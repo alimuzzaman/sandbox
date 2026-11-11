@@ -51,6 +51,7 @@ import urllib.request
 import subprocess
 import sys
 import time
+import threading
 import selectors
 import tarfile
 import fcntl
@@ -299,7 +300,11 @@ def validate_remote_name(name: str) -> str:
     return name
 
 
-def get_remote(name: str) -> dict | None:
+_JOIN_ADOPTION_STATE = threading.local()
+_REGISTRATION_LOCK_STATE = threading.local()
+
+
+def get_remote(name: str, *, budget_seconds: float = 15, adopt_joined: bool = True) -> dict | None:
     entry = _remote_block().get(name)
     if not isinstance(entry, dict):
         return entry
@@ -309,6 +314,14 @@ def get_remote(name: str) -> dict | None:
     copy = dict(entry)
     if isinstance(name, str) and _NAME_RE.fullmatch(name):
         copy["_remote_name"] = name
+    if adopt_joined and not getattr(_JOIN_ADOPTION_STATE, 'active', False):
+        from sandbox.remote_runtime.join_adoption import needs_adoption, adopt_missing
+        if needs_adoption(copy):
+            _JOIN_ADOPTION_STATE.active = True
+            try:
+                return adopt_missing(name, copy, budget_seconds=budget_seconds)
+            finally:
+                _JOIN_ADOPTION_STATE.active = False
     return copy
 
 
@@ -411,6 +424,17 @@ def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 
     """
     if name is not None:
         name = validate_remote_name(name)
+    held = getattr(_REGISTRATION_LOCK_STATE, 'held', None)
+    if held is None or getattr(_REGISTRATION_LOCK_STATE, 'pid', None) != os.getpid():
+        held = _REGISTRATION_LOCK_STATE.held = set()
+        _REGISTRATION_LOCK_STATE.pid = os.getpid()
+    if name in held or None in held:
+        # Automatic CAS adoption can be reached under an existing authority
+        # reader lock. The same thread already owns its OS lock descriptor.
+        yield
+        return
+    if name is None and held:
+        raise RemoteRegistrationBusy(None)  # Never upgrade a named/shared lock.
     directory = _registration_lock_directory()
     deadline = time.monotonic() + timeout_seconds
     registry = _open_registration_lock(directory / "registry.lock")
@@ -421,7 +445,11 @@ def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 
                 raise RemoteRegistrationBusy(_read_registration_holder(registry))
             acquired.append(registry)
             _write_registration_holder(registry, None)
-            yield
+            held.add(name)
+            try:
+                yield
+            finally:
+                held.remove(name)
             return
         if not _flock_until(registry, fcntl.LOCK_SH, deadline):
             raise RemoteRegistrationBusy(_read_registration_holder(registry))
@@ -433,7 +461,11 @@ def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 
                 raise RemoteRegistrationBusy(_read_registration_holder(own))
             acquired.append(own)
             _write_registration_holder(own, name)
-            yield
+            held.add(name)
+            try:
+                yield
+            finally:
+                held.remove(name)
         finally:
             os.close(own)
     finally:
@@ -660,9 +692,10 @@ def put_remote(name: str, _lock_timeout: float = 30, *, _expected=_ANY_REMOTE, *
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's
     idempotency expectation, applied to registration too)."""
+    deadline = time.monotonic() + _lock_timeout
     with registered_remote_lock(registration_lock_name(name),
                                 timeout_seconds=_lock_timeout), \
-            _registry_write_lock():
+            _registry_write_lock(timeout_seconds=max(0, deadline - time.monotonic())):
         block = _remote_block()
         if _expected is not _ANY_REMOTE:
             expected = ({k: v for k, v in _expected.items() if k != "_remote_name"}
@@ -833,19 +866,67 @@ def _ssh_connection_options(multiplex: bool = True) -> list[str]:
     ]
     if multiplex:
         control_path = _ssh_control_dir() / "cm-%C"
-        options.extend([
-            "-o", "ControlMaster=auto",
-            "-o", f"ControlPersist={_CONTROL_PERSIST_SECONDS}",
-            "-o", f"ControlPath={control_path}",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3",
-        ])
+        # %C expands to40hex; OpenSSH binds a temporary master path with a
+        # dot+16-character suffix before publishing the socket. Count bytes
+        # and the terminating NUL before launching ANY remote command.
+        limit = 108 if sys.platform.startswith('linux') else 104
+        expanded = str(control_path).replace('%C', '0' * 40)
+        if len(os.fsencode(expanded)) + 17 + 1 > limit:
+            options.extend(['-o', 'ControlMaster=no', '-o', 'ControlPath=none'])
+        else:
+            options.extend([
+                "-o", "ControlMaster=auto",
+                "-o", f"ControlPersist={_CONTROL_PERSIST_SECONDS}",
+                "-o", f"ControlPath={control_path}",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+            ])
+    return options
+
+
+def _ssh_transport_parts(remote_or_target):
+    parts = remote_ssh_parts(remote_or_target)
+    # Tailnet HTTP control on an existing owner registration does not imply
+    # that its separately provisioned SSH server supports Tailscale SSH.
+    tailnet = (isinstance(remote_or_target, dict) and remote_or_target.get('joined') is True
+               and remote_or_target.get('control_transport') == 'tailscale')
+    if not tailnet:
+        return parts, False
+    address = remote_or_target.get('tailscale_host')
+    if not isinstance(address, str):
+        raise ValueError('tailnet_ssh_target_unavailable: a verified Tailnet address is required')
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        raise ValueError('tailnet_ssh_target_unavailable: a verified Tailnet address is required') from None
+    networks = (ipaddress.ip_network('100.64.0.0/10'), ipaddress.ip_network('fd7a:115c:a1e0::/48'))
+    if not any(parsed.version == network.version and parsed in network for network in networks):
+        raise ValueError('tailnet_ssh_target_unavailable: public SSH fallback is disabled')
+    user = parts['target'].rpartition('@')[0]
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]*[$]?', user) or parts['port'] not in (None, 22):
+        raise ValueError('tailnet_ssh_target_unavailable: Tailscale SSH requires the selected Linux user on port22')
+    host = str(parsed)
+    target = user + '@' + (f'[{host}]' if parsed.version == 6 else host)
+    return {'target': target, 'host': host, 'port': None}, True
+
+
+def _ssh_transport_options(tailnet, multiplex):
+    options = _ssh_connection_options(False if tailnet else multiplex)
+    if tailnet:
+        # OpenSSH to a Tailnet address reaches the Tailscale SSH server. Ignore
+        # client config/keys and force a fresh policy evaluation per command;
+        # never reuse a master authenticated before a local Tailnet switch.
+        options = ['-F', '/dev/null', *options,
+            '-o', 'IdentityAgent=none', '-o', 'IdentitiesOnly=yes', '-o', 'PubkeyAuthentication=no',
+            '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no',
+            '-o', 'PreferredAuthentications=none', '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
+            '-o', 'ControlMaster=no', '-o', 'ControlPath=none']
     return options
 
 
 def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) -> list[str]:
-    parts = remote_ssh_parts(remote_or_target)
-    args = ["ssh", *_ssh_connection_options(multiplex)]
+    parts, tailnet = _ssh_transport_parts(remote_or_target)
+    args = ["ssh", *_ssh_transport_options(tailnet, multiplex)]
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     args.extend([parts["target"], command])
@@ -854,8 +935,8 @@ def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) 
 
 def scp_command_args(remote_or_target, local_path: str, remote_path: str,
                      *, multiplex: bool = True) -> list[str]:
-    parts = remote_ssh_parts(remote_or_target)
-    args = ["scp", *_ssh_connection_options(multiplex)]
+    parts, tailnet = _ssh_transport_parts(remote_or_target)
+    args = ["scp", *_ssh_transport_options(tailnet, multiplex)]
     if parts["port"]:
         args.extend(["-P", str(parts["port"])])
     args.extend([local_path, f"{parts['target']}:{remote_path}"])
@@ -864,15 +945,17 @@ def scp_command_args(remote_or_target, local_path: str, remote_path: str,
 
 def git_ssh_command(remote_or_target, *, multiplex: bool = True) -> str:
     """Shell-safe SSH command for Git's direct VPS transport."""
-    parts = remote_ssh_parts(remote_or_target)
-    args = ["ssh", *_ssh_connection_options(multiplex)]
+    parts, tailnet = _ssh_transport_parts(remote_or_target)
+    args = ["ssh", *_ssh_transport_options(tailnet, multiplex)]
+    if tailnet:
+        args.extend(['-o', 'HostName=' + parts['host']])
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     return shlex.join(args)
 
 
 def git_ssh_url(remote: dict, path: str) -> str:
-    parts = remote_ssh_parts(remote)
+    parts, _tailnet = _ssh_transport_parts(remote)
     push_path = path if path.startswith("/") else f"/{path}"
     if parts["port"]:
         return f"ssh://{parts['target']}:{parts['port']}{push_path}"
@@ -1103,7 +1186,7 @@ def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
     """
     started = time.monotonic()
     try:
-        parts = remote_ssh_parts(remote)
+        parts, tailnet = _ssh_transport_parts(remote)
     except (OSError, TypeError, ValueError):
         return {"reachable": False, "state": "invalid_target", "latency_ms": None}
     args = [
@@ -1116,6 +1199,10 @@ def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     args.extend([parts["target"], "true"])
+    if tailnet:
+        args = ssh_command_args(remote, 'true', multiplex=False)
+        args = [f'ConnectTimeout={REMOTE_REACHABILITY_CONNECT_TIMEOUT_SECONDS}'
+                if arg == 'ConnectTimeout=10' else arg for arg in args]
     try:
         res = subprocess.run(
             args, capture_output=True, text=True,
@@ -2922,7 +3009,7 @@ def _dns_detail(exc: BaseException) -> str:
     return ""
 
 
-def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
+def _remote_control_request(remote: dict, path: str, *, timeout: float = 10,
                             payload: dict | None = None) -> dict:
     """Call one authenticated, bounded remote-control HTTP endpoint."""
     base = remote.get("control_url")
@@ -2945,7 +3032,7 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
     request = urllib.request.Request(base.rstrip("/") + path, data=data, headers=headers,
                                      method="POST" if data is not None else "GET")
     try:
-        with _control_urlopen(remote, request, timeout=max(int(timeout), 1)) as response:
+        with _control_urlopen(remote, request, timeout=max(float(timeout), 0.001)) as response:
             if response.status != 200:
                 raise RuntimeError(f"remote control returned HTTP {response.status}")
             raw = response.read(4 * 1024 * 1024 + 1)
@@ -2970,7 +3057,7 @@ def remote_resource_request(remote: dict, payload: dict, *, timeout: int) -> dic
     return result
 
 
-def remote_host_memory_request(remote: dict, payload: dict) -> dict:
+def remote_host_memory_request(remote: dict, payload: dict, *, timeout_seconds=None) -> dict:
     """Send one strict host-memory action over authenticated control only."""
     from sandbox.resources.host_memory.remote import validate_request
 
@@ -2979,6 +3066,11 @@ def remote_host_memory_request(remote: dict, payload: dict) -> dict:
     if isinstance(budget, bool) or not isinstance(budget, (int, float)):
         raise ValueError("host-memory budget is invalid")
     timeout = min(max(int(budget) + 5, 5), 305)
+    if timeout_seconds is not None:
+        if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+                or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            raise ValueError('host-memory transport deadline is invalid')
+        timeout = min(float(budget), timeout_seconds)
     return _remote_control_request(
         remote, "/resources", timeout=timeout, payload=request,
     )
@@ -4670,7 +4762,8 @@ def _record_controller_hint(remote: dict, revision, source: str) -> None:
         pass
 
 
-def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = None) -> dict:
+def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = None,
+                                      timeout_seconds=None) -> dict:
     """The service status a remote effect is gated on (spec 061).
 
     Identical to :func:`remote_mcp_service_status` unless strict mode is
@@ -4680,17 +4773,54 @@ def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = N
     """
     from sandbox.remote_runtime.verdict import strict_requested
 
-    status = remote_mcp_service_status(remote)
+    def observe():
+        return (remote_mcp_service_status(remote) if timeout_seconds is None
+                else remote_mcp_service_status(remote, timeout_seconds=timeout_seconds))
+    status = observe()
     if not strict_requested():
         return status
     from sandbox.core._paths import ROOT
     from sandbox.remote_runtime.pins import purpose_for, strict_gate
     command = " ".join(["sb", *[arg for arg in sys.argv[1:3] if not arg.startswith("-")]])
     return strict_gate(remote, status, purpose=purpose or purpose_for(command, str(ROOT)),
-                       recheck=lambda: remote_mcp_service_status(remote))
+                       recheck=observe)
 
 
-def remote_mcp_service_status(remote: dict) -> dict:
+def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18) -> dict:
+    """Keep live Tailnet admission distinct from SSH unit/credential metadata."""
+    from sandbox.remote_runtime.join_adoption import joined
+    if not joined(remote):
+        return _remote_mcp_service_status_via_ssh(remote, timeout_seconds=timeout_seconds)
+    from sandbox.remote_runtime.join_identity import discover_join_identity
+    from sandbox.resources.host_memory.remote import RemoteProtocolError
+    deadline = time.monotonic() + timeout_seconds
+    admission = {'state': 'unavailable', 'method': 'tailnet', 'code': 'joined_metadata_unavailable'}
+    def request(selected, payload):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('control observation budget expired')
+        return remote_host_memory_request(selected, payload, timeout_seconds=min(5, remaining))
+    try:
+        discover_join_identity(remote.get('_remote_name') or 'joined', remote, request,
+                               budget_seconds=min(5, timeout_seconds))
+        admission = {'state': 'admitted', 'method': 'tailnet', 'code': None}
+    except RemoteProtocolError as exc:
+        # An endpoint answering with a different pin is a real identity failure,
+        # never a reason to replace the registration or grant new authority.
+        raise
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        if 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
+            admission = {'state': 'denied', 'method': 'tailnet', 'code': 'remote_access_denied'}
+    remaining = max(0.001, deadline - time.monotonic())
+    status = _remote_mcp_service_status_via_ssh(remote, timeout_seconds=remaining)
+    status['control_admission'] = admission
+    status.setdefault('ssh_access', {'state': 'unavailable', 'transport': 'tailscale'})
+    status['authenticated'] = True if admission['state'] == 'admitted' else (False if admission['state'] == 'denied' else None)
+    status['auth_state'] = {'admitted': 'ok', 'denied': 'failed', 'unavailable': 'unknown'}[admission['state']]
+    return status
+
+
+def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float = 18) -> dict:
     """Read only the selected Sandbox unit state; never inspect generic argv."""
     record = dict(remote.get("mcp_service") or {})
     expected = record.get("service_name") == REMOTE_MCP_SERVICE
@@ -4700,9 +4830,12 @@ def remote_mcp_service_status(remote: dict) -> dict:
     port = record.get("port") if isinstance(record.get("port"), int) else 0
     local_revision = _remote_mcp_runtime_revision()
     local_revision_valid = _REMOTE_MCP_REVISION_RE.fullmatch(local_revision) is not None
+    ssh_admission = 'unavailable'
 
     def unavailable(error: str) -> dict:
         return {
+            **({'ssh_access': {'state': ssh_admission, 'transport': 'tailscale'}}
+               if remote.get('control_transport') == 'tailscale' else {}),
             "installed": False, "enabled": False, "active": False,
             "linger": False, "ownership": "unknown",
             "service_name": REMOTE_MCP_SERVICE if expected else None,
@@ -4858,13 +4991,17 @@ def remote_mcp_service_status(remote: dict) -> dict:
         + listener_probe + auth_probe + legacy_probe
     )
     try:
-        res = ssh_run(remote, command, timeout=18)
+        res = ssh_run(remote, command, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         return unavailable("remote_service_probe_timeout")
     except (OSError, subprocess.SubprocessError):
         return unavailable("remote_service_probe_transport_failed")
     if getattr(res, "returncode", 1) != 0:
+        diagnostic = (getattr(res, 'stderr', '') or '').lower()
+        if remote.get('control_transport') == 'tailscale' and ('tailnet policy does not permit' in diagnostic or 'permission denied' in diagnostic):
+            ssh_admission = 'denied'
         return unavailable("remote_service_probe_transport_failed")
+    ssh_admission = 'admitted'
     if not (getattr(res, "stdout", "") or "").strip():
         return unavailable("remote_service_probe_output_missing")
     values: dict[str, str] = {}
@@ -4914,6 +5051,8 @@ def remote_mcp_service_status(remote: dict) -> dict:
     else:
         revision_state = "unavailable"
     return {
+        **({'ssh_access': {'state': ssh_admission, 'transport': 'tailscale'}}
+           if remote.get('control_transport') == 'tailscale' else {}),
         "installed": installed, "enabled": enabled, "active": active,
         "linger": linger, "ownership": ownership,
         "service_name": REMOTE_MCP_SERVICE if expected else None,

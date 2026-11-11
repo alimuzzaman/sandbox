@@ -44,10 +44,12 @@ class ToolGroupRegistry:
         return tuple(sorted(self._specs.values(), key=lambda item: (item.order, item.group_id)))
 
     def compose(self, server, dependencies: ToolDependencies) -> None:
+        from sandbox.installation.tool_guard import OperationLeasedRegistrar
+        registrar = OperationLeasedRegistrar(server)
         for spec in self.specs():
             for key in spec.dependencies:
                 dependencies.require(key)
-            spec.register(server, dependencies)
+            spec.register(registrar, dependencies)
 
     def group_ids(self) -> tuple[str, ...]:
         return tuple(spec.group_id for spec in self.specs())

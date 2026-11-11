@@ -453,9 +453,6 @@ def _selection_argv(argv):
         if not passthrough and value == '--strict-runtime':
             continue
         result.append(value)
-    if 'host' in result and '--' in result:
-        from sandbox.hosting.host_exec import split_passthrough
-        result, _command = split_passthrough(result)
     return result
 
 

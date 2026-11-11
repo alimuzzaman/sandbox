@@ -70,7 +70,7 @@ def _parse_retention_timestamp(ts: Any) -> datetime | None:
 
 
 class JobServiceProtocol(Protocol):
-    def submit(self, submission): ...
+    def submit(self, submission, *, anonymous_input=None): ...
     def get(self, job_id: str, *, reconcile: bool = True): ...
     def list(self, query): ...
     def read_output(self, job_id: str, query): ...
@@ -317,6 +317,8 @@ class JobService:
                 "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": environment,
                 "execution_runtime": execution_runtime,
+                "server_cli_deadline_at": ((submission.execution_policy_provenance or {}).get('server_cli.absolute_deadline_at')
+                    if submission.kind == 'server-cli' else None),
                 "server_cli_parent": ({'job_id': submission.parent_job_id,
                     'deadline_at': submission.execution_policy_provenance['server_cli.parent_deadline_at']}
                     if submission.kind == 'server-cli' and submission.parent_job_id else None),

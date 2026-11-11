@@ -1,12 +1,21 @@
 # Hosting through the installed server CLI
 
-Joined Tailscale hosting requests select the fixed installed server CLI durable
+Confirmed joined Tailscale stack-up and apply requests select the fixed installed server CLI durable
 job before controller configuration and provider-key preflight. Every admitted
 operator has the existing Linux owner's Sandbox rights. No controller allowlist,
 owner SSH private key, managed installation or copied laptop provider key is a
 prerequisite. An explicit `--credential-scope personal-local` retains the existing
 controller credential workflow. The separate explicit registered-profile contract
 remains separate and cannot silently become this execution path.
+
+Observation, validation, planning and existing exec commands retain their
+synchronous result and stdin contracts. They are not automatically staged from
+the invoking cwd or converted to accepted-job responses. In particular the
+durable supervisor has no controller stdin delivery port; automatic exec
+handoff stays disabled rather than accepting a job with silent EOF. The owner
+exec adapter below is for a genuine already-admitted server CLI invocation,
+and does not itself supply controller stdin transport or a new read-only
+server-target discovery endpoint.
 
 The server job retains its original alias, machine/service pins, source,
 request, process identities and deadline. A same-server hosting target is issued

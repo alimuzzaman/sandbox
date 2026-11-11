@@ -113,7 +113,7 @@ class InstalledInputSelectionTests(unittest.TestCase):
                  mock.patch('sandbox.core._remote.get_remote') as lookup, \
                  mock.patch('sandbox.resources.context.authenticated_target_identity') as identity, \
                  mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.control') as control, \
-                 mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.submit') as submit:
+                 mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.submit_server_cli') as submit:
                 with self.assertRaises(server_cli.ServerCLIStdinUnavailable):
                     server_cli.dispatch_server_cli('fixture', values, project_dir='.',
                                                    request_id='stdin-selection-fixture')

@@ -254,7 +254,11 @@ class ServerSelectionTests(OwnerTargetTests):
         def output(owner, command, **kwargs):
             argv = shlex.split(command)
             if "rev-parse" in argv:
-                value = self.published_commit
+                value = self.published_commit if argv[-1] == 'HEAD' else 'a' * 40
+            elif 'cat-file' in argv:
+                value = 'blob'
+            elif 'hash-object' in argv:
+                value = 'a' * 40
             elif argv[:2] == ["docker", "ps"]:
                 value = "f" * 12
             elif argv[:2] == ["docker", "inspect"]:
@@ -266,6 +270,53 @@ class ServerSelectionTests(OwnerTargetTests):
 
     def selected(self):
         return selection.read_owner_exec_selection(self.entry, name="named")
+
+    def test_metadata_git_never_executes_repository_fsmonitor_or_content_filters(self):
+        from sandbox.services.process import ProcessResult
+        from tests.subprocess_support import run_test_process, synthetic_environment
+        def git(*args):
+            result = run_test_process(['git', '-C', str(self.source), *args],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+        git('init', '-q', '-b', 'fixture')
+        (self.source / '.gitattributes').write_text('*.yml filter=fixture diff=fixture\n')
+        git('add', 'compose.yml', '.gitattributes')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture')
+        self.published_commit = git('rev-parse', 'HEAD')
+        self.summary['commit'] = self.published_commit
+        sentinel = self.home / 'metadata-helper-ran'
+        helper = self.home / 'fsmonitor-helper'
+        helper.write_text('#!/bin/sh\nprintf ran > ' + shlex.quote(str(sentinel))
+                          + '\nprintf "fixture-token\\0"\n')
+        helper.chmod(0o700)
+        git('config', 'core.fsmonitor', str(helper))
+        git('config', 'core.fsmonitorHookVersion', '2')
+        # Establish that this Git actually invokes the configured helper.
+        git('ls-files', '--error-unmatch', '--', 'compose.yml')
+        self.assertTrue(sentinel.exists(), 'fixture must reproduce Git helper execution')
+        sentinel.unlink()
+        git('config', 'filter.fixture.clean', shlex.quote(str(helper)))
+        git('config', 'filter.fixture.required', 'true')
+        git('config', 'diff.fixture.textconv', shlex.quote(str(helper)))
+        def run(argv, **kwargs):
+            if argv[0] == 'git':
+                result = run_test_process(argv, cwd=kwargs.get('cwd'),
+                    env=kwargs.get('env'), capture_output=True, text=True, timeout=5)
+            else:
+                result = self.process.side_effect(self.owner, shlex.join(argv))
+            return ProcessResult(tuple(argv), result.returncode, result.stdout, result.stderr)
+        with patch.object(sdk, 'read_current_server_owner', return_value=self.owner), \
+             patch.object(sdk, 'owner_environment', return_value=synthetic_environment()), \
+             patch('sandbox.services.process.BoundedProcessRunner.run', side_effect=run):
+            selected = selection.inspect_server_exec_target(origin_remote_name='box', name='named')
+            self.assertEqual(selected['source_commit'], self.published_commit)
+            self.assertFalse(sentinel.exists(), 'metadata query executed repository configuration')
+            self.compose.write_text('services: {changed: {image: synthetic}}\n')
+            with self.assertRaises(TargetRefusal):
+                selection.inspect_server_exec_target(origin_remote_name='box', name='named')
+            self.assertFalse(sentinel.exists(), 'dirty-file refusal executed a content filter')
 
     def test_server_inventory_resolves_without_local_history_and_uses_actual_alias_keys(self):
         with patch("sandbox.hosting.stack_registry.read", side_effect=AssertionError("local registry")), \

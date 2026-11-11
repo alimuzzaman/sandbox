@@ -31,7 +31,10 @@ stack registry or hosting history. The server selector cross-checks the lifetime
 copy and tuple, successful server apply summary, deployed Git revision and five
 specific Compose labels. It never reads container environments or the runtime
 environment file. It requires known committed Compose source files and retains
-the actual runtime override. For a subtree publication, the successful summary
+the actual runtime override. Manifest bytes must match their committed blob
+identities using raw, unfiltered hashing. Inspection does not refresh Git's
+index or run repository-configured fsmonitor, diff or content-filter helpers.
+For a subtree publication, the successful summary
 must bind the original stack/lifetime commit to the published Git revision;
 those two revisions are retained separately. Incomplete historical evidence,
 dirty source files, uncertain applies and the

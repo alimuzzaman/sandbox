@@ -53,6 +53,11 @@ does not skip target/native/lifetime locks or turn a dictionary flag into local
 authority. Host/CI selection and credential-consuming recipe integration must be
 assembled and tested before claiming a complete stack workflow.
 
+Cancelling a process-owning server CLI parent still cancels its original
+process when a listed child finishes concurrently. Only a fresh observation
+of that exact child's terminal state permits continuing after `already_terminal`;
+live-process identity failures and unknown outcomes remain errors.
+
 `owner_command_args(owner, command)` and `owner_environment(owner)` support a
 bounded host-exec caller retaining its original stdin FD. The caller revalidates
 the issued host target before and after effects and enforces the retained

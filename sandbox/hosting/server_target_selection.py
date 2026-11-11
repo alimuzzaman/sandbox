@@ -64,6 +64,11 @@ def _output(run, argv):
     return (result.stdout or "").strip()
 
 
+def _git_metadata(source, *args):
+    return ['git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null',
+            '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never', '-C', str(source), *args]
+
+
 def read_owner_exec_selection(entry, *, target=None, name=None, environment=None):
     from sandbox.hosting.server_cli_target import require_owner_target
     context = require_owner_target(entry)
@@ -194,8 +199,7 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
     source = home / "deploy-src" / "hosts" / project
     if not source.is_dir() or source.is_symlink() or source.resolve() != source:
         _refuse()
-    if _output(run, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
-                        "rev-parse", "--verify", "HEAD"]) != commit:
+    if _output(run, _git_metadata(source, 'rev-parse', '--verify', 'HEAD')) != commit:
         _refuse()
     ids = _output(run, ["docker", "ps", "--filter", "label=com.docker.compose.project=" +
                          compose_project, "--format", "{{.ID}}"]).splitlines()
@@ -244,10 +248,14 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
             _refuse()
         if path != override:
             relative = path.relative_to(source).as_posix()
-            _output(run, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
-                            "ls-files", "--error-unmatch", "--", relative])
-            _output(run, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
-                            "diff", "--quiet", "HEAD", "--", relative])
+            # Compare the deployed bytes to the committed blob without index
+            # refresh, diff/textconv or clean/smudge filters. Even read-only Git
+            # index/diff commands can execute repository-configured helpers.
+            blob = _output(run, _git_metadata(source, 'rev-parse', '--verify', 'HEAD:' + relative))
+            if (re.fullmatch(r'[0-9a-f]{40}', blob) is None
+                    or _output(run, _git_metadata(source, 'cat-file', '-t', blob)) != 'blob'
+                    or _output(run, _git_metadata(source, 'hash-object', '--no-filters', '--', relative)) != blob):
+                _refuse()
     # Bind measured public source/manifest selection and runtime container set,
     # not provider bytes or opaque owner claims from the controller.
     digest = hashlib.sha256(json.dumps({"lifetime": lifetime, "summary": summary,

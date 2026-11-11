@@ -46,8 +46,13 @@ class CanonicalSelectionTests(unittest.TestCase):
                         installed.assert_not_called()
 
     def test_host_exec_with_options_before_action_still_refuses_missing_stdin(self):
-        with self.assertRaises(server_cli.ServerCLIStdinUnavailable):
-            server_cli.fixed_argv(('host', '--remote', 'box', 'exec', '--', 'cat'))
+        for prefix in ((), ('--lab', 'fixture')):
+            with self.subTest(prefix=prefix), self.assertRaises(server_cli.ServerCLIStdinUnavailable):
+                server_cli.fixed_argv((*prefix, 'host', '--remote', 'box', 'exec', '--', 'cat'))
+
+    def test_passthrough_is_not_silently_removed_from_another_host_action(self):
+        with self.assertRaises(server_cli.ServerCLIUnavailable):
+            server_cli.fixed_argv(('host', 'stack', 'list', '--', 'ignored-command'))
 
     def test_invalid_parser_input_is_silent_and_never_dispatches(self):
         output, errors = io.StringIO(), io.StringIO()

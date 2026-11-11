@@ -39,6 +39,14 @@ def _id(value: object) -> str:
     return value
 
 
+def _request_id(value: object) -> str:
+    # Match the canonical host writer/gate request identity. Credential intent
+    # must not admit an ID the supervisor cannot bind later at its effect gate.
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value) is None:
+        raise CredentialValidationError()
+    return value
+
+
 def _revision(value: object) -> str:
     # Registered opaque revision, never a value-derived fingerprint.
     if (not isinstance(value, str) or not value
@@ -190,7 +198,7 @@ class RequestScope:
                        {"schema_version", "installation_id", "incarnation", "project_ref", "request_id"})
         _version(data["schema_version"])
         return cls(_hex(data["installation_id"], 32), _hex(data["incarnation"], 32),
-                   require_authenticated(receipt), _id(data["project_ref"]), _id(data["request_id"]))
+                   require_authenticated(receipt), _id(data["project_ref"]), _request_id(data["request_id"]))
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -271,14 +279,15 @@ def parse_operation(body: bytes, receipt: AuthenticatedControlReceipt) -> Creden
     commit = data["source_commit"]
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit) is None:
         raise CredentialValidationError()
-    values = {key: _id(data[key]) for key in ("request_id", "project_ref", "environment", "source_ref", "profile_ref")}
+    values = {key: _id(data[key]) for key in ("project_ref", "environment", "source_ref", "profile_ref")}
+    values["request_id"] = _request_id(data["request_id"])
     values.update(action=data["action"], expected_installation=InstallationBinding.parse(data["expected_installation"]),
                   target_ref=TargetReference.parse(data["target_ref"]), source_commit=commit,
                   artifact_digest=_hex(data["artifact_digest"], 64), manifest_digest=_hex(data["manifest_digest"], 64),
                   source_revision=_revision(data["source_revision"]), profile_revision=_revision(data["profile_revision"]),
                   mappings=mappings, generate_requested=data["generate_requested"],
                   requested_deadline=_positive(data["requested_deadline"]),
-                  retry_of=_id(data["retry_of"]) if "retry_of" in data else None,
+                  retry_of=_request_id(data["retry_of"]) if "retry_of" in data else None,
                   principal_id=require_authenticated(receipt))
     if values["retry_of"] == values["request_id"]:
         raise CredentialValidationError("credential_retry_invalid")

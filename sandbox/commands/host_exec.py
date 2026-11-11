@@ -65,10 +65,11 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
                           f"remote '{args.remote}' is not provisioned")
     if is_owner_target(entry):
         from sandbox.hosting.server_target_selection import read_owner_exec_selection
+        context = entry.require_current()
         selected = read_owner_exec_selection(entry,
             target=getattr(args, "target", None), name=getattr(args, "name", None),
-            environment=getattr(args, "environment", None))
-        context = entry.require_current()
+            environment=getattr(args, "environment", None),
+            expected_selector_digest=context.target_selector_digest)
         remaining = int((datetime.datetime.fromisoformat(context.deadline_at.replace("Z", "+00:00"))
                          - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
         if remaining <= 0:

@@ -351,6 +351,24 @@ class ServerSelectionTests(OwnerTargetTests):
         with self.assertRaises(TargetRefusal):
             selection.read_owner_exec_selection(self.entry, name="named", expected_selector_digest="bad")
 
+    def test_prepare_consumes_selector_only_from_genuine_retained_context(self):
+        from sandbox.commands import host_exec
+        observed = self.selected()
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            project_dir="/unrelated/controller", exec_argv=["id", "-un"], service="web", timeout=30, json=True)
+        expected = "sha256:" + observed.fingerprint
+        self.context = replace(self.context, target_selector_digest=expected)
+        self.current.return_value = self.context
+        with patch.object(sdk, "server_cli_context_if_selected", return_value=self.context):
+            self.entry = targets.selected_owner_target("box")
+            request, _, _ = host_exec._prepare(args)
+        self.assertEqual(request.owner_selection.expected_selector_digest, expected)
+        self.lifetime["copy_id"] = "abcd1234"
+        with patch.object(sdk, "server_cli_context_if_selected", return_value=self.context), \
+                self.assertRaises(TargetRefusal) as refused:
+            host_exec._prepare(args)
+        self.assertEqual(refused.exception.code, "host_server_target_changed")
+
     def test_metadata_inspection_cannot_issue_execution_selection_or_serialize_owner_proof(self):
         reader = getattr(sdk, "read_current_server_owner", None)
         if reader is None:

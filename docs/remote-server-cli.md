@@ -153,5 +153,41 @@ proved, with a closed SHA256 encoding. Ordinary creation jobs leave it None.
 Historical exec consumers re-resolve under their held native locks and pass
 this digest into their sealed selection on every before/after check. Client
 snapshot dictionaries cannot create a `ServerCLIContext` or replace its job
-provenance. No receiver currently sets this field until no-source admission is
-assembled.
+provenance.
+
+`sandbox.application.server_cli_exec.submit_server_cli_exec(remote_name, *,
+snapshot, service, argv, stdin_fd, request_id, timeout_seconds=300)` implements
+the source contract for a fixed historical host-exec job. It needs no controller
+checkout. The client captures original stdin once into a bounded anonymous file
+and sends only its size/hash in the nonsecret selector envelope, with the actual
+bytes through the keyless SSH stdin FD. It makes exactly one submission. An
+incomplete, timed-out or malformed acceptance is
+`ServerCLIExecAcceptanceUnknown` with the original request ID, never a new
+request or an implicit retry.
+
+The installed `job-start --local --server-cli --server-cli-exec-selector JSON
+-- COMMAND...` receiver resolves existing target metadata itself. Client paths
+are absent from this closed envelope. It verifies current machine/marker/revision,
+selector digest and unique first service, captures and verifies original stdin,
+then re-resolves before durable acceptance. It derives the exact source root,
+canonical project/source identities and published commit on the receiver. Its
+retained provenance includes the original target snapshot, selector, input
+size/hash and absolute deadline. The supervisor and current-job context enforce
+that original deadline; admission time cannot reset it. The fixed installed
+child runs `host exec --json` under genuine owner-job context. Existing retained
+job status/output ports provide bounded synchronous-result observation to the
+client adapter. This contract does not grant a role or use a self remote alias.
+
+The dedicated intake is bounded to 1 MiB stdin, 256 argv entries / 64 KiB argv,
+30 seconds stdin intake and an original request deadline of at most 3600 seconds.
+It captures batch stdin before admission; it does not provide an interactive
+TTY or claim live streaming. The generic v1 forwarding adapter still refuses
+`host exec`; normal controller integration must explicitly use this dedicated
+port and preserve its original receipt, status and captured result. No public
+exec readiness is inferred from metadata alone. Discovery's separate
+`server_exec_capabilities` contains `job.server-cli.exec-stdin.v1` only when
+the actual receiver parser, owner target, native execution scope and digest-aware
+selector are assembled. The client observes that contract before reading stdin
+or submitting a job. Older receivers refuse as capability unavailable at this
+read-only stage. Source checks, independent review and installed end-to-end
+acceptance are still required.

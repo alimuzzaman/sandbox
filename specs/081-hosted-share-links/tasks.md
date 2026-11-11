@@ -92,4 +92,4 @@ page follows.
 - [x] T034 Add `src/web/tests/sharelabels.test.ts` and register it in `tests/test_web_poller.py`'s node suite per FR-032 (missing)
 - [x] T035 Rebuild `config/sandbox-web.js` and `config/sandbox-web.css` with the repo scripts (typecheck clean) per plan: panel follow-up (missing)
 - [x] T036 Update `docs/login-service.md` and the sandbox-cli skill in `skills/` and `.agents/skills/` (byte-identical) for the panel button per Constitution V (missing)
-- [ ] T037 Run the touched suites on xspeed-dev against an `origin/latest` baseline, and check the dialog against a placeholder fixture per quickstart.md (missing)
+- [x] T037 Run the touched suites on xspeed-dev against an `origin/latest` baseline, and check the dialog against a placeholder fixture per quickstart.md (missing)

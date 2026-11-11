@@ -1386,6 +1386,14 @@ class _NginxHostEdge:
             cert_path, key_path = self.nginx.public_paths(route)
             return cert_path, key_path, {"id": None, "hostnames": sorted(hostnames),
                                          "issuer": "public"}
+        from sandbox.hosting import login_service as login
+        if login.is_private(validated.get("login_service")):
+            # Spec 081: a private route keeps HTTPS closed with the certificate it has
+            # while after_dns issues one covering the new names; never HTTP only.
+            existing = self.nginx.existing_certificate(self.entry, route)
+            if existing is not None:
+                return existing[0], existing[1], {"id": None, "hostnames": [],
+                                                  "issuer": "pending", "pending": True}
         # DNS-only and not issued yet: serve the ACME challenge first, issue
         # after the DNS step points the hostname here (after_dns).
         return None, None, None
@@ -1420,7 +1428,7 @@ class _NginxHostEdge:
 
     def after_dns(self, validated: dict, port: int, secret_values: dict, cert_path,
                   certificate, name: str, *, log_path: str | None = None):
-        if cert_path is not None:
+        if cert_path is not None and not (certificate or {}).get("pending"):
             return certificate
         hostnames = [route["hostname"] for route in validated["routes"]]
         cert_path, key_path, certificate = self.nginx.ensure_public_certificate(
@@ -3671,13 +3679,26 @@ def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> N
     authority = {}
 
     recovery_repository = RecoveryRepository()
+    # Spec 081 rollout: take the target lease before recovery records any effect, so
+    # another controller's lease is a plain refusal, not an uncertain edge effect.
+    held_lease = None
+    lease_entry = None
+    if action == RecoveryAction.CONTINUE_EDGE:
+        try:
+            lease_entry = remote.get_remote(remote_name)
+        except Exception:
+            lease_entry = None
+        if lease_entry:
+            held_lease = _acquire_host_apply_lease(lease_entry, validated)
+    edge_continuation = (_continue_host_edge_only_unleased if held_lease is not None
+                         else _continue_host_edge_only)
     service = RecoveryService(
         repository=recovery_repository, job_lookup=_recovery_job_lookup,
         source_check=lambda operation: _recovery_source_check(validated, operation),
         observer=lambda recovery_request, operation: _recovery_observer(
             validated, authority["entry"], remote_name, recovery_request, operation,
             authority["machine_identity"], authority["edge_intent"]),
-        edge_adapter=lambda recovery_request, operation: _continue_host_edge_only(
+        edge_adapter=lambda recovery_request, operation: edge_continuation(
             validated, authority["entry"], remote_name, recovery_request, operation),
         governance_check=lambda _request: _recovery_governance_authorized(
             validated, remote_name),
@@ -3685,7 +3706,10 @@ def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> N
         authority_guard=lambda _request, operation: _registered_recovery_authority(
             validated, remote_name, operation, authority),
     )
-    result = service.recover(request)
+    try:
+        result = service.recover(request)
+    finally:
+        _release_host_apply_lease(lease_entry, held_lease)
     try:
         from sandbox.delivery.hosting import capture_recovery_result
         result = dict(result, recovery_delivery=capture_recovery_result(
@@ -4703,6 +4727,15 @@ def _refuse_proxied_now(validated: dict, hostname: str, records: list[dict]) -> 
             f"private_proxied_record: {hostname} became proxied by Cloudflare during the apply")
 
 
+def _route_serves_https(text: str | None) -> bool:
+    """An nginx route with a TLS listener (Caddy routes serve HTTPS implicitly)."""
+    if not text:
+        return False
+    if "server {" not in text:
+        return True  # Caddy: site addresses serve HTTPS themselves.
+    return re.search(r"^\s*listen\s+\S*443\b[^;]*\bssl\b", text, re.M) is not None
+
+
 def _route_tag(validated: dict) -> str | None:
     """A fresh tag for this apply's front-door route when the target has a gate."""
     from sandbox.hosting import login_service as login
@@ -5417,6 +5450,11 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         render_validated = {**validated, "route_tag": route_tag} if route_tag else validated
         rendered = edge.render(
             render_validated, runtime["loopback_port"], cert_path, key_path, secret_values)
+        if (private_closure is not None and _route_serves_https(previous_caddy)
+                and not _route_serves_https(rendered)):
+            # Spec 081: never trade the closure's HTTPS denial for an HTTP-only route.
+            raise hosting.HostingError(
+                "private_route_https_lost: the new private route would not listen on HTTPS")
         if edge.mode == "caddy":
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)

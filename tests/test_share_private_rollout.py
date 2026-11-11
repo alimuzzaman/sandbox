@@ -439,6 +439,39 @@ class DenyRouteTests(unittest.TestCase):
             for previous in (None, "server {\n    listen 80;\n}\n"):
                 self.assertNotIn("listen 443", edge.deny_route(validated, runtime, ROUTE, previous))
 
+    def test_a_private_route_keeps_https_while_its_certificate_grows(self):
+        """A new gate name the certificate lacks never turns the route HTTP only."""
+        validated = _HostingOwnerFixture(self, _private_manifest()).validated
+        edge = hosting_cmd._NginxHostEdge({"ssh": "fixture@example.test"})
+        edge.features = {}
+        runtime = {"loopback_port": 18123, "certificate_hostnames": [PRIMARY, ALIAS, GATE]}
+        old = nginx.public_paths("host-example-site-production")
+        with patch.object(nginx, "public_certificate_present", return_value=False), \
+                patch.object(nginx, "existing_certificate", return_value=old):
+            cert_path, key_path, certificate = edge.certificate(False, validated, runtime, {}, None, "/srv", ROUTE)
+        self.assertEqual((cert_path, key_path), old)
+        self.assertTrue(certificate["pending"])
+        self.assertTrue(hosting_cmd._route_serves_https(
+            edge.render(validated, 18123, cert_path, key_path, {})))
+        issued = {"id": None, "hostnames": sorted([PRIMARY, ALIAS, GATE]), "issuer": "public"}
+        with patch.object(nginx, "ensure_public_certificate", return_value=(*old, issued)) as issue, \
+                patch.object(edge, "configure") as configure:
+            self.assertEqual(edge.after_dns(validated, 18123, {}, cert_path, certificate, ROUTE), issued)
+        issue.assert_called_once()
+        configure.assert_called_once()
+        public = _HostingOwnerFixture(self, _private_manifest(private=False)).validated
+        with patch.object(nginx, "public_certificate_present", return_value=False), \
+                patch.object(nginx, "existing_certificate", side_effect=AssertionError("public path unchanged")):
+            self.assertEqual(edge.certificate(False, public, runtime, {}, None, "/srv", ROUTE), (None, None, None))
+
+    def test_https_detection(self):
+        for text, expected in ((None, False), ("server {\n    listen 80;\n}\n", False),
+                               ("server {\n    listen 443 ssl;\n}\n", True),
+                               ("server {\n    listen [::]:443 ssl http2;\n}\n", True),
+                               ("site.example.test {\n    respond 404\n}\n", True)):
+            with self.subTest(text=text):
+                self.assertEqual(hosting_cmd._route_serves_https(text), expected)
+
     def test_the_certificate_check_never_reads_a_failure_as_none(self):
         for code, stdout, expected in ((0, "public\n", "public"), (0, "origin\n", "origin"), (0, "none\n", None),
                                        (255, "", "raise"), (0, "", "raise")):

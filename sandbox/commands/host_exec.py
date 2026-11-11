@@ -16,6 +16,10 @@ from sandbox.hosting import host_exec, target_resolution
 from sandbox.hosting.host_exec import ExecRefusal, ExecRequest
 from sandbox.hosting.server_cli_target import host_target, is_owner_target, can_operate_host
 
+# v1 means retained selector consumption plus the native/physical held scope
+# below. It describes the existing redacted UTF-8 capture, not binary transport.
+SERVER_CLI_EXEC_BINDING_VERSION = 1
+
 
 def _refuse(code: str, message: str, *, as_json: bool, exit_code: int) -> None:
     if as_json:
@@ -66,6 +70,9 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
     if is_owner_target(entry):
         from sandbox.hosting.server_target_selection import read_owner_exec_selection
         context = entry.require_current()
+        if context.target_selector_digest is None:
+            raise ExecRefusal("server_cli_target_binding_unavailable",
+                              "original server exec has no retained target selector")
         selected = read_owner_exec_selection(entry,
             target=getattr(args, "target", None), name=getattr(args, "name", None),
             environment=getattr(args, "environment", None),
@@ -127,6 +134,11 @@ def _execution_scope(request, entry):
     from sandbox.hosting import target_lease
     if type(selected) is not OwnerExecSelection or not is_owner_target(entry):
         raise ExecRefusal(host_exec.TRANSPORT_FAILED, "current server target evidence is required")
+    context = entry.require_current()
+    if (context.target_selector_digest is None or
+            selected.expected_selector_digest != context.target_selector_digest):
+        raise ExecRefusal("server_cli_target_binding_unavailable",
+                          "original server exec target binding changed")
     repository = RecoveryRepository()
     with ExitStack() as held:
         for key in selected.native_keys:
@@ -139,20 +151,16 @@ def _execution_scope(request, entry):
         lease = target_lease.acquire(lambda command: entry.process(command, timeout=30),
             target_lease.lease_path(entry.sandbox_home(), selected.target.project,
                                     selected.target.environment), owner)
-        clean_exit = False
-        try:
-            selected.require_current()
-            yield
-            selected.require_current()
-            clean_exit = True
-        finally:
-            if clean_exit:
-                # Do not acknowledge successful cleanup on an unavailable
-                # process result. The generic release helper is best-effort.
-                result = entry.process(target_lease.command(lease["path"], lease["token"],
-                    lease["owner"], "release"), timeout=30)
-                if result.returncode:
-                    raise RuntimeError("host_exec_lease_retirement_unknown")
+        selected.require_current()
+        yield
+        selected.require_current()
+    # Native context exit can fail. Retain the physical fence in that case;
+    # neither clean child exit nor a successful inner check proves cleanup.
+    selected.require_current()
+    result = entry.process(target_lease.command(lease["path"], lease["token"],
+        lease["owner"], "release"), timeout=30)
+    if result.returncode:
+        raise RuntimeError("host_exec_lease_retirement_unknown")
 
 
 def cmd_host_exec(args) -> None:

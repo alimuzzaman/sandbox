@@ -549,7 +549,10 @@ Tiers are strictly nested and the nesting is asserted by tests.
   the Compose project and then the checkout. Docker has no compare-and-remove,
   so the gap between each fresh inspect and its stop or remove is the one
   window left; a restart in it fails the remove, which refuses a running
-  container. A stray already gone counts as removed,
+  container. A stray started with `--rm` removes itself on the
+  stop; a remove that answers `No such container` or `removal ... already in
+  progress` counts only once an inspect (retried for up to about 10 seconds)
+  shows the container gone. Any other remove error fails the candidate. A stray already gone counts as removed,
   so a rerun after a crash converges; a stop or remove failure keeps the
   checkout and names the container. A plan made before this change names no
   strays, and the host refuses an unlabeled bound container as before. The

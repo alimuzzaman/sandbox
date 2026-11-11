@@ -540,6 +540,52 @@ class StrayTeardownTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("stray_rm_failed:" + ID, result["failures"])
 
+    def autoremove(self, rm_error, disappears=True):
+        """A ``--rm`` container: the stop makes the daemon remove it."""
+        record = container()
+        engine = Engine(record)
+        original = engine.__call__
+        pauses = []
+
+        def daemon(argv, timeout):
+            if argv[:2] == ["docker", "rm"]:
+                engine.calls.append(list(argv))
+                if disappears:
+                    engine.containers.pop(ID, None)
+                return 1, "", rm_error
+            return original(argv, timeout)
+        result = teardown_workspace_stack(daemon, WS, [ID], strays=[planned(record)],
+                                          checkout=CHECKOUT, pause=pauses.append)
+        return result, engine, pauses
+
+    def test_autoremoved_stray_in_progress_counts_as_removed(self):
+        result, engine, _pauses = self.autoremove(
+            "Error response from daemon: removal of container " + ID + " is already in progress")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["strays_removed"], [ID])
+        self.assertEqual(engine.containers, {})
+
+    def test_autoremoved_stray_gone_before_rm_counts_as_removed(self):
+        result, _engine, _pauses = self.autoremove(
+            "Error response from daemon: No such container: " + ID)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["strays_removed"], [ID])
+
+    def test_removal_in_progress_that_never_finishes_fails(self):
+        result, _engine, pauses = self.autoremove(
+            "Error response from daemon: removal of container " + ID + " is already in progress",
+            disappears=False)
+        self.assertFalse(result["ok"])
+        self.assertIn("stray_rm_failed:" + ID, result["failures"])
+        self.assertTrue(pauses)
+
+    def test_other_rm_errors_are_not_widened(self):
+        result, _engine, pauses = self.autoremove(
+            "Error response from daemon: container is paused", disappears=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("stray_rm_failed:" + ID, result["failures"])
+        self.assertEqual(pauses, [])
+
     def test_crash_after_intent_then_rerun_removes_once(self):
         record = container()
         engine = Engine(record)

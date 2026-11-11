@@ -2,7 +2,7 @@
 
 import type {
   AppData, ActionResult, JobSnapshot, Usage, RemoteInventory, RemoteSummary, HostingView,
-  ShareCreated, ShareList, ShareRevoked, ShareRefused,
+  ShareCreated, ShareList, ShareRevoked, ShareRefused, SharePartial,
 } from "./types";
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -50,9 +50,9 @@ export async function postSignIn(body: ShareTarget): Promise<SignInResult> {
   });
   return await response.json() as SignInResult;
 }
-export function postShare(body: ShareTarget & { action: "create" }): Promise<ShareCreated | ShareRefused>;
+export function postShare(body: ShareTarget & { action: "create" }): Promise<ShareCreated | ShareRefused | SharePartial>;
 export function postShare(body: ShareTarget & { action: "list" }): Promise<ShareList | ShareRefused>;
-export function postShare(body: ShareTarget & { action: "revoke"; id: string }): Promise<ShareRevoked | ShareRefused>;
+export function postShare(body: ShareTarget & { action: "revoke"; id: string }): Promise<ShareRevoked | ShareRefused | SharePartial>;
 export async function postShare(body: ShareTarget & { action: string; id?: string }): Promise<unknown> {
   let r: Response;
   try {

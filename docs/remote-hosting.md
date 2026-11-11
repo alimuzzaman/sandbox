@@ -1544,6 +1544,49 @@ recorded inbox names shows the supported setup command. One-link teammate access
 and per-click sign-in are separate spec 088 work; this declaration alone does not
 grant access.
 
+For spec 088 one-link access, declare complete per-route/inbox access on parent and
+every direct used stack. See the [worked stack template](login-service.md#worked-stack-template)
+for `route_sign_in`, reserved `$wordpress`, `inbox_sign_in`, capture and direct `uses`.
+Source requires all four capabilities before key/grant effects; source support is
+not proof of installed revision. V2 flat companion records, per-click pools, online
+WordPress claims and schema-2 cleanup descriptors are documented in the
+[access contract](../specs/088-stack-page-access/contracts/access.md), including the
+source-defined attempt/list/revoke and coverage envelopes. Runtime acceptance is
+unverified; source capability constants are not installed revision or capability proof.
+Use the [future acceptance plan](../specs/088-stack-page-access/quickstart.md), which
+confers no apply, migration or teardown authority. Apply resets gate tmpfs; explicitly
+reissue v2 links. Apply resets legacy records too; the legacy reader does not preserve
+them. Retained v1 pages remain readable with WP actions unavailable.
+
+For recorded linked sites, optionally declare anonymous normal-route intent in the
+stack's environment share block. For example, with `example.test` in the existing
+`allowed_host_suffixes` and `wp-{slug}.example.test` recorded as a linked site:
+
+```yaml
+share:
+  hostname: share-{slug}.example.test
+  linked_access:
+    wp-{slug}.example.test: open
+```
+
+`linked_access` defaults to `{}`. It accepts at most 16 exact canonical lowercase DNS
+hostnames covered by `allowed_host_suffixes`, each mapped to literal `open`. URLs,
+tokens, conditions and protected modes are refused. Every declared host must match
+an actual recorded linked row; unused declarations are coverage gaps. A legacy row
+with `access: open` alone remains unknown. To resolve `linked_access_unknown`, declare
+that exact recorded hostname only after confirming its normal route is intended to
+be anonymous. Known Basic Auth, private and other recorded restrictions still refuse.
+Protected linked apps remain unsupported. Linking public WordPress adds its normal
+route only and never adopts admin credentials or adds an admin sign-in.
+
+This declaration records author intent plus known controls, the same boundary used
+for an unmapped own route. It does not measure anonymous usability or detect
+out-of-band application DB/auth changes. The frozen manifest and stack record are
+revalidated before effects; no redeploy proof or access-generation writer is implied.
+Linked rows show their own recorded valid commit/state, otherwise unknown, without
+using the parent revision or claiming verification. Full runtime acceptance and
+independent authentication review remain required before release.
+
 Placeholders: `{slug}`, `{SLUG}` (upper case, `-` becomes `_`), `{port:<name>}` (the
 name must be listed in `stack.ports`) and `{ref_branch}` (the branch `--ref` was
 resolved from; empty for a detached commit). They are allowed only in `project`,
@@ -1551,7 +1594,10 @@ resolved from; empty for a detached commit). They are allowed only in `project`,
 values and `secrets.generated` source names. A placeholder anywhere else, or any
 other brace pattern, is `stack_template_invalid`; the basic-auth route parameter
 syntax (`/api/{id}`) is left to its own validation. `{port:...}` cannot appear in
-`project`. A template is not deployable on its own: `host validate`, `plan`, `apply`
+`project`. Approved login-service paths additionally include share.hostname,
+share.route_sign_in and share.linked_access hostname keys, entry hostnames and magic_link origins/pattern/
+required_params values. Entry names, mapping values and inbox_sign_in stay literal;
+regex replacements are escaped. A template is not deployable on its own: `host validate`, `plan`, `apply`
 and the rest refuse it with `stack_template_requires_stack_up`. To inspect or exec
 into a deployed stack, pass `--target` or `--name` (see `sb host exec` below).
 

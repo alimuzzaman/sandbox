@@ -11,7 +11,7 @@ import { modal } from "../ui/modal";
 import { toast } from "../ui/toast";
 import { postShare } from "../api";
 import { canShare, refusalHelp, revocableId, shareTerms } from "../ui/sharelabels";
-import type { ShareCreated, ShareList, ShareRefused } from "../types";
+import type { ShareCreated, ShareList, ShareRefused, SharePartial, ShareAttempt, ShareGrant } from "../types";
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
@@ -53,11 +53,31 @@ function stackOf(button: HTMLElement): { remote: string; stack: string } | null 
   return canShare(remote) && SLUG.test(stack) ? { remote, stack } : null;
 }
 
-function refusal(body: HTMLElement, result: ShareRefused, remote: string, stack: string): void {
+function refusal(body: HTMLElement, result: ShareRefused | SharePartial, remote: string, stack: string): void {
   const help = refusalHelp(result.code, result.message, remote, stack);
   body.innerHTML = `<div role="alert" class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-900 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-100">
       <div class="font-medium"><code>${esc(result.code)}</code></div><div class="mt-1">${esc(result.message)}</div></div>
-    ${help ? `<p>${esc(help)}</p>` : ""}`;
+    ${help ? `<p>${esc(help)}</p>` : ""}
+    ${"gaps" in result ? (result.gaps || []).map(gap => `<div class="rounded border p-2"><p>${esc(gap.stack)} · ${esc(gap.target)} ${esc(gap.hostname || "")} · ${esc(gap.piece)} · ${esc(gap.code)}</p><p>${esc(gap.fix)}</p></div>`).join("") : ""}
+    ${"phase" in result ? cleanupDetails(result.attempt_id, result.still_live) : ""}`;
+}
+
+function cleanupDetails(attemptId: string | undefined, grants: ShareGrant[]): string {
+  return `<div role="alert"><p>cleanup_pending · ${esc(attemptId || "Attempt identity unavailable")}</p>
+    <p>Grants may remain live. Do not make another share until cleanup is confirmed.</p>
+    ${grants.map(grant => `<p><code>${esc(grant.id)}</code> · ${esc(grant.target)} · entry ${esc(grant.entry)} · expires ${esc(when(grant.expires_at))} · ${esc(grant.status)} · ${esc(grant.reason_code)}</p>`).join("")}
+    <p>Repeat revoke with the original parent link id from Live links. Remaining grant ids above are evidence; cleanup uses the original durable attempt.</p></div>`;
+}
+
+/** Pure decision shared by the dialog and its bounded node regression. */
+export function shareCreationBlocked(result: ShareList): boolean {
+  return !result.ok || result.attempts.some(attempt => !["active", "revoked", "expired"].includes(attempt.phase));
+}
+
+function attemptsTable(attempts: ShareAttempt[]): string {
+  return attempts.map(attempt => `<div class="rounded border p-2"><p><code>${esc(attempt.attempt_id)}</code> · ${esc(attempt.phase)} · parent <code>${esc(attempt.link_id)}</code> · expires ${esc(when(attempt.expires_at))}</p>
+    ${!["revoked", "expired"].includes(attempt.phase) ? `<button type="button" data-revoke="${esc(attempt.link_id)}" class="${theme.button}">Repeat revoke ${esc(attempt.link_id)}</button>` : ""}
+    ${!["active", "revoked", "expired"].includes(attempt.phase) ? cleanupDetails(attempt.attempt_id, attempt.still_live || []) : ""}</div>`).join("");
 }
 
 function copyLink(input: HTMLInputElement, button: HTMLButtonElement, note: HTMLElement): void {
@@ -104,6 +124,16 @@ function showLink(body: HTMLElement, result: ShareCreated): void {
 export async function shareStack(button: HTMLElement): Promise<void> {
   const target = stackOf(button);
   if (!target) return;
+  const inventory = await postShare({ action: "list", ...target });
+  if (!("attempts" in inventory)) {
+    refusal(dialog(`Share ${target.stack}`), inventory, target.remote, target.stack);
+    return;
+  }
+  if (shareCreationBlocked(inventory)) {
+    const body = dialog(`Live links · ${target.stack}`);
+    renderLinks(body, target, inventory);
+    return;
+  }
   const ok = await modal({
     title: `Share stack ${target.stack}?`, okText: "Make link",
     desc: "This makes a link to the stack's page and its sign-in links, usable without the tailnet " +
@@ -134,15 +164,22 @@ function linksTable(result: ShareList): string {
       <td class="py-2 text-right">${revoke(row.id)}</td></tr>`).join("");
   const table = (head: string, rows: string, empty: string) => `<div><div class="${theme.label}">${head}</div>
     ${rows ? `<table class="mt-1 w-full text-left"><tbody>${rows}</tbody></table>` : `<p class="mt-1 text-[12px] ${theme.quiet}">${empty}</p>`}</div>`;
-  return `<p class="text-[12px] ${theme.quiet}">${esc(result.target)} · entry ${esc(result.entry)}. Ids only: a link itself is never shown again.</p>
-    ${table("Links", links, "No live links.")}${table("Browser sessions", sessions, "No open sessions.")}`;
+  return `<p class="text-[12px] ${theme.quiet}">${esc(result.target || "Target unavailable")} · entry ${esc(result.entry || "unknown")}. Ids only: a link itself is never shown again.</p>
+    ${!result.ok ? `<p role="alert">Live status is incomplete. Grants may remain live. New sharing is blocked until status and cleanup are confirmed.</p>` : ""}
+    ${result.partial_reasons?.map(reason => `<p>${esc(reason)}</p>`).join("") || ""}
+    ${attemptsTable(result.attempts)}
+    ${table("Links", links, result.ok ? "No live links." : "Live links could not be confirmed.")}${table("Browser sessions", sessions, result.ok ? "No open sessions." : "Browser sessions could not be confirmed.")}`;
 }
 
 async function loadLinks(body: HTMLElement, target: { remote: string; stack: string }): Promise<void> {
   body.innerHTML = `<p class="${theme.quiet}" role="status">Loading…</p>`;
   const result = await postShare({ action: "list", ...target });
   if (!body.isConnected) return;
-  if (!result.ok) { refusal(body, result, target.remote, target.stack); return; }
+  if (!("attempts" in result)) { refusal(body, result, target.remote, target.stack); return; }
+  renderLinks(body, target, result);
+}
+
+function renderLinks(body: HTMLElement, target: { remote: string; stack: string }, result: ShareList): void {
   body.innerHTML = linksTable(result);
   body.querySelectorAll<HTMLButtonElement>("[data-revoke]").forEach(button => {
     button.addEventListener("click", () => void revoke(body, target, button.dataset.revoke || ""));
@@ -159,7 +196,17 @@ async function revoke(body: HTMLElement, target: { remote: string; stack: string
   if (!ok || !body.isConnected) return;
   const result = await postShare({ action: "revoke", ...target, id });
   if (result.ok) toast(`Revoked: ${result.revoked_links} link(s), ${result.revoked_sessions} session(s)`, "ok");
-  else toast(`${result.code}: ${result.message}`, "err");
+  else {
+    if (body.isConnected) {
+      refusal(body, result, target.remote, target.stack);
+      const retry = document.createElement("button");
+      retry.className = theme.button;
+      retry.textContent = `Repeat revoke ${id}`;
+      retry.addEventListener("click", () => void revoke(body, target, id));
+      body.appendChild(retry);
+    }
+    return;
+  }
   if (body.isConnected) await loadLinks(body, target);
 }
 

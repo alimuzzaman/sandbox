@@ -36,7 +36,11 @@
   (`sb host login-url --name`), manifest fields (`stack.uses`, `autologin`) and the
   panel's same-origin rule appear as user-facing behavior, as in specs 076 and 081. No
   module, storage layout or language is named.
-- Defaults taken from the PRD's open items, for `speckit-clarify` to confirm: `uses`
+- Settled owner clarifications, integrated through `speckit-clarify`: `uses`
   limit 4; `stack down` of a used stack reports, not refuses; a used stack's shorter
   window shortens the whole share; outstanding sign-in bound 8.
 - Stories 5 and 6 depend on `feat/short-share-links` being in `latest`.
+
+- 2026-11-11 contract reconciliation re-evaluated all 17 checklist items; markers
+  unchanged. Readiness boxes describe specification coverage, not runtime acceptance.
+  Callback wire/capability details remain in the design contract for owner agreement.

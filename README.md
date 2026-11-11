@@ -1503,3 +1503,15 @@ Stack templates can declare direct shared stacks with `stack.uses: [dev]` (spec 
 The referenced stacks must already be recorded by the controller on the same remote.
 This records a relationship and does not create access grants. See
 [stack templates](docs/remote-hosting.md#stack-templates-sb-host-stack-spec-071).
+
+Stack-page access source for spec 088 adds declared route/inbox coverage, per-click
+sign-ins and flat direct companion metadata. Checks, independent authentication
+review and installed/runtime acceptance remain pending. See the
+[complete hosting declaration](docs/login-service.md#worked-stack-template),
+[exact source contract](specs/088-stack-page-access/contracts/access.md) and
+[future acceptance plan](specs/088-stack-page-access/quickstart.md). Applying a new
+runtime resets gate links/sessions, including legacy records; v2 requires explicit
+reissuance. Source capability declarations do not prove installed runtime revision or
+capability. Check JSON `ok` and `partial_reasons` when listing shares because a partial
+stack list can still exit zero. V1 WordPress actions remain unavailable. No rollout is
+authorized by these docs.

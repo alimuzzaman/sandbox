@@ -12,7 +12,7 @@ the accepted requirements and review evidence are unchanged.
 Give each hosted stack a panel page with its routes, delivered revision, inbox,
 WordPress sign-in and direct shared stacks. Extend existing stack records and
 panel views. Use the existing host autologin installation path for controller
-sign-ins. After short share links merge, extend each stack gate with per-click
+sign-ins. With the short share links dependency merged locally, extend each stack gate with per-click
 sign-ins and companion pages. Keep the full panel private.
 
 ## Technical context
@@ -21,20 +21,21 @@ sign-ins and companion pages. Keep the full panel private.
 - Dependencies: existing YAML parser, stdlib HTTP/JSON/locking, Vite/TypeScript; no new packages.
 - Storage: existing controller stack registry and rendered manifests; a new token-free
   share-attempt repository; gate private state; bounded WordPress hash pool.
-- Testing: unittest, existing PHP/runtime fixtures, TypeScript compiler and web build.
-  Tests/type-checks run only through Luna on personal codex, per the latest owner
-  coordination update. The owner authorized local
-  Luna checks during exclusive remote host ownership; remote jobs require an explicit slot.
+- Verification provider for the current task: PERSONAL Codex GPT-6.1-Sol high only.
+  This design pass runs no tests/builds/apps/network/remote jobs and spawns no helpers.
+  Historical reports keep their original provider provenance. Later runner assignment
+  and host slot are coordinator-owned, never an implicit Office/Luna fallback.
 - Platform: macOS controller and Linux remote hosting; existing tailnet panel.
 - Scope: direct uses limited to four, eight outstanding sign-ins per entry, existing
-  panel truncation and gate limits retained. No recursive traversal or new health probes.
+  gate bounds enforced by refusal without silent truncation. No recursive traversal or general health probing; only the explicit authenticated
+  non-consuming companion availability probe is added.
 - Constraints: placeholder hosts in committed content; no new live grants, migrations,
   deployments or applies. Full-stack thread exclusively owns fs-try/host mutations;
   shared dev and setup-plan remain untouched.
 
 ## Constitution check
 
-Pre-design and post-design checks pass in design, with runtime proof pending.
+Design is mapped to the constitution below; independent review and runtime proof remain pending.
 
 1. Keep project/instance targeting explicit. Use the recorded remote/slug and manifest.
 2. Extend existing registries through their APIs; default absent uses to empty.
@@ -45,8 +46,8 @@ Pre-design and post-design checks pass in design, with runtime proof pending.
    and revision evidence land with code; deployed protocol upgrades remain owner actions.
 6. Preserve existing hosting/login paths. No facade or provider is removed.
 
-The owner task explicitly requests types, then tests, then implementation, overriding
-this repository's implementation-first default. Test execution remains delegated.
+This task edits design only. It writes or runs no tests and certifies no checks from
+concurrent helpers. Future implementation/verification order remains coordinator-owned.
 
 ## Project structure
 
@@ -76,7 +77,7 @@ Do not add imports of a facade or registry namespace prohibited by repo guidance
 
 See [research.md](research.md), [data-model.md](data-model.md) and
 [contracts/access.md](contracts/access.md). These are proposed until implementation
-and verification. Local `stack.uses` parsing/persistence checks now pass; remote
+and verification. Earlier checkpoint reports are supplied historical evidence, not rerun here. Remote
 installed support remains unverified and no release is authorized.
 
 Controller sign-in resolves the stack's recorded rendered manifest. The CLI's
@@ -95,18 +96,22 @@ posts a fragment token, removes the fragment and has no third-party assets. Clai
 and delete a hash atomically before setting the WordPress auth cookie. Install
 failure returns no link. Do not put hashes or tokens in controller state or audit.
 
-For shared pages use host-only gate sessions and per-gate companion grants. This
-reuses the existing gates without a parent-domain cookie or public panel proxy.
-Record attempt ids and grant ids before minting; tokens exist only in private gate
-state or the immediate response. Lock targets in stable remote/project/environment
-order, never parent-first nesting. Hold a per-parent attempt lock for cleanup/mint.
-A retry cleans unresolved attempts before creating another. Revoke from the durable
-record even after parent gate state loss; retain incomplete records until all grants
-are confirmed revoked or expired. Report every still-live grant and its expiry.
-Companion pages omit their own uses. No authority propagates transitively.
+For shared pages use the exact v2 page, complete coverage, action POST, child probe
+and WP online claim in [contracts/access.md](contracts/access.md). Gate GET/HEAD never
+issue sign-ins. Eight pending per-entry hashes and source lifetime checks apply to
+fresh clicks. Legacy direct CLI singleton remains separate. Host-only sessions confer
+no panel or sibling authority. WordPress callback needs independent authentication
+review and owner sign-off before release; the exact source callback wire is recorded in access.md, with runtime parity unverified.
 
-The precise short-link mint/id API must be checked after merging the dependency.
-That integration is blocked, not replaced with a legacy implementation.
+Dependency e04e293 is integrated locally by normal merge 93431f7. Allocate derived
+l-12hex ids with the same MintedLink passed to later mint_link; final page travels in
+that mint, companions first then parent. No attach, reservation or replay-success mint.
+Durably persist safe original runtime/gate/key-cleanup identity before unknown-before-
+keyinstall/mint. Per-parent attempt lock then sorted unique effect locks, with short
+state snapshots and no shared lock nesting. List/revoke recover even without parent.
+Never remint on uncertainty or clean a replacement slug by guess. Exact four-capability negotiation and schema-2 original cleanup descriptors are
+recorded in access.md/data-model.md. Late controller result/error fields remain
+pending owner consolidation, not new invented contracts.
 
 ## Phase manifest
 
@@ -116,24 +121,35 @@ all own/direct shared routes, inboxes and sign-ins, and the owner can revoke it.
 - Scope: US1–US6, docs, revision evidence, regression and runtime proof.
 - Assigned PRs: planned Sandbox `feat/stack-page-access`; no PR opened.
 - Target release cycle: coordinated owner-approved dev integration, date unassigned.
-- Dependencies/order: design/types → tests → US1–US4 implementation → short-share-links
-  merged into latest and branch rebased → US5–US6 → remote proof → independent Sol
-  review → owner auth sign-off. Setup repo consumes the documented schema only when ready.
+- Dependencies/order: local short-link integration is complete; contract agreement →
+  implementation across US1–US6 → actual supported workflows → focused regressions and
+  required gates → independent source/authentication review → owner release sign-off.
 - Acceptance: all spec success criteria; fresh non-tailnet browser exercises all
   own/shared paths; two sign-ins both work; parent revoke closes companions and unused
   sign-ins; recovery succeeds after partial failure and gate restart.
-- Readiness: design in progress, no feature implementation verified. Short-link merge
-  blocks gate changes. Runtime acceptance needs explicit authorization and coordination
-  after full-stack releases exclusive host ownership. No partial release promised.
+- Readiness: no feature acceptance declared. Source integration removes the dependency
+  merge block; installed protocol support, authentication review and runtime acceptance
+  remain unverified. No partial release promised.
 
-Local checkpoint: the stack page, direct relationships and controller WordPress
-sign-in action are implemented. Local Python fixtures and UI typecheck/build have
-run, with the known baseline `/var` versus `/private/var` path failure. This does
-not establish runtime acceptance or public teammate access. Gate work is blocked
-until short-share-links lands. All six stories still belong to the same release.
+Earlier local checkpoint work exists for panel/relationships/controller WordPress.
+This pass neither reruns nor adopts its tests as current proof. All six stories remain
+in one release. Follow [quickstart.md](quickstart.md), which is a future reviewable plan,
+not authorization to execute. Current design provider is personal Sol high; historical
+Office/other-provider review records are preserved in their original artifacts.
 
 ## Complexity tracking
 
 No constitution exception. The new attempt repository is needed because a parent gate
 can lose state while companion grants remain live. A gate-only revoke cannot meet
 FR-029–FR-032. New modules separate this mechanism from CLI and HTTP presentation.
+
+## Bounded source documentation reconciliation, 2026-11-11
+
+Applied speckit-plan Phase 1 contract/data-model/quickstart reconciliation to the
+existing 088 plan after metadata-only setup-plan. No specification, PRD, historical
+review provenance or task marker is rewritten. Explicit task ownership excludes
+agent-pointer regeneration; optional after_plan agent-context hook is skipped.
+Source schema/runtime/WP/ledger were inspected, not executed. Constitution IV proof
+and VI compatibility acceptance remain open: v1 WP action is explicitly unavailable,
+v2 reissuance is required, and apply resets gate tmpfs. This is not runtime acceptance
+or approval of that compatibility limitation for release. No lifecycle upgrade is run.

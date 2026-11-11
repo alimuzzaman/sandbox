@@ -3039,6 +3039,29 @@ def _with_host_effect_lease(validated: dict, remote_name: str, callback):
         return callback(state)
 
 
+@__import__("contextlib").contextmanager
+def _host_share_effects(targets):
+    """Own sorted unique fanout targets; never hold state.lock during effects.
+
+    One mutation port per target avoids the port's nested identity restriction.
+    The caller already owns the original parent attempt lock.
+    """
+    from contextlib import ExitStack
+    repository = RecoveryRepository()
+    with ExitStack() as locks:
+        keys = []
+        for target in sorted(set(targets)):
+            key = hosting.state_key(target.remote, {"project": target.project,
+                                                   "environment": target.environment})
+            keys.append(key)
+            locks.enter_context(repository.target_mutation_port("sync").target_mutation_transaction(key))
+        with repository.state_lock():
+            state = hosting.load_host_state()
+            for key in keys:
+                _assert_no_active_host_operation(state, key)
+        yield state
+
+
 def _refresh_hosting_operation(state: dict, key: str, *, classified: dict,
                                observation: dict, save_state=None) -> None:
     operation = (state["hosts"].get(key) or {}).get("hosting_operation")

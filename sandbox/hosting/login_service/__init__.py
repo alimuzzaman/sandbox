@@ -53,7 +53,7 @@ _SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_hos
 _CAPTURE_FIELDS = {"service", "adapter", "api_url", "username", "credential_secret"}
 _ENTRY_FIELDS = {"mode", "requires_email", "hostname", "path", "ttl_seconds", "magic_link", "landing_path",
                  "upstream"}
-_SHARE_FIELDS = {"hostname", "private", "agent_mint", "stack_sign_in"}
+_SHARE_FIELDS = {"hostname", "private", "agent_mint", "stack_sign_in", "route_sign_in", "inbox_sign_in", "linked_access"}
 _SHARE_SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_host_suffixes"}
 _MAGIC_FIELDS = {"request_url", "request_origin", "link_origin", "link_path", "link_pattern",
                  "required_params", "poll_timeout_seconds", "denied_emails"}
@@ -316,6 +316,20 @@ def _check_suffixes(raw: object, routes: list[dict]) -> list[str]:
     return suffixes
 
 
+def validate_linked_access(value: object, suffixes: list[str] | None = None) -> dict[str, str]:
+    """Validate author intent for exact recorded links, never measured app access."""
+    if not isinstance(value, dict) or len(value) > 16:
+        raise _invalid("share.linked_access must map at most 16 exact hostnames to literal open")
+    host_pattern = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+"
+    for host, access in value.items():
+        if (not isinstance(host, str) or len(host) > 253
+                or not re.fullmatch(host_pattern, host) or access != "open"):
+            raise _invalid("share.linked_access requires exact canonical DNS keys and literal open values")
+        if suffixes is not None and not _host_is_covered(host, suffixes):
+            raise _invalid("share.linked_access hostname is not covered by allowed_host_suffixes")
+    return dict(value)
+
+
 def _share_block(share: object, *, declared_service: bool) -> tuple[dict, dict | None]:
     """Split ``share:`` into its own fields and, in the short form, login-service fields."""
     if not isinstance(share, dict):
@@ -333,9 +347,19 @@ def _share_block(share: object, *, declared_service: bool) -> tuple[dict, dict |
     if not isinstance(sign_in, list) or not all(isinstance(item, str) for item in sign_in) \
             or len(set(sign_in)) != len(sign_in):
         raise _invalid("share.stack_sign_in must be a list of distinct autologin entry names")
+    route_sign_in = share.get("route_sign_in", {})
+    if (not isinstance(route_sign_in, dict) or len(route_sign_in) > 16
+            or not all(isinstance(host, str) and isinstance(name, str)
+                       for host, name in route_sign_in.items())):
+        raise _invalid("share.route_sign_in must map at most 16 hostnames to entry names or $wordpress")
+    linked_access = validate_linked_access(share.get("linked_access", {}))
+    inbox = share.get("inbox_sign_in")
+    if inbox is not None and (not isinstance(inbox, str) or not _ENTRY_NAME.fullmatch(inbox)):
+        raise _invalid("share.inbox_sign_in must be a literal inbox_gate entry name")
     own = {"hostname": str(share.get("hostname") or "").strip().rstrip(".").lower(),
            "private": share.get("private", False), "agent_mint": share.get("agent_mint", False),
-           "stack_sign_in": list(sign_in)}
+           "stack_sign_in": list(sign_in), "route_sign_in": dict(route_sign_in),
+           "inbox_sign_in": inbox, "linked_access": linked_access}
     if declared_service:
         return own, None
     service = {key: share[key] for key in _SHARE_SERVICE_FIELDS if key in share}
@@ -384,6 +408,8 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
     if not _PINNED_IMAGE.fullmatch(image):
         raise _invalid("login_service.image must be pinned as name@sha256:digest")
     suffixes = _check_suffixes(service.get("allowed_host_suffixes"), routes)
+    if share_own is not None:
+        validate_linked_access(share_own["linked_access"], suffixes)
     if not isinstance(entries, dict) or (not entries and share_own is None):
         raise _invalid("entries must be a non-empty mapping")
     needs_capture = any(not isinstance(item, dict) or item.get("mode") != "site_gate"
@@ -406,6 +432,9 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
             if parsed.get(name, {}).get("mode") not in ("magic_link", "inbox_gate"):
                 raise _invalid(f"share.stack_sign_in names {name!r}, which is not a magic_link or "
                                "inbox_gate entry")
+    if share_own is not None:
+        validate_route_sign_in(share_own, parsed, routes,
+                               wordpress=raw if not declared and isinstance(raw, dict) else None)
     site_hosts = [entry["hostname"] for entry in parsed.values() if entry["mode"] == "site_gate"]
     if any(sum(1 for entry in parsed.values() if entry["hostname"] == host) > 1 for host in site_hosts):
         # The gate answers every path on its hostname, so nothing else may share it.
@@ -427,6 +456,31 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
     return {"image": image, "enabled_until": enabled_until.isoformat(),
             "session_ttl_seconds": session, "allowed_host_suffixes": suffixes,
             "capture": capture, "entries": parsed, "share": share_own}
+
+
+def validate_route_sign_in(share: dict, entries: dict, routes: list[dict], *,
+                          wordpress: dict | None) -> None:
+    """Check exact destinations. $wordpress is reserved, never an entry name."""
+    served = {route["hostname"] for route in routes if route.get("mode") == "serve"}
+    primary = next((route["hostname"] for route in routes if route.get("primary")), None)
+    for host, name in share.get("route_sign_in", {}).items():
+        if host not in served:
+            raise _invalid("share.route_sign_in keys must be served route hostnames")
+        if name == "$wordpress":
+            if not wordpress or host != primary:
+                raise _invalid("share.route_sign_in $wordpress requires the WordPress primary route")
+            continue
+        if name not in share["stack_sign_in"]:
+            raise _invalid("share.route_sign_in values must be listed in share.stack_sign_in")
+        entry = entries.get(name, {})
+        destination = (urllib.parse.urlsplit(entry["magic_link"]["link_origin"]).hostname
+                       if entry.get("mode") == "magic_link" else entry.get("hostname"))
+        if entry.get("mode") not in ("magic_link", "inbox_gate") or destination != host:
+            raise _invalid("share.route_sign_in destination hostname does not match its entry")
+    inbox = share.get("inbox_sign_in")
+    if inbox is not None and (inbox not in share["stack_sign_in"]
+                              or entries.get(inbox, {}).get("mode") != "inbox_gate"):
+        raise _invalid("share.inbox_sign_in must name a listed inbox_gate entry")
 
 
 def _share_entry(share: dict, *, gate_hosts: set[str], compose: dict) -> dict:
@@ -661,10 +715,16 @@ def valid_revoke_target(value: object) -> bool:
 
 
 def site_command(prefix: str, verb: str, entry: str, *extra: str) -> str:
-    """Run the service's own runtime to mint, list or revoke share links.
+    """Run the service's runtime to mint, list, revoke, or check capabilities.
 
     The argv holds the public runtime source and ids only. A mint record goes on stdin.
     """
+    if verb not in {"mint", "list", "revoke", "capabilities"}:
+        raise LoginServiceError("site_usage", "unsupported site command")
+    if not isinstance(entry, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", entry):
+        raise LoginServiceError("site_usage", "invalid site entry")
+    if (verb == "revoke" and (len(extra) != 1 or not valid_revoke_target(extra[0]))) or (verb != "revoke" and extra):
+        raise LoginServiceError("site_usage", "invalid site command arguments")
     return (f"{prefix} exec -T {SERVICE_NAME} "
             + shlex.join(["python3", "-c", _LOADER, _runtime_source(), "site", verb, entry, *extra]))
 

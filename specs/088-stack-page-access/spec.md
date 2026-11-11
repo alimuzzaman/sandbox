@@ -9,6 +9,14 @@
 **Input**: The ready PRD `specs/088-stack-page-access/prd.md` (Sol readiness review PASS,
 2026-11-11), which is the authoritative feature description.
 
+## Clarifications
+
+### Session 2026-11-11
+
+- Q: How are route and inbox access declared? → A: route_sign_in names a declared stack_sign_in entry or `$wordpress`; inbox_sign_in explicitly names an inbox_gate. Unmapped means author-declared anonymous, subject to known restrictions and adequate metadata.
+- Q: When may stack-page actions issue credentials? → A: Fresh sign-ins only on authenticated same-origin POST per click, never GET/HEAD; source grant/session/window bounds and eight pending per entry apply.
+- Q: What happens on child gate loss or interrupted mint? → A: Probe availability without consumption, report unavailable, reconcile original durable identities and never remint under an uncertain attempt.
+
 ## User Scenarios & Testing *(mandatory)*
 
 Stories 1 to 4 are independent of the short share links branch (`feat/short-share-links`)
@@ -326,7 +334,8 @@ it up.
   081 defines, using the short link format.
 - **FR-022**: The page MUST list each own route with one access path: open, or a named
   Sandbox sign-in (WordPress admin, a login-service entry, the inbox sign-in) that lands
-  on it. A route is open unless the template names the sign-in that serves it.
+  on it. An unmapped route is author-declared anonymous, but known authentication, private
+  restrictions or missing access metadata MUST still refuse sharing.
 - **FR-023**: Sign-ins on the page MUST be minted per click, single-use, living at most
   10 minutes, and a click MUST NOT invalidate another click's unused sign-in, within a
   bound of 8 outstanding per sign-in.
@@ -373,7 +382,7 @@ it up.
 - **FR-036**: Docs, specs and tests MUST use placeholder hostnames only.
 - **FR-037**: The documentation MUST list the manifest fields a stack template uses for
   this feature (`stack.uses`, the inbox port name, share gate and sign-in hostnames, the
-  route-to-sign-in mapping), with one worked example of a WordPress stack using a Hub
+  route-to-sign-in mapping and explicit inbox_sign_in), with one worked example of a WordPress stack using a Hub
   stack.
 
 ### Key Entities

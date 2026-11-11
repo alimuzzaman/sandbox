@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 import re
 import shlex
+import time
+import base64
 
 from sandbox.application.server_cli import (ServerCLIUnavailable, read_current_server_owner,
     validate_target_metadata)
@@ -24,13 +26,14 @@ def exec_contract_available():
     import inspect
     try:
         from sandbox.commands.jobs_runtime import configure_start_parser
-        from sandbox.commands.host_exec import _execution_scope
+        from sandbox.commands.host_exec import _execution_scope, SERVER_CLI_EXEC_BINDING_VERSION
         from sandbox.hosting.server_cli_target import OwnerHostTarget, require_owner_target
         from sandbox.hosting.server_target_selection import read_owner_exec_selection
         from sandbox.application.server_cli_targets import installed_inspector
         parser = argparse.ArgumentParser(add_help=False)
         configure_start_parser(parser)
         return ('--server-cli-exec-selector' in parser._option_string_actions
+            and type(SERVER_CLI_EXEC_BINDING_VERSION) is int and SERVER_CLI_EXEC_BINDING_VERSION == 1
             and callable(_execution_scope) and isinstance(OwnerHostTarget, type)
             and callable(require_owner_target) and callable(installed_inspector())
             and 'expected_selector_digest' in inspect.signature(read_owner_exec_selection).parameters)
@@ -151,6 +154,8 @@ def receive_server_cli_exec(args, *, stdin_fd):
             'server_cli.remote_name': selector['origin_remote_name'],
             'server_cli.target_metadata': json.dumps(selector['target_metadata'], sort_keys=True, separators=(',', ':')),
             'server_cli.target_selector_digest': snapshot['selector_digest'],
+            'server_cli.exec_service': selector['service'],
+            'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
             'server_cli.target_snapshot': json.dumps({key: value for key, value in snapshot.items() if key != 'ok'},
                 sort_keys=True, separators=(',', ':')),
             'server_cli.absolute_deadline_at': selector['deadline_at'],
@@ -179,6 +184,14 @@ class ServerCLIExecAcceptanceUnknown(RuntimeError):
     def __init__(self, request_id):
         self.request_id = request_id
         super().__init__('server exec acceptance is unknown; retain this request and inspect the server ledger before any replay')
+
+
+class ServerCLIExecObservationUnavailable(RuntimeError):
+    code = 'server_cli_exec_observation_unavailable'
+    def __init__(self, receipt):
+        self.job_id = receipt.get('job_id') if isinstance(receipt, dict) else None
+        self.request_id = receipt.get('request_id') if isinstance(receipt, dict) else None
+        super().__init__('original server exec is retained; its current result could not be validated, so do not replay it')
 
 
 def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, request_id,
@@ -254,4 +267,121 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             or receipt.get('request_id') != request_id or receipt.get('selector_digest') != snapshot['selector_digest']
             or not isinstance(receipt.get('job_id'), str) or re.fullmatch(r'[0-9a-f]{32}', receipt['job_id']) is None):
         raise ServerCLIExecAcceptanceUnknown(request_id)
+    retained_policy = receipt.get('execution_policy')
+    proof = retained_policy.get('provenance') if isinstance(retained_policy, dict) else None
+    expected = {'server_cli.target_identity': owner.target_identity,
+        'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
+        'server_cli.remote_name': remote_name, 'server_cli.target_selector_digest': snapshot['selector_digest'],
+        'server_cli.exec_service': service, 'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
+        'server_cli.stdin_sha256': original_input.binding['sha256'],
+        'server_cli.stdin_size': str(original_input.binding['size']),
+        'server_cli.absolute_deadline_at': deadline.isoformat()}
+    source = receipt.get('source')
+    if (not isinstance(proof, dict) or any(proof.get(key) != value for key, value in expected.items())
+            or not isinstance(source, dict) or source.get('commit') != snapshot['source_commit']
+            or source.get('identity') != 'sha256:' + hashlib.sha256(snapshot['source_dir'].encode()).hexdigest()):
+        raise ServerCLIExecAcceptanceUnknown(request_id)
     return receipt
+
+
+def read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15):
+    """One bounded retained observation, never child-stdio streaming or replay."""
+    from sandbox.core import _remote
+    from sandbox.resources.context import authenticated_target_identity
+    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
+    from sandbox.resources.host_memory.remote import RemoteProtocolError
+    if (not isinstance(receipt, dict) or not isinstance(receipt.get('job_id'), str)
+            or re.fullmatch(r'[0-9a-f]{32}', receipt['job_id']) is None
+            or not isinstance(receipt.get('request_id'), str)
+            or isinstance(budget_seconds, bool) or not isinstance(budget_seconds, (int, float))
+            or not math.isfinite(budget_seconds) or not 0 < budget_seconds <= 300):
+        raise ServerCLIExecObservationUnavailable(receipt)
+    policy = receipt.get('execution_policy')
+    proof = policy.get('provenance') if isinstance(policy, dict) else None
+    if (not isinstance(proof, dict) or proof.get('server_cli.remote_name') != remote_name
+            or proof.get('server_cli.target_selector_digest') != receipt.get('selector_digest')
+            or not isinstance(receipt.get('selector_digest'), str)
+            or re.fullmatch(r'sha256:[0-9a-f]{64}', receipt['selector_digest']) is None):
+        raise ServerCLIExecObservationUnavailable(receipt)
+    deadline = time.monotonic() + budget_seconds
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise ServerCLIExecObservationUnavailable(receipt)
+        return value
+    try:
+        identity = authenticated_target_identity(remote_name, budget_seconds=remaining())
+        record = _remote.get_remote(remote_name, budget_seconds=remaining())
+        if (not isinstance(record, dict) or record.get('joined') is not True
+                or record.get('control_transport') != 'tailscale'
+                or identity['target_identity'] != proof.get('server_cli.target_identity')
+                or (record.get('mcp_service') or {}).get('ownership_marker') != proof.get('server_cli.ownership_marker')):
+            raise ServerCLIExecObservationUnavailable(receipt)
+        transport = RemoteJobTransport(deploy=None, ssh_run=_remote.ssh_run,
+            remote_lookup=lambda name: record if name == remote_name else None,
+            remote_sb_path=_remote.remote_sb_path)
+        state = transport.control(remote_name, ['job-status', receipt['job_id']], timeout=remaining())
+        if not isinstance(state, dict):
+            raise ServerCLIExecObservationUnavailable(receipt)
+        retained = json.loads(state.get('execution_policy_provenance_json') or '{}')
+        source = receipt.get('source')
+        if (state.get('ok') is not True or state.get('job_id') != receipt['job_id']
+                or state.get('request_id') != receipt['request_id'] or state.get('kind') != 'server-cli'
+                or state.get('target_kind') != 'local' or not isinstance(source, dict)
+                or state.get('source_identity') != source.get('identity')
+                or state.get('source_commit') != source.get('commit') or retained != proof):
+            raise ServerCLIExecObservationUnavailable(receipt)
+        lifecycle = state.get('lifecycle')
+        if lifecycle not in {'accepted', 'queued', 'running', 'cancelling',
+                             'succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted'}:
+            raise ServerCLIExecObservationUnavailable(receipt)
+        result = {'ok': True, 'job_id': receipt['job_id'], 'request_id': receipt['request_id'],
+            'status': lifecycle, 'receipt': receipt, 'result': None}
+        if lifecycle in {'accepted', 'queued', 'running', 'cancelling'}:
+            return result
+        if state.get('termination_reason') == 'anonymous_stdin_capacity_unavailable':
+            return {**result, 'result': {'ok': False, 'code': 'anonymous_stdin_capacity_unavailable',
+                'exit_code': 1, 'error': 'no job effect was dispatched because the server slot was occupied'}}
+        chunks, cursor, seen, total = [], None, set(), 0
+        for _page in range(256):
+            argv = ['job-output', receipt['job_id'], '--stream', 'stdout', '--encoding', 'base64', '--max-bytes', '65536']
+            if cursor is not None:
+                argv.extend(['--cursor', cursor])
+            page = transport.control(remote_name, argv, timeout=remaining())
+            if (not isinstance(page, dict) or page.get('ok') is not True or page.get('job_id') != receipt['job_id']
+                    or page.get('stream') != 'stdout' or page.get('encoding') != 'base64'
+                    or type(page.get('has_more')) is not bool or not isinstance(page.get('data'), str)):
+                raise ServerCLIExecObservationUnavailable(receipt)
+            chunk = base64.b64decode(page['data'], validate=True)
+            if len(chunk) > 65536 or type(page.get('bytes_read')) is not int or page['bytes_read'] != len(chunk):
+                raise ServerCLIExecObservationUnavailable(receipt)
+            total += len(chunk)
+            if total > 16 * 1024 * 1024:
+                raise ServerCLIExecObservationUnavailable(receipt)
+            chunks.append(chunk)
+            if not page['has_more']:
+                break
+            cursor = page.get('cursor')
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise ServerCLIExecObservationUnavailable(receipt)
+            seen.add(cursor)
+        else:
+            raise ServerCLIExecObservationUnavailable(receipt)
+        outcome = json.loads(b''.join(chunks))
+        if (not isinstance(outcome, dict) or type(outcome.get('ok')) is not bool
+                or not isinstance(outcome.get('code'), str) or type(state.get('exit_code')) is not int):
+            raise ServerCLIExecObservationUnavailable(receipt)
+        if outcome.get('ok') is False and 'exit_code' not in outcome and isinstance(outcome.get('error'), str):
+            if state['exit_code'] == 0:
+                raise ServerCLIExecObservationUnavailable(receipt)
+            return {**result, 'result': {**outcome, 'exit_code': state['exit_code']}}
+        if (type(outcome.get('exit_code')) is not int or outcome['exit_code'] != state['exit_code']
+                or outcome['ok'] != (outcome['exit_code'] == 0 and outcome['code'] == 'ok')
+                or outcome.get('remote') != remote_name or outcome.get('target') != proof.get('server_cli.exec_target')
+                or outcome.get('service') != proof.get('server_cli.exec_service')
+                or any(not isinstance(outcome.get(key), str) for key in ('stdout', 'stderr'))
+                or any(type(outcome.get(key)) is not bool for key in ('stdout_truncated', 'stderr_truncated'))):
+            raise ServerCLIExecObservationUnavailable(receipt)
+        return {**result, 'result': outcome}
+    except (RemoteJobTransportError, RemoteProtocolError, ServerCLIUnavailable, OSError, ValueError, TypeError, KeyError):
+        raise ServerCLIExecObservationUnavailable(receipt) from None

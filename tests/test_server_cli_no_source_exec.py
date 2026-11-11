@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
+import shlex
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -107,9 +108,23 @@ class NoSourceClientTests(unittest.TestCase):
             self.assertEqual(os.fstat(kwargs['stdin']).st_nlink, 0)
             self.assertNotIn('original synthetic stdin', ' '.join(argv))
             self.assertNotIn('CLOUDFLARE_API_TOKEN', kwargs['env'])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(payload if payload is not None else {
+            parts = shlex.split(argv[-1])
+            selected = json.loads(parts[parts.index('--server-cli-exec-selector') + 1])
+            valid_receipt = {
                 'ok': True, 'job_id': 'a' * 32, 'request_id': 'original-exec',
-                'selector_digest': snapshot()['selector_digest']}), stderr='',
+                'selector_digest': snapshot()['selector_digest'],
+                'source': {'commit': snapshot()['source_commit'], 'identity': 'sha256:' +
+                    hashlib.sha256(snapshot()['source_dir'].encode()).hexdigest()},
+                'execution_policy': {'provenance': {
+                    'server_cli.target_identity': OWNER.target_identity,
+                    'server_cli.ownership_marker': OWNER.ownership_marker,
+                    'server_cli.runtime_revision': OWNER.runtime_revision,
+                    'server_cli.remote_name': 'box', 'server_cli.target_selector_digest': snapshot()['selector_digest'],
+                    'server_cli.exec_service': 'wordpress', 'server_cli.exec_target': 'fixture/dev',
+                    'server_cli.stdin_sha256': selected['stdin_sha256'],
+                    'server_cli.stdin_size': str(selected['stdin_size']),
+                    'server_cli.absolute_deadline_at': selected['deadline_at']}}}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload if payload is not None else valid_receipt), stderr='',
                 termination_reason=terminated, stdout_truncated=False, stderr_truncated=False)
         with tempfile.TemporaryFile('w+b') as original:
             original.write(b'original synthetic stdin')

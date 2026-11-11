@@ -5,6 +5,17 @@ This source contract is not installed acceptance. A server lacking the assembled
 adapter. It must not be described as denying an admitted owner. The managed
 installation feature remains separate and paused.
 
+Ordinary joined `job-start` selection also discovers the installed contract
+automatically. The application target resolver calls the shared execution remote
+adapter when `job.exec` is missing, reads `job-capabilities` over the selected
+keyless Tailnet transport, validates its machine/marker/revision against the
+joined registration, and publishes only observed contracts by compare-and-swap.
+This happens before source staging or job acceptance. `job-list` success alone
+does not establish execution support. An older installed CLI without discovery
+reports `remote_execution_capability_unavailable`; it does not become an owner
+denial or authorize invented registration flags. A supported runtime update and
+separate installed acceptance remain necessary for that older receiver.
+
 `sandbox.application.server_cli.dispatch_server_cli(remote_name, argv, *,
 project_dir, request_id, timeout_seconds=900)` submits before controller secret
 preflight. `argv` starts with the CLI command, without an executable. The adapter
@@ -177,6 +188,11 @@ that original deadline; admission time cannot reset it. The fixed installed
 child runs `host exec --json` under genuine owner-job context. Existing retained
 job status/output ports provide bounded synchronous-result observation to the
 client adapter. This contract does not grant a role or use a self remote alias.
+The server ledger retains the original request ID even if the controller loses
+its receipt. `job-list --remote NAME --kind server-cli --workspace server-exec
+--json` returns those request IDs; follow its normal cursor pagination. Inspect
+the matching retained job with `job-status` and bounded `job-output` before any
+replay. Unknown acceptance does not authorize a second request identity.
 
 The dedicated intake is bounded to 1 MiB stdin, 256 argv entries / 64 KiB argv,
 30 seconds stdin intake and an original request deadline of at most 3600 seconds.
@@ -191,3 +207,15 @@ selector are assembled. The client observes that contract before reading stdin
 or submitting a job. Older receivers refuse as capability unavailable at this
 read-only stage. Source checks, independent review and installed end-to-end
 acceptance are still required.
+
+`read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15)` observes
+one original retained job. It checks the request/source/provenance and selected
+machine/owner against the receipt. A running result returns status without child
+output. After termination it reads bounded retained stdout pages, verifies the
+fixed host-exec result's target/service/exit code and returns the original capture
+envelope for the caller to render. It makes no submission, retries or stdin
+replay. Malformed, missing, mismatched or truncated observations raise
+`ServerCLIExecObservationUnavailable` with the known job and request IDs; known
+acceptance is not relabeled as a new unknown submission. Compatible service
+updates may permit reading an older job's ledger without rewriting that job's
+original revision or granting it a new execution context.

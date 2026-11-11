@@ -651,7 +651,9 @@ def _start_admission_tick(interval: float = ADMISSION_TICK_SECONDS):
         while True:
             time.sleep(interval)
             try:
-                run_admission_tick()
+                from sandbox.installation.maintenance import operation_guard
+                with operation_guard():
+                    run_admission_tick()
             except Exception as exc:  # The next tick retries; never stop the service.
                 print(f"admission tick failed: {type(exc).__name__}", file=sys.stderr)
 
@@ -789,9 +791,20 @@ def _run_streamable_http(bind: str, port: int, token: str,
             if not await asyncio.to_thread(allowed_request, request.method, request.url.path,
                     home=home, managed=os.environ.get('SANDBOX_MANAGED') == '1'):
                 return PlainTextResponse('Installation maintenance admission is closed', status_code=409)
-            if attribution is not None:
-                return await attribution.observe(request, call_next)
-            return await call_next(request)
+            from sandbox.installation.admission import OBSERVATION_PATHS
+            if request.method == 'GET' and request.url.path in OBSERVATION_PATHS:
+                if attribution is not None:
+                    return await attribution.observe(request, call_next)
+                return await call_next(request)
+            from sandbox.installation.binding import InstallationBindingError
+            from sandbox.installation.maintenance import operation_guard
+            try:
+                with operation_guard(home=home):
+                    if attribution is not None:
+                        return await attribution.observe(request, call_next)
+                    return await call_next(request)
+            except InstallationBindingError as exc:
+                return JSONResponse({'ok': False, 'code': exc.code, 'error': str(exc)}, status_code=409)
 
     mcp.settings.host = bind
     mcp.settings.port = port

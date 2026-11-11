@@ -78,6 +78,12 @@ def _linux_cgroup_path(pid: int) -> str | None:
 def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
+    from sandbox.installation.maintenance import operation_guard
+    with operation_guard(home=Path(descriptor['runtime_dir']).parent):
+        return _run_descriptor(descriptor)
+
+
+def _run_descriptor(descriptor) -> int:
     job_id = descriptor["job_id"]
     repository = JobRepository(descriptor["registry_path"])
     storage = JobStorage(descriptor["runtime_dir"], free_disk_reserve=descriptor.get("free_disk_reserve", 0))

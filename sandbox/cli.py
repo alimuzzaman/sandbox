@@ -1591,6 +1591,24 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # Lifecycle owns its explicit root guard; service startup is controlled by
+    # that lifecycle and leases each HTTP/tool operation separately.
+    if args.cmd in {'installation', 'mcp'}:
+        return _execute_parsed(args, raw_argv, invocation_started_monotonic)
+    from sandbox.installation.binding import InstallationBindingError
+    from sandbox.installation.maintenance import operation_guard
+    try:
+        with operation_guard():
+            return _execute_parsed(args, raw_argv, invocation_started_monotonic)
+    except InstallationBindingError as exc:
+        if getattr(args, 'json', False):
+            print(json.dumps({'ok': False, 'code': exc.code, 'error': str(exc)}))
+            raise SystemExit(1)
+        die(f'{exc.code}: {exc}')
+
+
+def _execute_parsed(args, raw_argv, invocation_started_monotonic):
+
     # Spec 072: before any command effect, fast-forward this controller to a
     # newer published revision a remote reported, then re-run once.
     from sandbox.controller_update.hook import maybe_auto_update

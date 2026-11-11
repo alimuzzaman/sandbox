@@ -72,6 +72,8 @@ Symlinked or foreign-owned state; malformed policy; reused installation identity
 - **FR-018**: Existing project/workspace/job/delivery/lease/volume/network/domain/credential identities MUST survive migration. Runtime paths MUST be regenerated or schema-migrated, never global text replacement.
 - **FR-019**: Existing xCloud/root ingress 80/443, apex /mcp and protected shared workloads MUST remain unchanged without separately scoped approval.
 - **FR-020**: Public contracts MUST carry docs, tests and release/revision evidence. Live acceptance and cutover require root's explicit serialized authority.
+- **FR-021**: Administrator journals MUST use root-owned /var/lib/sandbox-installation outside service-writable ancestors; operation lease anchors MUST use root-owned /run/lock/sandbox-installation. Parent and opened-FD authority, same-anchor lookup and atomic publication MUST be validated.
+- **FR-022**: Supported CLI, HTTP, MCP and detached workers MUST hold shared installation leases; lifecycle exclusivity MUST refuse busy writers without closing underneath them. Legacy source sealing requires actual handle/mapping/bind evidence plus explicit administrator quiescence. Full sudo policy is retained and intentionally bypassing root administrators are outside the proof.
 
 ### Key Entities
 

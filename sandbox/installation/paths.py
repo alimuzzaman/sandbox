@@ -14,6 +14,8 @@ class ManagedPaths:
     logs: Path = Path('/var/log/sandbox')
     cache: Path = Path('/var/cache/sandbox')
     backups: Path = Path('/var/backups/sandbox')
+    admin_state: Path = Path('/var/lib/sandbox-installation')
+    lease_root: Path = Path('/run/lock/sandbox-installation')
 
 
 def selected_home(home=None) -> Path:

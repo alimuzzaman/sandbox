@@ -8,6 +8,13 @@ and ephemeral files to `/run/sandbox`. The fixed non-login service identity is
 `sandbox:sandbox`. Actual host allocation and cutover need explicit operator
 approval; no CLI reader installs accounts or moves state.
 
+Administrator plans and journals use the separately root-owned
+`/var/lib/sandbox-installation` with mode0700. Shared operation lock anchors use
+root-owned `/run/lock/sandbox-installation`. These paths keep administrator proof
+outside the service-writable state ancestor. Every directory parent and actual
+opened descriptor is checked; records publish atomically with directory fsync,
+and held locks must still match the same path/inode after acquisition and use.
+
 ## Genuine identity in both layouts
 
 The supported owner service lifecycle initializes private
@@ -85,6 +92,23 @@ available and refuses effects, including broad MCP. This is maintenance, not a
 new reduced operator role. Existing owner-mode admission is unchanged. This
 HTTP guard alone does not fence legacy SSH, timers or already-running jobs;
 cutover requires independent proof all writers are stopped or fenced.
+
+Supported CLI operations, MCP tool calls including delayed streaming sessions,
+HTTP effects, admission ticks and detached job supervisors hold an installation
+shared lease. Lifecycle holds its exclusive counterpart. Busy writers prevent
+maintenance from closing admission underneath their nested operations. Legacy
+writers additionally require the selected old service to stop, explicit
+administrator-quiescence acknowledgement, a scoped read-only source seal and
+zero open handles, writable mappings, relevant live bind namespaces or unknown
+kernel observations. Active workload binds refuse before a workload is touched.
+Kernel metadata observation does not choose or replace a container backend.
+None of this promises isolation from a root administrator deliberately bypassing
+the maintenance window while retaining the intended full sudo policy.
+The root journal persists closed admission outside service-writable state;
+`prepare_start` recreates ephemeral anchors from that durable record after reboot
+and never infers permission to open admission. The current maintenance/kernel
+implementation is an unreviewed source checkpoint. Root-run checks and the
+install/migration CLI composition remain required before use.
 
 Generic legacy uninstall refuses managed mode/path even if identity is missing.
 It must not delete managed volumes/state/credentials/backups. Actual managed

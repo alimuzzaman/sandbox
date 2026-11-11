@@ -8,9 +8,12 @@ front of the newly built, unlocked runtime.
 import datetime as dt
 import hashlib
 import io
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 import urllib.error
 from email.message import Message
@@ -301,6 +304,76 @@ class FrontDoorClosureCommandTests(unittest.TestCase):
             nginx.reconcile_route({}, "x", "server { listen 80; }\n")
 
 
+class HostApplyLeaseTests(unittest.TestCase):
+    """One remote lease per target across a whole apply, so controllers cannot interleave."""
+
+    def run_script(self, path, token, owner, action):
+        command = hosting_cmd._host_apply_lease_command(path, token, owner, action)
+        return subprocess.run(["sh", "-c", command], capture_output=True, text=True, check=False).returncode
+
+    @unittest.skipUnless(shutil.which("flock"), "flock(1) is Linux util-linux; remotes have it")
+    def test_the_lease_script(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = f"{home}/.sandbox/host-apply-example-site-production.lease"
+            mine, other = "1" * 32, "2" * 32
+            self.assertEqual(self.run_script(path, "a" * 32, mine, "acquire"), 0)
+            self.assertEqual(self.run_script(path, "b" * 32, other, "acquire"), 45)
+            # This controller's own lease (a crashed apply) is taken over.
+            self.assertEqual(self.run_script(path, "c" * 32, mine, "acquire"), 0)
+            # A release with a stale token leaves the current lease in place.
+            self.assertEqual(self.run_script(path, "a" * 32, mine, "release"), 0)
+            self.assertEqual(self.run_script(path, "b" * 32, other, "acquire"), 45)
+            self.assertEqual(self.run_script(path, "c" * 32, mine, "release"), 0)
+            self.assertEqual(self.run_script(path, "b" * 32, other, "acquire"), 0)
+            with open(path) as handle:
+                token, owner, expires = handle.read().split()
+            self.assertEqual((token, owner), ("b" * 32, other))
+            self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+            # An expired lease of another controller is taken.
+            with open(path, "w") as handle:
+                handle.write(f"{'b' * 32} {other} 1\n")
+            self.assertEqual(self.run_script(path, "d" * 32, mine, "acquire"), 0)
+
+    def test_every_apply_and_edge_continuation_holds_the_lease(self):
+        entry = {"ssh": "fixture@example.test"}
+        validated = {"project": "example-site", "environment": "production"}
+        for outer, inner, args in (
+                ("_apply_host", "_apply_host_unleased", (validated, entry, "myvps", {})),
+                ("_continue_host_edge_only", "_continue_host_edge_only_unleased",
+                 (validated, entry, "myvps", None, {}))):
+            for fails in (False, True):
+                with self.subTest(outer=outer, fails=fails), \
+                        patch.object(hosting_cmd, "_acquire_host_apply_lease", return_value={"t": 1}) as take, \
+                        patch.object(hosting_cmd, "_release_host_apply_lease") as release, \
+                        patch.object(hosting_cmd, inner,
+                                     side_effect=RuntimeError("x") if fails else None, return_value={}) as run:
+                    if fails:
+                        with self.assertRaises(RuntimeError):
+                            getattr(hosting_cmd, outer)(*args)
+                    else:
+                        getattr(hosting_cmd, outer)(*args)
+                    take.assert_called_once_with(entry, validated)
+                    run.assert_called_once()
+                    release.assert_called_once_with(entry, {"t": 1})
+
+    def test_a_held_lease_refuses_before_anything_runs(self):
+        result = subprocess.CompletedProcess([], 45, "1900000000\n", "")
+        with tempfile.TemporaryDirectory() as runtime, \
+                patch.object(hosting_cmd, "RUNTIME_DIR", Path(runtime)), \
+                patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+                patch.object(hosting_cmd.remote, "ssh_run", return_value=result) as ssh, \
+                patch.object(hosting_cmd, "_apply_host_unleased") as run:
+            with self.assertRaisesRegex(hosting.HostingError, "host_apply_lease_held"):
+                hosting_cmd._apply_host({"project": "example-site", "environment": "production"},
+                                        {"ssh": "fixture@example.test"}, "myvps", {})
+            run.assert_not_called()
+            command = ssh.call_args.args[1]
+            self.assertIn("/srv/sandbox/.sandbox/host-apply-example-site-production.lease", command)
+            owner = (Path(runtime) / "hosting" / "controller-id").read_text().strip()
+            self.assertIn(owner, command)
+            self.assertEqual(hosting_cmd._controller_lease_owner(), owner)
+
+
 class DenyRouteTests(unittest.TestCase):
     def test_a_deny_route_sends_nothing_anywhere(self):
         validated = {**_HostingOwnerFixture(self, _private_manifest()).validated, "route_deny": True}
@@ -313,6 +386,38 @@ class DenyRouteTests(unittest.TestCase):
                 self.assertTrue(hosting.is_marked_private_route(text))
                 for host in (PRIMARY, ALIAS, GATE):
                     self.assertIn(host, text)
+
+    def test_the_nginx_deny_route_keeps_https_with_any_existing_certificate(self):
+        validated = _HostingOwnerFixture(self, _private_manifest()).validated
+        edge = hosting_cmd._NginxHostEdge({"ssh": "fixture@example.test"})
+        edge.features = {}
+        runtime = {"loopback_port": 18123, "certificate_hostnames": [PRIMARY, ALIAS, GATE]}
+        current = "server {\n    listen 443 ssl;\n    server_name site.example.test;\n}\n"
+        public = ("/etc/letsencrypt/live/sandbox-x/fullchain.pem", "/etc/letsencrypt/live/sandbox-x/privkey.pem")
+        with patch.object(nginx, "existing_certificate", return_value=public):
+            text = edge.deny_route(validated, runtime, ROUTE, current)
+        self.assertIn(f"ssl_certificate {public[0]};", text)
+        self.assertNotIn("proxy_pass", text)
+        with patch.object(nginx, "existing_certificate", return_value=None):
+            with self.assertRaisesRegex(hosting.HostingError, "private_closure_https_unavailable"):
+                edge.deny_route(validated, runtime, ROUTE, current)
+            # No route yet (first apply) or a port-80-only route: nothing on HTTPS to keep.
+            for previous in (None, "server {\n    listen 80;\n}\n"):
+                self.assertNotIn("listen 443", edge.deny_route(validated, runtime, ROUTE, previous))
+
+    def test_the_certificate_check_never_reads_a_failure_as_none(self):
+        for code, stdout, expected in ((0, "public\n", "public"), (0, "origin\n", "origin"), (0, "none\n", None),
+                                       (255, "", "raise"), (0, "", "raise")):
+            with self.subTest(code=code, stdout=stdout), \
+                    patch.object(nginx, "_ssh", return_value=subprocess.CompletedProcess([], code, stdout, "")):
+                if expected == "raise":
+                    with self.assertRaises(nginx.FrontDoorError):
+                        nginx.existing_certificate({}, "x")
+                elif expected is None:
+                    self.assertIsNone(nginx.existing_certificate({}, "x"))
+                else:
+                    paths = nginx.existing_certificate({}, "x")
+                    self.assertEqual(paths, nginx.public_paths("x") if expected == "public" else nginx.origin_paths("x"))
 
     def test_only_a_private_target_renders_a_deny_route(self):
         validated = {**_HostingOwnerFixture(self, _private_manifest(private=False)).validated, "route_deny": True}
@@ -342,7 +447,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         fixture.configure_edge.side_effect = install
         fixture.restore_edge.side_effect = install
         fixture.manager = MagicMock()
-        for name, mock in (("update", fixture.update), ("compose", fixture.compose),
+        for name, mock in (("push", fixture.push), ("update", fixture.update), ("compose", fixture.compose),
                            ("configure", fixture.configure_edge), ("restore", fixture.restore_edge),
                            ("reconcile", fixture.reconcile)):
             fixture.manager.attach_mock(mock, name)
@@ -367,7 +472,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         changed = False
         live = None
         for name, args, _kwargs in fixture.manager.mock_calls:
-            if name in ("update", "compose"):
+            if name in ("push", "update", "compose"):
                 changed = True
             elif name in ("configure", "restore", "reconcile"):
                 live = args[2]
@@ -381,7 +486,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         fixture.edge.side_effect = RuntimeError(f"edge verification failed for {PRIMARY}: HTTP 404")
         self.run_failing(fixture)
         # The private route this apply installed stays after the failure.
-        self.assertEqual(self.calls(fixture), ["reconcile", "update", "compose", "configure"])
+        self.assertEqual(self.calls(fixture), ["reconcile", "push", "update", "compose", "configure"])
         self.assert_denies(fixture.reconcile.call_args.args[2])
         self.assert_never_public(fixture)
         live = self.live["route"]
@@ -393,7 +498,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
         fixture.configure_edge.assert_not_called()
-        self.assertEqual(self.calls(fixture), ["reconcile", "update", "compose", "restore"])
+        self.assertEqual(self.calls(fixture), ["reconcile", "push", "update", "compose", "restore"])
         self.assert_denies(self.live["route"])
         self.assert_never_public(fixture)
 
@@ -401,7 +506,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         """No route on disk is not proof none is loaded: the deny route owns the names."""
         fixture = self.fixture(None)
         fixture.apply()
-        self.assertEqual(self.calls(fixture)[:2], ["reconcile", "update"])
+        self.assertEqual(self.calls(fixture)[:3], ["reconcile", "push", "update"])
         self.assert_denies(fixture.reconcile.call_args.args[2])
 
     def test_no_deployment_change_when_the_deny_route_is_not_confirmed(self):
@@ -416,6 +521,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
                     fixture.reconcile.side_effect = lambda *_a, **_k: {"state": "reconciled"}
                 with self.assertRaisesRegex(hosting.HostingError, "private_route_closure_failed"):
                     fixture.apply()
+                fixture.push.assert_not_called()
                 fixture.update.assert_not_called()
                 fixture.compose.assert_not_called()
                 fixture.configure_edge.assert_not_called()
@@ -427,6 +533,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         with self.assertRaisesRegex(hosting.HostingError, "private_proxied_record"):
             fixture.apply()
         fixture.reconcile.assert_not_called()
+        fixture.push.assert_not_called()
         fixture.update.assert_not_called()
         fixture.compose.assert_not_called()
         fixture.client.upsert_address.assert_not_called()
@@ -438,7 +545,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         self.live["route"] = previous
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
-        self.assertEqual(self.calls(fixture), ["reconcile", "update", "compose", "restore"])
+        self.assertEqual(self.calls(fixture), ["reconcile", "push", "update", "compose", "restore"])
         self.assert_denies(fixture.reconcile.call_args.args[2])
         fixture.restore_edge.assert_called_once_with(fixture.entry, ROUTE, previous, log_path=APPLY_LOG)
         self.assert_never_public(fixture)
@@ -457,7 +564,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         previous = self.live["route"]
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
-        self.assertEqual(self.calls(fixture), ["update", "compose", "restore"])
+        self.assertEqual(self.calls(fixture), ["push", "update", "compose", "restore"])
         fixture.reconcile.assert_not_called()
         fixture.restore_edge.assert_called_once_with(fixture.entry, ROUTE, previous, log_path=APPLY_LOG)
 

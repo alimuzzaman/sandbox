@@ -226,13 +226,15 @@ the route marker that apply checks.
   names (or the shared coverage wildcard). Make them DNS-only and purge the Cloudflare
   cache first, so no cached page outlives the switch and a DNS rollback never turns
   proxying back on.
-- **A private apply closes the public name first.** Before the deployed checkout
-  changes, an apply of a private manifest reads the front-door route (a failed read
+- **A private apply closes the public name first.** Before any source reaches the
+  remote (a push to the deployed branch updates its working tree), an apply of a private manifest reads the front-door route (a failed read
   stops the apply) and installs a deny route: every name, the gate's included, answers
   404. The deny route is installed with a forced validate and reload and, on nginx,
   proven loaded by its own marker. It owns the hostnames, so no default or catch-all
-  server answers for them. If that cannot be confirmed, the apply stops before the
-  checkout changes. Routes Sandbox renders for a private manifest end with
+  server answers for them. On nginx it keeps an HTTPS listener with whatever
+  certificate the route already has; if the current route serves HTTPS and no
+  certificate is left, the apply refuses. If any of that cannot be confirmed, the apply
+  stops before the source changes. Routes Sandbox renders for a private manifest end with
   `# sandbox-private-route v1 <sha256 of the text above>`. The gate is therefore down
   from the closure until the new route is live, and an apply that is refused or fails
   before its route is installed leaves the deny route, or the previous route when it
@@ -244,8 +246,9 @@ the route marker that apply checks.
 - Limits: on nginx, the deny route covers HTTPS only once the target's public
   certificate exists; on the very first apply HTTPS for those names is whatever the
   server answered before. Image activation checks privacy without the route tag.
-  Applies of the same target from two controllers are not serialized against each
-  other (true of every hosted apply); run one controller per target.
+  Controllers older than this fix do not take the target lease (see
+  [remote hosting](remote-hosting.md)); update every controller that applies a private
+  target.
 - With an `autologin.login_service` block, `share` carries only `hostname`, `private`,
   `agent_mint` and `stack_sign_in`, and uses that block's fields. `share` is then a
   reserved entry name.

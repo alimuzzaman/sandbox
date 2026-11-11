@@ -2425,6 +2425,16 @@ install, not backed up or losslessly recoverable.
 
 ## 9. Troubleshooting a failed `host apply`
 
+### `host_apply_lease_held`
+
+Every `sb host apply` and edge-only recovery holds one lease per target on the remote,
+`$SANDBOX_HOME/.sandbox/host-apply-<project>-<environment>.lease`, for the whole apply,
+so applies of the same target from two controllers cannot interleave route changes. A
+lease left by this controller (an apply that crashed) is taken over by its next apply.
+Another controller's lease refuses the apply until that apply finishes or the lease
+expires (4 hours). The lease file holds a random token, a random controller id
+(`$SANDBOX_HOME/runtime/hosting/controller-id`) and the expiry; nothing secret.
+
 ### `binding_mismatch` after a remote's connection changed
 
 Each deployment records a digest of how its remote was registered: SSH target, control

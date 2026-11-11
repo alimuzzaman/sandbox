@@ -1281,7 +1281,8 @@ class _CaddyHostEdge:
     def read_strict(self, name: str) -> str | None:
         return _read_remote_strict(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
 
-    def deny_route(self, validated: dict, runtime: dict, name: str) -> str:
+    def deny_route(self, validated: dict, runtime: dict, name: str, current: str | None) -> str:
+        # Caddy keeps serving TLS for its site addresses itself (managed certificates).
         return hosting.caddyfile({**validated, "route_deny": True}, runtime["loopback_port"])
 
     def reconcile(self, name: str, keep: str, *, log_path: str | None = None) -> dict:
@@ -1340,12 +1341,21 @@ class _NginxHostEdge:
     def read_strict(self, name: str) -> str | None:
         return self.nginx.read_route_strict(self.entry, self.route_name(name))
 
-    def deny_route(self, validated: dict, runtime: dict, name: str) -> str:
-        """Every name 404, on HTTPS too when the target's public certificate exists."""
+    def deny_route(self, validated: dict, runtime: dict, name: str, current: str | None) -> str:
+        """Every name 404, on HTTPS too with whatever certificate the route has.
+
+        A certificate that does not cover a new hostname still keeps the HTTPS listener
+        (that name fails TLS rather than reach another server). With no certificate at
+        all, a current route that listens on 443 is refused: closing it would hand
+        HTTPS for its names to whatever default server the host has.
+        """
         route = self.route_name(name)
-        cert_path = key_path = None
-        if self.nginx.public_certificate_present(self.entry, route, list(runtime["certificate_hostnames"])):
-            cert_path, key_path = self.nginx.public_paths(route)
+        paths = self.nginx.existing_certificate(self.entry, route)
+        if paths is None and current is not None and re.search(r"^\s*listen\s+(\[::\]:)?443\b", current, re.M):
+            raise hosting.HostingError(
+                "private_closure_https_unavailable: the current route serves HTTPS but its "
+                "certificate is gone, so a deny route cannot keep HTTPS closed")
+        cert_path, key_path = paths if paths else (None, None)
         return self.nginx.render_host_conf(
             {**validated, "route_deny": True}, runtime["loopback_port"], name=route,
             cert_path=cert_path, key_path=key_path, ipv6=bool(self.entry.get("origin_ipv6")),
@@ -3784,6 +3794,15 @@ def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
 def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                              _request: RecoveryRequest, operation: dict) -> dict:
     """Continue only the declared Caddy/Cloudflare edge for a proven runtime."""
+    lease = _acquire_host_apply_lease(entry, validated)
+    try:
+        return _continue_host_edge_only_unleased(validated, entry, remote_name, _request, operation)
+    finally:
+        _release_host_apply_lease(entry, lease)
+
+
+def _continue_host_edge_only_unleased(validated: dict, entry: dict, remote_name: str,
+                                      _request: RecoveryRequest, operation: dict) -> dict:
     secret_values, missing = _secret_status(validated)
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
@@ -4631,7 +4650,7 @@ def _close_route_for_private_apply(edge, name: str, *, validated: dict, runtime:
         return None
     try:
         current = edge.read_strict(name)
-        deny = edge.deny_route(validated, runtime, name)
+        deny = edge.deny_route(validated, runtime, name, current)
         edge.reconcile(name, deny, log_path=log_path)
         installed = edge.read_strict(name)
     except Exception as exc:
@@ -4969,7 +4988,95 @@ def _local_image_apply_lease(validated: dict, remote_name: str,
         yield lease
 
 
-def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
+# Spec 081 rollout: one remote lease per target, held for a whole apply (closure,
+# source, runtime, route, rollback) so a second controller cannot interleave a route
+# change. The controller's own state lock already serializes its own applies, so a
+# lease left by this controller (a crashed apply) is taken over; another's waits out
+# its expiry.
+_HOST_APPLY_LEASE_TTL_SECONDS = 4 * 3600
+_HOST_APPLY_LEASE_SCRIPT = r"""set -eu
+f=$1; token=$2; owner=$3; ttl=$4; action=$5
+mkdir -p "$(dirname "$f")"
+exec 9>"$f.lock"
+flock -w 30 9 || exit 46
+now=$(date +%s)
+t=; o=; exp=0
+if [ -f "$f" ]; then read -r t o exp < "$f" || true; fi
+case "$exp" in ''|*[!0-9]*) exp=0 ;; esac
+case "$action" in
+acquire)
+  if [ -n "$t" ] && [ "$o" != "$owner" ] && [ "$exp" -ge "$now" ]; then echo "$exp"; exit 45; fi
+  umask 077
+  printf '%s %s %s\n' "$token" "$owner" "$((now + ttl))" > "$f.new"
+  mv -f "$f.new" "$f" ;;
+release)
+  if [ "$t" = "$token" ]; then rm -f "$f"; fi ;;
+*) exit 2 ;;
+esac
+"""
+
+
+def _controller_lease_owner() -> str:
+    """A stable random id for this controller (never a secret, never a hostname)."""
+    path = Path(RUNTIME_DIR) / "hosting" / "controller-id"
+    try:
+        value = path.read_text().strip()
+        if re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = secrets.token_hex(16)
+    temporary = path.with_name(f".controller-id.{value}")
+    temporary.write_text(value + "\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return value
+
+
+def _host_apply_lease_command(path: str, token: str, owner: str, action: str) -> str:
+    return (f"sh -c {shlex.quote(_HOST_APPLY_LEASE_SCRIPT)} sandbox-lease {shlex.quote(path)} "
+            f"{token} {owner} {_HOST_APPLY_LEASE_TTL_SECONDS} {action}")
+
+
+def _acquire_host_apply_lease(entry: dict, validated: dict) -> dict | None:
+    if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
+        return None
+    home = remote.resolve_sandbox_home(entry)
+    lease = {"path": f"{home}/.sandbox/host-apply-{validated['project']}-{validated['environment']}.lease",
+             "token": secrets.token_hex(16), "owner": _controller_lease_owner()}
+    result = remote.ssh_run(entry, _host_apply_lease_command(
+        lease["path"], lease["token"], lease["owner"], "acquire"), timeout=60)
+    if result.returncode == 45:
+        until = (result.stdout or "").strip()
+        raise hosting.HostingError(
+            "host_apply_lease_held: another controller is applying this target"
+            + (f" (lease expires at unix time {until})" if until.isdigit() else ""))
+    if result.returncode != 0:
+        raise hosting.HostingError(
+            f"host_apply_lease_unavailable: the target lease could not be taken (exit {result.returncode})")
+    return lease
+
+
+def _release_host_apply_lease(entry: dict, lease: dict | None) -> None:
+    if lease is None:
+        return
+    try:
+        remote.ssh_run(entry, _host_apply_lease_command(
+            lease["path"], lease["token"], lease["owner"], "release"), timeout=60)
+    except Exception:
+        pass  # The lease expires on its own; a failed release never fails the apply.
+
+
+def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *args, **kwargs) -> dict:
+    lease = _acquire_host_apply_lease(entry, validated)
+    try:
+        return _apply_host_unleased(validated, entry, remote_name, runtime, *args, **kwargs)
+    finally:
+        _release_host_apply_lease(entry, lease)
+
+
+def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
                 progress=None, recovery_repository=None,
                 purge_edge_cache: bool = False, delivery_holder=None,
@@ -5074,6 +5181,16 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             raise hosting.HostingError("recovery_receipt_unavailable") from exc
     if before_effects is not None:
         before_effects()
+    client = cloudflare.Client()
+    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    edge = _host_edge(entry)
+    edge.preflight(validated, caddy_name)
+    # Spec 081: before any source reaches the remote (a push to the checked-out branch
+    # updates the working tree), a private target's names are DNS-only and answer 404
+    # behind a confirmed deny route.
+    _refuse_proxied_records_for_private(client, validated, runtime)
+    private_closure = _close_route_for_private_apply(
+        edge, caddy_name, validated=validated, runtime=runtime)
     attempt.checkpoint('source', 'source_publish')
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -5130,24 +5247,6 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "revision/config; "
             "refusing before target reset, observation, Compose, or initializer mutation"
         )
-    client = cloudflare.Client()
-    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
-    edge = _host_edge(entry)
-    edge.preflight(validated, caddy_name)
-    try:
-        # Spec 081: before the deployed checkout changes, a private target's names are
-        # DNS-only and answer 404 behind a confirmed deny route.
-        _refuse_proxied_records_for_private(client, validated, runtime)
-        private_closure = _close_route_for_private_apply(
-            edge, caddy_name, validated=validated, runtime=runtime)
-    except Exception:
-        try:
-            _release_host_apply_reservation(entry, reservation)
-        except Exception as cleanup_error:
-            raise hosting.HostingError(
-                f"private closure refused; rollback-space cleanup failed: {cleanup_error}"
-            ) from cleanup_error
-        raise
     remote.update_target_to(
         entry, target, sha,
         project_root=None if require_clean else validated["project_root"],

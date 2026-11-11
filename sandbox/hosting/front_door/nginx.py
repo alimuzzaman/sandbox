@@ -971,6 +971,25 @@ def public_paths(name: str) -> tuple[str, str]:
             f"/etc/letsencrypt/live/sandbox-{name}/privkey.pem")
 
 
+def existing_certificate(entry: dict, name: str) -> tuple[str, str] | None:
+    """Any certificate this route already has (public first, then origin), or None.
+
+    Spec 081 private closure: a deny route keeps an HTTPS listener with whatever
+    certificate exists, even one that does not cover every new hostname. A failed
+    check raises, so an unknown answer is never read as "no certificate".
+    """
+    public, origin = public_paths(name), origin_paths(name)
+    script = ('if [ -s "$1" ] && [ -s "$2" ]; then echo public; '
+              'elif [ -s "$3" ] && [ -s "$4" ]; then echo origin; else echo none; fi')
+    args = " ".join(shlex.quote(path) for path in (*public, *origin))
+    result = _ssh(entry, _SUDO + f"$SUDO sh -c {shlex.quote(script)} sandbox-cert {args}", timeout=30)
+    answer = (result.stdout or "").strip()
+    if result.returncode != 0 or answer not in {"public", "origin", "none"}:
+        raise FrontDoorError("front_door_read_failed",
+                             f"nginx route {name} certificate check failed (exit {result.returncode})")
+    return {"public": public, "origin": origin, "none": None}[answer]
+
+
 def public_certificate_present(entry: dict, name: str, hostnames: list[str]) -> bool:
     cert_path, _ = public_paths(name)
     command = _SUDO + (

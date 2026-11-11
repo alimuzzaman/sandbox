@@ -16,7 +16,7 @@ import sys
 def dispatch_host_if_selected(args) -> bool:
     try:
         return _dispatch_host_if_selected(args)
-    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+    except Exception as error:
         code = getattr(error, "code", None)
         unknown = bool(getattr(error, "completion_unknown", False)) or (
             bool(getattr(args, "_server_cli_submission_started", False))
@@ -56,12 +56,6 @@ def _dispatch_host_if_selected(args) -> bool:
                       (action == "stack" and getattr(args, "image_action", None) == "up"))
     if not selected_apply or not getattr(args, "confirm", False) or getattr(args, "plan", False):
         return False
-    args._server_cli_request_id = (getattr(args, "_server_cli_request_id", None)
-        or getattr(args, "request_id", None) or "host-cli-" + secrets.token_hex(12))
-    from sandbox.hosting.host_exec import split_passthrough
-    _, tail = split_passthrough(list(original))
-    if tail is not None:
-        raise ValueError("server_cli_unexpected_stdin_or_command")
     # Explicit credential declarations retain their existing closed contract.
     # Explicit personal-local is also an execution choice, not a fallback.
     if getattr(args, "credential_scope", None) is not None or any(
@@ -69,6 +63,12 @@ def _dispatch_host_if_selected(args) -> bool:
                 "credential_project", "credential_source", "credential_source_revision",
                 "credential_profile", "credential_profile_revision")):
         return False
+    args._server_cli_request_id = (getattr(args, "_server_cli_request_id", None)
+        or getattr(args, "request_id", None) or "host-cli-" + secrets.token_hex(12))
+    from sandbox.hosting.host_exec import split_passthrough
+    _, tail = split_passthrough(list(original))
+    if tail is not None:
+        raise ValueError("server_cli_unexpected_stdin_or_command")
     try:
         from sandbox.application.server_cli import server_cli_context_if_selected
     except ModuleNotFoundError as exc:
@@ -131,6 +131,8 @@ def _dispatch_host_if_selected(args) -> bool:
     if not isinstance(receipt, dict):
         _failure(args, "server_cli_acceptance_unknown", unknown=True)
     if receipt.get("ok") is False or receipt.get("status") == "acceptance_unknown":
-        _failure(args, "server_cli_acceptance_unknown", unknown=True, receipt=receipt)
+        unknown = receipt.get("acceptance") != "not_accepted"
+        _failure(args, "server_cli_acceptance_unknown" if unknown else "server_cli_execution_unavailable",
+                 unknown=unknown, receipt=receipt)
     print(json.dumps(receipt, sort_keys=True))
     return True

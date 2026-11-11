@@ -109,7 +109,23 @@ descriptor or this version constant without the composition does not enable it.
 Exact binary output needs a separate privacy-reviewed retained capture contract.
 `--output-encoding base64` in inner JSON would not be sufficient: the generic
 job output redactor can recognize and rewrite arbitrary base64 text. This
-increment does not bypass redaction or introduce a binary capability.
+increment does not bypass redaction. The separate artifact capture composition
+uses a hidden receiver-only `--exec-capture-artifacts` option. It prepares SDK
+custody before effects under the genuine original owner/selector, captures up
+to 1 MiB per stream and requires actual reader EOF. After the whole held target
+scope exits successfully, native locks exit, physical retirement succeeds and
+the current selector/owner validate again, it publishes the actual `ExecOutcome`
+through that custody. Ordinary job stdout contains only the returned metadata.
+Cleanup failure or missing custody refuses capture publication.
+
+The client renders verified SDK `stdout_bytes` and `stderr_bytes` directly to
+the corresponding plain-output byte streams. User JSON keeps the default UTF-8
+replacement projection. It never puts raw/base64 artifact bytes back into job
+logs. The SDK owns byte artifact storage, immutable registry/manifest bindings,
+retention, authenticated chunk retrieval and a separate capture capability.
+`SERVER_CLI_EXEC_CAPTURE_VERSION` remains absent until the actual SDK custody
+port and this emitter/renderer are assembled together; source groundwork does
+not advertise binary availability.
 
 ## Minimal installed-e467 composition
 

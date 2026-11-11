@@ -112,6 +112,38 @@ class ExecClientTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "notice\n")
         self.submit.assert_called_once()
 
+    def test_verified_artifact_bytes_are_written_exactly_to_plain_output(self):
+        self.args.json = False
+        content = b"\x00\xff\xfe" + b"AIza" + b"A" * 40
+        self.outcome.update(stdout_bytes=content, stderr_bytes=b"\x80\x00", exit_code=7,
+                            ok=False, code="host_exec_failed")
+        stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        stderr = io.TextIOWrapper(stderr_bytes, encoding="utf-8")
+        with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as failure:
+            dispatch.dispatch_host_if_selected(self.args)
+        self.assertEqual(failure.exception.code, 7)
+        self.assertEqual(stdout_bytes.getvalue(), content)
+        self.assertEqual(stderr_bytes.getvalue(), b"\x80\x00")
+        self.submit.assert_called_once()
+
+    def test_user_json_default_keeps_utf8_projection_of_verified_artifact_bytes(self):
+        self.outcome.update(stdout_bytes=b"\x00\xff", stderr_bytes=b"\x80")
+        result = self.invoke()
+        self.assertEqual(result["stdout"], "\x00\ufffd")
+        self.assertEqual(result["stderr"], "\ufffd")
+        self.assertNotIn("stdout_bytes", result)
+        self.assertEqual(result["job_id"], "a" * 32)
+
+    def test_missing_byte_stream_refuses_with_original_handle(self):
+        self.outcome.update(stdout_bytes=b"synthetic")
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            dispatch.dispatch_host_if_selected(self.args)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["code"], "server_cli_exec_observation_unavailable")
+        self.assertEqual(result["job_id"], "a" * 32)
+
     def test_lost_acceptance_preserves_request_and_never_observes_or_replays(self):
         self.submit.side_effect = execute.ServerCLIExecAcceptanceUnknown("original-exec")
         output = io.StringIO()

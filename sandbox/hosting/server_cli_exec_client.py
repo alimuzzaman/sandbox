@@ -63,15 +63,41 @@ def _render(args, result, receipt, request_id):
     payload = {key: result[key] for key in (
         "ok", "code", "exit_code", "remote", "target", "service", "duration_ms",
         "stdout", "stderr", "stdout_truncated", "stderr_truncated", "error", "audit") if key in result}
+    byte_capture = "stdout_bytes" in result or "stderr_bytes" in result
+    if byte_capture:
+        if any(type(result.get(key)) is not bytes for key in ("stdout_bytes", "stderr_bytes")):
+            raise ValueError("original capture bytes are incomplete")
+        # JSON's public default stays the original UTF-8 replacement projection.
+        # Exact bytes are a local SDK result, never another JSON/log encoding.
+        payload["stdout"] = result["stdout_bytes"].decode("utf-8", errors="replace")
+        payload["stderr"] = result["stderr_bytes"].decode("utf-8", errors="replace")
     if getattr(args, "json", False):
         print(json.dumps({**payload, **_handle(receipt, request_id)}, sort_keys=True))
     else:
-        sys.stdout.write(payload.get("stdout", ""))
-        sys.stderr.write(payload.get("stderr", ""))
+        if byte_capture:
+            _write_bytes(sys.stdout, result["stdout_bytes"])
+            _write_bytes(sys.stderr, result["stderr_bytes"])
+        else:
+            sys.stdout.write(payload.get("stdout", ""))
+            sys.stderr.write(payload.get("stderr", ""))
         if not payload.get("ok") and "error" in payload:
             print(payload["error"], file=sys.stderr)
     if result["exit_code"]:
         raise SystemExit(result["exit_code"])
+
+
+def _write_bytes(stream, content):
+    if not content:
+        return
+    stream.flush()
+    sink = stream.buffer
+    view = memoryview(content)
+    while view:
+        count = sink.write(view)
+        if type(count) is not int or not 0 < count <= len(view):
+            raise OSError("capture output was not completely written")
+        view = view[count:]
+    sink.flush()
 
 
 def dispatch_exec_if_selected(args) -> bool:

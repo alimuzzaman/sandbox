@@ -444,6 +444,29 @@ def _consume_strict_runtime(argv: list[str]) -> list[str]:
     return out
 
 
+def _selection_argv(argv):
+    """Pure parser normalization; strict intent stays in forwarded argv."""
+    result, passthrough = [], False
+    for value in _normalize_test_routing_options(list(argv)):
+        if value == '--':
+            passthrough = True
+        if not passthrough and value == '--strict-runtime':
+            continue
+        result.append(value)
+    if 'host' in result and '--' in result:
+        from sandbox.hosting.host_exec import split_passthrough
+        result, _command = split_passthrough(result)
+    return result
+
+
+def _forwarded_cli_argv(argv, *, strict):
+    values = tuple(_normalize_test_routing_options(list(argv)))
+    head = values[:values.index('--')] if '--' in values else values
+    if strict and '--strict-runtime' not in head:
+        return ('--strict-runtime', *values)
+    return values
+
+
 @_config_parse_error_boundary
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
@@ -1561,8 +1584,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
             sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
-    raw_argv = _consume_strict_runtime(
-        _normalize_test_routing_options(list(sys.argv[1:])))
+    from sandbox.application.command_selection import bind_cli_command_parser
+    bind_cli_command_parser(p, _selection_argv)
+    normalized_argv = _normalize_test_routing_options(list(sys.argv[1:]))
+    raw_argv = _consume_strict_runtime(normalized_argv)
+    from sandbox.remote_runtime.verdict import strict_requested
+    forwarded_argv = _forwarded_cli_argv(normalized_argv, strict=strict_requested())
     head_argv, host_exec_argv = raw_argv, None
     if "host" in raw_argv and "--" in raw_argv:
         from sandbox.hosting.host_exec import split_passthrough
@@ -1573,7 +1600,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             args.exec_argv = host_exec_argv
         else:
             args = p.parse_args(raw_argv)
-    args._server_cli_argv = tuple(raw_argv)
+    args._server_cli_argv = forwarded_argv
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "share":
         # `host share revoke ID|all` reuses the optional positional slot.
         args.share_id, args.tailnet_hostname = args.tailnet_hostname, None

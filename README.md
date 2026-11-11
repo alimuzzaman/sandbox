@@ -1559,16 +1559,31 @@ A canonical installation identity alone does not establish owner context.
 The [source contract](specs/086-shared-server-secret-use/contracts/source-groundwork.md)
 describes this limited branch. The
 [future owner/broker contract](specs/086-shared-server-secret-use/contracts/future-owner-broker.md)
-is PROPOSED/UNAVAILABLE. No authenticated dispatch, committed admission, grant,
-ledger, executor, transport or credential-consuming server path is implemented.
-Future broker delivery must remain confined to its intended consumer, without
-provider credentials in clients, argv, logs, polls, staged or retained storage.
+records the original increment. The active
+[authenticated consumption contract](specs/086-shared-server-secret-use/contracts/authenticated-consumption-v1.md)
+now specifies the expanded source work. Internal actor receipts, the additive
+jobs credential ledger, registered hosting profiles and broker callbacks exist.
+The admission service now commits a genuine broker preflight against a retained
+reservation before privately issuing a nonserializable receipt. Every receipt
+use rechecks the initiating gate, registered resolver and retained admission,
+including cancellation, deadline and exact intent. Retained replay never
+automatically reissues execution authority. These modules remain unverified and
+are not connected to installed dispatch, fixed consumers or the complete driver.
+No credential-consuming server capability is advertised.
+
+Broker delivery must remain confined to the reviewed intended server consumer.
+Explicit minimal recipient environments or approved protected runtime-secret
+facilities are allowed; inherited owner environments and arbitrary staging or
+temporary secret files are not. Facility ownership, readers, retention, cleanup,
+backup and export behavior require explicit review. Clients, argv, logs, polls,
+ordinary job payloads, public artifacts and source/image layers contain no values.
 
 Disabled refusal is stateless. It reserves no identity and performs no missing-key
 preflight. Resolution before atomic reservation, frozen retained terminal
 no-effect missing-key refusal, original-id lookup after uncertainty, and an
 explicit linked new-id retry only after a known terminal refusal are blocked
-integration obligations. Committed admission must precede staging or consumption;
+integration obligations at the public command boundary. The internal ledger and
+admission mechanisms alone do not make that boundary executable. Committed admission must precede staging or consumption;
 source validation cannot supply it. Generation cannot replace provider keys.
 
 Revision evidence: this source change was prepared against supplied baseline

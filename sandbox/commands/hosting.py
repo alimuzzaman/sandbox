@@ -5386,14 +5386,21 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
 
 
 def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | None) -> None:
-    """Move the `sb host stack` record to the commit this apply proved delivered.
+    """Move the `sb host stack` record to this completed apply's commit.
 
-    The record's ``commit`` must never run ahead of the server. Best effort: the
-    delivery has already happened, so a registry problem only leaves the
-    record at its earlier commit and is reported on stderr.
+    Called where the apply completes, the same point that makes its durable job
+    (and so ``last_apply.status``) succeed. By then the runtime was freshly
+    observed ready, a declared ``pushed_commit_sha`` revision matched (a
+    mismatch raises before this point, and edge-only replay needs the exact
+    revision observed), and the host recorded ``recorded_revision``. The
+    delivery-outcome summary can still be ``incomplete`` (feedback 94bf4610:
+    ``required_evidence_missing``) when no runtime revision is declared or the
+    public edge was not observed, so only ``failed`` or ``unknown`` keeps the
+    record back. Best effort: the delivery has already happened, so a registry
+    problem only leaves the record at its earlier commit, reported on stderr.
     """
     stack = validated.get("stack")
-    if not stack or (delivery or {}).get("delivery_succeeded") is not True:
+    if not stack or (delivery or {}).get("delivery_state") not in {"succeeded", "incomplete"}:
         return
     from sandbox.hosting import stack_registry
     try:

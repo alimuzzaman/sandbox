@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import json
 from sandbox.services.source_fingerprint import source_has_changes
 
 CONTRACT = 'job.acceptance-receipt.v1'
@@ -20,8 +21,33 @@ def deployed_source(deployment: dict) -> dict:
         raise ValueError('deployed source dirty observation is invalid')
     if 'dirty' in deployment and deployment['dirty'] != source_has_changes(digest):
         raise ValueError('deployed source dirty observation is inconsistent')
-    return {'identity': deployment['identity'], 'commit': deployment.get('commit') or None,
-            'dirty_digest': digest, 'dirty': source_has_changes(digest)}
+    result = {'identity': deployment['identity'], 'commit': deployment.get('commit') or None,
+              'dirty_digest': digest, 'dirty': source_has_changes(digest)}
+    if deployment.get('content_digest') is not None:
+        result['content_digest'] = _content_digest(deployment['content_digest'])
+    return result
+
+
+def _content_digest(value):
+    if not isinstance(value, str) or re.fullmatch(r'sha256:[0-9a-f]{64}', value) is None:
+        raise ValueError('retained source content digest is invalid')
+    return value
+
+
+def retained_content_digest(row: dict) -> str | None:
+    """Read the optional measurement from the original retained submission."""
+    raw = row.get('submission_json')
+    if raw is None:
+        return None
+    try:
+        snapshot = json.loads(raw)
+        source = snapshot['source']
+        if not isinstance(source, dict):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('retained source content snapshot is unavailable') from None
+    value = source.get('content_digest')
+    return None if value is None else _content_digest(value)
 
 
 def retained_acceptance_fields(row: dict) -> dict:
@@ -48,10 +74,13 @@ def require_retained_acceptance(payload: dict, *, request_id: str | None,
         raise ValueError('remote acceptance request receipt is missing or mismatched')
     retained_acceptance_fields(payload)
     observed = payload.get('source')
-    if (not isinstance(observed, dict) or set(observed) != _SOURCE_KEYS
+    if (not isinstance(observed, dict)
+            or frozenset(observed) not in (_SOURCE_KEYS, _SOURCE_KEYS | {'content_digest'})
             or type(observed['dirty']) is not bool
             or not isinstance(observed['identity'], str) or not observed['identity']
             or any(value is not None and (not isinstance(value, str) or not value)
                    for value in (observed['commit'], observed['dirty_digest']))
             or (source is not None and observed != source)):
         raise ValueError('remote acceptance source receipt is missing or mismatched')
+    if 'content_digest' in observed:
+        _content_digest(observed['content_digest'])

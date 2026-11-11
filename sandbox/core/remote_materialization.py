@@ -14,6 +14,8 @@ import re
 import secrets
 import shlex
 import subprocess
+import inspect
+from sandbox.workspaces.content import content_digest
 
 
 # Standalone trusted program sent over the selected transport. It imports no
@@ -77,7 +79,7 @@ if action == "acquire":
     write(value)
 else:
     value = read()
-if action == "run":
+if action in ("run", "measure"):
     if value["state"] not in ("idle", "complete"):
         raise SystemExit(70)
     command, intent = sys.argv[5:7]
@@ -90,17 +92,22 @@ if action == "run":
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     value.update(state="active", step=value["step"] + 1, intent_digest=intent)
     value.pop("exit_code", None)
+    value.pop('content_digest', None)
     write(value)
-    child = subprocess.Popen(["/bin/sh", "-c", command], stdin=sys.stdin.buffer,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    code = child.wait()
-    while True:
-        try:
-            os.waitpid(-1, 0)
-        except InterruptedError:
-            continue
-        except ChildProcessError:
-            break
+    if action == "measure":
+        value['content_digest'] = content_digest(command)
+        code = 0
+    else:
+        child = subprocess.Popen(["/bin/sh", "-c", command], stdin=sys.stdin.buffer,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        code = child.wait()
+        while True:
+            try:
+                os.waitpid(-1, 0)
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                break
     value.update(state="complete", exit_code=code)
     write(value)
 elif action == "release":
@@ -117,6 +124,7 @@ elif action not in ("acquire", "inspect"):
     raise SystemExit(70)
 print(json.dumps(value, sort_keys=True, separators=(",", ":")), flush=True)
 '''
+COORDINATOR = inspect.getsource(content_digest) + '\n' + COORDINATOR
 
 
 class RemoteMaterializationUnknown(RuntimeError):
@@ -176,15 +184,19 @@ class RemoteMaterializationLease:
                     value.get("operation_id") != self.operation_id or
                     type(value.get("step")) is not int or value["step"] < 0):
                 raise ValueError("wrong materialization receipt")
-            expected = {"acquire": "idle", "run": "complete",
+            expected = {"acquire": "idle", "run": "complete", "measure": "complete",
                         "release": "released"}.get(action)
             if expected and value.get("state") != expected:
                 raise ValueError("incomplete materialization receipt")
-            if action == "run" and (
+            if action in ("run", "measure") and (
                     value["step"] != self.step + 1 or
                     value.get("intent_digest") != intent or
                     type(value.get("exit_code")) is not int):
                 raise ValueError("wrong materialization step")
+            if action == 'measure' and (value.get('exit_code') != 0 or
+                    not isinstance(value.get('content_digest'), str) or
+                    re.fullmatch(r'sha256:[0-9a-f]{64}', value['content_digest']) is None):
+                raise ValueError('missing measured source content')
             if action == "acquire" and value["step"] != 0:
                 raise ValueError("wrong initial materialization step")
             self.step = value["step"]
@@ -210,6 +222,9 @@ class RemoteMaterializationLease:
         if self.unknown:
             raise RemoteMaterializationUnknown(self.operation_id)
         return self._call("release")
+
+    def measure(self, target_path):
+        return self._call('measure', command=target_path, timeout=120)['content_digest']
 
     def inspect(self):
         """Read original durable evidence; busy/missing/corrupt is unknown."""

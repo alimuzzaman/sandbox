@@ -380,10 +380,30 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
             "dirty_digest": _bounded_text(source.get("dirty_digest"), "source dirty digest", allow_none=True),
         },
     }
+    if source.get('content_digest') is not None:
+        snapshot['source']['content_digest'] = _bounded_text(
+            source['content_digest'], 'source content digest', maximum=71)
     payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
     if len(payload.encode("utf-8")) > MAX_SUBMISSION_SNAPSHOT_BYTES:
         raise ValueError("canonical submission snapshot exceeds 65536 bytes")
     return payload
+
+
+def read_checkout_admissions(database, checkout):
+    """Read live original-job bindings without creating/migrating runtime state."""
+    database = Path(database)
+    if not database.exists():
+        return []
+    connection = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in connection.execute(
+            "SELECT job_id,request_id,project_identity,source_identity,submission_json FROM jobs "
+            "WHERE project_root=? AND (lifecycle IN ('accepted','queued','running','cancelling') "
+            "OR EXISTS (SELECT 1 FROM workspace_leases l WHERE l.job_id=jobs.job_id)) LIMIT 129",
+            (str(Path(checkout).resolve(strict=False)),))]
+    finally:
+        connection.close()
 
 
 class JobRepository:

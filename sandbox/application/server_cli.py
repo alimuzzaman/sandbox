@@ -141,6 +141,7 @@ def capabilities() -> dict:
     from sandbox.application.server_cli_exec import exec_contract_available, capture_contract_available, CONTRACT as EXEC_CONTRACT
     from sandbox.application.server_cli_capture import CONTRACT as CAPTURE_CONTRACT
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
+    from sandbox.workspaces.content import source_content_available
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
@@ -148,7 +149,9 @@ def capabilities() -> dict:
             'inspection_capabilities': inspection,
             'server_exec_capabilities': [EXEC_CONTRACT] if exec_contract_available() else [],
             'server_exec_capture_capabilities': [CAPTURE_CONTRACT] if capture_contract_available() else [],
-            'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT]}
+            'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +
+                (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
+                 and source_content_available() else [])}
 
 
 def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
@@ -629,7 +632,7 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
             or observed.get('ownership_marker') != (entry.get('mcp_service') or {}).get('ownership_marker')
             or not isinstance(observed.get('capabilities'), list)
             or any(not isinstance(value, str) for value in observed['capabilities'])
-            or not {CONTRACT, ACCEPTANCE_CONTRACT}.issubset(observed['capabilities'])):
+            or not {CONTRACT, ACCEPTANCE_CONTRACT, 'job.source-content.v1'}.issubset(observed['capabilities'])):
         raise ServerCLIUnavailable('installed server CLI contract is unavailable or changed')
     routing = validate_target_metadata(observed.get('target_metadata', {}))
     selected = dict(entry)

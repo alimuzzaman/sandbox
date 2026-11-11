@@ -29,7 +29,7 @@ def adopt_execution_capabilities(name, record, request):
             raise ExecutionCapabilityUnavailable('installed job service identity changed or is unavailable')
     values = observed.get('capabilities')
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
-    known = {'job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, 'job.server-cli.v1'}
+    known = {'job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, 'job.server-cli.v1', 'job.source-content.v1'}
     if (observed.get('ok') is not True or not isinstance(values, list)
             or any(not isinstance(value, str) or value not in known for value in values)
             or len(set(values)) != len(values)

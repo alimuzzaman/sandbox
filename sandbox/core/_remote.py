@@ -630,14 +630,17 @@ def deploy_exact_working_tree(
         push_timeout=push_timeout,
         allow_detached=True,
     )
+    content_receipt = {}
     applied = update_target_to(
         remote, target, pushed_sha,
         project_root=root if resolved_source is None else None,
         diff_text=diff_text, untracked=untracked, overlay_snapshot=overlay,
+        content_receipt=content_receipt,
     )
     dirty = overlay["digest"]
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
+            "content_digest": content_receipt['content_digest'],
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
             "uncommitted_files_applied": applied,
             "network_capacity": network_capacity,
@@ -1561,9 +1564,8 @@ def ensure_deploy_repo(remote: dict, project_root, *, sandbox_home: str | None =
                        home_timeout: int = 15) -> str:
     """Lazily create the deploy-target git repo on first deploy to this remote
     (NOT during `provision`, which is machine-level, not project-level). Safe
-    to call every deploy -- a no-op if the repo already exists. Sets
-    receive.denyCurrentBranch=updateInstead so a push directly updates the
-    checked-out working tree, no bare-repo indirection needed. Returns the
+    to call every deploy. Pushes update Git objects/refs only. Working tree
+    publication belongs exclusively to update_target_to's source lease. Returns the
     resolved absolute path (see deploy_target_path)."""
     target = deploy_target_path(
         remote, project_root, sandbox_home=sandbox_home,
@@ -1573,8 +1575,8 @@ def ensure_deploy_repo(remote: dict, project_root, *, sandbox_home: str | None =
     cmd = (
         f"mkdir -p {quoted_target} && "
         f"cd {quoted_target} && "
-        f"if [ ! -d .git ]; then git init -q && "
-        f"git config receive.denyCurrentBranch updateInstead; fi"
+        f"if [ ! -d .git ]; then git init -q; fi && "
+        f"git config receive.denyCurrentBranch ignore"
     )
     res = ssh_run(remote, cmd, timeout=30)
     if res.returncode != 0:
@@ -2322,7 +2324,8 @@ def push_commits(
     env = git_environment(overrides={"GIT_SSH_COMMAND": git_ssh})
     try:
         res = subprocess.run(
-            ["git", "push", push_url, source_spec],
+            ["git", "push", "--receive-pack=git -c receive.denyCurrentBranch=ignore receive-pack",
+             push_url, source_spec],
             cwd=str(push_cwd), env=env, capture_output=True, text=True,
             timeout=push_timeout, check=False,
         )
@@ -2387,6 +2390,9 @@ def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str, *, lease
     touched, since those were never part of the deploy in the first place."""
     reset = (
         f"cd {shlex.quote(target_path)} && "
+        # Keep the worktree's HEAD independent of refs updated by concurrent
+        # receive-pack. Only this leased publisher changes its checkout HEAD.
+        f"git update-ref --no-deref HEAD {shlex.quote(sha)} && "
         f"git reset --hard {shlex.quote(sha)} && git clean -fd"
     )
     # Bound the stateful reset on the VPS as well as in the local SSH client.
@@ -2733,16 +2739,17 @@ def update_target_to(remote: dict, target_path: str, sha: str, *,
                      project_root=None, diff_text: str = "",
                      untracked: list[str] | None = None,
                      include_paths: list[str] | None = None,
-                     overlay_snapshot: dict | None = None) -> int:
+                     overlay_snapshot: dict | None = None,
+                     content_receipt: dict | None = None) -> int:
     """Reset and publish one dirty overlay under one source lock."""
     with _remote_materialization_lock(remote, target_path) as lease:
         _reset_target_to_unlocked(remote, target_path, sha, lease=lease)
-        if project_root is None:
-            return 0
-        return _apply_uncommitted_unlocked(
+        applied = 0 if project_root is None else _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text,
-            list(untracked or ()), include_paths, overlay_snapshot, lease=lease,
-        )
+            list(untracked or ()), include_paths, overlay_snapshot, lease=lease)
+        if content_receipt is not None:
+            content_receipt['content_digest'] = lease.measure(target_path)
+        return applied
 
 
 DEFAULT_MCP_PORT = 9174

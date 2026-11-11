@@ -236,6 +236,7 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--execution-policy-json", help=argparse.SUPPRESS)
     parser.add_argument("--request-id")
     parser.add_argument("--source-identity")
+    parser.add_argument('--source-content-digest', help=argparse.SUPPRESS)
     parser.add_argument("--source-commit")
     parser.add_argument("--source-dirty-digest")
     parser.add_argument("--wait", action="store_true")
@@ -519,6 +520,7 @@ def cmd_job_start(_cfg, args) -> None:
         or _source_identity(target.project_root).identity,
         getattr(args, "source_commit", None),
         getattr(args, "source_dirty_digest", None),
+        getattr(args, "source_content_digest", None),
     )
     project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))

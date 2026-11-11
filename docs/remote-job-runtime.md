@@ -15,6 +15,25 @@ pushed to an immutable `sandbox-source-<sha>` ref, so no branch has to be
 checked out. A project directory that is not a git checkout with a commit is
 refused with a message that says so; use `--local` for those.
 
+Receivers supporting `job.source-content.v1` measure the deployed working-tree
+bytes, executable modes, symlink targets and detached Git HEAD under the source
+lease. Git pushes update objects/refs only; they cannot publish working-tree
+files through `receive.denyCurrentBranch=updateInstead`. The measured content
+digest travels separately from the existing source identity and dirty digest.
+Workspace copying checks both the source and the staged copy against it. New
+admission rechecks the actual workspace while holding the same checkout lock
+used by refresh, through the SQLite acceptance commit. A changed tree is refused
+before acceptance, rather than acknowledging earlier source metadata for later
+bytes. The existing request identity must be preserved when investigating it.
+
+An admitted or still-leased job prevents another refresh of its checkout. Exact
+request replay returns the retained receipt without copying over job output;
+new submissions still require a byte check. CI uses a prepared verified copy
+instead of recopying a subsequently changed shared deployment. Unused nullable
+content fields do not alter legacy request digests. Older runtime capabilities
+do not authorize the new source contract; update through the supported lifecycle
+before relying on it. This contract adds no operator role or credential grant.
+
 ## Normal operation
 
 `job-list --json` returns bounded summaries, not stored command, submission,

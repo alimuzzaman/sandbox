@@ -35,6 +35,7 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
 
 MAX_AGGREGATE_RESULT_BYTES = 262_144
+SOURCE_CONTENT_VERSION = 1
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
 
@@ -137,13 +138,20 @@ class JobService:
                 hasattr(self.workspace_registry, "submission_guard"))
             else nullcontext()
         )
-        with guard:
+        from sandbox.workspaces.content import checkout_guard, verify_content
+        content_guard = (checkout_guard(submission.project_root)
+                         if submission.source.content_digest is not None else nullcontext())
+        with content_guard, guard:
             replay = (
                 None if submission.sync_relationship_id is not None
                 else self.repository.replay(submission)
             )
             if replay is not None:
                 return self._accepted(replay, replay=True)
+            if (submission.materialization_source_root is not None
+                    and submission.source.content_digest is None
+                    and submission.retry_of_job_id is None):
+                raise ValueError('measured_source_contract_required')
             # Workspace validation/materialization and durable acceptance share
             # the same controller lock as terminal deletion. A checkout cannot
             # disappear between these two commits.
@@ -180,6 +188,9 @@ class JobService:
                             workspace_authority_digest = mount_res["mount_identity_digest"]
                     except Exception:
                         pass
+            if submission.source.content_digest is not None:
+                verify_content(submission.project_root, submission.source.content_digest,
+                               expected_commit=submission.source.commit)
             row, replay = self.repository.accept(
 
                 submission, workspace_id=workspace_id,
@@ -383,6 +394,10 @@ class JobService:
             raise RuntimeError("supervisor_acceptance_missing_source_identity")
         from sandbox.services.source_fingerprint import source_has_changes
         source["dirty"] = source_has_changes(source["dirty_digest"])
+        from sandbox.jobs.acceptance import retained_content_digest
+        measured = retained_content_digest(row)
+        if measured is not None:
+            source['content_digest'] = measured
         result = {"ok": True, "job_id": job_id, "status": "accepted", "kind": row["kind"],
                 "target": {"kind": row["target_kind"], "remote": row["remote_name"]},
                 "workspace": row["workspace_label"], "output_profile": row["output_profile"],
@@ -661,7 +676,7 @@ class JobService:
             deadline_seconds=canonical["deadline_seconds"],
             source=SourceIdentity(
                 source["identity"], source.get("commit"),
-                source.get("dirty_digest"),
+                source.get("dirty_digest"), source.get('content_digest'),
             ),
             request_id=canonical.get("request_id"),
             parent_job_id=canonical.get("parent_job_id"),
@@ -1411,7 +1426,7 @@ class JobService:
                 remote_name=canonical.get("remote_name"), workspace_label=canonical["workspace_label"],
                 workspace_mode=canonical["workspace_mode"], argv=tuple(canonical["argv"]),
                 deadline_seconds=canonical["deadline_seconds"],
-                source=SourceIdentity(source["identity"], source.get("commit"), source.get("dirty_digest")),
+                source=SourceIdentity(source["identity"], source.get("commit"), source.get("dirty_digest"), source.get('content_digest')),
                 request_id=request_id, retry_of_job_id=job_id,
                 # Standalone jobs remain standalone. CI/matrix children retain
                 # their actual parent, never a guessed root/self relationship.
@@ -1691,6 +1706,18 @@ class JobService:
         }
 
     def submit_matrix(self, submissions: list[JobSubmission], *, allow_project_variants: bool = False) -> dict:
+        from contextlib import ExitStack
+        from sandbox.workspaces.content import checkout_guard, verify_content
+        with ExitStack() as stack:
+            roots = sorted({item.project_root for item in submissions if item.source.content_digest is not None})
+            for root in roots:
+                stack.enter_context(checkout_guard(root))
+            for item in submissions:
+                if item.source.content_digest is not None:
+                    verify_content(item.project_root, item.source.content_digest, expected_commit=item.source.commit)
+            return self._submit_matrix_bound(submissions, allow_project_variants=allow_project_variants)
+
+    def _submit_matrix_bound(self, submissions, *, allow_project_variants):
         if not submissions:
             raise ValueError("matrix requires at least one child submission")
         first = submissions[0]

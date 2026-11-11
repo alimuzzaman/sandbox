@@ -546,13 +546,21 @@ def refresh_with_self_heal(run: Callable[[str], object], refresh: str, sb: str,
 
 
 def workspace_refresh_command(source_path: str, workspace_path: str, *,
-                              sandbox_root: str | None = None) -> str:
+                              sandbox_root: str | None = None, source_proof=None,
+                              request_id=None, project_identity=None) -> str:
     """Render the shared materializer with shell-safe argument quoting."""
     argv = [
         "python3", "-m", "sandbox.workspaces.checkout", "materialize",
         "--source", source_path, "--workspace", workspace_path,
         "--label", "remote",
     ]
+    if source_proof is not None:
+        argv.extend(['--source-content-digest', source_proof['content_digest'],
+                     '--source-identity', source_proof['identity'], '--source-commit', source_proof['commit']])
+        if request_id:
+            argv.extend(['--request-id', request_id])
+        if project_identity:
+            argv.extend(['--project-identity', project_identity])
     if sandbox_root is not None:
         argv[:0] = ["env", f"PYTHONPATH={sandbox_root}"]
     return shlex.join(argv)
@@ -629,6 +637,19 @@ class RemoteJobTransport:
             raise RemoteJobTransportError(
                 "remote does not support the required execution-policy and retained acceptance contracts; "
                 "update the selected remote before submitting jobs")
+        if 'job.source-content.v1' not in capabilities:
+            observed = self.control(name, ['job-capabilities'], timeout=15)
+            service = remote.get('mcp_service') or {}
+            if (not isinstance(observed, dict) or observed.get('ok') is not True
+                    or type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
+                    or not isinstance(observed.get('capabilities'), list)
+                    or any(not isinstance(value, str) for value in observed.get('capabilities', ()))
+                    or 'job.source-content.v1' not in observed.get('capabilities', ())
+                    or any(not isinstance(service.get(field), str)
+                           or re.fullmatch(r'[0-9a-f]{24}', service[field]) is None
+                           or observed.get(field) != service[field]
+                           for field in ('ownership_marker', 'runtime_revision'))):
+                raise RemoteJobTransportError('installed measured-source capability is unavailable; no job submitted', retryable=False)
         return remote
 
     def _deploy(self, remote: dict, project_root: str,
@@ -762,7 +783,7 @@ class RemoteJobTransport:
                 or remote.get('joined') is not True or remote.get('control_transport') != 'tailscale'
                 or not isinstance(capabilities, (list, tuple, set))
                 or any(not isinstance(value, str) for value in capabilities)
-                or not {CONTRACT, ACCEPTANCE_CONTRACT}.issubset(capabilities)):
+                or not {CONTRACT, ACCEPTANCE_CONTRACT, 'job.source-content.v1'}.issubset(capabilities)):
             raise RemoteJobTransportError('installed server CLI capability is unavailable', retryable=False)
         require_safe_argv(submission.argv)
         provenance = dict(submission.execution_policy_provenance or {})
@@ -814,7 +835,8 @@ class RemoteJobTransport:
         plan = []
         expected_source = deployed_source(deployed)
         for item in submissions:
-            workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label)
+            workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label,
+                source_proof=deployed, request_id=item.request_id, project_identity=item.project_identity)
             argv = list(item.argv)
             # Matrix coordinators execute their explicit child argv on the
             # VPS. Match single-job submission and bind nested Sandbox CLI
@@ -845,7 +867,7 @@ class RemoteJobTransport:
                  "depends_on": list(item.depends_on), "failure_policy": item.failure_policy,
                  "compatibility_differences": list(item.compatibility_differences),
                  "artifact_paths": list(item.artifact_paths),
-                 "source": {key: expected_source[key] for key in ('identity', 'commit', 'dirty_digest')}})
+                 "source": {key: expected_source[key] for key in ('identity', 'commit', 'dirty_digest', 'content_digest')}})
         encoded = base64.b64encode(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).decode()
         args = ["job-matrix", "--local", "--project-dir", deployed["target_path"],
                 "--project-identity", first.project_identity,
@@ -896,7 +918,8 @@ class RemoteJobTransport:
                                         "workspace": first.workspace_label},
                 "workspace_path": deployed["target_path"]}
 
-    def _prepare_workspace(self, remote: dict, source_path: str, label: str) -> str:
+    def _prepare_workspace(self, remote: dict, source_path: str, label: str, *,
+                           source_proof=None, request_id=None, project_identity=None) -> str:
         suffix = hashlib.sha256(label.encode()).hexdigest()[:14]
         # Project resolution derives a slug from the deployed workspace name;
         # use hyphens so the copied path remains a valid project root.
@@ -906,6 +929,7 @@ class RemoteJobTransport:
         sandbox_root = str(PurePosixPath(self.remote_sb_path(remote)).parent)
         command = workspace_refresh_command(
             source_path, workspace_path, sandbox_root=sandbox_root,
+            source_proof=source_proof, request_id=request_id, project_identity=project_identity,
         )
         result, repaired = refresh_with_self_heal(
             lambda text: self._run(
@@ -942,12 +966,19 @@ class RemoteJobTransport:
             deployed_source(deployed)
         except ValueError:
             raise RemoteJobTransportError('remote deployment source metadata is inconsistent', retryable=False) from None
+        if (not isinstance(deployed.get('content_digest'), str)
+                or re.fullmatch(r'sha256:[0-9a-f]{64}', deployed['content_digest']) is None):
+            raise RemoteJobTransportError('remote deployment lacks measured source content', retryable=False)
+        if (not isinstance(deployed.get('commit'), str)
+                or re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', deployed['commit']) is None):
+            raise RemoteJobTransportError('remote deployment lacks an exact source commit', retryable=False)
 
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         expected_source = deployed_source(deployed)
-        workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
+        workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label,
+            source_proof=deployed, request_id=submission.request_id, project_identity=submission.project_identity)
         args = ["job-start", "--local", "--project-dir", workspace_path,
                 "--kind", submission.kind,
                 "--materialization-source-root", deployed["target_path"],
@@ -956,6 +987,7 @@ class RemoteJobTransport:
                 "--cwd-relative", submission.cwd_relative,
                 "--output-profile", submission.output_profile, "--profile", submission.execution_profile,
                 "--source-identity", expected_source["identity"]]
+        args += ['--source-content-digest', deployed['content_digest']]
         policy = {
             "execution_profile": submission.execution_profile,
             "deadline_seconds": submission.deadline_seconds,

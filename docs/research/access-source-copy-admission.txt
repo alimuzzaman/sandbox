@@ -1,0 +1,83 @@
+Deployment -> workspace -> original acceptance, source-only increment
+
+Finding and decision
+The old deployment receipt described A after releasing its source lease. A later
+publication B could replace the same deployment before A's workspace copy. The
+copy checked directory identities, not its bytes, so admission could retain A
+while running B. receive.denyCurrentBranch=updateInstead also let Git push write
+the worktree outside the update lease.
+
+This increment uses measured content pin/recheck, not a controller-provided grant
+or one continuous SSH session. A competing publication can cause a truthful
+source_content_changed preacceptance refusal; it cannot silently bind B to A.
+No automatic retry, source rollback, old-request replacement or unlock is added.
+
+Mechanism
+1. Git receive-pack is explicitly configured with denyCurrentBranch=ignore for
+every production push, including a repo still configured updateInstead. Repo
+preparation also fixes that setting for subsequent supported legacy pushes.
+Ref/object pushes retain named branch/divergence/no-force semantics. The leased
+reset detaches checkout HEAD using update-ref --no-deref before reset/clean, so
+concurrent ref pushes cannot move its measured HEAD or write working-tree files.
+2. update_target_to measures actual post-reset/post-overlay content under its
+original remote coordinator/source lease. The same trusted self-contained
+fingerprint code is sent to that coordinator and used by workspace/admission.
+Measurement is another durable lease step, not a guessed commit/dirty digest.
+Existing unknown-cessation retention/reconciliation behavior remains in place.
+3. The fingerprint includes sorted relative names, file bytes and executable
+modes, symlink targets, directory shape and HEAD. Git administration is excluded
+except HEAD. Traversal uses opened directory FDs and nofollow regular-file opens,
+checks concurrent inode/time changes, and has 100000-entry/512MiB byte bounds.
+The coordinator's finite transport budget still applies. No contents or file
+paths enter public measurement output, only the digest.
+4. SourceIdentity adds optional content_digest; absent fields are omitted from
+old canonical serialization. The existing source identity/commit/dirty identity
+remain unchanged. The new digest is retained in original submission JSON and
+retry reconstruction, inside the unchanged total submission snapshot limit.
+5. Single, matrix and CI carry the same measured digest into the copy and actual
+job-start/JobSubmission. Materialize checks source bytes before copying and both
+source/staging bytes before publication. Receipt or inode presence alone is not
+treated as byte proof. A private stable same-anchor flock serializes workspace
+publication with the final actual JobService byte check and repository.accept.
+6. Under that workspace guard, refresh reads the real job repository through a
+bounded readonly repository port. Nonterminal jobs or retained physical leases
+prevent overwriting that checkout. Exact original request/source replay skips
+refresh only; actual repository replay still checks the whole original digest.
+It does not claim current mutated job outputs are freshly measured source.
+7. CI validates the prepared copy and archives that copy, rather than copying B
+from a source path that changed after preparation. Existing retained-artifact
+restore stays supported, under the guard and with active ownership checks.
+
+Versioning
+job.source-content.v1 is advertised by the assembled job-capabilities parser/
+handler. Ordinary remote jobs require it before deployment; owner registrations
+missing cached metadata can discover the real installed contract with marker/
+revision checks. Fixed server-CLI dispatch likewise requires the real contract.
+New materialized submissions missing a digest refuse before new admission;
+legacy receipt replay and explicit retained-artifact retries retain their old
+identities. No runtime capability is asserted installed by this source work.
+
+Source definitions, NOT RUN
+tests.test_remote_source_admission defines real Git working trees and real SQLite
+acceptance for clean/dirty A->B before copy, B after copy before acceptance,
+positive single/matrix-kind/CI acceptance, a concurrent same-label refresh blocked
+by actual acceptance, active original replay without overwriting output, real CI
+prepared-A preservation after B, legacy canonical replay, single/matrix/CI wire
+composition, actual production Git push against updateInstead, and measurement
+ordering inside the source lease. Subprocess fixtures use synthetic environments.
+
+Limits and required root work
+No tests/imports/apps/builds/helpers/network/SSH/host/credential operations were
+run in this checkpoint. All new definitions are unrun. Existing mocked deployment
+fixtures need actual measured-content fields/capabilities, and mocked
+update_target_to success must supply the measurement receipt. Do not weaken
+production validation to accept legacy blank/mock receipts. Split relevant
+transport, CI, workspace, job, source and capability shards at the existing root
+time bound. Linux coordinator cases remain separately unavailable on macOS.
+Root's newer ACK/HTTP/_accepted changes must be preserved during selective
+integration; this branch intentionally does not import or overwrite them.
+In-flight old receive-pack processes from before rollout are not retroactively
+fenced by a source change. Root's authorized rollout must account for old active
+source writers; this is not managed migration/cutover approval or proof.
+Local tests/review/runtime acceptance, capability adoption and any deployment
+remain separate gates. No full-CLI-ready or merge-ready claim is made here.

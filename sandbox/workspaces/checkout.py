@@ -19,6 +19,7 @@ from typing import Callable
 
 
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+SOURCE_CONTENT_VERSION = 1
 _SAFE_LOCK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _LOOSE_OBJECT = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{38}$")
 _PACK_SUFFIXES = frozenset({".pack", ".idx", ".bitmap", ".rev"})
@@ -113,6 +114,10 @@ class MaterializationPlan:
     parent_identity: tuple[int, int] = (0, 0)
     source_identity_fs: tuple[int, int] = (0, 0)
     workspace_identity_fs: tuple[int, int] | None = None
+    content_digest: str | None = None
+    request_id: str | None = None
+    project_identity: str | None = None
+    source_commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,7 +152,9 @@ def _absolute_unsymlinked(path: Path, label: str, *, must_exist: bool) -> Path:
 def plan_materialization(source: Path | str, workspace: Path | str, *,
                          source_identity: str | None = None,
                          workspace_label: str = "workspace",
-                         plain_copy: bool = False) -> MaterializationPlan:
+                         plain_copy: bool = False, content_digest: str | None = None,
+                         request_id: str | None = None, project_identity: str | None = None,
+                         source_commit: str | None = None) -> MaterializationPlan:
     """Validate a sibling checkout request without mutating either tree."""
     source_path = _absolute_unsymlinked(Path(source), "source", must_exist=True)
     workspace_path = _absolute_unsymlinked(Path(workspace), "workspace", must_exist=False)
@@ -169,6 +176,12 @@ def plan_materialization(source: Path | str, workspace: Path | str, *,
         raise WorkspaceMaterializationError("workspace_lock_invalid", "materialization lock key is invalid")
     if type(plain_copy) is not bool:
         raise WorkspaceMaterializationError("workspace_mode_invalid", "plain-copy mode must be boolean")
+    if content_digest is not None and (not isinstance(content_digest, str)
+            or re.fullmatch(r'sha256:[0-9a-f]{64}', content_digest) is None):
+        raise WorkspaceMaterializationError('source_content_invalid', 'source content digest is invalid')
+    if source_commit is not None and (not isinstance(source_commit, str)
+            or re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', source_commit) is None):
+        raise WorkspaceMaterializationError('source_content_invalid', 'source commit is invalid')
     parent_stat = os.stat(source_path.parent, follow_symlinks=False)
     source_stat = os.stat(source_path, follow_symlinks=False)
     workspace_stat = None
@@ -184,6 +197,7 @@ def plan_materialization(source: Path | str, workspace: Path | str, *,
         source_path, workspace_path, source_identity, workspace_label, key,
         plain_copy, (parent_stat.st_dev, parent_stat.st_ino),
         (source_stat.st_dev, source_stat.st_ino), workspace_stat,
+        content_digest, request_id, project_identity, source_commit,
     )
 
 
@@ -437,6 +451,32 @@ def _publish(staging_name: str, plan: MaterializationPlan, parent_fd: int, *,
 def materialize(plan: MaterializationPlan, *,
                 link: Callable[[str, str], object] = os.link,
                 publish_rename: Callable[..., object] = os.rename) -> CheckoutMaterializationReceipt:
+    if type(plan) is not MaterializationPlan:
+        raise WorkspaceMaterializationError('workspace_plan_invalid', 'materialization plan is invalid')
+    from sandbox.workspaces.content import checkout_guard, active_checkout_rows
+    with checkout_guard(plan.workspace_path):
+        live = active_checkout_rows(plan.workspace_path)
+        if live:
+            if len(live) > 128:
+                raise WorkspaceMaterializationError('workspace_materialization_busy', 'checkout admission inventory exceeds its bounded read')
+            for row in live:
+                snapshot = json.loads(row['submission_json'])
+                if (plan.request_id is not None and row['request_id'] == plan.request_id
+                        and row['project_identity'] == plan.project_identity
+                        and row['source_identity'] == plan.source_identity
+                        and plan.content_digest is not None
+                        and snapshot.get('source', {}).get('content_digest') == plan.content_digest):
+                    # No new bytes/admission claimed. The actual job repository
+                    # will verify the whole original request before replay.
+                    return CheckoutMaterializationReceipt(1, str(plan.workspace_path), plan.source_identity,
+                        'original-request-replay', 0, 0, None, 'original-request-replay-no-refresh',
+                        {'key': plan.lock_key, 'acquired': False, 'released': True})
+            raise WorkspaceMaterializationError('workspace_materialization_busy',
+                                                'an admitted job still owns the checkout')
+        return _materialize_locked(plan, link=link, publish_rename=publish_rename)
+
+
+def _materialize_locked(plan: MaterializationPlan, *, link, publish_rename):
     """Materialize one validated checkout and return a bounded receipt."""
     if type(plan) is not MaterializationPlan:
         raise WorkspaceMaterializationError("workspace_plan_invalid", "materialization plan is invalid")
@@ -512,6 +552,12 @@ def materialize(plan: MaterializationPlan, *,
         # support traversing a directory through /dev/fd, so copying uses the
         # plan-bound paths and rechecks both open descriptors before publication.
         _require_source_identity(parent_fd, plan)
+        if plan.content_digest is not None:
+            from sandbox.workspaces.content import verify_content
+            try:
+                verify_content(source_view, plan.content_digest, expected_commit=plan.source_commit)
+            except ValueError:
+                raise WorkspaceMaterializationError('source_content_changed', 'source bytes changed before copy') from None
         stage = "copy_worktree"
         _copy_worktree(source_view, staging)
         _require_source_identity(parent_fd, plan)
@@ -550,10 +596,16 @@ def materialize(plan: MaterializationPlan, *,
             raise WorkspaceMaterializationError("workspace_identity_changed", "source identity changed")
         _require_source_identity(parent_fd, plan)
         stage = "publish"
+        if plan.content_digest is not None:
+            try:
+                verify_content(source_view, plan.content_digest, expected_commit=plan.source_commit)
+                verify_content(staging, plan.content_digest, expected_commit=plan.source_commit)
+            except ValueError:
+                raise WorkspaceMaterializationError('source_content_changed', 'copied source bytes changed') from None
         _publish(staging_name, plan, parent_fd, rename=publish_rename)
         receipt_fields = (
             1, str(plan.workspace_path), plan.source_identity, history_mode,
-            linked, copied, fallback_reason, "not_run",
+            linked, copied, fallback_reason, "content-verified" if plan.content_digest else "not_run",
         )
     except WorkspaceMaterializationError:
         raise
@@ -611,11 +663,18 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--label", default="workspace")
     parser.add_argument("--source-identity")
+    parser.add_argument('--source-content-digest')
+    parser.add_argument('--request-id')
+    parser.add_argument('--project-identity')
+    parser.add_argument('--source-commit')
     args = parser.parse_args(argv)
     try:
         receipt = materialize(plan_materialization(
             args.source, args.workspace, workspace_label=args.label,
             source_identity=args.source_identity,
+            content_digest=args.source_content_digest, request_id=args.request_id,
+            project_identity=args.project_identity,
+            source_commit=args.source_commit,
         ))
     except WorkspaceMaterializationError as exc:
         print(json.dumps({"ok": False, "code": exc.code, "error": str(exc),

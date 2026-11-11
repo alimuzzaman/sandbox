@@ -223,7 +223,7 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
         result = _mint_locked(found, request, stack_record)
         minted = result.pop("_minted")
         result["link_id"] = minted.link_id
-        link = share.share_url(result["hostname"], minted.link_id, minted.token)
+        link = share.share_url(result["hostname"], minted.token)
         if terminal is not None:
             with terminal:
                 try:

@@ -31,7 +31,10 @@ export function canShare(remote: string): boolean {
   return remote !== "this-server" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(remote);
 }
 
-/** A revoke target the panel may send: one link or session, never `all`. */
+/**
+ * A revoke target the panel may send: one link or session, never `all`. A link id is
+ * `l-` and 12 hex; an old-form one (32 hex) lives until it expires (LEGACY(081 short links)).
+ */
 export function revocableId(id: string): boolean {
-  return /^[ls]-[0-9a-f]{32}$/.test(id);
+  return /^(?:l-[0-9a-f]{12}|[ls]-[0-9a-f]{32})$/.test(id);
 }

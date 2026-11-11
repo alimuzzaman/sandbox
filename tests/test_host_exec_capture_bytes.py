@@ -68,6 +68,21 @@ class CaptureCompletionTests(unittest.TestCase):
 
 
 class CaptureAssemblyTests(unittest.TestCase):
+    def setUp(self):
+        import argparse
+        from sandbox import cli
+        from sandbox.application import command_selection
+        token = command_selection.bind_cli_command_parser(argparse.ArgumentParser(), lambda values: values)
+        self.addCleanup(command_selection.reset_cli_command_parser, token)
+        class ParserCaptured(Exception):
+            pass
+        def capture(parser, *args, **kwargs):
+            raise ParserCaptured()
+        # Capture the actual installed parser before configuration or dispatch.
+        with patch.object(argparse.ArgumentParser, 'parse_args', capture), \
+                patch.object(cli.sys, 'argv', ['sb']), self.assertRaises(ParserCaptured):
+            cli.main()
+
     def test_committed_parser_custody_and_actual_handler_contract_assemble(self):
         from sandbox.application.server_cli_exec import capture_contract_available
         self.assertTrue(capture_contract_available())

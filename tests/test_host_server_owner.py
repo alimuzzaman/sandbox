@@ -383,6 +383,7 @@ class ServerSelectionTests(OwnerTargetTests):
 
     def test_native_exit_failure_does_not_retire_physical_fence(self):
         from sandbox.commands import host_exec
+        from sandbox.hosting.recovery.repository import RecoveryRepository
         from contextlib import contextmanager
         self.bind_original_selector()
         selected = selection.read_owner_exec_selection(self.entry, name="named",
@@ -392,9 +393,9 @@ class ServerSelectionTests(OwnerTargetTests):
         def broken_exit(*args, **kwargs):
             yield
             raise OSError("synthetic native unlock failure")
-        repository = Mock()
-        repository.effect_lock.side_effect = broken_exit
-        with patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+        repository = RecoveryRepository(self.home / "hosts.json", self.home / "native-locks")
+        with patch.object(repository, "effect_lock", side_effect=broken_exit), \
+                patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
                 patch("sandbox.hosting.target_lease.acquire", return_value={
                     "path": "synthetic", "token": "a" * 32, "owner": "b" * 32}), \
                 self.assertRaises(OSError):

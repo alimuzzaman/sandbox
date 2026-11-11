@@ -243,12 +243,12 @@ class FrontDoorClosureCommandTests(unittest.TestCase):
 
     def test_the_nginx_transaction_can_force_a_reload_and_prove_removal(self):
         plain = nginx.transaction_command("/etc/nginx/conf.d/sandbox-x.conf", None, "absent",
-                                          operation="apply", remove=True)
+                                          operation="apply", remove=True, probe_host="a.example.test")
         forced = nginx.transaction_command("/etc/nginx/conf.d/sandbox-x.conf", None, "absent",
                                            operation="apply", remove=True, force=True,
                                            probe_host="a.example.test", gone_marker="c" * 24)
-        self.assertTrue(forced.endswith(" 1 " + "c" * 24))
-        self.assertNotIn(" 1 -", plain[-6:])
+        # Unforced callers keep the exact command they had; force only appends.
+        self.assertEqual(forced, plain + " 1 " + "c" * 24)
         script = nginx.transaction_script()
         self.assertIn('[ "$force" != 1 ]', script)
         self.assertIn("route_still_loaded", script)

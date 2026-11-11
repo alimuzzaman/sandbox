@@ -115,7 +115,7 @@ class DeliveryAuthorityRevalidationTests(unittest.TestCase):
         with self.assertRaises(service.CredentialExecutionError) as failure:
             with service.held_credential_execution(self.receipt, intent=self.intent,
                     held_writer=self.writer, canonical_target_key="a" * 64,
-                    target_repository=self.target):
+                    native_mutations=((self.target, "fixture/fixture/fixture"),)):
                 self.broker.consume(self.grant, "fixture-app", "deliver-provider")
         self.assertEqual(failure.exception.code, "credential_effects_unknown")
         row = self.ledger.lookup(self.intent.request_scope(), operation_id=self.operation_id)

@@ -25,7 +25,7 @@ _SEAL = object()
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False, repr=False, eq=False)
 class AuthenticatedControlReceipt:
-    via: Literal["token", "tailnet"]
+    via: Literal["token", "tailnet", "owner-peer"]
     service_principal: str | None
     login: str | None
     node: str | None
@@ -72,7 +72,7 @@ class _ControlReceiptIssuer:
     def __init__(self, validator: Callable[[AuthenticatedControlReceipt], bool]):
         self._validator = validator
 
-    def _issue(self, *, via: Literal["token", "tailnet"], policy_epoch: str,
+    def _issue(self, *, via: Literal["token", "tailnet", "owner-peer"], policy_epoch: str,
                service_principal: str | None = None, login: str | None = None,
                node: str | None = None) -> AuthenticatedControlReceipt:
         receipt = object.__new__(AuthenticatedControlReceipt)

@@ -11,11 +11,12 @@ from contextlib import contextmanager
 import json
 import os
 import threading
+import time
 
-from sandbox.hosting.recovery.repository import RecoveryRepository
 from sandbox.jobs.credential_operations import EffectOutcome, OperationState
 from .admission import require_committed
 from .models import CredentialIntent
+from .native_locks import hold_native_mutations, require_native_mutations
 
 
 class CredentialExecutionError(ValueError):
@@ -68,7 +69,7 @@ def _host_binding(intent, row, canonical_target_key):
 @contextmanager
 def held_credential_execution(receipt, *, intent: CredentialIntent, held_writer,
                               canonical_target_key: str,
-                              target_repository: RecoveryRepository):
+                              native_mutations: tuple):
     """Trusted supervisor adapter, inside its actual ``supervisor.hold``.
 
     canonical_target_key is independently resolved registered server data. The
@@ -76,7 +77,7 @@ def held_credential_execution(receipt, *, intent: CredentialIntent, held_writer,
     ownership. Both opaque proofs are validated, never reconstructed here.
     Neither this context nor its exit completes/reopens the broader lifecycle.
     """
-    if type(intent) is not CredentialIntent or type(target_repository) is not RecoveryRepository:
+    if type(intent) is not CredentialIntent:
         raise CredentialExecutionError()
     row = require_committed(receipt, intent_digest=intent.intent_digest())
     if row.canonical_intent != intent.canonical_json():
@@ -84,19 +85,25 @@ def held_credential_execution(receipt, *, intent: CredentialIntent, held_writer,
     expected = _host_binding(intent, row, canonical_target_key)
     _require_host_writer(held_writer, expected)
     owner = (os.getpid(), threading.get_ident())
-    association = (intent, held_writer, expected, target_repository, owner)
-    with _HELD_LOCK:
-        if receipt in _HELD:
-            raise CredentialExecutionError("credential_effect_scope_busy")
-        _HELD[receipt] = association
-    try:
-        yield
-        require_committed(receipt, intent_digest=intent.intent_digest())
-        _require_host_writer(held_writer, expected)
-    finally:
+    association = (intent, held_writer, expected, native_mutations, owner)
+    # The generic factory enters this same native set before canonical writer
+    # acquisition; exact nesting reuses that hold without a second flock.
+    with hold_native_mutations(native_mutations,
+            timeout_seconds=row.effective_deadline - time.time()):
         with _HELD_LOCK:
-            if _HELD.get(receipt) is association:
-                del _HELD[receipt]
+            if receipt in _HELD:
+                raise CredentialExecutionError("credential_effect_scope_busy")
+            _HELD[receipt] = association
+        try:
+            require_native_mutations(native_mutations)
+            yield
+            require_committed(receipt, intent_digest=intent.intent_digest())
+            _require_host_writer(held_writer, expected)
+            require_native_mutations(native_mutations)
+        finally:
+            with _HELD_LOCK:
+                if _HELD.get(receipt) is association:
+                    del _HELD[receipt]
 
 
 class _Checkpoint:
@@ -121,6 +128,7 @@ class _Checkpoint:
                 or row.canonical_intent != self._intent.canonical_json()):
             raise CredentialExecutionError()
         _require_host_writer(self._held_writer, self._expected)
+        require_native_mutations(held[3])
 
     def complete(self, code):
         if self._done or code not in ("succeeded", "failed", "effects_unknown"):
@@ -150,7 +158,7 @@ def credential_effect_boundary(receipt, *, intent: CredentialIntent,
                                resolution_digest: str):
     """Broker-only use under a genuine same-thread supervisor hold.
 
-    Lock order: live supervisor writer, target mutation transaction, short job
+    Lock order: registered native set, live supervisor writer, short job
     CAS. No job database transaction is held over the consumer invocation.
     Exceptions/missing completion retain unknown effect evidence, never retry.
     """
@@ -159,7 +167,7 @@ def credential_effect_boundary(receipt, *, intent: CredentialIntent,
         held = _HELD.get(receipt)
     if held is None:
         raise CredentialExecutionError()
-    bound_intent, writer, expected, repository, owner = held
+    bound_intent, writer, expected, native_mutations, owner = held
     if (owner != (os.getpid(), threading.get_ident())
             or bound_intent.canonical_json() != intent.canonical_json()
             or not any(item.consumer_id == consumer_id for item in intent.mappings)):
@@ -174,36 +182,35 @@ def credential_effect_boundary(receipt, *, intent: CredentialIntent,
     if not matches:
         raise CredentialExecutionError("credential_resolution_changed")
     _require_host_writer(writer, expected)
-    with repository.target_mutation_port("shared_credentials").target_mutation_transaction(
-            expected.canonical_target_key):
-        # Distinct same-controller operations also serialize here, while the
-        # genuine canonical host/gate ownership remains required throughout.
-        _require_host_writer(writer, expected)
-        row = require_committed(receipt, intent_digest=intent.intent_digest())
-        ledger = receipt._issuer._ledger
-        if row.state is OperationState.ADMITTED:
-            row = ledger.start(row.scope, row.operation_id, expected_version=row.row_version)
-        row = require_committed(receipt, intent_digest=intent.intent_digest())
-        claim = ledger.claim_effect(row.scope, row.operation_id,
-            expected_version=row.row_version, effect_step=effect_step)
-        if claim is None:
-            raise CredentialExecutionError("credential_deadline_expired")
-        checkpoint = _Checkpoint(ledger, row.scope, claim, writer, expected, receipt, intent)
-        failed = False
-        try:
-            # Recheck after irreversible step admission, immediately before
-            # the broker resolves/delivers the value to its trusted consumer.
-            checkpoint.require_current()
-            yield checkpoint
-            if not checkpoint._done:
-                failed = True
-        except BaseException:
+    require_native_mutations(native_mutations)
+    # Distinct same-controller operations also serialize here, while the
+    # genuine canonical host/gate ownership remains required throughout.
+    _require_host_writer(writer, expected)
+    row = require_committed(receipt, intent_digest=intent.intent_digest())
+    ledger = receipt._issuer._ledger
+    if row.state is OperationState.ADMITTED:
+        row = ledger.start(row.scope, row.operation_id, expected_version=row.row_version)
+    row = require_committed(receipt, intent_digest=intent.intent_digest())
+    claim = ledger.claim_effect(row.scope, row.operation_id,
+        expected_version=row.row_version, effect_step=effect_step)
+    if claim is None:
+        raise CredentialExecutionError("credential_deadline_expired")
+    checkpoint = _Checkpoint(ledger, row.scope, claim, writer, expected, receipt, intent)
+    failed = False
+    try:
+        # Recheck after irreversible step admission, immediately before
+        # the broker resolves/delivers the value to its trusted consumer.
+        checkpoint.require_current()
+        yield checkpoint
+        if not checkpoint._done:
             failed = True
-        finally:
-            if failed:
-                checkpoint._unknown()
+    except BaseException:
+        failed = True
+    finally:
         if failed:
-            raise CredentialExecutionError("credential_effects_unknown") from None
+            checkpoint._unknown()
+    if failed:
+        raise CredentialExecutionError("credential_effects_unknown") from None
 
 
 __all__ = ["CredentialExecutionError", "held_credential_execution",

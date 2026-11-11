@@ -169,6 +169,7 @@ class CredentialAdmissionService:
                 or row.state not in (OperationState.ADMITTED, OperationState.RUNNING)
                 or row.effective_deadline <= time.time()):
             raise AdmissionError()
+        self._broker.validate_retained_preflight(intent, preflight_digest=row.preflight_digest)
         return row
 
 

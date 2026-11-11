@@ -201,6 +201,31 @@ class OwnerTargetTests(unittest.TestCase):
         self.assertEqual(process.call_args.kwargs["input_data"], text.encode())
         self.assertNotIn(marker, repr(self.entry))
 
+    def test_fixed_recipient_writer_persists_only_private_intended_file_and_rejects_links(self):
+        from sandbox.commands.hosting import _write_remote_text
+        from sandbox.core._hosting import HostingError
+        from tests.subprocess_support import run_test_process
+        import stat
+        def run(owner, command, *, timeout, input_data):
+            return run_test_process(shlex.split(command), input=input_data,
+                env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+                capture_output=True, timeout=5)
+        destination = self.home / "runtime/hosts/project/dev/recipient.txt"
+        with patch.object(sdk, "owner_process", side_effect=run):
+            _write_remote_text(self.entry, str(destination), "synthetic-private-recipient")
+            self.assertEqual(destination.read_text(), "synthetic-private-recipient")
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+            linked = destination.with_name("linked.txt")
+            linked.symlink_to(destination)
+            with self.assertRaises(HostingError):
+                _write_remote_text(self.entry, str(linked), "unintended-write")
+            self.assertEqual(destination.read_text(), "synthetic-private-recipient")
+            linked.unlink()
+            os.link(destination, linked)
+            with self.assertRaises(HostingError):
+                _write_remote_text(self.entry, str(linked), "unintended-write")
+            self.assertEqual(destination.read_text(), "synthetic-private-recipient")
+
 
 class ServerSelectionTests(OwnerTargetTests):
     def setUp(self):

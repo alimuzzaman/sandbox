@@ -146,3 +146,12 @@ An occupied scheduler slot produces a retained terminal
 queuing a job whose anonymous input would disappear. Ordinary jobs retain
 DEVNULL. This internal handoff does not yet assemble no-source CLI admission,
 client original-stdin forwarding or advertise remote exec readiness.
+
+`ServerCLIContext.target_selector_digest` is optional retained selection context.
+It is read only after the actual original job and current kernel child have been
+proved, with a closed SHA256 encoding. Ordinary creation jobs leave it None.
+Historical exec consumers re-resolve under their held native locks and pass
+this digest into their sealed selection on every before/after check. Client
+snapshot dictionaries cannot create a `ServerCLIContext` or replace its job
+provenance. No receiver currently sets this field until no-source admission is
+assembled.

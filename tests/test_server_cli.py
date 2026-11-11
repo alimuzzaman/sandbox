@@ -147,7 +147,7 @@ class ServerCLIDispatchTest(unittest.TestCase):
 
 
 class RetainedServerCLIContextTest(unittest.TestCase):
-    def observe(self, *, row_fields=None, process_fields=None, dispatch=False):
+    def observe(self, *, row_fields=None, process_fields=None, provenance_fields=None, dispatch=False):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
             registry = runtime / 'jobs/registry.sqlite3'
@@ -165,7 +165,7 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                     'server_cli.target_identity': OWNER.target_identity,
                     'server_cli.runtime_revision': OWNER.runtime_revision,
                     'server_cli.ownership_marker': OWNER.ownership_marker,
-                    'server_cli.remote_name': 'origin-box'}), 'process': process}
+                    'server_cli.remote_name': 'origin-box', **(provenance_fields or {})}), 'process': process}
             row.update(row_fields or {})
             def captured(pid):
                 return SimpleNamespace(host_boot_id='boot',
@@ -201,6 +201,18 @@ class RetainedServerCLIContextTest(unittest.TestCase):
         self.assertNotIn('SSH_AUTH_SOCK', run.call_args.kwargs['env'])
         self.assertEqual(run.call_args.kwargs['env']['HOME'], OWNER.home)
         self.assertEqual(run.call_count, 1)
+
+    def test_selector_digest_is_read_only_after_original_retained_process_proof(self):
+        digest = 'sha256:' + 'a' * 64
+        context, _run = self.observe(provenance_fields={'server_cli.target_selector_digest': digest})
+        self.assertEqual(context.target_selector_digest, digest)
+        invalid, run = self.observe(provenance_fields={'server_cli.target_selector_digest': 'caller-claim'}, dispatch=True)
+        self.assertIsInstance(invalid, cli.ServerCLIUnavailable)
+        run.assert_not_called()
+        foreign, run = self.observe(provenance_fields={'server_cli.target_selector_digest': digest},
+                                   process_fields={'child_pid': 4321}, dispatch=True)
+        self.assertIsInstance(foreign, cli.ServerCLIUnavailable)
+        run.assert_not_called()
 
     def test_client_environment_key_cannot_replace_original_process_source_or_target(self):
         for rows, processes in (({'kind': 'exec'}, {}),

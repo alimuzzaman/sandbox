@@ -543,7 +543,7 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     unknown acceptance, streams child stdio, or invokes a self remote alias.
     """
     from sandbox.core import _remote
-    from sandbox.transports.remote_jobs import RemoteJobTransport
+    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
     from sandbox.resources.context import authenticated_target_identity
     from sandbox.services.redaction import require_safe_argv
     from sandbox.config.facade import project_identity
@@ -573,7 +573,13 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
         ssh_run=_remote.ssh_run, remote_lookup=lambda name: entry if name == remote_name else None,
         remote_sb_path=_remote.remote_sb_path)
-    observed = transport.control(remote_name, ['job-capabilities'])
+    try:
+        observed = transport.control(remote_name, ['job-capabilities'])
+    except RemoteJobTransportError:
+        # This constant operation only observes the installed contract. The
+        # source/job submission below has not been invoked, even if its reply
+        # is unavailable. Do not strand a request as unknown acceptance.
+        raise ServerCLIUnavailable('installed server CLI capability could not be observed') from None
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
             or observed.get('target_identity') != identity['target_identity']
             or observed.get('runtime_revision') != (entry.get('mcp_service') or {}).get('runtime_revision')

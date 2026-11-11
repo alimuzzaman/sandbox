@@ -579,7 +579,8 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(job[job.index("--project-dir") + 1], validated["project_root"])
         self.assertIn("--exact-project-dir", job)
         self.assertEqual(Path(child[child.index("--project-dir") + 1]).resolve(), manifest_root.resolve())
-        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["template"], template)
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["template"],
+                         str(Path(template).resolve()))
 
     def test_record_commit_moves_only_when_its_apply_proves_delivery(self):
         """Feedback 20153592: `stack list` must not run ahead of the server."""

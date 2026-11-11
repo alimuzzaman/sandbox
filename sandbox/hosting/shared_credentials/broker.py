@@ -163,6 +163,14 @@ class RegisteredCredentialBroker:
         keys = tuple(sorted({item.source_key for item in profile.mappings if item.kind == "provider"}))
 
         def invoke(values):
+            # Source/provider resolution can block after entering the effect
+            # boundary. Refresh the registered consumer and both authorities at
+            # actual delivery, rather than relying on pre-resolution checks.
+            self._profile(intent)
+            self._committed(receipt, intent)
+            if require_consumer(intent, consumer_id=consumer_id) is not consumer:
+                raise BrokerError("credential_consumer_changed")
+            checkpoint.require_current()
             slots = {item.destination: values[item.source_key] for item in selected}
             try:
                 return consumer.consume(slots)

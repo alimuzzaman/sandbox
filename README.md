@@ -1580,6 +1580,11 @@ when completion cannot be proved. Request and retry IDs use the host writer's
 64-character grammar. The supervisor port is still a source proposal; its lazy
 dependency is not an installed factory or acceptance of that proposal. No command
 or HTTP route constructs this composition yet, and no runtime checks ran here.
+The checkpoint revalidates both credential and held-writer authority at actual
+delivery after blocking secret resolution, and again before recording completion.
+The fixed consumer registration must still be the same bound registration at
+delivery. Revocation during resolution or consumption leaves an unknown step;
+an earlier successful check or consumer return cannot acknowledge success.
 
 Broker delivery must remain confined to the reviewed intended server consumer.
 Explicit minimal recipient environments or approved protected runtime-secret

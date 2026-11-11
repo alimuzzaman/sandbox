@@ -190,7 +190,7 @@ def job_workspace_references(jobs, *, now, idle_seconds):
 
 
 def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
-                             strays=None, checkout=None):
+                             strays=None, checkout=None, pause=None):
     """Remove the compose project(s) exclusively owned by one workspace.
 
     Spec 080: ``strays`` (a list, possibly empty, of the plan's
@@ -240,6 +240,9 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
             return result
 
         result["strays_removed"] = []
+        if pause is None:
+            import time
+            pause = time.sleep
         planned = {}
         # 10 is MAX_STRAYS_PER_CHECKOUT; this body is shipped without globals.
         if (not isinstance(strays, list) or len(strays) > 10
@@ -385,8 +388,26 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
                 else:
                     argv = ["docker", "rm", identity]
                 code, _out, err = run(argv, 30)
-                if code != 0 and "no such container" not in str(err).lower():
-                    return refuse("stray_" + step + "_failed:" + identity)
+                if code == 0:
+                    continue
+                message = str(err).lower()
+                if step == "stop":
+                    if "no such container" not in message:
+                        return refuse("stray_stop_failed:" + identity)
+                    continue
+                # A container started with --rm removes itself once stopped,
+                # so this remove can race the daemon's own: accept exactly
+                # those two answers, and only once an inspect shows it gone.
+                if "no such container" not in message and not (
+                        "removal of container" in message
+                        and "already in progress" in message):
+                    return refuse("stray_rm_failed:" + identity)
+                for _attempt in range(10):
+                    if current(identity, stopped=True) == "absent":
+                        break
+                    pause(1)
+                else:
+                    return refuse("stray_rm_failed:" + identity)
             result["strays_removed"].append(identity)
         ids = []
     if ids:

@@ -5284,7 +5284,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         'grep -Fqx ' + shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + observed_revision)
         + ' "$unit_path"; '
         'test -f "$env_path" && test ! -L "$env_path" && '
-        'test "$(stat -c \'%u:%a\' "$env_path")" = "$(id -u):600"; '
+        'test "$(stat -c \'%u:%a\' "$env_path")" = "$(id -u):600" || exit 43; '
     ) if preserve_credentials else ''
     credential_write = '' if preserve_credentials else (
         "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
@@ -5309,14 +5309,14 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "loaded:inactive:|not-found:inactive:) :;; *) exit 1;; esac; "
         + legacy_preflight +
         f"stage_root={stage_root}; source_stage=\"$stage_root/tree\"; runtime=$HOME/sandbox/sb-src; "
-        "test -d \"$stage_root\" && test ! -L \"$stage_root\" && test -d \"$source_stage\" && test ! -L \"$source_stage\"; "
+        "test -d \"$stage_root\" && test ! -L \"$stage_root\" && test -d \"$source_stage\" && test ! -L \"$source_stage\" || exit 1; "
         "test \"$(stat -c '%u:%a' \"$stage_root\")\" = \"$(id -u):700\"; "
         "test \"$(stat -c '%u:%a' \"$source_stage\")\" = \"$(id -u):700\"; "
-        "test -f \"$source_stage/sb\" && test ! -L \"$source_stage/sb\"; "
+        "test -f \"$source_stage/sb\" && test ! -L \"$source_stage/sb\" || exit 1; "
         "test -f \"$source_stage/scripts/provision_image_stage_helper.py\" && "
-        "test ! -L \"$source_stage/scripts/provision_image_stage_helper.py\"; "
+        "test ! -L \"$source_stage/scripts/provision_image_stage_helper.py\" || exit 1; "
         "if test -e \"$runtime\"; then test -d \"$runtime\" && test ! -L \"$runtime\" && "
-        "test \"$(stat -c '%u' \"$runtime\")\" = \"$(id -u)\"; "
+        "test \"$(stat -c '%u' \"$runtime\")\" = \"$(id -u)\" || exit 1; "
         "else test ! -L \"$runtime\"; fi; "
         "test ! -L \"$stage_root/receipt.json\"; "
         "test \"$(stat -c '%u:%a' \"$stage_root/receipt.json\")\" = \"$(id -u):600\"; "

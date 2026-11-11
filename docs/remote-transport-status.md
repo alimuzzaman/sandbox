@@ -62,6 +62,9 @@ post-exchange durability check so a failed fsync can still restore the exact
 prior source. Missing activation outcome or failed restoration returns
 `remote_service_rollback_indeterminate`, stops the selected Sandbox service and
 withholds restart. Inspect that original attempt before another migration.
+Credential preservation requires a current unit revision and a private,
+nonsymlink credential file. Changed credentials or symlinked source paths
+refuse before exchange, without requesting a local token or input.
 Ordinary host-memory status and authenticated target-identity lookup also enforce
 the saved machine pin; a changed machine or malformed pin refuses without refresh.
 Legacy owner registrations with no machine pin keep their existing behavior.

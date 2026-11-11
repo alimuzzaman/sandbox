@@ -93,6 +93,10 @@ class JobService:
     _drain_local: Any = field(default_factory=threading.local, repr=False, compare=False)
 
     def submit(self, submission: JobSubmission):
+        if submission.kind == 'server-cli':
+            from sandbox.application.server_cli import installed_cli
+            if submission.target_kind != 'local' or submission.argv[0] != str(installed_cli()):
+                raise ValueError('server CLI requires the fixed installed local executable')
         pending_sync = False
         request_digest = submission.canonical_digest()
         if submission.sync_relationship_id is not None:
@@ -254,11 +258,18 @@ class JobService:
 
     def _descriptor(self, row: dict, submission: JobSubmission) -> dict:
         nonce = os.urandom(32)
+        environment = None
+        if submission.kind == 'server-cli':
+            from sandbox.application.server_cli import FixedServerCLI, ServerCLIUnavailable
+            component = self.components.get('server_cli')
+            if component is None or not isinstance(component.component, FixedServerCLI):
+                raise ServerCLIUnavailable('fixed installed CLI component is not assembled')
+            environment = component.component.environment(submission)
         # Runtime selection is part of the immutable submission decision.  A
         # supervisor must never reinterpret a managed job as host-executable
         # after a config/import/registry failure.
         execution_runtime = "host"
-        if self.runtime_selector is not None:
+        if self.runtime_selector is not None and submission.kind != 'server-cli':
             execution_runtime = (
                 "managed_native" if self.runtime_selector(
                     row["project_root"], label="default",
@@ -275,7 +286,7 @@ class JobService:
                 "deadline_seconds": row["deadline_seconds"],
                 "cancel_grace_seconds": row.get("cancel_grace_seconds", 20),
                 "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
-                "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
+                "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": environment,
                 "execution_runtime": execution_runtime,
                 "artifact_paths": list(submission.artifact_paths),
                 "workspace_cleanup": cleanup_context,

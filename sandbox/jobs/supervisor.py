@@ -34,13 +34,26 @@ _CHILD_CONTEXT_KEYS = {
 
 
 @contextmanager
-def _child_identity_context(value: object):
+def _child_identity_context(value: object, environment=None):
     """Temporarily add only fixed authoritative keys for one child launch.
 
     The detached supervisor is single-purpose. This intentionally does not
     enumerate, copy, unpack, log, or persist the inherited environment.
     """
     context = value if isinstance(value, dict) else {}
+    if environment is not None:
+        # Only the adapter's explicit synthetic identity environment is copied,
+        # never os.environ. Other durable jobs retain their existing behavior.
+        child = dict(environment)
+        for field, environment_key in _CHILD_CONTEXT_KEYS.items():
+            item = context.get(field)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item or '\0' in item:
+                raise ValueError('durable child identity context is invalid')
+            child[environment_key] = item
+        yield child
+        return
     previous = {}
     changed = []
     try:
@@ -104,10 +117,10 @@ def run_descriptor(path: str | Path) -> int:
         output = JobOutputStore(storage, repository, job_id, secrets=descriptor.get("redaction_secrets", ()))
         if _managed_native_job(descriptor):
             return _run_managed_native(descriptor, repository, output)
-        with _child_identity_context(descriptor.get("authoritative_context")):
+        with _child_identity_context(descriptor.get("authoritative_context"), descriptor.get('environment')) as environment:
             command = subprocess.Popen(
                 descriptor["argv"], cwd=descriptor["cwd"],
-                env=descriptor.get("environment"), stdin=subprocess.DEVNULL,
+                env=environment, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, close_fds=True)
         release_authority = False

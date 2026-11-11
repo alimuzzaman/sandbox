@@ -194,6 +194,11 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--project-identity",
                         help="canonical project identity supplied by a detached controller")
     parser.add_argument("--kind", default="exec", help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli', action='store_true',
+                        help='run the fixed installed host CLI as a retained local job')
+    parser.add_argument('--server-cli-target', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-revision', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-marker', help=argparse.SUPPRESS)
     parser.add_argument("--materialization-source-root", help=argparse.SUPPRESS)
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
@@ -429,6 +434,19 @@ def cmd_job_start(_cfg, args) -> None:
         command = command[1:]
     if not command:
         _die("usage: ./sb job-start [target options] -- <argv...>")
+    server_cli = bool(getattr(args, 'server_cli', False))
+    if server_cli:
+        from sandbox.application.server_cli import capabilities, fixed_argv
+        cap = capabilities()
+        if (getattr(args, 'remote', None) or not getattr(args, 'local', False)
+                or getattr(args, 'server_cli_target', None) != cap['target_identity']
+                or getattr(args, 'server_cli_revision', None) != cap['runtime_revision']
+                or getattr(args, 'server_cli_marker', None) != cap['ownership_marker']
+                or not getattr(args, 'request_id', None)):
+            _die('server_cli_capability_unavailable: fixed server CLI binding is missing or changed')
+        command = list(fixed_argv(command))
+    elif getattr(args, 'kind', None) == 'server-cli':
+        _die('server_cli_capability_unavailable: use the fixed server CLI contract')
     dependencies = durable_job_dependencies()
     try:
         target = dependencies["target_service"].resolve(TargetRequest(
@@ -444,6 +462,13 @@ def cmd_job_start(_cfg, args) -> None:
         raise_registration_refusal(exc)
         _die(f"{exc.code}: {exc}")
     policy = _resolved_execution_policy(target, args)
+    if server_cli:
+        expected = dict(policy.provenance or {})
+        expected.update({'server_cli.target_identity': cap['target_identity'],
+                         'server_cli.runtime_revision': cap['runtime_revision'],
+                         'server_cli.ownership_marker': cap['ownership_marker']})
+        from dataclasses import replace
+        policy = replace(policy, provenance=expected)
     source = SourceIdentity(
         getattr(args, "source_identity", None)
         or _source_identity(target.project_root).identity,
@@ -453,7 +478,7 @@ def cmd_job_start(_cfg, args) -> None:
     project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))
     submission = JobSubmission(
-        kind=getattr(args, "kind", "exec"), project_root=target.project_root,
+        kind='server-cli' if server_cli else getattr(args, "kind", "exec"), project_root=target.project_root,
         project_identity=project_identity,
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
         argv=tuple(command), deadline_seconds=policy.deadline_seconds, source=source,

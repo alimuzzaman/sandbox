@@ -846,7 +846,7 @@ class StatusTests(unittest.TestCase):
 
 
 SITE_HOST = "share.example.test"
-CANARY = "C4nAryT0kenC4nAryT0kenC4nAryT0kenC4nAryT0k"  # 43 characters, like token_urlsafe(32)
+CANARY = "C4nAryT0kenC4nAryT0ken"  # 22 characters, like token_urlsafe(16) (spec 081 Story 7)
 
 
 def _site_entry(**fields):
@@ -1074,13 +1074,11 @@ class SiteCommandTests(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self._assert_no_leak(out, err)
         self.assertEqual(self.terminal.final.count(CANARY), 1)
-        self.assertRegex(self.terminal.final.strip(),
-                         rf"^https://{re.escape(SITE_HOST)}/s/l-[0-9a-f]{{32}}#{re.escape(CANARY)}$")
+        self.assertEqual(self.terminal.final.strip(), f"https://{SITE_HOST}/s/#{CANARY}")
         reply = json.loads(out)
         self.assertNotIn("url", reply)
         self.assertEqual((reply["ok"], reply["uses"], reply["link_shown_on"]), (True, 3, "terminal"))
-        self.assertRegex(reply["link_id"], r"^l-[0-9a-f]{32}$")
-        self.assertIn(reply["link_id"], self.terminal.final)
+        self.assertEqual(reply["link_id"], "l-" + hashlib.sha256(CANARY.encode()).hexdigest()[:12])
         payload = json.loads(self.inputs[0])
         self.assertIsNone(payload["stack"])
         record = payload["link"]

@@ -34,7 +34,8 @@ from tests.subprocess_support import run_test_process  # noqa: E402
 IMAGE = "python:3.13-alpine@sha256:" + "a" * 64
 PRIMARY = "mockups.dev.example.test"
 GATE = "s7k2.dev.example.test"
-CANARY = "C4nAryT0kenC4nAryT0kenC4nAryT0kenC4nAryT0k"
+# A short-form token: 128 bits, 22 base64url characters (spec 081 Story 7).
+CANARY = "C4nAryT0kenC4nAryT0ken"
 PORT = 18050
 
 
@@ -89,6 +90,14 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(login.gate_hostnames(declaration), {GATE})
         self.assertIn("sandbox-login", validated["compose"]["background_services"])
         self.assertEqual(login.runtime_config(declaration)["allowed_host_suffixes"], ["dev.example.test"])
+
+    def test_a_short_gate_hostname_is_accepted(self):
+        """The gate hostname is not a secret: a one-letter label is fine (FR-041)."""
+        environment = _environment(_share(hostname="s.dev.example.test"))
+        environment["host"]["aliases"][0]["hostname"] = "s.dev.example.test"
+        validated = _validate(environment)
+        entry = validated["login_service"]["entries"]["share"]
+        self.assertEqual((entry["mode"], entry["hostname"]), ("site_gate", "s.dev.example.test"))
 
     def test_defaults_are_not_private_and_not_agent_minted(self):
         block = _share()
@@ -314,12 +323,14 @@ class CommandTests(unittest.TestCase):
             self.assertNotIn(CANARY, sent or "")
 
     def test_agent_mint_returns_the_link_once(self):
-        result = self.run_create(path="/designs/home/", ttl="3d", uses=2)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = self.run_create(path="/designs/home/", ttl="3d", uses=2)
         self.assertTrue(result["ok"])
-        self.assertRegex(result["link"], rf"^https://{re.escape(GATE)}/s/l-[0-9a-f]{{32}}#{CANARY}$")
-        self.assertEqual(result["link"].count(CANARY), 1)
+        self.assertEqual(result["link"], f"https://{GATE}/s/#{CANARY}")
+        self.assertEqual(result["link_id"], "l-" + hashlib.sha256(CANARY.encode()).hexdigest()[:12])
         rest = {key: value for key, value in result.items() if key != "link"}
-        self.assert_no_leak(json.dumps(rest))
+        self.assert_no_leak(json.dumps(rest), stdout.getvalue(), stderr.getvalue())
         self.assertEqual((result["scope"], result["uses"], result["kind"]), ("/designs/home/", 2, "site"))
         self.assertNotIn("designs", result["link"])
         payload = json.loads(next(item for item in self.inputs if item))
@@ -425,6 +436,35 @@ class CommandTests(unittest.TestCase):
                          ("host_share_create", "host_share_list", "host_share_revoke",
                           "host_front_door_refresh"))
 
+    def test_short_link_helpers(self):
+        token = share.new_token()
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{22}$")
+        self.assertEqual(share.share_url("s.dev.example.test", token), f"https://s.dev.example.test/s/#{token}")
+        link_id = share.short_link_id(token)
+        self.assertEqual(link_id, "l-" + hashlib.sha256(token.encode()).hexdigest()[:12])
+        self.assertTrue(share.LINK_ID_RE.fullmatch(link_id))
+        self.assertNotIn(link_id[2:], token)
+        minted = share.mint(share.LinkRequest("share", "site", "/", 3600, None), now=1000, ends_at=10 ** 6)
+        self.assertEqual(minted.link_id, share.short_link_id(minted.token))
+        self.assertEqual(share.link_record(share.LinkRequest("share", "site", "/", 3600, None), minted)["id"],
+                         minted.link_id)
+
+    def test_revoke_takes_short_and_old_form_ids(self):
+        for value, ok in (("l-" + "a" * 12, True), ("l-" + "a" * 32, True), ("s-" + "a" * 32, True),
+                          ("all", True), ("s-" + "a" * 12, False), ("l-" + "a" * 13, False),
+                          ("l-" + "A" * 12, False), ("l-" + "a" * 31, False), ("", False), ("l-", False)):
+            with self.subTest(value=value):
+                self.assertEqual(bool(share.REVOKE_TARGET_RE.fullmatch(value)), ok)
+        with patch.object(host_share, "resolve_target", return_value=self.target), \
+             patch.object(host_share, "revoke_on_gate", return_value={"revoked_links": 1, "revoked_sessions": 0,
+                                                                      "revoked_keys": 0}) as revoked, \
+             patch.object(hosting_cmd, "_with_host_writer_lock",
+                          side_effect=lambda _v, _r, callback: callback({}, lambda _s: None)), \
+             patch.object(share, "audit_path", return_value=self.audit), \
+             patch.object(host_share, "_audit"):
+            host_share.revoke_share("dev", "l-" + "b" * 12, target="mockups/dev")
+        self.assertEqual(revoked.call_args.args[2], "l-" + "b" * 12)
+
     def test_cli_parses_share_verbs(self):
         home = tempfile.mkdtemp(dir=self.directory.name)
         done = run_test_process([sys.executable, str(ROOT / "sb"), "host", "share", "revoke", "nope", "--remote",
@@ -463,9 +503,9 @@ class StackPageTests(unittest.TestCase):
                          [(PRIMARY, "mockups", "internal"), ("hub.dev.example.test", "hub", "internal"),
                           ("wp1.dev.example.test", "wp1", "public")])
         self.assertEqual(page["wordpress"]["url"], f"https://{PRIMARY}/")
-        keyed = stack_page.with_key(page, "l-" + "c" * 32)
-        record = stack_page.gate_record(keyed, "share", "l-" + "c" * 32)
-        self.assertEqual(record["wordpress"]["kid"], "c" * 32)
+        keyed = stack_page.with_key(page, "l-" + "c" * 12)
+        record = stack_page.gate_record(keyed, "share", "l-" + "c" * 12)
+        self.assertEqual(record["wordpress"]["kid"], "c" * 12)
         self.assertRegex(record["wordpress"]["key"], r"^[0-9a-f]{64}$")
         self.assertNotIn("user", record["wordpress"])
 
@@ -485,7 +525,11 @@ class StackPageTests(unittest.TestCase):
         self.assertNotIn("add_site_option", plugin)
         self.assertIn("X-Robots-Tag: noindex, nofollow, noarchive", plugin)
         self.assertIn(f"$exp > $now + {share.SIGN_IN_SECONDS}", plugin)
+        # A short link's kid is 12 hex; an old-form link's is 32 (LEGACY(081 short links)).
+        self.assertIn("'cccccccccccc'", stack_page.render_key_plugin("c" * 12, "d" * 64, "admin", 4_000_000_000))
         for kid, key, user, until in (("short", "d" * 64, "admin", 4_000_000_000),
+                                       ("c" * 11, "d" * 64, "admin", 4_000_000_000),
+                                       ("c" * 13, "d" * 64, "admin", 4_000_000_000),
                                        ("c" * 32, "d" * 63, "admin", 4_000_000_000),
                                        ("c" * 32, "d" * 64, "ad min", 4_000_000_000),
                                        ("c" * 32, "d" * 64, "admin", 1)):

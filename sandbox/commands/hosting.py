@@ -1047,14 +1047,18 @@ def _caddy_transaction_command(path: str, temporary: str | None, digest: str,
     interleaving between validation and reload while each external command is
     still independently bounded by ``timeout``.
     """
+    # force (spec 081 private closure): validate and reload even when the file already
+    # matches, so a fragment a failed earlier reload left loaded is unloaded too.
+    # Without it the script is byte-identical to the one every other caller runs.
+    force_arg = "force_reload=${6:-0}\n" if force else ""
+    noop_guard = ' && [ "$force_reload" != 1 ]' if force else ""
     script = f"""set -eu
 path=$1
 temporary=$2
 desired_digest=$3
 operation=$4
 remove_fragment=$5
-force_reload=${{6:-0}}
-phase() {{
+{force_arg}phase() {{
   printf '[Sandbox] caddy phase=%s state=%s digest=%s\\n' "$1" "$2" "$desired_digest"
 }}
 finish() {{
@@ -1089,9 +1093,7 @@ if [ "$current_digest" = "$desired_state" ]; then
 else
   phase digest changed
 fi
-# force_reload (spec 081 private closure): validate and reload even when the file
-# already matches, so a fragment removed by a failed earlier reload is unloaded too.
-if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ] && [ "$force_reload" != 1 ]; then
+if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ]{noop_guard}; then
   if [ "$temporary" != - ]; then rm -f "$temporary"; fi
   if [ "$operation" = apply ]; then
     phase noop unchanged
@@ -1203,20 +1205,18 @@ def _read_remote_strict(entry: dict, path: str) -> str | None:
     raise hosting.HostingError(f"route state unknown: {path} could not be read (exit {result.returncode})")
 
 
-def _reconcile_host_caddy(entry: dict, name: str, keep: str | None, *,
+def _reconcile_host_caddy(entry: dict, name: str, keep: str, *,
                           log_path: str | None = None) -> dict:
-    """Install ``keep`` (or remove the fragment) with a forced validate and reload."""
+    """Install ``keep`` with a forced validate and reload (Caddy's reload is synchronous
+    and fails when the new configuration does not load)."""
     path = f"/etc/caddy/conf.d/{name}.caddy"
-    temporary = None
-    digest = "absent"
-    if keep is not None:
-        digest = hashlib.sha256(keep.encode()).hexdigest()
-        temporary = f"/tmp/{name}.close.{digest}.caddy"
-        _write_remote_text(entry, temporary, keep, "0644")
+    digest = hashlib.sha256(keep.encode()).hexdigest()
+    temporary = f"/tmp/{name}.close.{digest}.caddy"
+    _write_remote_text(entry, temporary, keep, "0644")
     _remote_checked(
         entry,
         _caddy_transaction_command(path, temporary, digest, operation="apply",
-                                   remove=keep is None, force=True),
+                                   remove=False, force=True),
         timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
         log_path=log_path,
         log_phase="edge_caddy_private_closure",
@@ -1281,8 +1281,10 @@ class _CaddyHostEdge:
     def read_strict(self, name: str) -> str | None:
         return _read_remote_strict(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
 
-    def reconcile(self, name: str, keep: str | None, current: str | None, *,
-                  log_path: str | None = None) -> dict:
+    def deny_route(self, validated: dict, runtime: dict, name: str) -> str:
+        return hosting.caddyfile({**validated, "route_deny": True}, runtime["loopback_port"])
+
+    def reconcile(self, name: str, keep: str, *, log_path: str | None = None) -> dict:
         return _reconcile_host_caddy(self.entry, name, keep, log_path=log_path)
 
     def certificate(self, proxied: bool, validated: dict, runtime: dict,
@@ -1338,10 +1340,20 @@ class _NginxHostEdge:
     def read_strict(self, name: str) -> str | None:
         return self.nginx.read_route_strict(self.entry, self.route_name(name))
 
-    def reconcile(self, name: str, keep: str | None, current: str | None, *,
-                  log_path: str | None = None) -> dict:
+    def deny_route(self, validated: dict, runtime: dict, name: str) -> str:
+        """Every name 404, on HTTPS too when the target's public certificate exists."""
+        route = self.route_name(name)
+        cert_path = key_path = None
+        if self.nginx.public_certificate_present(self.entry, route, list(runtime["certificate_hostnames"])):
+            cert_path, key_path = self.nginx.public_paths(route)
+        return self.nginx.render_host_conf(
+            {**validated, "route_deny": True}, runtime["loopback_port"], name=route,
+            cert_path=cert_path, key_path=key_path, ipv6=bool(self.entry.get("origin_ipv6")),
+            **(self.features or {}))
+
+    def reconcile(self, name: str, keep: str, *, log_path: str | None = None) -> dict:
         return self.nginx.reconcile_route(
-            self.entry, self.route_name(name), keep, current,
+            self.entry, self.route_name(name), keep,
             log=lambda output: self._log(log_path, output))
 
     def certificate(self, proxied: bool, validated: dict, runtime: dict,
@@ -4600,35 +4612,37 @@ def _restore_edge_fail_closed(edge, name: str, previous: str | None, *, validate
     return "removed"
 
 
-def _close_route_for_private_apply(edge, name: str, previous: str | None, *, validated: dict,
-                                   log_path: str) -> str | None:
-    """Prove the front door serves nothing public before a ``share.private`` apply.
+def _close_route_for_private_apply(edge, name: str, *, validated: dict, runtime: dict,
+                                   log_path: str | None = None) -> dict | None:
+    """Put a deny route in front of a ``share.private`` target before anything changes.
 
-    A public route left in place while the runtime is recreated would put the public
-    name in front of the new application until the private route replaces it. The
-    route is read strictly (a failed read is not "no route"); a marked private route
-    is kept, anything else removed, and either way the front door validates and
-    reloads, so a fragment that a failed earlier reload left loaded is unloaded too.
-    Returns the route to treat as the previous one from here on. Raises, before any
-    runtime change, when that cannot be confirmed.
+    Runs before the deployed checkout is updated: a public route left in place would
+    put the public names in front of the changing application. The deny route (every
+    name, gate included, answers 404) is installed with a forced validate and reload
+    and, on nginx, proven loaded by its own marker; it owns the hostnames, so no
+    default or catch-all server can answer for them. The current route is read
+    strictly first (a failed read is not "no route"). Returns ``{"baseline": route}``,
+    the route a failed apply may put back: the current route when it is a marked
+    private route, otherwise the deny route. Returns None for a public manifest.
+    Raises, before any change but the deny route, when the closure is not confirmed.
     """
     from sandbox.hosting import login_service as login
     if not login.is_private(validated.get("login_service")):
-        return previous
+        return None
     try:
         current = edge.read_strict(name)
-        keep = current if hosting.is_marked_private_route(current) else None
-        edge.reconcile(name, keep, current, log_path=log_path)
+        deny = edge.deny_route(validated, runtime, name)
+        edge.reconcile(name, deny, log_path=log_path)
         installed = edge.read_strict(name)
     except Exception as exc:
         raise hosting.HostingError(
-            f"private_route_closure_failed: the front door route could not be closed before "
-            f"the private apply; nothing was changed on the runtime: {exc}") from exc
-    if installed != keep:
+            f"private_route_closure_failed: the deny route could not be confirmed before "
+            f"the private apply; the deployment was not changed: {exc}") from exc
+    if installed != deny:
         raise hosting.HostingError(
             "private_route_closure_failed: the front door route changed during closure; "
-            "nothing was changed on the runtime")
-    return keep
+            "the deployment was not changed")
+    return {"baseline": current if hosting.is_marked_private_route(current) else deny}
 
 
 def _refuse_proxied_records_for_private(client, validated: dict, runtime: dict) -> None:
@@ -5117,6 +5131,23 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "refusing before target reset, observation, Compose, or initializer mutation"
         )
     client = cloudflare.Client()
+    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    edge = _host_edge(entry)
+    edge.preflight(validated, caddy_name)
+    try:
+        # Spec 081: before the deployed checkout changes, a private target's names are
+        # DNS-only and answer 404 behind a confirmed deny route.
+        _refuse_proxied_records_for_private(client, validated, runtime)
+        private_closure = _close_route_for_private_apply(
+            edge, caddy_name, validated=validated, runtime=runtime)
+    except Exception:
+        try:
+            _release_host_apply_reservation(entry, reservation)
+        except Exception as cleanup_error:
+            raise hosting.HostingError(
+                f"private closure refused; rollback-space cleanup failed: {cleanup_error}"
+            ) from cleanup_error
+        raise
     remote.update_target_to(
         entry, target, sha,
         project_root=None if require_clean else validated["project_root"],
@@ -5151,10 +5182,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 if secret:
                     safe = safe.replace(secret, "[REDACTED]")
             progress(safe)
-    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
-    edge = _host_edge(entry)
-    edge.preflight(validated, caddy_name)
-    previous_caddy = edge.read_previous(caddy_name)
+    previous_caddy = (private_closure["baseline"] if private_closure is not None
+                      else edge.read_previous(caddy_name))
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
     edge_cache_receipt = None
@@ -5192,7 +5221,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             raise hosting.HostingError("; ".join(failures))
 
     def apply() -> None:
-        nonlocal reservation, edge_cache_receipt, previous_caddy
+        nonlocal reservation, edge_cache_receipt
         if stream_progress is not None:
             stream_progress(f"source reset to {sha}")
             stream_progress(f"apply log: {apply_log}")
@@ -5261,10 +5290,6 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 reason["evidence_error"] = remote.redact_text(
                     str(evidence_error))[:500]
             raise HostRuntimeApplyRefused(reason)
-        # Spec 081: a private manifest never runs behind the previous public route.
-        _refuse_proxied_records_for_private(client, validated, runtime)
-        previous_caddy = _close_route_for_private_apply(
-            edge, caddy_name, previous_caddy, validated=validated, log_path=apply_log)
         local_image_evidence = None
         if local_images_digest is not None:
             local_image_evidence = _verify_receipt_bound_local_images(

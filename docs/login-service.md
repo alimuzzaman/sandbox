@@ -226,20 +226,26 @@ the route marker that apply checks.
   names (or the shared coverage wildcard). Make them DNS-only and purge the Cloudflare
   cache first, so no cached page outlives the switch and a DNS rollback never turns
   proxying back on.
-- **A private apply closes the public name first.** Before it touches the runtime, an
-  apply of a private manifest reads the front-door route (a failed read stops the
-  apply), keeps it only if it is one Sandbox rendered private and nobody changed since
-  (its last line is `# sandbox-private-route v1 <sha256 of the text above>`), removes it
-  otherwise, and validates and reloads the front door either way, so the running
-  configuration matches the disk. nginx also waits until the removed route's marker
-  stops answering. If any of that cannot be confirmed, the apply stops before the
-  runtime changes. The first private apply over a route without the mark (including
-  one rendered private before the mark existed) therefore leaves the hostnames
-  unrouted, the gate included, until the new route is live.
+- **A private apply closes the public name first.** Before the deployed checkout
+  changes, an apply of a private manifest reads the front-door route (a failed read
+  stops the apply) and installs a deny route: every name, the gate's included, answers
+  404. The deny route is installed with a forced validate and reload and, on nginx,
+  proven loaded by its own marker. It owns the hostnames, so no default or catch-all
+  server answers for them. If that cannot be confirmed, the apply stops before the
+  checkout changes. Routes Sandbox renders for a private manifest end with
+  `# sandbox-private-route v1 <sha256 of the text above>`. The gate is therefore down
+  from the closure until the new route is live, and an apply that is refused or fails
+  before its route is installed leaves the deny route, or the previous route when it
+  carries that mark.
 - **A failed apply fails closed.** The apply recreates the containers before it installs
   the new route, and a failure does not roll them back. For a private manifest a private
-  route the apply already installed stays, a marked private previous route goes back,
-  and anything else is removed. Run the apply again once the cause is fixed.
+  route the apply already installed stays, a marked previous route goes back, and
+  otherwise the deny route stays. Run the apply again once the cause is fixed.
+- Limits: on nginx, the deny route covers HTTPS only once the target's public
+  certificate exists; on the very first apply HTTPS for those names is whatever the
+  server answered before. Image activation checks privacy without the route tag.
+  Applies of the same target from two controllers are not serialized against each
+  other (true of every hosted apply); run one controller per target.
 - With an `autologin.login_service` block, `share` carries only `hostname`, `private`,
   `agent_mint` and `stack_sign_in`, and uses that block's fields. `share` is then a
   reserved entry name.

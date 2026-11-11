@@ -1122,6 +1122,10 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
     served = [r["hostname"] for r in validated["routes"] if r["mode"] == "serve"]
     app_hosts = [host for host in served if host not in gate]
     gate_hosts = [host for host in served if host in gate]
+    # Spec 081 private closure: a deny route answers 404 on every name, the gate's too.
+    deny = bool(validated.get("route_deny"))
+    if deny and not private:
+        raise HostingError("route_deny renders only for a share.private target")
     robots = _ROBOTS_DENY_BLOCK if validated.get("robots") == "deny" else ""
     noindex = _NOINDEX_HEADER_BLOCK if validated.get("indexing", "noindex") != "public" else ""
     route_tag = route_tag_lines(validated)
@@ -1212,7 +1216,8 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
         blocks.append(site(app_hosts, "", None) if private else site(app_hosts, basic_for(port), port))
     if gate_hosts:
         gate_port = login_service.gate_loopback_port(port)
-        blocks.append(site(gate_hosts, basic_for(gate_port), gate_port))
+        blocks.append(site(gate_hosts, "", None) if deny
+                      else site(gate_hosts, basic_for(gate_port), gate_port))
     for route in validated["routes"]:
         if route["mode"] == "redirect":
             # share.private: a redirect alias would announce the primary, so it answers 404 too.

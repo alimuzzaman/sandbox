@@ -342,7 +342,12 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
     if cert_path and app_served:
         out += [""] + served_block(app_served, None if private else port, bool(auth))
     if cert_path and gate_served:
-        out += [""] + served_block(gate_served, login_service.gate_loopback_port(port), bool(auth))
+        # Spec 081 private closure: a deny route answers 404 on the gate hostnames too.
+        deny = bool(validated.get("route_deny"))
+        if deny and not private:
+            raise ValueError("route_deny renders only for a share.private target")
+        out += [""] + served_block(gate_served, None if deny else login_service.gate_loopback_port(port),
+                                   bool(auth))
     if cert_path:
         for route in redirects:
             out += [""] + tls_head([route["hostname"]]) + [
@@ -690,8 +695,13 @@ def _ensure_edge_dirs_command() -> str:
             f"$SUDO install -d -o root -g root -m 0755 /var/lib/sandbox-edge {ACME_ROOT}")
 
 
-def transaction_script() -> str:
+def transaction_script(force: bool = False) -> str:
+    """The locked nginx transaction. ``force`` (spec 081 private closure) validates,
+    reloads and probes the marker even when the file already matches; without it the
+    script is byte-identical to the one every other caller has always run."""
     t = PHASE_TIMEOUT_SECONDS
+    noop_guard = ' && [ "$force" != 1 ]' if force else ""
+    force_arg = "force=${8:-0}\n" if force else ""
     return f"""set -eu
 path=$1
 staged=$2
@@ -700,9 +710,7 @@ operation=$4
 remove_route=$5
 probe_host=$6
 marker=$7
-force=${{8:-0}}
-gone=${{9:--}}
-phase() {{
+{force_arg}phase() {{
   printf '[Sandbox] nginx phase=%s state=%s digest=%s\\n' "$1" "$2" "$desired"
 }}
 backup=$(mktemp {STAGING_DIR}/rollback.XXXXXX)
@@ -717,9 +725,7 @@ restore_local() {{
   if [ "$had_previous" = 1 ]; then install -o root -g root -m 0600 "$backup" "$path"; else rm -f "$path"; fi
 }}
 if [ "$remove_route" = 1 ]; then want=absent; else want=$desired; fi
-# force: validate and reload even when the file already matches (spec 081 private
-# closure), so the running configuration is proven to match the disk.
-if [ "$current" = "$want" ] && [ "$force" != 1 ]; then
+if [ "$current" = "$want" ]{noop_guard}; then
   rm -f "$backup"
   if [ "$staged" != - ]; then rm -f "$staged"; fi
   phase digest unchanged
@@ -770,22 +776,6 @@ if [ "$remove_route" = 0 ] && [ "$probe_host" != - ]; then
     exit 73
   fi
 fi
-if [ "$remove_route" = 1 ] && [ "$probe_host" != - ] && [ "$gone" != - ]; then
-  # The removed route must stop answering; never put it back from here.
-  i=0
-  got=$gone
-  while [ $i -lt 40 ]; do
-    got=$(curl -s --max-time 2 --resolve "$probe_host:80:127.0.0.1" "http://$probe_host{MARKER_PATH}" 2>/dev/null || true)
-    if [ "$got" != "$gone" ]; then break; fi
-    i=$((i + 1))
-    sleep 0.25
-  done
-  if [ "$got" = "$gone" ]; then
-    rm -f "$backup"
-    phase observe route_still_loaded
-    exit 74
-  fi
-fi
 rm -f "$backup"
 phase observe active
 if [ "$operation" = apply ]; then phase complete changed; else phase rollback rollback_complete; fi
@@ -794,22 +784,20 @@ if [ "$operation" = apply ]; then phase complete changed; else phase rollback ro
 
 def transaction_command(path: str, staged: str | None, digest: str, *, operation: str,
                         remove: bool, probe_host: str | None = None,
-                        marker: str | None = None, force: bool = False,
-                        gone_marker: str | None = None) -> str:
+                        marker: str | None = None, force: bool = False) -> str:
     return (
         "set -eu; " + _SUDO +
         "$SUDO install -d -m 0755 /run/lock; "
         f"$SUDO flock -w {LOCK_WAIT_SECONDS} {shlex.quote(LOCK_PATH)} "
-        f"sh -c {shlex.quote(transaction_script())} sandbox-nginx "
+        f"sh -c {shlex.quote(transaction_script(force))} sandbox-nginx "
         f"{shlex.quote(path)} {shlex.quote(staged or '-')} {shlex.quote(digest)} "
         f"{shlex.quote(operation)} {'1' if remove else '0'} "
         f"{shlex.quote(probe_host or '-')} {shlex.quote(marker or '-')}"
-        + (f" 1 {shlex.quote(gone_marker or '-')}" if force else "")
+        + (" 1" if force else "")
     )
 
 
-_EXIT_REASONS = {70: "validate", 71: "reload", 72: "observe", 73: "route_not_loaded",
-                 74: "route_still_loaded"}
+_EXIT_REASONS = {70: "validate", 71: "reload", 72: "observe", 73: "route_not_loaded"}
 
 
 def _stage(entry: dict, name: str, content: str, digest: str) -> str:
@@ -841,26 +829,24 @@ def read_route_strict(entry: dict, name: str) -> str | None:
                          f"nginx route {name} could not be read (exit {result.returncode})")
 
 
-def reconcile_route(entry: dict, name: str, keep: str | None, current: str | None, *,
+def reconcile_route(entry: dict, name: str, keep: str, *,
                     log: Callable[[str], None] | None = None) -> dict:
-    """Install ``keep`` (or remove the route) with a forced validate and reload.
+    """Install ``keep`` with a forced validate, reload and marker probe.
 
-    Removing proves the old route no longer answers its marker. Spec 081 private
-    closure: run before a private runtime changes.
+    Spec 081 private closure, before a private runtime changes: the route's own
+    marker answering proves this configuration (not an older one, and not a
+    default server) now serves its hostnames.
     """
     path = route_file(name)
-    if keep is None:
-        command = transaction_command(
-            path, None, "absent", operation="apply", remove=True, force=True,
-            probe_host=_probe_host(current) if current else None,
-            gone_marker=route_marker(current) if current else None)
-        digest = "absent"
-    else:
-        digest = hashlib.sha256(keep.encode()).hexdigest()
-        staged = _stage(entry, name, keep, digest)
-        command = transaction_command(path, staged, digest, operation="apply", remove=False,
-                                      force=True, probe_host=_probe_host(keep),
-                                      marker=route_marker(keep))
+    marker = route_marker(keep)
+    probe_host = _probe_host(keep)
+    if not marker or not probe_host:
+        raise FrontDoorError("front_door_route_invalid",
+                             f"nginx route {name} has no marker to prove it is loaded")
+    digest = hashlib.sha256(keep.encode()).hexdigest()
+    staged = _stage(entry, name, keep, digest)
+    command = transaction_command(path, staged, digest, operation="apply", remove=False,
+                                  force=True, probe_host=probe_host, marker=marker)
     result = _ssh(entry, command, timeout=TRANSACTION_TIMEOUT_SECONDS)
     if log:
         log(result.stdout or "")

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import json
+import re
+import secrets
 import time
 from typing import Callable
 
@@ -16,7 +19,7 @@ from sandbox.jobs.credential_operations import (
     CredentialOperationRepository, OperationEvidence, OperationState,
 )
 from .authentication import AuthenticatedControlReceipt, require_authenticated
-from .models import CredentialIntent
+from .models import CredentialIntent, parse_json_body, parse_operation
 
 
 class AdmissionError(ValueError):
@@ -178,5 +181,59 @@ def require_committed(receipt, *, intent_digest: str) -> OperationEvidence:
     return receipt._issuer._require(receipt, intent_digest)
 
 
+def prepare_target(ledger: CredentialOperationRepository, actor: AuthenticatedControlReceipt, *,
+                   body: bytes, project_identity: str, project: str):
+    """Server metadata allocation after genuine gate/source recipe resolution.
+
+    The trusted registered recipe supplies project_identity/project. HTTP input
+    supplies ``name`` in place of target_ref and cannot supply copy/incarnation.
+    This returns nonsecret retained DATA, not a receipt or host/lifetime claim.
+    The original scope retains its first generated IDs even after a lost reply.
+    """
+    require_authenticated(actor)
+    if type(ledger) is not CredentialOperationRepository:
+        raise AdmissionError("credential_target_preparation_invalid")
+    raw = parse_json_body(body)
+    if ("target_ref" in raw or "name" not in raw or raw.get("action") != "stack_up"
+            or not isinstance(raw["name"], str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", raw["name"]) is None):
+        raise AdmissionError("credential_target_preparation_invalid")
+    name = raw.pop("name")
+    raw["target_ref"] = {"target_id": name, "copy_id": secrets.token_hex(4),
+                         "incarnation": "i-" + secrets.token_hex(16)}
+    intent = parse_operation(json.dumps(raw, separators=(",", ":"), allow_nan=False).encode(), actor)
+    return ledger.prepare_target(intent, project_identity=project_identity, project=project)
+
+
+def require_target_preparation(receipt, *, name: str, project: str, environment: str,
+                               copy_id: str, incarnation: str, source_commit: str):
+    """Return genuine retained preparation evidence under a live receipt.
+
+    The claim adapter still independently requires its original-job and held
+    canonical writer authority. No caller mapping, IDs or evidence record can
+    substitute for the private receipt accepted by require_committed.
+    """
+    if type(receipt) is not CommittedCredentialReceipt:
+        raise AdmissionError()
+    intent = getattr(receipt, "_intent", None)
+    if type(intent) is not CredentialIntent:
+        raise AdmissionError()
+    row = require_committed(receipt, intent_digest=intent.intent_digest())
+    evidence = receipt._issuer._ledger.target_preparation(row.scope)
+    if (evidence is None or intent.action != "stack_up"
+            or evidence.scope != row.scope or evidence.operation_id != row.operation_id
+            or evidence.project_identity != row.project_identity
+            or evidence.intent_digest != row.intent_digest
+            or evidence.canonical_intent != row.canonical_intent
+            or (evidence.name, evidence.project, evidence.environment, evidence.copy_id,
+                evidence.incarnation, evidence.source_commit) !=
+               (name, project, environment, copy_id, incarnation, source_commit)
+            or (name, copy_id, incarnation) !=
+               (intent.target_ref.target_id, intent.target_ref.copy_id, intent.target_ref.incarnation)
+            or environment != intent.environment or source_commit != intent.source_commit):
+        raise AdmissionError("credential_target_preparation_invalid")
+    return evidence
+
+
 __all__ = ["AdmissionError", "CommittedCredentialReceipt", "CredentialAdmissionService",
-           "require_committed"]
+           "require_committed", "prepare_target", "require_target_preparation"]

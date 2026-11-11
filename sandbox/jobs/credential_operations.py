@@ -197,11 +197,21 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
     )''')
     connection.execute('INSERT INTO schema_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',
                        (_VERSION_KEY, str(EXTENSION_VERSION)))
+    from .credential_preparations import initialize_schema as initialize_preparations
+    initialize_preparations(connection)
 
 
 class CredentialOperationRepository:
     def __init__(self, jobs: JobRepository):
         self._jobs = jobs
+
+    def prepare_target(self, intent: CredentialIntent, *, project_identity: str, project: str):
+        from .credential_preparations import prepare
+        return prepare(self, intent, project_identity=project_identity, project=project)
+
+    def target_preparation(self, scope: RequestScope):
+        from .credential_preparations import lookup
+        return lookup(self, scope)
 
     @contextmanager
     def _transaction(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -327,6 +337,8 @@ class CredentialOperationRepository:
                         'SELECT 1 FROM credential_effects WHERE operation_id=? LIMIT 1',
                         (previous['operation_id'],)).fetchone() is not None:
                     raise LedgerError('credential_retry_invalid')
+            from .credential_preparations import require_for_reservation, bind_operation
+            require_for_reservation(connection, intent, project_identity=project_identity)
             operation_id = uuid4().hex
             connection.execute('''INSERT INTO credential_operations
                 (operation_id,installation_id,incarnation,principal_id,project_identity,project_ref,
@@ -335,6 +347,7 @@ class CredentialOperationRepository:
                 (operation_id, scope.installation_id, scope.incarnation, scope.principal_id,
                  project_identity, scope.project_ref, scope.request_id, canonical, digest,
                  effective_deadline, intent.retry_of, now, now))
+            bind_operation(connection, intent, operation_id)
             return self._evidence(self._require(connection, scope, operation_id))
 
     @staticmethod

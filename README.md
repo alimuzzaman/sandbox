@@ -1596,6 +1596,15 @@ intent digest alone cannot approve another hostname. That production resolver,
 application runtime-secret consumer, public dispatcher and factory remain missing.
 No provider request was executed while implementing this source.
 
+Creation now has an internal retained
+[target-preparation port](specs/086-shared-server-secret-use/contracts/target-preparation-v1.md)
+in the jobs owner. It allocates only nonsecret copy/incarnation metadata under
+the original authenticated request; it claims no host resources. Creation
+reservation freezes that exact metadata into its canonical intent. A host claim
+must later present the genuine committed credential receipt and match the
+retained preparation. No read initializes an identity, and a dictionary or
+`trusted` flag cannot authorize the claim. The production caller remains pending.
+
 Broker delivery must remain confined to the reviewed intended server consumer.
 Explicit minimal recipient environments or approved protected runtime-secret
 facilities are allowed; inherited owner environments and arbitrary staging or

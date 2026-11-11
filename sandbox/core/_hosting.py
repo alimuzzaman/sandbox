@@ -37,6 +37,7 @@ class HostingRefusal(HostingError):
 # the RecoveryRepository owner/CAS boundary.  Consumers validate membership
 # before opening state or entering an effect.  Unknown/bypass names fail closed.
 TARGET_MUTATION_CAPABILITIES = {
+    "shared_credentials": "hosting.shared-credentials.v1",
     "apply": "hosting.apply.v1",
     "sync": "hosting.sync.v1",
     "login-url": "hosting.login-url.v1",

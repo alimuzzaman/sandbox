@@ -20,6 +20,12 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
+from weakref import WeakKeyDictionary
+
+from sandbox.hosting.shared_credentials.authentication import (
+    AuthenticatedControlReceipt, _ControlReceiptIssuer,
+)
 
 _TAILNET_RANGES = (ipaddress.ip_network("100.64.0.0/10"),
                    ipaddress.ip_network("fd7a:115c:a1e0::/48"))
@@ -161,9 +167,64 @@ class MemberAccess:
 class ControlGate:
     """Admit the bearer token, or a tailnet node Tailscale resolves unless members are turned off."""
 
-    def __init__(self, token: str, members: MemberAccess | None, whois: Whois | None):
+    def __init__(self, token: str, members: MemberAccess | None, whois: Whois | None,
+                 *, service_principal: str = "sandbox-control-service"):
+        if (not isinstance(service_principal, str) or not service_principal
+                or not all(c.isprintable() for c in service_principal)
+                or len(service_principal.encode("utf-8")) > 128):
+            raise ValueError("invalid control service principal")
         self.expected = f"Bearer {token}".encode()
         self.members, self.whois = members, whois
+        # Trusted server configuration, independent of bearer content and clients.
+        self._service_principal = service_principal
+        self._policy_epoch = uuid4().hex
+        self._receipt_issuer = _ControlReceiptIssuer(self._receipt_current)
+        self._receipt_peers = WeakKeyDictionary()
+        self._receipt_lock = threading.Lock()
+
+    async def admit_request(self, authorization, peer) -> tuple[dict | None, AuthenticatedControlReceipt | None]:
+        """Issue provenance only after this gate's actual admission decision.
+
+        Existing callers retain the dictionary-returning admit API. Attribution
+        logging is independent and cannot mint an authentication receipt.
+        """
+        admission = await self.admit(authorization, peer)
+        if admission is None:
+            return None, None
+        if admission["via"] == "token":
+            return admission, self._receipt_issuer._issue(
+                via="token", policy_epoch=self._policy_epoch,
+                service_principal=self._service_principal,
+            )
+        # Existing admission allows a resolved login without a node. Preserve
+        # that decision for existing routes, but it cannot authorize credentials.
+        if not admission.get("login") or not admission.get("node"):
+            return admission, None
+        receipt = self._receipt_issuer._issue(
+            via="tailnet", policy_epoch=self._policy_epoch,
+            login=admission["login"], node=admission["node"],
+        )
+        # Peer is server-observed, retained privately for current whois checks.
+        with self._receipt_lock:
+            self._receipt_peers[receipt] = peer
+        return admission, receipt
+
+    def _receipt_current(self, receipt: AuthenticatedControlReceipt) -> bool:
+        """Synchronous service-worker check; no event loop bridging or bearer copy."""
+        if (receipt._issuer is not self._receipt_issuer
+                or receipt.policy_epoch != self._policy_epoch):
+            return False
+        if receipt.via == "token":
+            return receipt.service_principal == self._service_principal
+        if self.members is None or self.whois is None or not self.members.enabled():
+            return False
+        with self._receipt_lock:
+            peer = self._receipt_peers.get(receipt)
+        if peer is None:
+            return False
+        identity = self.whois.lookup(peer)
+        return (identity.get("reason") is None and identity.get("login") == receipt.login
+                and identity.get("node") == receipt.node)
 
     async def admit(self, authorization, peer) -> dict | None:
         supplied = (authorization or "").encode("utf-8", "surrogateescape")

@@ -1,0 +1,34 @@
+# Future owner/broker composition contract
+
+Status: PROPOSED/UNAVAILABLE. This document is not an accepted wire schema, runtime API, grant, dispatch capability or release approval. Sibling dependency: `specs/085-hosted-site-baselines/contracts/owner-dispatch.md` in the separately owned miu-site-backend worktree, read-only. Root reservation on 2026-11-11 assigns this feature 086 and retains 085 for that sibling. Numbering is resolved; the sibling contract still requires joint acceptance before integration.
+
+## Ownership and rights
+
+Secret-use owns authenticated ControlGate actor propagation, registered broker references and credential grants. The sibling owns lifecycle dispatch, canonical target leases/live fences and exact committed source publication with source-writer authority. Genuine retained admission is the joint handoff prerequisite. A typed operation is server-created from that committed receipt plus canonical installation binding, never constructed from client fields or an owner-context observation.
+
+Every currently admitted operator retains full existing owner rights including approved sudo consumers. Profile restrictions constrain credential purpose/delivery, not membership. Do not add laptop grants or restrictive roles. Existing generic secret-run escalation refusals stay intact; the eventual owner-approved privileged consumer needs its own accepted bounded hosting integration.
+
+## Required ordering
+
+1. Existing ControlGate authenticates/adopts the actor. Resolve selected installed canonical installation, owner context and runtime revision. No client actor replacement, uid/home/executable/socket/registration or shell input.
+2. Resolve nonsecret project/source/profile references and exact revisions/mappings. Bind immutable installation, actor, runtime, target/copy/incarnation, exact committed source identity/artifact digest, source/profile revisions, every source key, destination and intended consumer, request id, deadline and any separate generation intent. Value-derived hashes/metadata are forbidden.
+3. Atomically lookup/reserve scoped original request identity against complete immutable intent. Reservation is not committed admission. Same id/same intent returns retained state; changed intent refuses. Unknown outcomes require original lookup before replay and cannot authorize a new id.
+4. Broker preflights all required provider names and consumer bindings before staging, lifetime/resource claims, generation or provider/runtime effects. Missing/unavailable required keys persist terminal no-effect refusal with bounded key names/status only. No characters, lengths or fingerprints. A repaired source cannot reopen that identity. Only explicit new-id retry linked to a KNOWN terminal refusal may review fresh intent; unknown refusal persistence first requires lookup.
+5. Successful required-key preflight can proceed to genuine retained committed admission. Create typed admitted operation only from the committed receipt/current installation. Neither context schema, reservation nor presence alone grants effects.
+6. Consume only with current grant, source/profile revisions, exact mappings, intended consumer, deadline and cancellation. Broker hands values only to the intended trusted server consumer through the accepted confidential path. No provider value enters transport, argv, logs, polls, artifacts, caches, files or retained storage. No inherited owner environment, dummy key, local fallback or alternate host. Unsupported persistent delivery refuses.
+7. Each subsequent effect checks deadline, cancellation and applicable current host/target fence. Source staging/publication requires the sibling source-writer authority. Target/source change never silently rebinds intent. Cancellation/expiry replay remains inspection-only.
+8. Explicit generation is a separate postadmission effect with bound generation authority and confidential stack delivery. It never satisfies required provider mappings or overwrites their source. Provider rejection is a bounded provider failure, distinct from inventory absence or missing generated values.
+
+No successful wire envelope, receipt schema or grant serializer is specified here. Agree versioned closed schemas jointly before introducing transport. Reuse accepted durable storage/lookup mechanisms once their atomicity and retention are demonstrated; do not create a duplicate generic ledger in this feature. Status exposes only bounded nonsecret identifiers/names/status, never captured secret-bearing output.
+
+## Enablement evidence required
+
+- A supported joined-controller readiness/adoption path must establish and validate the installed service ownership marker, runtime revision and authenticated canonical target identity. Supplied source diagnosis of e46777b reports that `remote join` omits the service metadata required by `HostMemoryRemote`, leading to `recovery_target_identity_unavailable`. This is a concrete unresolved integration prerequisite, not proof that tokenless tailnet admission failed. Do not substitute manual registration edits, the owner's bearer, or machine/uid/home context for installation authority. Feedback `5304bf1fd55d8772ae5e70d875ff6dbb` tracks the reported gap; no live registration or reserved attempt was inspected here. Preserve original uncertain request identities and establish effects through supported inspection before any separately authorized retry. This source slice adds no adoption command or runtime repair.
+- Accepted installed authenticated owner-local dispatch/admission, matching client/controller revision and versioned capability agreement, with canonical installation identity beyond machine/uid/home.
+- Real ControlGate proof retained as initiating actor through committed admission, operation and broker grants; equal operator rights and approved sudo consumer behavior demonstrated.
+- Exact immutable binding plus source writer/target lease and live-fence wiring across complete lifecycle/gates/drivers, including preflight before effects and every consumption/effect lifetime check.
+- Frozen no-effect refusal, same-id replay/changed-intent conflict, original lookup after uncertainty, concurrent actor isolation, cancellation/expiry inspection-only behavior, retained committed admission proof.
+- No provider-value leaks across success/failure/timeout/status/storage, clean-laptop server use, no ambient/dummy/fallback path; separate generated credential delivery compatibility.
+- Matching docs, release/revision evidence, focused meaningful checks and independently reviewed results, plus separately authorized installed/runtime acceptance under constitution IV.
+
+Absence of any item keeps execution disabled. No private installation migration, permission change, self-remote/self-SSH, `--here`, source-copy workaround or human-readable gate/link file can supply missing authority.

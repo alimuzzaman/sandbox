@@ -9,12 +9,15 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, TYPE_CHECKING
 
 from sandbox.services.redaction import require_safe_argv
 
 from ._trace_snapshot import SnapshotBudget, SnapshotMissing, read_connection
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
+
+if TYPE_CHECKING:
+    from .credential_operations import CredentialOperationRepository
 
 
 SCHEMA_VERSION = 7
@@ -649,6 +652,19 @@ class JobRepository:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
             )
+            # Independent additive extension: existing job schema/projections stay
+            # at version 7. Publish the extension version in this same transaction.
+            from .credential_operations import initialize_schema
+            initialize_schema(connection)
+
+    def credential_operations(self) -> CredentialOperationRepository:
+        """Return the jobs-owned nonsecret ledger; this is not admission authority.
+
+        Repository initialization installs the extension. Lookup on the returned
+        owner only reads retained rows and never initializes installation identity.
+        """
+        from .credential_operations import CredentialOperationRepository
+        return CredentialOperationRepository(self)
 
     def schema_version(self) -> int:
         row = self.connection.execute(

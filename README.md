@@ -1586,6 +1586,16 @@ The fixed consumer registration must still be the same bound registration at
 delivery. Revocation during resolution or consumption leaves an unknown step;
 an earlier successful check or consumer return cannot acknowledge success.
 
+The fixed consumer manifest now contains one source-owned Cloudflare address
+mutation consumer. It accepts a validated zone/record/address action, an explicit
+nonempty broker token, and performs one fixed API request per effect checkpoint.
+It returns no provider response or exception text and uses no ambient token
+fallback. Its private registration additionally requires the registered resolver
+to validate the exact action against the committed artifact/target; a matching
+intent digest alone cannot approve another hostname. That production resolver,
+application runtime-secret consumer, public dispatcher and factory remain missing.
+No provider request was executed while implementing this source.
+
 Broker delivery must remain confined to the reviewed intended server consumer.
 Explicit minimal recipient environments or approved protected runtime-secret
 facilities are allowed; inherited owner environments and arbitrary staging or

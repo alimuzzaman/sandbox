@@ -57,7 +57,8 @@ class CredentialAdmissionService:
     """
 
     def __init__(self, ledger: CredentialOperationRepository, broker, *,
-                 revalidate: Callable[[CredentialIntent], None]):
+                 revalidate: Callable[[CredentialIntent], None],
+                 validate_consumer: Callable[[CredentialIntent, object], None] | None = None):
         from .broker import RegisteredCredentialBroker
         if (type(ledger) is not CredentialOperationRepository
                 or type(broker) is not RegisteredCredentialBroker or not callable(revalidate)):
@@ -65,6 +66,28 @@ class CredentialAdmissionService:
         self._ledger = ledger
         self._broker = broker
         self._revalidate = revalidate
+        if validate_consumer is not None and not callable(validate_consumer):
+            raise AdmissionError()
+        self._validate_consumer = validate_consumer
+
+    def _check_consumer(self, receipt, intent, consumer):
+        """Registered resolver verifies nonsecret action against exact artifact.
+
+        Parsed DNS fields plus an intent digest alone do not prove that action
+        belongs to the registered target. Missing production resolver refuses.
+        This trusted composition callback is never selected by wire/config argv.
+        """
+        self._require(receipt, intent.intent_digest())
+        if self._validate_consumer is None:
+            raise AdmissionError("credential_consumer_binding_unavailable")
+        failed = False
+        try:
+            self._validate_consumer(intent, consumer)
+        except Exception:
+            failed = True
+        if failed:
+            raise AdmissionError("credential_consumer_binding_changed") from None
+        self._require(receipt, intent.intent_digest())
 
     def _current(self, actor, intent):
         if (type(intent) is not CredentialIntent

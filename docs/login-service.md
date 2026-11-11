@@ -374,7 +374,7 @@ controller instead.
 
 The panel has no login, so the share route (`POST /api/hosting/share`) refuses any
 request that does not carry an Origin equal to its Host, a JSON body and the panel's
-own `X-Sandbox-Panel` header. Over plain `http://<tailnet IP>` the browser blocks the
+own `X-Sandbox-Panel` header, and no page may frame the panel. Over plain `http://<tailnet IP>` the browser blocks the
 clipboard API; the dialog selects the link for a manual copy instead. Contract:
 `specs/081-hosted-share-links/contracts/panel-http.md`.
 

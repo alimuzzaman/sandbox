@@ -182,6 +182,29 @@ class ShareRouteTest(unittest.TestCase):
                 self.assertEqual((payload["ok"], payload["code"]), (False, "panel_request_invalid"))
         self.assert_no_share_call()
 
+    def test_deeply_nested_json_is_a_bad_body(self):
+        body = b"[" * 2000 + b"]" * 2000
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, cache, payload, _ = self.post(body)
+        self.assertEqual((status, cache, payload["code"]), (400, "no-store", "panel_request_invalid"))
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assert_no_share_call()
+
+    def test_no_page_may_frame_the_panel(self):
+        for method, path, body in (("GET", "/hosting", None),
+                                   ("POST", "/api/hosting/share",
+                                    {"action": "list", "remote": "xspeed-dev", "stack": "demo"})):
+            with self.subTest(path):
+                connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+                connection.request(method, path, body=json.dumps(body).encode() if body else None,
+                                   headers=self.headers() if body else {"Host": self.host})
+                response = connection.getresponse()
+                response.read()
+                connection.close()
+                self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
+                self.assertEqual(response.getheader("Content-Security-Policy"), "frame-ancestors 'none'")
+
     # ---- results ----
 
     def test_list_passes_only_contract_fields(self):

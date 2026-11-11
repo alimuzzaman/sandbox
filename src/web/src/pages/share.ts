@@ -17,16 +17,18 @@ const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
 const when = (epoch: number): string => new Date(epoch * 1000).toLocaleString();
 
-let openDialog: HTMLElement | null = null;
+// Open dialogs. A new dialog replaces the others, except one that shows a
+// minted link: that stays until its owner closes it, so a link is never lost.
+const openDialogs = new Set<HTMLElement>();
 
-function closeDialog(): void {
-  openDialog?.remove();
-  openDialog = null;
+function closeDialog(el: HTMLElement): void {
+  el.remove();
+  openDialogs.delete(el);
 }
 
-/** One dialog at a time, on `document.body` below the confirm modal (z-40 < z-50). */
+/** A dialog on `document.body`, below the confirm modal (z-40 < z-50); returns its body. */
 function dialog(title: string): HTMLElement {
-  closeDialog();
+  for (const other of [...openDialogs]) if (!other.dataset.holdsLink) closeDialog(other);
   const el = document.createElement("div");
   el.className = "fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4";
   el.setAttribute("role", "dialog");
@@ -37,11 +39,11 @@ function dialog(title: string): HTMLElement {
     <button type="button" data-close class="${theme.button}">Close</button></div>
     <div data-body class="flex flex-col gap-3 text-[13px] text-neutral-700 dark:text-neutral-200"></div></div>`;
   el.addEventListener("click", (e) => {
-    if (e.target === el || (e.target as HTMLElement).closest("[data-close]")) closeDialog();
+    if (e.target === el || (e.target as HTMLElement).closest("[data-close]")) closeDialog(el);
   });
-  el.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDialog(); });
+  el.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDialog(el); });
   document.body.appendChild(el);
-  openDialog = el;
+  openDialogs.add(el);
   (el.querySelector("[data-close]") as HTMLElement).focus();
   return el.querySelector("[data-body]") as HTMLElement;
 }
@@ -89,6 +91,7 @@ function showLink(body: HTMLElement, result: ShareCreated): void {
       <dt class="${theme.quiet}">Link id</dt><dd><code>${esc(result.link_id)}</code> · revoke it from “Live links”</dd>
       <dt class="${theme.quiet}">Target</dt><dd>${esc(result.target)} · ${esc(result.hostname)}</dd></dl>
     ${notes ? `<ul class="list-disc pl-5 text-[12px] ${theme.quiet}">${notes}</ul>` : ""}`;
+  (body.closest("[role=dialog]") as HTMLElement).dataset.holdsLink = "1";
   // Set as a property, not an attribute, so the link is not in the markup.
   const input = body.querySelector("[data-share-link]") as HTMLInputElement;
   input.value = result.link;
@@ -110,8 +113,9 @@ export async function shareStack(button: HTMLElement): Promise<void> {
   let body = dialog(`Share ${target.stack}`);
   body.innerHTML = `<p class="${theme.quiet}" role="status">Making the link…</p>`;
   const result = await postShare({ action: "create", ...target });
-  // Closed while minting: show the result anyway, so a minted link is never lost unseen.
-  if (!openDialog) body = dialog(`Share ${target.stack}`);
+  // This dialog was closed or replaced while minting: show the result in a new one,
+  // so a minted link is never lost unseen. Another dialog holding a link stays open.
+  if (!body.isConnected) body = dialog(`Share ${target.stack}`);
   if (result.ok) showLink(body, result);
   else refusal(body, result, target.remote, target.stack);
 }

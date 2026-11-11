@@ -415,6 +415,10 @@ def cmd_web(cfg, args) -> None:
             data = body.encode() if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            # No page may frame the panel: a framed panel could be clickjacked into
+            # its mutating actions, such as "Share this stack".
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
             if no_store:
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
@@ -455,7 +459,7 @@ def cmd_web(cfg, args) -> None:
                     "message": "share requests must come from the panel page"}), no_store=True)
             try:
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            except ValueError:
+            except (ValueError, RecursionError):  # deep nesting fits in 4 KiB
                 payload = None
             code, result = _web_share(payload)
             return self._send(code, json.dumps(result), no_store=True)

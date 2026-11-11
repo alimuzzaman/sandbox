@@ -104,6 +104,8 @@
   header, and a cross-site `fetch` that does triggers a CORS preflight the panel never
   answers. Requiring `Origin` (the rest of the panel allows its absence for GETs and
   scripts) stops a script or a page from another loopback origin on the same machine.
+- Framing: every panel response forbids framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`),
+  because a same-origin gate does not stop a framed panel from being clicked through.
 - Alternatives: a CSRF token in the page shell (the shell is inlined at start and
   cached by nothing, but a token adds state for no gain over Origin plus a custom
   header); reusing `_local()` alone (allows a missing Origin and a loopback Origin

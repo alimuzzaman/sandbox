@@ -40,5 +40,11 @@ remote name outside the remote naming rule, or a slug outside `[a-z0-9][a-z0-9-]
 - Anything unexpected: `500 {"ok": false, "code": "share_failed", "message": "the
   share request failed; see the CLI for details"}`, with no detail.
 
+Every panel response also carries `X-Frame-Options: DENY` and
+`Content-Security-Policy: frame-ancestors 'none'`, so no page can frame the panel and
+clickjack the share and confirm buttons (Sol review, 2026-11-11). A body that fails to
+parse, including one nested deep enough to exhaust the parser, is `400
+panel_request_invalid`.
+
 The handler writes nothing to stdout, stderr or any file beyond what the share
 functions already do (audit records, which never hold a token).

@@ -71,11 +71,38 @@ class JoinedIdentityTest(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.put.assert_not_called()
 
+    def test_discovery_requires_complete_integer_versioned_envelope(self):
+        malformed = []
+        for field in evidence():
+            value = evidence()
+            value.pop(field)
+            malformed.append(value)
+        malformed.extend(({**evidence(), 'unknown': True},
+                          {**evidence(), 'resource_schema': True},
+                          {**evidence(), 'host_memory_schema': 1.0},
+                          {**evidence(), 'transport': 'ssh'},
+                          {**evidence(), 'result': {}},
+                          {**evidence(), 'service': []}))
+        for observed in malformed:
+            with self.subTest(observed=observed):
+                self.assertNotEqual(self.invoke(observed=observed)[0], 0)
+                self.put.assert_not_called()
+
     def test_refresh_preserves_other_registration_fields(self):
         code, _ = self.invoke(refresh=True, previous={"custom": "keep", "runtime_policy": "strict"})
         self.assertEqual(code, 0)
         self.assertNotIn("custom", self.put.call_args.kwargs)
         self.assertNotIn("ssh", self.put.call_args.kwargs)
+
+    def test_refresh_refuses_malformed_existing_pin_instead_of_repairing_it(self):
+        for pin in (None, {}, {'schema_version': True, 'target_identity': 'c' * 24},
+                    {'schema_version': 1.0, 'target_identity': 'c' * 24},
+                    {'schema_version': 1, 'target_identity': 'bad'},
+                    {'schema_version': 1, 'target_identity': 'c' * 24, 'extra': True}):
+            with self.subTest(pin=pin):
+                code, _ = self.invoke(refresh=True, previous={'control_identity': pin})
+                self.assertNotEqual(code, 0)
+                self.put.assert_not_called()
 
     def test_matching_pins_and_service_metadata_survive_refresh(self):
         previous = {"mcp_service": {"ownership_marker": "a" * 24,

@@ -51,6 +51,9 @@ SITE_SESSION_SCHEMA = "sandbox.share-session.v2"
 STACK_SCHEMA = "sandbox.share-stack.v1"
 # One cookie per gate hostname; it holds up to SHARE_COOKIE_SESSIONS session secrets.
 SHARE_COOKIE = "__Host-sandbox_share"
+# Every gate answer carries it, so apply can tell the gate's 404 from a front
+# door's (sandbox.commands.hosting._GATE_HEADER names the same header).
+GATE_HEADER = "X-Sandbox-Gate"
 SHARE_COOKIE_SESSIONS = 8
 SHARE_PREFIX = "/s/"
 STACK_PAGE_PATH = "/__sandbox/stack"
@@ -923,6 +926,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Robots-Tag", ROBOTS_TAG)
+        self.send_header(GATE_HEADER, "1")
         for name, value in headers:
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
@@ -1271,10 +1275,12 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
     def _relay(self, response):
         self.send_response(response.status)
         for name, value in response.getheaders():
-            if name.lower() not in _HOP_BY_HOP and name.lower() not in ("referrer-policy", "x-robots-tag"):
+            if name.lower() not in _HOP_BY_HOP and name.lower() not in (
+                    "referrer-policy", "x-robots-tag", GATE_HEADER.lower()):
                 self.send_header(name, value)
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Robots-Tag", ROBOTS_TAG)
+        self.send_header(GATE_HEADER, "1")
         length = response.getheader("Content-Length")
         if length is not None:
             self.send_header("Content-Length", length)
@@ -1325,10 +1331,12 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
                 return self._fail(502, "upgrade_refused")
             self.send_response(101)
             for name, value in response_headers:
-                if name.lower() not in ("x-robots-tag", "referrer-policy", "server", "date"):
+                if name.lower() not in ("x-robots-tag", "referrer-policy", "server", "date",
+                                        GATE_HEADER.lower()):
                     self.send_header(name, value)
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Robots-Tag", ROBOTS_TAG)
+            self.send_header(GATE_HEADER, "1")
             self.end_headers()
             self.wfile.flush()
             if rest:

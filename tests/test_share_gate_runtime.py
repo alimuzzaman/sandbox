@@ -335,6 +335,8 @@ class NoIndexTests(_Gate):
         for response, _ in answers:
             with self.subTest(status=response.status):
                 self.assertEqual(response.getheader("X-Robots-Tag"), TAG)
+                # Apply verification tells the gate's 404 from a front door's by this.
+                self.assertEqual(response.msg.get_all(runtime.GATE_HEADER), ["1"])
 
     def test_errors_http_server_raises_itself_carry_the_header(self):
         for method in ("TRACE", "PROPFIND"):
@@ -368,6 +370,7 @@ class NoIndexTests(_Gate):
         with patch.object(_Upstream, "do_GET", _robots_allowing_handle):
             response, _ = self.get("/", cookie)
         self.assertEqual(response.msg.get_all("X-Robots-Tag"), [TAG])
+        self.assertEqual(response.msg.get_all(runtime.GATE_HEADER), ["1"])
 
     def test_robots_txt_denies_without_a_session(self):
         response, body = self.request("GET", "/robots.txt")
@@ -379,6 +382,7 @@ def _robots_allowing_handle(self):
     body = b"ok"
     self.send_response(200)
     self.send_header("X-Robots-Tag", "all")
+    self.send_header("X-Sandbox-Gate", "forged")
     self.send_header("Content-Length", str(len(body)))
     self.end_headers()
     self.wfile.write(body)

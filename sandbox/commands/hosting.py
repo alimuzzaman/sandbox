@@ -3758,13 +3758,16 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             except Exception as exc:
                 failures.append(f"DNS restore: {exc}")
         try:
-            edge.restore(caddy_name, previous_caddy, log_path=apply_log)
+            _restore_edge_fail_closed(
+                edge, caddy_name, previous_caddy, validated=validated, app_ports={port},
+                new_edge_live=edge_live["new"], log_path=apply_log)
         except Exception as exc:
             failures.append(f"{'Caddy' if edge.mode == 'caddy' else 'nginx'} restore: {exc}")
         if failures:
             raise hosting.HostingError("; ".join(failures))
 
     result: dict = {}
+    edge_live = {"new": False}
 
     def apply() -> None:
         proxied = edge_intent["proxied"]
@@ -3775,6 +3778,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             proxied, validated, runtime, recorded, client, home, caddy_name)
         content = edge.render(validated, port, cert_path, key_path, secret_values)
         edge.configure(caddy_name, content, previous_caddy, log_path=apply_log)
+        edge_live["new"] = True
         zones: dict[str, dict] = {}
         drift_rule = bool((edge_intent.get("dns_coverage") or {}).get("drift_rule"))
         for wanted in edge_intent["records"]:
@@ -3813,7 +3817,8 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             auth = validated["basic_auth"]
             credentials = (auth["username"], secret_values[auth["password_secret"]])
         kwargs = {"healthcheck_path": edge_intent["healthcheck_path"],
-                  "basic_auth_enabled": edge_intent["basic_auth"]["enabled"]}
+                  "basic_auth_enabled": edge_intent["basic_auth"]["enabled"],
+                  **_privacy_verify_kwargs(validated)}
         if credentials is not None:
             kwargs["basic_auth_credentials"] = credentials
         evidence = None
@@ -4288,8 +4293,20 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
 
 
 
+class _EdgeAnswerMismatch(Exception):
+    """A route answered, but not the way its privacy requires (spec 081)."""
+
+
+# The gate marks every answer with this header; a front door's own 404 never carries it.
+_GATE_HEADER = "X-Sandbox-Gate"
+# A path no gate serves without a session: the gate answers it 404.
+_GATE_CHECK_PATH = "/__sandbox/gate-check"
+
+
 def _edge_failure_detail(error: BaseException) -> str:
     """Name the edge failure class without stringifying the exception."""
+    if isinstance(error, _EdgeAnswerMismatch):
+        return str(error)
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {getattr(error, 'code', 'error')}"
     reason = getattr(error, "reason", error)
@@ -4322,7 +4339,16 @@ def _verify_edge(
     basic_auth_credentials: tuple[str, str] | None = None,
     fresh_hostnames: frozenset[str] = frozenset(),
     handlers: tuple = (),
+    gate_hostnames: frozenset[str] = frozenset(),
+    private_hostnames: frozenset[str] = frozenset(),
 ) -> None:
+    """Prove each route answers as declared.
+
+    A public route answers 2xx/3xx (or 401 behind Basic Auth). A gate hostname
+    (spec 081) answers a session-less request with the gate's own 404, marked by
+    ``X-Sandbox-Gate``. A hostname of a ``share.private`` target other than the
+    gate answers 404, so a route that serves the application fails verification.
+    """
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
 
@@ -4338,6 +4364,12 @@ def _verify_edge(
         time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
     for route in routes:
         if route["hostname"].startswith("*."):
+            continue
+        if route["hostname"] in gate_hostnames:
+            _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True)
+            continue
+        if route["hostname"] in private_hostnames:
+            _verify_private_answer(opener, route["hostname"], "/", gate=False)
             continue
         path = healthcheck_path if route.get("mode") == "serve" else "/"
         endpoint = f"https://{route['hostname']}{path}"
@@ -4399,6 +4431,82 @@ def _verify_edge(
                 raise RuntimeError(
                     f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
                 )
+
+
+def _verify_private_answer(opener, hostname: str, path: str, *, gate: bool) -> None:
+    """Wait for ``hostname`` to answer ``path`` with 404 (from the gate when ``gate``).
+
+    Any 2xx or 3xx answer means the application (or a redirect to it) is reachable
+    where it must not be, so it never counts as reachable here.
+    """
+    request = urllib.request.Request(
+        f"https://{hostname}{path}", method="GET",
+        headers={"User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)"})
+    last_error: BaseException | None = None
+    for _ in range(30):
+        try:
+            with opener.open(request, timeout=15) as response:
+                last_error = _EdgeAnswerMismatch(
+                    f"HTTP {response.status} without a session; a private route must answer 404")
+        except urllib.error.HTTPError as exc:
+            from_gate = (exc.headers or {}).get(_GATE_HEADER) == "1"
+            if exc.code == 404 and (from_gate or not gate):
+                return
+            if exc.code == 404:
+                last_error = _EdgeAnswerMismatch("HTTP 404, but not from the gate")
+            elif 300 <= exc.code < 400:
+                last_error = _EdgeAnswerMismatch(
+                    f"HTTP {exc.code} redirect; a private route must answer 404")
+            else:
+                last_error = exc
+        except Exception as exc:  # Edge propagation is external and transient.
+            last_error = exc
+        time.sleep(10)
+    raise RuntimeError(
+        f"edge verification failed for {hostname}: {_edge_failure_detail(last_error)}")
+
+
+def _privacy_verify_kwargs(validated: dict) -> dict:
+    """The `_verify_edge` arguments that follow the manifest's gate and privacy."""
+    from sandbox.hosting import login_service as login
+    declaration = validated.get("login_service")
+    gates = frozenset(login.gate_hostnames(declaration))
+    kwargs: dict = {}
+    if gates:
+        kwargs["gate_hostnames"] = gates
+    if login.is_private(declaration):
+        kwargs["private_hostnames"] = frozenset(
+            route["hostname"] for route in validated["routes"] if route["hostname"] not in gates)
+    return kwargs
+
+
+_LOOPBACK_TARGET = re.compile(r"127\.0\.0\.1:([0-9]{1,5})(?![0-9])")
+
+
+def _restore_edge_fail_closed(edge, name: str, previous: str | None, *, validated: dict,
+                              app_ports: set, new_edge_live: bool, log_path: str) -> str:
+    """Roll the front door back without leaving a privacy-weaker pair live (spec 081).
+
+    Compose has already recreated the containers from the new commit, and the
+    rollback does not undo that. For a public manifest the previous route goes back,
+    as before. For a ``share.private`` manifest the previous route could put the
+    public name in front of that new runtime, so: a private route this apply already
+    installed stays; otherwise the previous route goes back only when it sends
+    nothing to the application's loopback port, and is removed when it does.
+    Returns ``restored``, ``kept_private`` or ``removed``.
+    """
+    from sandbox.hosting import login_service as login
+    if not login.is_private(validated.get("login_service")):
+        edge.restore(name, previous, log_path=log_path)
+        return "restored"
+    if new_edge_live:
+        return "kept_private"
+    if previous is not None and not any(
+            int(port) in app_ports for port in _LOOPBACK_TARGET.findall(previous)):
+        edge.restore(name, previous, log_path=log_path)
+        return "restored"
+    edge.restore(name, None, log_path=log_path)
+    return "removed"
 
 
 def _validate_apply_source(validated: dict) -> str:
@@ -4886,6 +4994,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
     edge_cache_receipt = None
+    # Set once this apply's own route is live, so a private rollback can keep it.
+    edge_live = {"new": False}
 
     def rollback() -> None:
         nonlocal reservation
@@ -4907,7 +5017,12 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             except Exception as exc:
                 failures.append(f"SSL mode restore for {zone_id}: {exc}")
         try:
-            edge.restore(caddy_name, previous_caddy, log_path=apply_log)
+            outcome = _restore_edge_fail_closed(
+                edge, caddy_name, previous_caddy, validated=validated,
+                app_ports={runtime["loopback_port"], previous_entry.get("loopback_port")},
+                new_edge_live=edge_live["new"], log_path=apply_log)
+            if outcome != "restored" and stream_progress is not None:
+                stream_progress(f"rollback kept the target private: front door route {outcome}")
         except Exception as exc:
             failures.append(f"{'Caddy' if edge.mode == 'caddy' else 'nginx'} restore: {exc}")
         if failures:
@@ -5059,6 +5174,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if edge.mode == "caddy":
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
+        edge_live["new"] = True
         zones: dict[str, dict] = {}
         fresh_hostnames: set[str] = set()
         drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule"))
@@ -5134,6 +5250,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         verify_kwargs = {
             "healthcheck_path": runtime["healthcheck"]["path"],
             "basic_auth_enabled": bool(validated.get("basic_auth")),
+            **_privacy_verify_kwargs(validated),
         }
         if fresh_hostnames:
             verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
@@ -5623,7 +5740,8 @@ class _HostImageEdgeAdapter:
         if not bootstrap:
             _verify_edge(self.validated["routes"],
                          healthcheck_path=self.validated["healthcheck"]["path"],
-                         basic_auth_enabled=bool(self.validated.get("basic_auth")))
+                         basic_auth_enabled=bool(self.validated.get("basic_auth")),
+                         **_privacy_verify_kwargs(self.validated))
         return self._route_plan()
 
     def _route_plan(self):

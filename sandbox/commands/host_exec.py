@@ -163,10 +163,32 @@ def _execution_scope(request, entry):
         raise RuntimeError("host_exec_lease_retirement_unknown")
 
 
+@contextmanager
+def _capture_lifetime(custody):
+    try:
+        yield
+    finally:
+        if custody is not None:
+            custody.close()
+
+
 def cmd_host_exec(args) -> None:
     as_json = bool(getattr(args, "json", False))
+    artifact_capture = bool(getattr(args, "exec_capture_artifacts", False))
+    custody = None
+    capture_metadata = None
+    setup_complete = False
     try:
         request, entry, prefix = _prepare(args)
+        if artifact_capture:
+            if not as_json or not is_owner_target(entry) or request.owner_selection is None:
+                raise ExecRefusal(host_exec.USAGE, "artifact capture requires original server exec",
+                                  host_exec.EXIT_USAGE)
+            # This hidden receiver option cannot select paths or issue custody.
+            # The SDK revalidates the genuine retained original execution.
+            from sandbox.application.server_cli_capture import prepare_server_cli_capture
+            request.owner_selection.require_current()
+            custody = prepare_server_cli_capture()
         command = (shlex.join(["timeout", "--kill-after=10", str(request.timeout_seconds), "env"]) +
                    " " + prefix + " " + shlex.join(request.argv) if request.owner_selection is not None else
                    host_exec.remote_command(prefix, request))
@@ -179,15 +201,24 @@ def cmd_host_exec(args) -> None:
         else:
             ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
         audit = host_exec.AuditLog()
+        setup_complete = True
     except ExecRefusal as exc:
         _refuse(exc.code, exc.detail, as_json=as_json, exit_code=exc.exit_code)
     except hosting.HostingError as exc:
         _refuse(getattr(exc, "code", None) or "host_exec_refused",
                 getattr(exc, "detail", None) or str(exc), as_json=as_json,
                 exit_code=host_exec.EXIT_REFUSAL)
+    except ImportError:
+        if not artifact_capture:
+            raise
+        _refuse("host_exec_capture_unavailable", "installed original capture facility is unavailable",
+                as_json=as_json, exit_code=host_exec.EXIT_REFUSAL)
+    finally:
+        if not setup_complete and custody is not None:
+            custody.close()
     audit_failed = False
     started = time.monotonic()
-    with audit:
+    with audit, _capture_lifetime(custody):
         try:
             with _execution_scope(request, entry):
                 outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source(),
@@ -197,6 +228,12 @@ def cmd_host_exec(args) -> None:
                     # Preserve the physical fence when descendant completion
                     # cannot be established. Never replay the command here.
                     raise RuntimeError("host_exec_effects_unknown")
+            if custody is not None:
+                # Historical byte custody follows all writer/context cleanup.
+                # Cleanup failure must never create a positive capture receipt.
+                request.owner_selection.require_current()
+                entry.require_current()
+                capture_metadata = custody.publish(outcome)
         except KeyboardInterrupt:
             outcome = host_exec.ExecOutcome(
                 exit_code=130, code=host_exec.INTERRUPTED,
@@ -214,7 +251,14 @@ def cmd_host_exec(args) -> None:
             audit_failed = True
             print(f"sb host exec: warning: audit record not written: {exc.strerror or exc}",
                   file=sys.stderr)
-    if as_json:
+    if artifact_capture:
+        if capture_metadata is None:
+            _refuse("host_exec_capture_unavailable",
+                    "original capture could not be retained; inspect the original job before replay",
+                    as_json=as_json, exit_code=host_exec.EXIT_TRANSPORT)
+        # No raw or reversibly encoded output enters the ordinary job log.
+        print(json.dumps(capture_metadata, sort_keys=True))
+    elif as_json:
         envelope = outcome.envelope(request)
         if audit_failed:
             envelope["audit"] = "failed"

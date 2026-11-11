@@ -351,6 +351,88 @@ class ServerSelectionTests(OwnerTargetTests):
                 pass
         self.assertFalse(any(call.args[1].endswith(" release") for call in self.process.call_args_list))
 
+    def test_byte_emitter_publishes_only_metadata_after_entire_held_scope(self):
+        from sandbox.commands import host_exec
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        from contextlib import contextmanager
+        self.bind_original_selector()
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["synthetic"], service="web", timeout=30, json=True, exec_capture_artifacts=True)
+        outcome = host_exec.host_exec.ExecOutcome(0, "ok", 1, stdout=b"\x00\xff" + b"AIza" + b"A" * 40)
+        metadata = {"ok": True, "code": "ok", "exit_code": 0,
+                    "capture": {"contract": "job.server-cli.capture-artifact.v1"}}
+        events = []
+        custody = Mock()
+        def prepare():
+            events.append("prepare")
+            return custody
+        def publish(actual):
+            self.assertIs(actual, outcome)
+            self.assertEqual(events, ["prepare", "run", "scope_exited"])
+            events.append("publish")
+            return metadata
+        custody.publish.side_effect = publish
+        actual_scope = host_exec._execution_scope
+        @contextmanager
+        def scope(request, entry):
+            with actual_scope(request, entry):
+                yield
+            events.append("scope_exited")
+        def run(*args, **kwargs):
+            events.append("run")
+            return outcome
+        repository = RecoveryRepository(self.home / "hosts.json", self.home / "native-locks")
+        audit = Mock()
+        audit.__enter__ = Mock(return_value=audit)
+        audit.__exit__ = Mock(return_value=False)
+        output = io.StringIO()
+        with patch("sandbox.application.server_cli_capture.prepare_server_cli_capture", side_effect=prepare), \
+                patch.object(host_exec, "_execution_scope", side_effect=scope), \
+                patch.object(host_exec.host_exec, "run", side_effect=run), \
+                patch.object(host_exec.host_exec, "AuditLog", return_value=audit), \
+                patch.object(sdk, "owner_command_args", return_value=["synthetic"]), \
+                patch.object(sdk, "owner_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                patch("sandbox.hosting.target_lease.acquire", return_value={
+                    "path": "synthetic", "token": "a" * 32, "owner": "b" * 32}), redirect_stdout(output):
+            host_exec.cmd_host_exec(args)
+        self.assertEqual(json.loads(output.getvalue()), metadata)
+        self.assertNotIn("stdout", output.getvalue())
+        self.assertNotIn("AIza", output.getvalue())
+        self.assertEqual(events[-1], "publish")
+        custody.close.assert_called_once()
+        audit.write.assert_called_once()
+
+    def test_byte_emitter_cleanup_failure_closes_custody_without_publishing(self):
+        from sandbox.commands import host_exec
+        from contextlib import contextmanager
+        self.bind_original_selector()
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["synthetic"], service="web", timeout=30, json=True, exec_capture_artifacts=True)
+        @contextmanager
+        def failed_cleanup(*args):
+            yield
+            raise RuntimeError("synthetic cleanup uncertainty")
+        custody = Mock()
+        audit = Mock()
+        audit.__enter__ = Mock(return_value=audit)
+        audit.__exit__ = Mock(return_value=False)
+        output = io.StringIO()
+        with patch("sandbox.application.server_cli_capture.prepare_server_cli_capture", return_value=custody), \
+                patch.object(host_exec, "_execution_scope", side_effect=failed_cleanup), \
+                patch.object(host_exec.host_exec, "run", return_value=host_exec.host_exec.ExecOutcome(
+                    0, "ok", 1, stdout=b"synthetic private output")), \
+                patch.object(host_exec.host_exec, "AuditLog", return_value=audit), \
+                patch.object(sdk, "owner_command_args", return_value=["synthetic"]), \
+                patch.object(sdk, "owner_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            host_exec.cmd_host_exec(args)
+        self.assertEqual(failure.exception.code, host_exec.host_exec.EXIT_TRANSPORT)
+        self.assertEqual(json.loads(output.getvalue())["code"], "host_exec_capture_unavailable")
+        self.assertNotIn("synthetic private output", output.getvalue())
+        custody.publish.assert_not_called()
+        custody.close.assert_called_once()
+
     def test_owner_exec_refuses_a_service_without_a_unique_first_container(self):
         selected = self.selected()
         with self.assertRaises(TargetRefusal):

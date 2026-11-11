@@ -106,6 +106,22 @@ def _linux_cgroup_path(pid: int) -> str | None:
     return None
 
 
+def _inherited_server_cli_stdin(descriptor, current, *, fd=0):
+    binding = descriptor.get('anonymous_input')
+    if binding is None:
+        return subprocess.DEVNULL
+    from .anonymous_input import validate_inherited_input
+    if current.get('kind') != 'server-cli':
+        raise RuntimeError('anonymous input requires the fixed server CLI contract')
+    proof = json.loads(current.get('execution_policy_provenance_json') or '{}')
+    if (not isinstance(binding, dict) or proof.get('server_cli.stdin_sha256') != binding.get('sha256')
+            or proof.get('server_cli.stdin_size') != str(binding.get('size'))):
+        raise RuntimeError('retained anonymous input binding changed')
+    stdin = validate_inherited_input(fd, binding)
+    os.lseek(stdin, 0, os.SEEK_SET)
+    return stdin
+
+
 def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
@@ -139,11 +155,14 @@ def run_descriptor(path: str | Path) -> int:
                 termination_reason=parent_reason)
             return 124 if parent_reason == 'parent_deadline_exceeded' else 130
         if _managed_native_job(descriptor):
+            if descriptor.get('anonymous_input') is not None:
+                raise RuntimeError('anonymous input is unavailable for managed project execution')
             return _run_managed_native(descriptor, repository, output)
+        stdin = _inherited_server_cli_stdin(descriptor, current)
         with _child_identity_context(descriptor.get("authoritative_context"), descriptor.get('environment')) as environment:
             command = subprocess.Popen(
                 descriptor["argv"], cwd=descriptor["cwd"],
-                env=environment, stdin=subprocess.DEVNULL,
+                env=environment, stdin=stdin,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, close_fds=True)
         release_authority = False

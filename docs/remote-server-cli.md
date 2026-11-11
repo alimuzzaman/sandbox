@@ -132,3 +132,17 @@ Discovery lists the optional contract in `inspection_capabilities`, separately
 from executable job contracts so older strict execution consumers remain valid.
 No no-source job admission or remote original-stdin handoff is enabled by this
 metadata port.
+
+The internal `JobService.submit(..., anonymous_input=...)` handoff accepts only
+an issued `AnonymousJobInput` for an independent fixed server CLI job. Intake
+reads original stdin once into an anonymous file, bounded to 1 MiB and a finite
+deadline. The retained original request binds its size and SHA256; the private
+descriptor records only those fields plus device/inode. The detached supervisor
+receives the actual file as descriptor0 and verifies owner, private mode, zero
+links, device/inode, size and bytes before giving it to the fixed child. A
+descriptor number or serialized binding cannot substitute for the held file.
+An occupied scheduler slot produces a retained terminal
+`anonymous_stdin_capacity_unavailable` receipt and no dispatch, rather than
+queuing a job whose anonymous input would disappear. Ordinary jobs retain
+DEVNULL. This internal handoff does not yet assemble no-source CLI admission,
+client original-stdin forwarding or advertise remote exec readiness.

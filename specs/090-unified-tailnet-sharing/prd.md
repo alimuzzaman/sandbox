@@ -1,6 +1,6 @@
 # Product Requirements Draft: Unified tailnet sharing
 
-**Status**: Authority decision refined, independent revalidation pending
+**Status**: Ready for specification
 
 **Created**: 2026-11-11
 
@@ -10,9 +10,9 @@
 
 **Drafting Model**: Personal Codex GPT-6.1-Sol, high; root-authored, no execution helpers.
 
-**Final Validation**: `PENDING` for the revised owner-network delegation model. The earlier independent personal Sol high PASS covered the superseded actor-ACL-preservation draft.
+**Final Validation**: `PASS`, independent personal Codex GPT-6.1-Sol high review of the revised owner-network delegation model.
 
-**Validated On**: N/A for this revision
+**Validated On**: 2026-11-11
 
 **Artifact Owner**: `speckit-refine`
 
@@ -160,6 +160,6 @@ No blocking product choice remains in the clarified authority model. Precise pro
 - [x] Acceptance outcomes identify observable positive and negative results.
 - [x] No blocking open product question is currently identified.
 - [x] No implementation plan, task list, wire contracts, or code changes are included.
-- [ ] The revised owner-network authority model has an independent readiness `PASS`.
+- [x] The revised owner-network authority model has an independent readiness `PASS`.
 
-**Readiness**: `NOT READY`, pending independent revalidation of the explicitly revised authority model. Prior specification/Phase0 plan clauses requiring the initiating person's destination ACL are superseded product intent and must be regenerated through the specification/planning workflow after readiness PASS. No forwarding, issuance, credentials or runtime enablement is authorized by this refinement.
+**Readiness**: `READY FOR SPECKIT`. The independent revalidation passed. Prior specification/Phase0 plan clauses requiring the initiating person's destination ACL must be regenerated through the specification/planning workflow using this approved intent. No forwarding, issuance, credentials or runtime enablement is authorized by this refinement.

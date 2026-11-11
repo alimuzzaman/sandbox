@@ -23,13 +23,14 @@
 ## Feature Readiness
 
 - [x] Stories can be checked as separate operator/recipient journeys.
-- [x] Scope includes identity/ACL, browser behavior, lifetime, recovery and secrecy.
+- [x] Scope includes current owner admission, receiver reachability/identity, browser behavior, lifetime, recovery and secrecy.
 - [x] Source/document readiness is separate from root-run acceptance and release approval.
 - [x] No production, test or runtime execution was performed as checklist validation.
 
 ## Notes
 
 Manual document validation only, using speckit-specify and its reviewed PRD.
+The revised owner-network delegation PRD independently passed revalidation.
 This checklist certifies specification quality, not security design, installed
 capability, source tests or acceptance. Security design must establish evidence
 freshness, revocation/stream termination bounds and supported browser profiles

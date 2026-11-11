@@ -40,6 +40,19 @@ replace a pin. A successful join does not imply every SSH operation is available
 Ordinary host-memory status and authenticated target-identity lookup also enforce
 the saved machine pin; a changed machine or malformed pin refuses without refresh.
 Legacy owner registrations with no machine pin keep their existing behavior.
+Pinned history and apply first validate the live machine with the existing status
+contract, using the same total operation budget. A foreign apply-plan target
+refuses before any request. Exhausted or unavailable identity evidence never
+dispatches the requested history or mutation. Refresh also refuses a malformed
+existing pin instead of silently normalizing it.
+
+Partial joined service metadata can leave ownership/authentication display fields
+unproven or unknown. Runtime compatibility is independently derived from the
+actual selected SSH user's service-unit revision and protocol declaration.
+Compatible protocol evidence can admit a differing controller hash; missing,
+malformed or incompatible unit evidence cannot. A separate Linux user's empty
+home is still a different SSH execution context. This does not repair that home
+or establish that every Linux user sees the owner's state.
 
 Joined registrations historically omitted the host front-door profile and therefore
 defaulted to Caddy. On a server already using incumbent nginx, explicitly adopt

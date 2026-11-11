@@ -1205,6 +1205,84 @@ robots: allow      # refused unless indexing is public
 `tests/test_hosted_noindex.py` renders every route kind on both front doors and fails
 if any can answer without the header.
 
+### Refreshing an existing target's front door (spec 084)
+
+A renderer change such as the noindex default reaches a target only when its route is
+rendered again. A full `sb host apply` of the same revision is refused
+(`unproven_staged_revision`) whenever the running application cannot be proven exact,
+which is every target whose source revision is not declared. Refresh only the route:
+
+```sh
+sb host refresh-front-door --remote R --name <stack> --json            # plan, read-only
+sb host refresh-front-door --remote R --name <stack> --confirm --json  # refresh
+# or --target <project>/<environment>, or --project-dir DIR --environment ENV
+```
+
+MCP: `host_front_door_refresh(remote, target|name|project_dir, environment, confirm)`.
+
+What it does:
+
+- Renders the route (gate names included) with the current renderer from the current
+  manifest, bound to what the target's last successful delivery recorded: loopback port,
+  route name, front door (Caddy or nginx), DNS records (names, addresses, proxy setting),
+  DNS coverage, certificate, and from now on a digest of the front-door declaration.
+- Reloads it (not when it is identical to the installed route), then verifies it with the
+  same checks an apply's edge step uses, privacy and route tag included.
+- On any failure after the reload, puts the previous route back and proves it: the forced
+  re-install the spec 081 private closure uses (validate and reload even when the file
+  already matches; on nginx the route's own marker must answer), then a strict read-back.
+  It reports `front_door_refresh_failed` with `restore`: `restored` or `restore_failed`.
+  The previous route is the one the fail-closed rule allows back: for a private manifest
+  it had to be a marked private route. An nginx route without a marker is refused up
+  front (`front_door_refresh_route_unprovable`), since its restore could not be proven. Recording and auditing the outcome are part of that boundary: a
+  refresh whose outcome cannot be saved is rolled back too, and a later audit or record
+  error never replaces the reported restore outcome.
+- Never touches Compose, containers, initializers, the checkout, DNS records, zone
+  settings or certificates, and never records a delivery attempt. It needs no runtime
+  proof and no durable job.
+
+It refuses, before any change:
+
+| Code | When |
+|---|---|
+| `front_door_refresh_fenced` | an apply, recovery, destroy or image activation owns the target, or recovery is uncertain |
+| `host_apply_lease_held` | another controller holds the target lease |
+| `front_door_refresh_no_route` / `front_door_refresh_route_unreadable` | no successful delivery on record, no installed route, or the route could not be read |
+| `front_door_refresh_route_unprovable` | the installed nginx route has no marker, so a failed refresh could not prove it was put back |
+| `front_door_refresh_declaration_changed` (`part`) | the manifest differs from the delivered record: `front_door`, `route_name`, `loopback_port`, `records`, `dns_coverage`, `certificate` or `declaration` |
+| `front_door_refresh_certificate_missing` | the certificate is absent, pending, or does not cover every name (a refresh never issues one) |
+| `front_door_refresh_names_changed` | the new route would serve other hostnames than the installed one |
+| `front_door_refresh_upstream_changed` | the new route would proxy to other loopback ports than the installed one |
+| `front_door_refresh_privacy_unproven` | `share.private`, but the installed route is not a Sandbox-marked private route |
+| `front_door_refresh_would_publish` | the installed route is a marked private route and the manifest is not private |
+| `front_door_refresh_auth_weakened` / `front_door_refresh_https_lost` | the new route would drop Basic Auth or HTTPS |
+| `private_proxied_record` | a private target's name is proxied by Cloudflare |
+| `front_door_refresh_secrets_missing` | the Basic Auth password secret is unavailable |
+
+Each run appends `start` and `end` lines (digests, never route text, secrets or
+addresses) to `$SANDBOX_HOME/runtime/front-door-refresh/audit.jsonl`; refusals inside the
+lease add an `end`/`refused` line. Each line is written and synced under an exclusive
+lock on the file, and a write that cannot complete fails the run (before the reload it
+refuses, after it the previous route is restored); the next line starts on its own line, so
+a partial one never hides it. The target record keeps `front_door_refresh` (last
+outcome) and `front_door_declaration`.
+
+A delivery fence does not stop a refresh. A refused or interrupted `host apply` leaves its
+delivery record `unknown` (`effect_unknown`), which makes the next apply refuse
+`required_evidence_missing`. The refresh holds the same effect lock and target lease as an
+apply (so no apply or recovery is running), binds only fields a successful delivery
+writes, and leaves that record as it is. Retire the attempt only before the next real
+apply: `host retire-delivery` also marks an unproven runtime retired, so that apply
+recreates the containers.
+For a stack, select it by name: see [Retiring an attempt that left no
+evidence](delivery-outcomes.md#retiring-an-attempt-that-left-no-evidence).
+
+Limit: a target delivered before spec 084 has no recorded declaration digest yet. Its
+first refresh is bound by the checks above (`legacy_binding: true` in the plan); a
+front-door-only manifest edit since its last successful apply that those checks do not
+see (indexing, robots, Basic Auth bypass lists, non-privacy share settings, health path)
+is rendered once. Review the plan before `--confirm`.
+
 Ephemeral routes deny too: `sb preview create` and the remote control proxy deny
 `robots.txt` and send the same header by default (`_remote._caddy_proxy_command`), because a preview hostname is a
 real public DNS record usually handed out with an autologin token in the URL. Fresh WP

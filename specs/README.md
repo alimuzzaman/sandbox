@@ -76,6 +76,7 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 069 | Secret Profiles and Create-Only Manager Migration | Open (3 of 67) | — | Internal |
 | 070 | Wildcard Subdomain Hosting | Open (49 of 49) | — | Internal |
 | 081 | Hosted Share Links | Ledger closed | Live apply and browser run | Internal |
+| 084 | Front-Door-Only Refresh for Hosted Targets | In progress | Live refresh by the orchestrator after merge | Feedback e674a79e |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`
 means no unchecked task; `Open (n of m)` counts unchecked tasks, which are mostly

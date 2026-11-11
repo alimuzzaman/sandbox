@@ -132,6 +132,27 @@ when the record is already terminal, and when the request is unknown. Use it
 only after `./sb delivery inspect` shows the attempt has no
 `terminal_snapshot_digest` and its job has stopped.
 
+For a hosted stack, name it instead (spec 084): `sb delivery inspect --remote NAME --name
+<stack> --json` and `sb host retire-delivery --remote NAME --name <stack>
+--original-request-id APPLY_REQUEST --confirm --json` (or `--target <project>/<env>`).
+Both read the delivery scope the target's hosting record names. Inspect then answers for
+one attempt only (`--request-id`, `--operation-id`, or by default the request the record
+names), without history or latest summaries: one checkout can serve several hosted
+projects, so that scope's history may belong to another target, and an attempt of
+another hosted runtime refuses `binding_mismatch`. Each `stack up` makes a
+new checkout, and an attempt stays recorded under the checkout it was admitted from, so
+neither that checkout (it holds the template) nor the rendered stack directory reaches it
+otherwise. Retire with `--project-dir <rendered stack dir>` falls back to the recorded
+scope too, only for the exact request id the record names. The request to retire is the
+target's `hosting_operation.request_id`, which a refused apply also prints.
+
+Both stay inside the one hosted runtime. A named inspect refuses `binding_mismatch` when
+the target's hosting record names no attempt of its own (there is nothing to fall back
+to that could not be another project's), so use `--project-dir` for such a target.
+Retirement, by any selector, refuses `binding_mismatch` before changing anything when
+the attempt belongs to another hosted runtime of the same checkout, because retiring
+clears the selected target's fences.
+
 ## Deployment trace v1
 
 The deployment trace is a separate diagnostic owner for one full command. It

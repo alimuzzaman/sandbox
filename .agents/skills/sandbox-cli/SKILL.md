@@ -535,6 +535,13 @@ before protected effects.
 - `sb host login-url --service <site entry> --confirm` still mints a terminal-only whole-site link.
 - Hosted targets are not indexed: `X-Robots-Tag: noindex, nofollow, noarchive` on every response and `robots: deny`, unless `indexing: public`.
 
+## Refreshing a target's front door (spec 084)
+
+- `sb host refresh-front-door --remote R --name <stack>|--target P/E|--project-dir DIR [--confirm] --json` (MCP `host_front_door_refresh`): re-renders and reloads only the route (gate names included) with the current renderer, e.g. to add the noindex header to a target a same-revision apply refuses (`unproven_staged_revision`). Without `--confirm` it is a read-only plan; review `legacy_binding` and `would_reload`.
+- No Compose, container, checkout, DNS or certificate change, no delivery attempt, no durable job needed. A failure puts the previous route back (`restore`). A private target stays private; a marked private route never becomes public.
+- Refusals (`front_door_refresh_*`, before any change): `fenced`, `no_route`, `route_unprovable`, `declaration_changed` (with `part`: the manifest must match the last successful delivery), `certificate_missing`, `names_changed`, `upstream_changed`, `privacy_unproven`, `would_publish`, `auth_weakened`, `https_lost`, `secrets_missing`; also `host_apply_lease_held`, `private_proxied_record`. Audit: `$SANDBOX_HOME/runtime/front-door-refresh/audit.jsonl`. Details: `docs/remote-hosting.md`.
+- It runs on a target fenced by a refused or interrupted apply and leaves that delivery record alone. Retire it (`host retire-delivery`) only before the next real apply: retiring makes that apply recreate the containers.
+
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
 Close that attempt explicitly, then apply again.
@@ -548,6 +555,13 @@ sb host retire-delivery --project-dir DIR --environment ENV --remote NAME \
 It observes nothing, records the attempt as `interrupted` with its real evidence
 completeness, and refuses while the owning job is active (`accepted`, `queued`,
 `running`, or `cancelling`).
+
+For a hosted stack, select it with `--name <stack>` (or `--target P/E`) on both commands
+instead of `--project-dir`: they read the delivery scope the target's hosting record
+names, because each `stack up` makes a new checkout and the attempt stays under the old
+one. The request to retire is the target's `hosting_operation.request_id`. A named inspect
+refuses `binding_mismatch` when the record names no attempt of its own, and retiring an
+attempt of another hosted runtime refuses `binding_mismatch` before any change.
 
 Retiring the delivery record does not reset the target's staged runtime state. A
 failed apply that staged its revision leaves `staged_revision` set with

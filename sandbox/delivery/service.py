@@ -456,7 +456,8 @@ class DeliveryService:
         return result
 
     def inspect(self, *, project_dir, remote, environment=None, label=None,
-                operation_id=None, request_id=None, observe=False, limit=10, cursor=None):
+                operation_id=None, request_id=None, observe=False, limit=10, cursor=None,
+                recorded_scope=None):
         if type(project_dir) is not str or not project_dir or "\x00" in project_dir or len(project_dir.encode("utf-8")) > 4096:
             raise DeliveryError("delivery_contract_invalid")
         identifier(remote)
@@ -475,7 +476,15 @@ class DeliveryService:
                 raise DeliveryError("delivery_contract_invalid") from None
         if type(observe) is not bool or type(limit) is not int or not 1 <= limit <= 50 or (cursor is not None and (observe or operation_id is not None or request_id is not None)):
             raise DeliveryError("delivery_contract_invalid")
-        target = validate_target(self.target_resolver(project_dir=project_dir, remote=remote, environment=environment, label=label))
+        if recorded_scope is not None and (
+                environment is None or not isinstance(recorded_scope, dict)
+                or set(recorded_scope) != {"project_identity", "project_root_digest"}
+                or (operation_id is None and request_id is None) or cursor is not None):
+            # A recorded scope can be shared with other hosted runtimes of the same
+            # checkout, so it answers only for one explicitly selected attempt.
+            raise DeliveryError("delivery_contract_invalid")
+        resolver_selectors = {"recorded_scope": recorded_scope} if recorded_scope is not None else {}
+        target = validate_target(self.target_resolver(project_dir=project_dir, remote=remote, environment=environment, label=label, **resolver_selectors))
         if target["remote_name"] != remote or target["environment"] != environment or target["label"] != label:
             raise DeliveryError("binding_mismatch")
         scope = {key: target[key] for key in ("project_identity", "project_root_digest", "remote_name", "target_kind", "environment", "label")}
@@ -487,10 +496,16 @@ class DeliveryService:
         selected = None
         original_id = None
         try:
-            history = self.repository.history_scope(request_scope(target), limit=limit, cursor=cursor)
-            result["latest_attempt"] = history.pop("latest_attempt")
-            result["latest_retained_complete_success"] = history.pop("latest_retained_complete_success")
-            result["history"] = history
+            if recorded_scope is None:
+                history = self.repository.history_scope(request_scope(target), limit=limit, cursor=cursor)
+                result["latest_attempt"] = history.pop("latest_attempt")
+                result["latest_retained_complete_success"] = history.pop("latest_retained_complete_success")
+                result["history"] = history
+            else:
+                # Spec 084: a scope reached through a hosting record may be shared with
+                # other hosted runtimes of the same checkout. Its history and latest
+                # summaries are never read, so no path (errors included) can carry them.
+                result["history"] = _empty_history("partial")
             if operation_id is not None or request_id is not None:
                 lookup = self.repository.lookup_operation(request_scope(target), operation_id) if operation_id is not None else self.repository.lookup_request(request_scope(target), request_id)
                 selected = lookup["operation"]
@@ -518,6 +533,11 @@ class DeliveryService:
                 selected = None
                 result["selected_operation"] = None
                 return bounded_projection(result)
+        if recorded_scope is not None and selected is not None and \
+                selected["target"].get("runtime_identity") != target.get("runtime_identity"):
+            # Spec 084: a scope reached through a hosting record is confined to that
+            # record's hosted runtime (one checkout can serve several hosted projects).
+            raise DeliveryError("binding_mismatch")
         # For a retained old incarnation, recorded projections are read using
         # its exact target; current observations always use the selected target.
         recorded_target = selected["target"] if selected is not None else target

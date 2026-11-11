@@ -1,6 +1,6 @@
-"""MCP tools for hosted share links (spec 081).
+"""MCP tools for hosted share links (spec 081) and the front-door refresh (spec 084).
 
-They call the same code as ``sb host share`` in-process. MCP has no terminal, so a
+They call the same code as ``sb host share`` and ``sb host refresh-front-door`` in-process. MCP has no terminal, so a
 target whose manifest lacks ``share.agent_mint: true`` refuses with
 ``agent_mint_not_enabled``. A created link is returned once, in the result.
 """
@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 
 def register(server: Any, dependencies: Any = None) -> None:
-    for tool in (host_share_create, host_share_list, host_share_revoke):
+    for tool in (host_share_create, host_share_list, host_share_revoke, host_front_door_refresh):
         server.tool()(tool)
 
 
@@ -60,3 +60,18 @@ def host_share_revoke(remote: str, link_id: str, project_dir: Optional[str] = No
     from sandbox.commands import host_share
     return _call(host_share.revoke_share, remote, link_id, target=target, name=name, stack=stack,
                  project_dir=project_dir, environment=environment, entry=entry)
+
+
+def host_front_door_refresh(remote: str, target: Optional[str] = None, name: Optional[str] = None,
+                            project_dir: Optional[str] = None, environment: Optional[str] = None,
+                            confirm: bool = False) -> Dict[str, Any]:
+    """Re-render and reload only a hosted target's front-door route with the current Sandbox
+    renderer (for example to pick up the default noindex header), from what its last
+    successful delivery recorded. No container, Compose, DNS or certificate change. Without
+    `confirm` it returns the plan; a private target never becomes public, and a failure puts
+    the previous route back. Select the target by `target` (P/E), stack `name`, or
+    `project_dir`."""
+    from sandbox.commands import hosting
+    return hosting.front_door_refresh_request(
+        remote, target=target, name=name, project_dir=project_dir, environment=environment,
+        confirm=confirm)

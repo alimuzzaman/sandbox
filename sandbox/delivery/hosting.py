@@ -55,7 +55,56 @@ def capture_recovery_result(validated, remote_name, original_request_id, result)
                           uncertain=result.get('result_class') in {'uncertain', 'ambiguous'})
 
 
-def retire_interrupted_operation(validated, remote_name, original_request_id, *, job_lookup):
+def recorded_request_scope(previous):
+    """The delivery scope a target's hosting operation was admitted under.
+
+    Worktree and stack checkout paths are part of the project identity, so an attempt
+    admitted from a checkout that no longer exists (a stack's earlier source) is only
+    reachable through the identity its hosting operation recorded.
+    """
+    target = previous.get('target') or {}
+    try:
+        return scope_digest({
+            'project_identity': previous.get('project_identity'),
+            'target_kind': 'hosted',
+            'remote_name': target.get('remote'),
+            'environment': target.get('environment'),
+            'label': None,
+        })
+    except DeliveryError:
+        raise DeliveryError('binding_mismatch') from None
+
+
+def recorded_operation_lookup(repository, current_target, recorded_operation, request_id):
+    """Find ``request_id`` in the scope the target's hosting record names (spec 084).
+
+    Only the exact request that record names, of the same remote, environment and
+    runtime identity, and bound back to its recorded project identity and root.
+    Returns None when the record does not name this request.
+    """
+    if not isinstance(recorded_operation, dict) or recorded_operation.get('request_id') != request_id:
+        return None
+    recorded_target = recorded_operation.get('target') or {}
+    if (recorded_target.get('remote') != current_target['remote_name']
+            or recorded_target.get('environment') != current_target['environment']):
+        raise DeliveryError('binding_mismatch')
+    operation = repository.lookup_request(
+        recorded_request_scope(recorded_operation), request_id)['operation']
+    if operation is None:
+        return None
+    old = operation['target']
+    if (operation.get('kind') != 'hosted_apply'
+            or old['project_identity'] != recorded_operation.get('project_identity')
+            or old['project_root_digest'] != recorded_operation.get('project_root_digest')
+            or old['remote_name'] != current_target['remote_name']
+            or old['environment'] != current_target['environment']
+            or old.get('runtime_identity') != current_target.get('runtime_identity')):
+        raise DeliveryError('binding_mismatch')
+    return operation
+
+
+def retire_interrupted_operation(validated, remote_name, original_request_id, *, job_lookup,
+                                 recorded_operation=None):
     """Close an abandoned attempt that can never produce its own evidence.
 
     An owner that exits without recording a terminal outcome leaves the target
@@ -65,6 +114,10 @@ def retire_interrupted_operation(validated, remote_name, original_request_id, *,
     inventing anything. The attempt becomes `interrupted`, its evidence stays
     exactly as incomplete as it really is, and the pinned reason records that a
     human retired it rather than an owner completing it.
+
+    ``recorded_operation`` is a zero-argument callable returning the target's recorded
+    hosting operation; it is read only when the current checkout's scope has no such
+    request (a stack's later checkout, spec 084).
     """
     import copy
     target = target_for_project(validated.get('manifest_root') or validated['project_root'], remote_name,
@@ -73,7 +126,18 @@ def retire_interrupted_operation(validated, remote_name, original_request_id, *,
     scope = request_scope(target)
     operation = repository.lookup_request(scope, original_request_id)['operation']
     if operation is None:
+        # A stack's later checkout has another identity; the target's own hosting
+        # record still names the attempt the next apply's predecessor check reads.
+        operation = recorded_operation_lookup(
+            repository, target, recorded_operation() if recorded_operation else None,
+            original_request_id)
+    if operation is None:
         raise DeliveryError('required_evidence_missing')
+    if operation['target'].get('runtime_identity') != target.get('runtime_identity'):
+        # One checkout can serve several hosted projects in one environment, and they
+        # share a request scope. Retiring clears this target's fences, so the attempt
+        # must be this target's own (spec 084).
+        raise DeliveryError('binding_mismatch')
     if operation['execution_state'] in TERMINAL or operation['terminal_snapshot_digest'] is not None:
         # Already closed. Retiring it again would rewrite a settled outcome.
         raise DeliveryError('delivery_terminal_conflict')
@@ -221,17 +285,7 @@ class HostingAttempt:
         previous_target = previous.get('target') or {}
         previous_evidence = previous.get('evidence') or {}
         previous_source = previous.get('source') or {}
-        previous_scope = {
-            'project_identity': previous.get('project_identity'),
-            'target_kind': 'hosted',
-            'remote_name': previous_target.get('remote'),
-            'environment': previous_target.get('environment'),
-            'label': None,
-        }
-        try:
-            predecessor_scope = scope_digest(previous_scope)
-        except DeliveryError:
-            raise DeliveryError('binding_mismatch') from None
+        predecessor_scope = recorded_request_scope(previous)
 
         current_target = self.operation['target']
         if (not previous.get('project_root_digest')

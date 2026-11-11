@@ -125,8 +125,14 @@ def build_delivery_service():
     roots = {}
     live_creation = {}
 
-    def resolve(*, project_dir, remote, environment=None, label=None):
+    def resolve(*, project_dir, remote, environment=None, label=None, recorded_scope=None):
         target = target_for_project(project_dir, remote, environment=environment, label=label)
+        if recorded_scope is not None and environment is not None:
+            # Spec 084: `--name`/`--target` read the scope the target's hosting record
+            # names; its manifest (the rendered stack dir) still serves the readers.
+            target = validate_target({
+                **target, 'project_identity': recorded_scope['project_identity'],
+                'project_root_digest': recorded_scope['project_root_digest']})
         roots[target['project_identity']] = str(Path(project_dir).expanduser().resolve())
         if environment is not None:
             validated = _hosting.validate_manifest(project_dir, environment)

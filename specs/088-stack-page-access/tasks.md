@@ -7,8 +7,8 @@ runs tests/type-checks, on the coordinated remote. No live mutation is authorize
 
 ## Phase 1: Setup
 
-- [x] T001 Recover existing source/research and complete design artifacts in specs/085-stack-page-access/.
-- [x] T002 Complete read-only Spec Kit consistency analysis of specs/085-stack-page-access/{spec,plan,tasks}.md before implementation.
+- [x] T001 Recover existing source/research and complete design artifacts in specs/088-stack-page-access/.
+- [x] T002 Complete read-only Spec Kit consistency analysis of specs/088-stack-page-access/{spec,plan,tasks}.md before implementation.
 
 ## Phase 2: Foundations
 
@@ -75,7 +75,7 @@ Independent acceptance: inject companion failure and gate restart; list remainin
 
 - [ ] T022 Update docs/remote-hosting.md, docs/login-service.md, README.md, hosting skill docs and matching owning revision/schema evidence; send final schema/readiness to setup/orchestrator, using placeholder hosts (FR-036–037).
 - [ ] T023 Ask Luna to run focused suites, UI typecheck/build and required gates via finite-timeout durable jobs on the coordinated remote; retain fixed reports under shared scratch. Rebuild config/sandbox-web.js after UI source changes.
-- [ ] T024 Obtain owner authorization and remote ownership release for runtime acceptance in specs/085-stack-page-access/quickstart.md; record all own/shared access, concurrency and recovery proof. Unavailable proof stays explicitly incomplete.
+- [ ] T024 Obtain owner authorization and remote ownership release for runtime acceptance in specs/088-stack-page-access/quickstart.md; record all own/shared access, concurrency and recovery proof. Unavailable proof stays explicitly incomplete.
 - [ ] T025 Fresh independent Sol reviews final diff against latest, fix/respond to findings and repeat after changes; owner authentication sign-off required before release. Record review evidence in shared scratch.
 - [ ] T026 Stage/commit/push verified work to the named branch, no force push or PR creation; write requested handback under shared scratch and notify orchestrator with manifest fields, results, review verdict and open limits.
 

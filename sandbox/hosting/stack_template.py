@@ -86,7 +86,7 @@ class StackTemplate:
     ports: tuple[str, ...]
     raw: dict = field(repr=False)  # the manifest without ``stack:``
     dev_branch: str = DEFAULT_DEV_BRANCH  # spec 077: the repo's dev branch
-    uses: tuple[str, ...] = ()  # direct same-remote stack names (spec 085)
+    uses: tuple[str, ...] = ()  # direct same-remote stack names (spec 088)
 
     def environment_names(self) -> tuple[str, ...]:
         environments = self.raw.get("environments")

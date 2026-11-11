@@ -6,7 +6,7 @@
 
 **Status**: Draft
 
-**Input**: The ready PRD `specs/085-stack-page-access/prd.md` (Sol readiness review PASS,
+**Input**: The ready PRD `specs/088-stack-page-access/prd.md` (Sol readiness review PASS,
 2026-11-11), which is the authoritative feature description.
 
 ## User Scenarios & Testing *(mandatory)*

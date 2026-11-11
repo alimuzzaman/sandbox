@@ -28,7 +28,10 @@ test("only a named remote gets the buttons, and only one id is revocable", () =>
   assert.equal(canShare("xspeed-dev"), true);
   assert.equal(canShare("this-server"), false);
   assert.equal(canShare("Bad Name"), false);
-  assert.equal(revocableId("l-" + "a".repeat(32)), true);
+  assert.equal(revocableId("l-" + "a".repeat(12)), true);
+  assert.equal(revocableId("l-" + "a".repeat(32)), true); // old form, until it expires
+  assert.equal(revocableId("l-" + "a".repeat(13)), false);
+  assert.equal(revocableId("s-" + "a".repeat(12)), false);
   assert.equal(revocableId("s-" + "0".repeat(32)), true);
   assert.equal(revocableId("all"), false);
   assert.equal(revocableId("l-" + "A".repeat(32)), false);

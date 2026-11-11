@@ -774,21 +774,33 @@ def _cmd_service(args, as_json: bool) -> None:
     # Mutating and diagnostic operations still require their explicit verb so
     # an incomplete command cannot silently change remote state.
     if name is None and operation not in {
-            None, "status", "diagnostics", "migrate", "cleanup-broker", "stop", "capability"}:
+            None, "status", "diagnostics", "refresh", "migrate", "cleanup-broker", "stop", "capability"}:
         name = operation
         operation = "status"
-    if operation not in {"status", "diagnostics", "migrate", "cleanup-broker", "stop", "capability"} or not name:
-        die("usage: ./sb remote service <status|diagnostics|migrate|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
+    if operation not in {"status", "diagnostics", "refresh", "migrate", "cleanup-broker", "stop", "capability"} or not name:
+        die("usage: ./sb remote service <status|diagnostics|refresh|migrate|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
     if operation == "diagnostics" and _arg_true(args, "ssh"):
         die("--ssh diagnostics are no longer supported; use the authenticated remote service")
     if _arg_true(args, "processes") and operation != "diagnostics":
         die("--processes requires `remote service diagnostics <name>`")
-    entry = sr.get_remote(name)
-    if not entry:
-        die(f"no remote named '{name}'")
     confirmed = _arg_true(args, "confirm")
+    entry = {}
     try:
-        if operation == "capability":
+        entry = (sr.get_remote(name, adopt_joined=False) if operation == 'refresh' else sr.get_remote(name))
+        if not entry:
+            die(f"no remote named '{name}'")
+        if operation == "refresh":
+            if entry.get("joined") is not True or entry.get("control_access") != "tailnet":
+                raise ValueError("refresh requires an existing joined tailnet registration")
+            from sandbox.remote_runtime.join_identity import discover_join_identity
+            evidence = discover_join_identity(name, entry, sr.remote_host_memory_request)
+            requested_profile = _arg_str(args, 'front_door')
+            if requested_profile is not None:
+                evidence.update(_joined_profile_evidence(entry, evidence, requested_profile))
+            sr.put_remote(name, _expected=entry, **evidence)
+            payload = {"ok": True, "name": name, "status": "refreshed",
+                       "data": evidence, "error": None}
+        elif operation == "capability":
             from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
             lifecycle_service = build_authority_lifecycle_service()
             cap = lifecycle_service.evaluate_capability(remote_identity=name)
@@ -824,8 +836,10 @@ def _cmd_service(args, as_json: bool) -> None:
             if not isinstance(bind, str) or not bind:
                 raise ValueError("remote service bind is unavailable; provision its control transport first")
             token = entry.get("bearer_token")
-            if not isinstance(token, str) or not token:
-                raise ValueError("remote service token is unavailable; provision the remote first")
+            preserve_credentials = (not token and entry.get('joined') is True
+                and entry.get('control_transport') == 'tailscale' and entry.get('control_access') == 'tailnet')
+            if not token and not preserve_credentials:
+                raise ValueError('owner_service_context_unavailable: existing owner credential context is unavailable')
             # Tailscale is a direct private bind, not a public reverse-proxy
             # origin. Passing its control URL as ``public_url`` changes the
             # service ownership marker and makes a valid existing unit look
@@ -846,7 +860,7 @@ def _cmd_service(args, as_json: bool) -> None:
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
                 _invalidate_readiness(name, before=True)
                 staged_source = _upload_runtime_source(
-                    entry["ssh"], source_revision=source_revision,
+                    entry, source_revision=source_revision,
                     upload_timeout=upload_timeout
                 )
                 _assert_clean_source_revision(source_revision)
@@ -857,6 +871,7 @@ def _cmd_service(args, as_json: bool) -> None:
                 source_revision=source_revision,
                 staged_source=staged_source if confirmed else None,
                 acknowledged_pins=acknowledged_pins,
+                **({'preserve_credentials': True} if preserve_credentials else {}),
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
@@ -931,7 +946,7 @@ def _cmd_service(args, as_json: bool) -> None:
                     "--confirm --json"
                 )
                 try:
-                    result = sr.ssh_run(entry["ssh"], command, timeout=180)
+                    result = sr.ssh_run(entry, command, timeout=180)
                 except (subprocess.SubprocessError, OSError) as exc:
                     raise RuntimeError("CI cleanup broker installation was interrupted") from exc
                 try:
@@ -955,7 +970,10 @@ def _cmd_service(args, as_json: bool) -> None:
                 sr.stop_remote_mcp_server(entry)
                 payload = {"ok": True, "name": name, "status": "stopped", "data": {}, "error": None}
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-        if isinstance(exc, (RemoteRuntimeSourceTimeout, RemoteRuntimeSourceIndeterminate)):
+        if (isinstance(getattr(exc, "code", None), str)
+                and re.fullmatch(r'[a-z][a-z0-9_]{1,80}', exc.code)):
+            code = exc.code
+        elif isinstance(exc, (RemoteRuntimeSourceTimeout, RemoteRuntimeSourceIndeterminate)):
             code = exc.code
         elif str(exc).startswith("remote_runtime_pins_unacknowledged:"):
             code = "remote_runtime_pins_unacknowledged"
@@ -974,7 +992,7 @@ def _cmd_service(args, as_json: bool) -> None:
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
         print(json.dumps(payload))
-        if operation in ("status", "capability") and not payload["ok"]:
+        if operation in ("status", "capability", "refresh") and not payload["ok"]:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")
@@ -1012,7 +1030,7 @@ def _cmd_add(args, as_json: bool) -> None:
     if port:
         ssh_target = f"{ssh_target}:{port}"
     requested = _arg_str(args, "front_door")
-    existing = sr.get_remote(name)
+    existing = sr.get_remote(name, adopt_joined=False)
     front_door = _checked_front_door(name, existing, requested, ssh_target=ssh_target)
     fields = {"ssh": ssh_target, "provisioned": False}
     if front_door is not None:
@@ -1314,15 +1332,16 @@ def _tailscale_ssh_login(entry: dict, user: str) -> str:
     # A throwaway file: Tailscale SSH answers with its own host key on this address.
     with tempfile.TemporaryDirectory() as directory:
         try:
+            selected = {'ssh': f'{user}@{address}', 'joined': True, 'control_transport': 'tailscale',
+                        'tailscale_host': address}
+            argv = sr.ssh_command_args(selected, 'true', multiplex=False)
+            argv[-2:-2] = ['-o', 'StrictHostKeyChecking=accept-new',
+                          '-o', f'UserKnownHostsFile={directory}/known_hosts']
             login = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                 "-o", "StrictHostKeyChecking=accept-new",
-                 "-o", f"UserKnownHostsFile={directory}/known_hosts",
-                 f"{user}@{address}", "true"],
+                argv,
                 capture_output=True, text=True, timeout=30, check=False)
         except subprocess.TimeoutExpired:
-            # ConnectTimeout covers an unreachable host; past that, a `check` rule is waiting.
-            return "denied"
+            return "unknown"  # No policy-denial response was observed.
         except OSError:
             return "unknown"
     if login.returncode == 0:
@@ -1424,8 +1443,9 @@ def _cmd_tailnet_access(args, as_json: bool) -> None:
     if entry.get("control_transport") != "tailscale":
         die(f"tailnet member access needs a Tailscale control connection; '{name}' uses "
             f"{entry.get('control_transport') or 'none'}")
-    if not entry.get("bearer_token"):
-        die(f"only the controller that provisioned '{name}' can change who may use it")
+    if not entry.get('bearer_token') and not (entry.get('joined') is True
+            and entry.get('control_access') == 'tailnet'):
+        die('owner_service_context_unavailable: selected owner connection metadata is unavailable')
     home = sr.resolve_sandbox_home(entry)
     setting = _member_access_setting(entry, home)
     result = {"ok": True, "name": name, "setting": setting, "error": None}
@@ -1483,22 +1503,37 @@ def _tailnet_address(host: str) -> str:
 
 
 def _first_ssh_login(target: str, port) -> str:
-    """Log in once without prompting, recording the host key: ok, denied or unknown."""
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            "-o", "StrictHostKeyChecking=accept-new"]
-    if port:
-        argv += ["-p", str(port)]
+    """Probe one Tailnet-only session without user config, agent or key fallback."""
     try:
-        login = subprocess.run(argv + [target, "true"], capture_output=True, text=True,
+        parts = sr.remote_ssh_parts(target)
+        entry = {'ssh': target + (f':{port}' if port else ''), 'joined': True, 'control_transport': 'tailscale',
+                 'tailscale_host': parts['host']}
+        argv = sr.ssh_command_args(entry, 'true', multiplex=False)
+        argv[-2:-2] = ['-o', 'StrictHostKeyChecking=accept-new']
+        login = subprocess.run(argv, capture_output=True, text=True,
                                timeout=30, check=False)
     except subprocess.TimeoutExpired:
-        return "denied"  # Past ConnectTimeout, a Tailscale `check` rule is waiting for a browser.
-    except OSError:
+        return "unknown"  # A timeout is not proof of a Tailnet policy denial.
+    except (OSError, ValueError):
         return "unknown"
     if login.returncode == 0:
         return "ok"
     refusal = (login.stderr or "").lower()
     return "denied" if any(text in refusal for text in _TAILSCALE_SSH_REFUSALS) else "unknown"
+
+
+def _joined_profile_evidence(entry, evidence, requested):
+    from sandbox.remote_runtime.join_profile import MACHINE_PROGRAM, adopt_join_profile
+    from sandbox.hosting.front_door import nginx
+
+    def machine_probe(record):
+        result = sr.ssh_run(record, 'python3 -c ' + shlex.quote(MACHINE_PROGRAM), timeout=15)
+        if result.returncode != 0:
+            raise RuntimeError('joined_profile_identity_unavailable')
+        return (result.stdout or '').strip()
+
+    return adopt_join_profile(entry, evidence, requested,
+                              machine_probe=machine_probe, nginx_probe=nginx.probe)
 
 
 def _cmd_join(args, as_json: bool) -> None:
@@ -1518,7 +1553,9 @@ def _cmd_join(args, as_json: bool) -> None:
     user, separator, host = parts["target"].rpartition("@")
     if not separator or not user:
         die("join needs the server account too, for example alim@server.tailnet.ts.net")
-    if sr.get_remote(name):
+    if parts.get('port') not in (None, 22):
+        die('tailnet_ssh_target_unavailable: Tailscale SSH uses the selected Linux account on port22; no key-based SSH fallback is attempted')
+    if sr.get_remote(name, adopt_joined=False):
         die(f"remote_exists: '{name}' is already registered here; pick another name or run "
             f"`./sb remote remove {name}` first")
     address = _tailnet_address(host)
@@ -1530,27 +1567,42 @@ def _cmd_join(args, as_json: bool) -> None:
     try:
         inventory = sr._remote_control_request(entry, "/inventory", timeout=15)
     except RuntimeError as exc:
-        die(f"join_refused: the control service on {address} did not admit this machine ({exc}). "
-            f"Its owner may have run `./sb remote tailnet-access disable`, or the service predates tailnet access.")
-    if inventory.get("inventory_schema") != 1:
-        die(f"join_refused: {address} did not answer as a Sandbox control service")
+        if 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
+            die('remote_access_denied: the control service denied the HTTP request')
+        die('joined_metadata_unavailable: HTTP control admission could not be observed; unavailable transport evidence is not a permission denial')
+    if type(inventory.get("inventory_schema")) is not int or inventory['inventory_schema'] != 1:
+        die('joined_metadata_unavailable: the control inventory capability is unavailable')
+    from sandbox.remote_runtime.join_identity import discover_join_identity
+    try:
+        entry.update(discover_join_identity(name, entry, sr.remote_host_memory_request))
+    except (RuntimeError, ValueError) as exc:
+        die(f"joined_metadata_unavailable: authenticated service identity is unavailable ({exc})")
     ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))
-    sr.put_remote(name, **entry)
+    requested_profile = _arg_str(args, 'front_door')
+    if requested_profile is not None:
+        if ssh_login != 'ok':
+            die(f'joined_profile_unavailable: HTTP control admitted; the separate Tailnet SSH path is {ssh_login}; no profile was recorded')
+        try:
+            entry.update(_joined_profile_evidence(entry, entry, requested_profile))
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            die(f'joined_profile_unavailable: HTTP control admitted but front-door metadata is unproven ({exc})')
+    sr.put_remote(name, _expected=None, **entry)
     result = {"ok": True, "name": name, "status": "joined", "ssh": ssh,
               "control_url": entry["control_url"], "ssh_login": ssh_login, "error": None}
     if as_json:
         print(json.dumps(result))
         return
-    ok(f"joined '{name}' at {address}; jobs and status work now")
+    ok(f"joined '{name}' at {address}; authenticated control identity recorded")
     if ssh_login != "ok":
-        info("deploys also need SSH: ask the owner to enable Tailscale SSH and add a tailnet "
-             f"rule that lets you log in as {user} ({'refused' if ssh_login == 'denied' else 'no answer'})")
+        info('HTTP control admission succeeded. The separate Tailnet SSH path is '
+             + ('denied by its SSH policy.' if ssh_login == 'denied' else 'unavailable; this is not evidence of denied control access.')
+             + ' No role or credential approval was requested or changed.')
 
 
 def _cmd_remove(args, as_json: bool) -> None:
     name = _require_name(args)
     if getattr(args, "dry_run", False) is True:
-        registered = sr.get_remote(name) is not None
+        registered = sr.get_remote(name, adopt_joined=False) is not None
         result = {"ok": True, "name": name, "removed": False, "dry_run": True,
                   "would_remove": registered, "error": None}
         if as_json:
@@ -1634,7 +1686,7 @@ def _read_exact_source_file(source_revision: str, relative_path: str) -> bytes:
 
 
 def _upload_runtime_source(
-        ssh_target: str, *, source_revision: str,
+        remote_or_target: dict | str, *, source_revision: str,
         upload_timeout: int = _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT,
 ) -> dict[str, str]:
     """Stage one clean exact Git object without reading mutable worktree bytes."""
@@ -1725,7 +1777,7 @@ def _upload_runtime_source(
     )
     try:
         ssh_res = sr.ssh_process(
-            ssh_target, remote_cmd, input_data=archive,
+            remote_or_target, remote_cmd, input_data=archive,
             timeout=upload_timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -2033,7 +2085,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     try:
         _record_provision_event(journal, "runtime_staging")
         staged_source = _upload_runtime_source(
-            ssh_target, source_revision=source_revision, upload_timeout=upload_timeout)
+            entry, source_revision=source_revision, upload_timeout=upload_timeout)
         _record_provision_event(journal, "runtime_staged")
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "runtime_staging_failed", status="failed", detail=str(e))
@@ -2050,7 +2102,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     try:
         _record_provision_event(journal, "bootstrap_running")
         res = subprocess.run(
-            sr.ssh_command_args(ssh_target, cmd),
+            sr.ssh_command_args(entry, cmd),
             capture_output=True, text=True, timeout=1800, check=False,
         )
     except (subprocess.SubprocessError, OSError) as e:
@@ -2224,9 +2276,10 @@ def _cmd_up(args, as_json: bool) -> None:
     control_url = entry.get("control_url")
     port = entry.get("mcp_port") or sr.DEFAULT_MCP_PORT
     token = entry.get("bearer_token")
-    if not token:
-        die(f"remote '{name}' is missing recorded connection details — "
-            f"re-run `./sb remote provision {name}`")
+    preserve_credentials = (not token and entry.get('joined') is True
+        and control_transport == 'tailscale' and entry.get('control_access') == 'tailnet')
+    if not token and not preserve_credentials:
+        die('owner_service_context_unavailable: selected owner connection metadata is unavailable')
     if not _arg_true(args, "confirm"):
         result = {"ok": True, "name": name, "status": "planned",
                   "data": {"requires_confirm": True, "action": "start"}, "error": None}
@@ -2244,7 +2297,7 @@ def _cmd_up(args, as_json: bool) -> None:
         source_revision = _local_git_revision()
         _invalidate_readiness(name, before=True)
         staged_source = _upload_runtime_source(
-            entry["ssh"], source_revision=source_revision, upload_timeout=upload_timeout)
+            entry, source_revision=source_revision, upload_timeout=upload_timeout)
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
             control_url = control_url or f"http://{tailscale_ip}:{port}"
@@ -2254,6 +2307,7 @@ def _cmd_up(args, as_json: bool) -> None:
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
                 source_revision=source_revision,
                 staged_source=staged_source,
+                **({'preserve_credentials': True} if preserve_credentials else {}),
             )
             sr.put_remote(name, mcp_service=plan["service"])
             _invalidate_readiness(name)

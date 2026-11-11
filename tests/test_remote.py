@@ -404,7 +404,9 @@ class TestSshRun(unittest.TestCase):
     def test_builds_expected_ssh_command(self, mock_run):
         mock_run.return_value = _completed(returncode=0)
         with tempfile.TemporaryDirectory() as runtime:
-            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                    patch.object(sr, "_ensure_ssh_control_dir"), \
+                    patch.object(sr, "_ssh_control_dir", return_value=Path('/fixture/s')):
                 sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true", timeout=10)
                 args = mock_run.call_args[0][0]
                 self.assertEqual(args[0], "ssh")
@@ -429,7 +431,9 @@ class TestSshRun(unittest.TestCase):
 
     def test_control_path_never_contains_connection_details(self):
         with tempfile.TemporaryDirectory() as runtime:
-            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                    patch.object(sr, "_ensure_ssh_control_dir"), \
+                    patch.object(sr, "_ssh_control_dir", return_value=Path('/fixture/s')):
                 args = sr.ssh_command_args(
                     {"ssh": "deploy-token@secret-host.internal:2222"}, "true"
                 )
@@ -490,7 +494,9 @@ class TestSshRun(unittest.TestCase):
     def test_scp_uses_control_options_with_custom_port(self, mock_run):
         mock_run.return_value = _completed(returncode=0)
         with tempfile.TemporaryDirectory() as runtime:
-            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                    patch.object(sr, "_ensure_ssh_control_dir"), \
+                    patch.object(sr, "_ssh_control_dir", return_value=Path('/fixture/s')):
                 result = sr.scp_run(
                     {"ssh": "ubuntu@1.2.3.4:2222"}, "local.php", "/remote/local.php"
                 )
@@ -1248,6 +1254,8 @@ class TestPushCommits(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as runtime:
             with patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr, "_ensure_ssh_control_dir"), \
+                 patch.object(sr, "_ssh_control_dir", return_value=Path('/fixture/s')), \
                  patch.dict(os.environ, {"PRESERVE_ME": "value"}):
                 sha = sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
                                        "/home/ubuntu/sandbox/deploy-src/proj", "main")

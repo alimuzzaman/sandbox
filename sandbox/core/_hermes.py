@@ -3706,12 +3706,9 @@ def chat(remote_name: str, repo: str, *, worktree: bool = True) -> dict:
         cwd = (res.stdout or "").strip().splitlines()[-1]
     else:
         cwd = repo_path
-    parts = remote.remote_ssh_parts(entry)
     command = f"cd {shlex.quote(cwd)} && HERMES_HOME={paths['hermes_home']} {paths['launcher']} chat"
-    argv = ["ssh"]
-    if parts["port"]:
-        argv.extend(["-p", str(parts["port"])])
-    argv.extend(["-tt", parts["target"], command])
+    argv = remote.ssh_command_args(entry, command, multiplex=False)
+    argv[1:1] = ['-tt']
     try:
         rc = subprocess.run(argv, check=False).returncode
     except OSError as exc:

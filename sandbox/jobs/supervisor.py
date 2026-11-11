@@ -22,8 +22,26 @@ from .metrics import append as append_metric, sample as sample_metric
 from sandbox.services.redaction import redact_structure, redact_text
 
 
+def _server_cli_parent_reason(descriptor, repository):
+    parent = descriptor.get('server_cli_parent')
+    if parent is None:
+        return None
+    from datetime import datetime, timezone
+    try:
+        deadline = datetime.fromisoformat(parent['deadline_at'])
+        if datetime.now(timezone.utc) >= deadline:
+            return 'parent_deadline_exceeded'
+        row = repository.get(parent['job_id'])
+        if row.get('kind') != 'server-cli' or row.get('lifecycle') not in {'running', 'succeeded'}:
+            return 'parent_cancelled_or_unavailable'
+    except Exception:
+        return 'parent_context_unavailable'
+    return None
+
+
 _CHILD_CONTEXT_KEYS = {
     "job_id": "SANDBOX_DURABLE_JOB_ID",
+    "execution_kind": 'SANDBOX_DURABLE_EXECUTION_KIND',
     "request_id": "SANDBOX_DURABLE_REQUEST_ID",
     "project_identity": "SANDBOX_DURABLE_PROJECT_IDENTITY",
     "project_root_digest": "SANDBOX_DURABLE_PROJECT_ROOT_DIGEST",
@@ -34,13 +52,26 @@ _CHILD_CONTEXT_KEYS = {
 
 
 @contextmanager
-def _child_identity_context(value: object):
+def _child_identity_context(value: object, environment=None):
     """Temporarily add only fixed authoritative keys for one child launch.
 
     The detached supervisor is single-purpose. This intentionally does not
     enumerate, copy, unpack, log, or persist the inherited environment.
     """
     context = value if isinstance(value, dict) else {}
+    if environment is not None:
+        # Only the adapter's explicit synthetic identity environment is copied,
+        # never os.environ. Other durable jobs retain their existing behavior.
+        child = dict(environment)
+        for field, environment_key in _CHILD_CONTEXT_KEYS.items():
+            item = context.get(field)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item or '\0' in item:
+                raise ValueError('durable child identity context is invalid')
+            child[environment_key] = item
+        yield child
+        return
     previous = {}
     changed = []
     try:
@@ -102,12 +133,17 @@ def run_descriptor(path: str | Path) -> int:
             supervisor_nonce_hash=descriptor["nonce_hash"])
         repository.transition(job_id, Lifecycle.RUNNING)
         output = JobOutputStore(storage, repository, job_id, secrets=descriptor.get("redaction_secrets", ()))
+        parent_reason = _server_cli_parent_reason(descriptor, repository)
+        if parent_reason is not None:
+            repository.transition(job_id, Lifecycle.TIMED_OUT if parent_reason == 'parent_deadline_exceeded' else Lifecycle.CANCELLED,
+                termination_reason=parent_reason)
+            return 124 if parent_reason == 'parent_deadline_exceeded' else 130
         if _managed_native_job(descriptor):
             return _run_managed_native(descriptor, repository, output)
-        with _child_identity_context(descriptor.get("authoritative_context")):
+        with _child_identity_context(descriptor.get("authoritative_context"), descriptor.get('environment')) as environment:
             command = subprocess.Popen(
                 descriptor["argv"], cwd=descriptor["cwd"],
-                env=descriptor.get("environment"), stdin=subprocess.DEVNULL,
+                env=environment, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, close_fds=True)
         release_authority = False
@@ -148,6 +184,12 @@ def run_descriptor(path: str | Path) -> int:
 
         while True:
             now = time.monotonic()
+            parent_reason = _server_cli_parent_reason(descriptor, repository)
+            if parent_reason is not None:
+                if parent_reason == 'parent_deadline_exceeded':
+                    timed_out = True
+                if repository.get(job_id)['lifecycle'] != Lifecycle.CANCELLING.value:
+                    repository.transition(job_id, Lifecycle.CANCELLING, termination_reason=parent_reason)
             if (now - last_state_probe >= 0.05) or (not selector.get_map()) or (now >= deadline):
                 leader_alive, group_running, active_descendants = _group_state(command)
                 for pid in active_descendants:

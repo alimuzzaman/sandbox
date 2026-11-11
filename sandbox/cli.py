@@ -876,6 +876,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Service actions:\n"
             "  ./sb remote service status NAME [--json]\n"
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
+            "  ./sb remote service refresh NAME [--json]  # adopt joined service identity locally\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
             "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]\n"
@@ -1579,6 +1580,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             args.exec_argv = host_exec_argv
         else:
             args = p.parse_args(raw_argv)
+    args._server_cli_argv = tuple(raw_argv)
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "share":
         # `host share revoke ID|all` reuses the optional positional slot.
         args.share_id, args.tailnet_hostname = args.tailnet_hostname, None

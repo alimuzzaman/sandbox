@@ -194,6 +194,14 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--project-identity",
                         help="canonical project identity supplied by a detached controller")
     parser.add_argument("--kind", default="exec", help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli', action='store_true',
+                        help='run the fixed installed host CLI as a retained local job')
+    parser.add_argument('--server-cli-target', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-revision', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-marker', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-origin', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-target-metadata', help=argparse.SUPPRESS)
+    parser.add_argument('--parent-job-id', help=argparse.SUPPRESS)
     parser.add_argument("--materialization-source-root", help=argparse.SUPPRESS)
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
@@ -429,6 +437,22 @@ def cmd_job_start(_cfg, args) -> None:
         command = command[1:]
     if not command:
         _die("usage: ./sb job-start [target options] -- <argv...>")
+    server_cli = bool(getattr(args, 'server_cli', False))
+    if server_cli:
+        from sandbox.application.server_cli import capabilities, fixed_argv, validate_target_metadata
+        cap = capabilities()
+        from sandbox.core._remote import validate_remote_name
+        origin_remote_name = validate_remote_name(getattr(args, 'server_cli_origin', None))
+        routing = validate_target_metadata(json.loads(getattr(args, 'server_cli_target_metadata', '{}')))
+        if (getattr(args, 'remote', None) or not getattr(args, 'local', False)
+                or getattr(args, 'server_cli_target', None) != cap['target_identity']
+                or getattr(args, 'server_cli_revision', None) != cap['runtime_revision']
+                or getattr(args, 'server_cli_marker', None) != cap['ownership_marker']
+                or not getattr(args, 'request_id', None)):
+            _die('server_cli_capability_unavailable: fixed server CLI binding is missing or changed')
+        command = list(fixed_argv(command))
+    elif getattr(args, 'kind', None) == 'server-cli':
+        _die('server_cli_capability_unavailable: use the fixed server CLI contract')
     dependencies = durable_job_dependencies()
     try:
         target = dependencies["target_service"].resolve(TargetRequest(
@@ -444,6 +468,24 @@ def cmd_job_start(_cfg, args) -> None:
         raise_registration_refusal(exc)
         _die(f"{exc.code}: {exc}")
     policy = _resolved_execution_policy(target, args)
+    parent_job_id = getattr(args, 'parent_job_id', None)
+    if parent_job_id and not server_cli:
+        _die('parent-job-id requires the fixed server CLI contract')
+    if server_cli:
+        expected = dict(policy.provenance or {})
+        expected.update({'server_cli.target_identity': cap['target_identity'],
+                         'server_cli.runtime_revision': cap['runtime_revision'],
+                         'server_cli.ownership_marker': cap['ownership_marker'],
+                         'server_cli.remote_name': origin_remote_name})
+        expected['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
+        if parent_job_id:
+            from sandbox.application.server_cli import validate_nested_parent
+            expected['server_cli.parent_deadline_at'] = validate_nested_parent(parent_job_id,
+                target_identity=cap['target_identity'], marker=cap['ownership_marker'],
+                revision=cap['runtime_revision'], origin_remote_name=origin_remote_name,
+                timeout_seconds=policy.deadline_seconds)
+        from dataclasses import replace
+        policy = replace(policy, provenance=expected)
     source = SourceIdentity(
         getattr(args, "source_identity", None)
         or _source_identity(target.project_root).identity,
@@ -453,11 +495,12 @@ def cmd_job_start(_cfg, args) -> None:
     project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))
     submission = JobSubmission(
-        kind=getattr(args, "kind", "exec"), project_root=target.project_root,
+        kind='server-cli' if server_cli else getattr(args, "kind", "exec"), project_root=target.project_root,
         project_identity=project_identity,
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
         argv=tuple(command), deadline_seconds=policy.deadline_seconds, source=source,
-        request_id=getattr(args, "request_id", None), execution_profile=policy.execution_profile, output_profile=output_profile,
+        request_id=getattr(args, "request_id", None), parent_job_id=parent_job_id,
+        execution_profile=policy.execution_profile, output_profile=output_profile,
         output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
                                    .get(output_profile)),
         deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,

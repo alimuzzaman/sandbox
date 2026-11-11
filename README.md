@@ -1333,6 +1333,16 @@ and can usually diagnose itself.
 
 ## Roadmap
 
+Joined tailnet controllers now discover and pin authenticated service and machine
+identity. Ordinary access automatically repairs missing joined metadata and
+adopts a front-door profile only when same-machine observations prove it. This
+does not reprovision the server or copy its owner's bearer token. Status separates
+HTTP admission from SSH access and unknown unit ownership. Tailnet SSH excludes
+public/key-based fallback. Optional `./sb remote service refresh NAME --json`
+remains available. See
+[remote transport status](docs/remote-transport-status.md) for pin preservation,
+runtime compatibility and remaining SSH boundaries.
+
 - **Shipped** — Docker WP stack; the single `sandbox` MCP server routing by
   `project_dir`; per-project `sandbox.config.*` + on-disk registry;
   externally-provisioned phpunit harness (`sandbox test` / `run_tests`);

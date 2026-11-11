@@ -24,10 +24,10 @@ SELECTOR: --project-dir D [--environment E] | --target P/E | --name STACK | --st
 ## `create` result (`--json`)
 
 ```json
-{"ok": true, "link": "https://share.dev.example.test/s/l-<32hex>#<token>",
- "link_id": "l-<32hex>", "target": "mockups/dev", "entry": "share", "kind": "site",
+{"ok": true, "link": "https://s.dev.example.test/s/#<22-character token>",
+ "link_id": "l-<12hex>", "target": "mockups/dev", "entry": "share", "kind": "site",
  "scope": "/designs/home/", "expires_at": 1700604800, "expires_clamped": false,
- "uses": null, "hostname": "share.dev.example.test"}
+ "uses": null, "hostname": "s.dev.example.test"}
 ```
 
 Without `agent_mint`, on a terminal: no `link` key, and `"link_shown_on": "terminal"`.

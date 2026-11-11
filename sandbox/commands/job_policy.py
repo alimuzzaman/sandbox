@@ -167,7 +167,26 @@ def _remote_control_predispatch(args) -> bool:
     return bool(getattr(args, "remote", None))
 
 
+def _configure_capabilities(parser) -> None:
+    parser.add_argument('--json', action='store_true')
+
+
+def cmd_job_capabilities(_cfg, args) -> None:
+    """Observe the assembled installed job contract without opening its ledger."""
+    from sandbox.application.server_cli import capabilities, ServerCLIUnavailable
+    try:
+        payload = capabilities()
+    except (ServerCLIUnavailable, OSError):
+        payload = {'schema_version': 1, 'ok': False, 'code': 'server_cli_capability_unavailable',
+                   'error': 'installed server CLI capability is unavailable'}
+    print(json.dumps(payload, sort_keys=True))
+    if not payload['ok']:
+        raise SystemExit(1)
+
+
 register_specs((
+    CommandSpec('job-capabilities', cmd_job_capabilities, configure=_configure_capabilities,
+                owner=__name__, scope='global', help='read installed durable CLI execution capabilities'),
     CommandSpec("job-policy", cmd_job_policy, configure=configure_parser, owner=__name__,
                 scope="global", predispatch_policy=_remote_control_predispatch,
                 help="show or set the durable-job slot limit and resource floors of a host"),

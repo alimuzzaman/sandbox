@@ -77,6 +77,9 @@ def front_door_mode(entry: dict | None) -> str:
     """Resolve a registered remote's front door; unrecorded means the default."""
     raw = (entry or {}).get("front_door")
     if raw is None:
+        if (entry or {}).get('joined') is True and (entry or {}).get('control_access') == 'tailnet':
+            raise FrontDoorError('joined_profile_unavailable',
+                'admitted control access is available but the existing front-door profile is not proven; no routing changes were attempted')
         return DEFAULT_FRONT_DOOR
     return validate_mode(raw)
 

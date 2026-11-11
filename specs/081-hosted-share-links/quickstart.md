@@ -49,3 +49,20 @@ Manual, on a controller with a stack whose target sets `share.agent_mint: true`
    fix; on one without a `share:` block, `stack_share_not_declared` with the fix.
 5. `curl -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:<port>/api/hosting/share`
    answers 403 (no Origin, no panel header).
+
+## Short links (2026-11-11 follow-up)
+
+Automated (xspeed-dev, `--profile unit`): `tests/test_share_gate_runtime.py`,
+`tests/test_host_share.py`, `tests/test_login_service_runtime.py`,
+`tests/test_host_login_service.py`, `tests/test_web_share.py`. They check the new form
+round-trips, old links still open, every bad token gets byte-identical 404s, the id is
+the hash prefix and not the token, and the token is absent from logs, audit and output.
+
+Manual (orchestrator, after the merge and a gate apply):
+
+1. `sb host share create --remote R --project-dir . --json`: `link` reads
+   `https://<gate>/s/#<22 characters>` and `link_id` reads `l-<12 hex>`.
+2. Open it in a private window: the site opens, and the address bar shows no `#`.
+3. An old-form link minted before the apply still opens until its expiry.
+4. `curl -si -X POST -d token=AAAAAAAAAAAAAAAAAAAAAA https://<gate>/s/` answers 404.
+5. `sb host share revoke l-<12 hex> --remote R --project-dir .`: a reload answers 404.

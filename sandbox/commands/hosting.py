@@ -4426,14 +4426,15 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     if not config:
         raise hosting.HostingError("this hosting environment does not declare autologin")
     ttl = config["ttl_seconds"] if ttl_seconds is None else ttl_seconds
-    if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or not 60 <= ttl <= 3600:
         raise hosting.HostingError("--ttl-seconds must be between 60 and 3600")
     key = hosting.state_key(remote_name, validated)
     host_state = state.get("hosts", {}).get(key)
     if not isinstance(host_state, dict):
         raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
     token = secrets.token_urlsafe(32)
-    expires_at = int(time.time()) + ttl
+    issued_at = int(time.time())
+    expires_at = issued_at + ttl
     plugin = hosting.render_autologin_mu_plugin(
         hashlib.sha256(token.encode()).hexdigest(), config["user"], expires_at,
     )
@@ -4446,7 +4447,9 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     target = config["container_path"]
     install = (
         f"set -eu; mkdir -p {shlex.quote(str(__import__('posixpath').dirname(target)))}; "
-        f"cat > {shlex.quote(target)}; chmod 0644 {shlex.quote(target)}"
+        f"temporary=$(mktemp {shlex.quote(target + '.XXXXXX')}); "
+        'trap \'rm -f "$temporary"\' EXIT; '
+        f'cat > "$temporary"; chmod 0644 "$temporary"; mv "$temporary" {shlex.quote(target)}'
     )
     service = shlex.quote(config.get("service") or validated["compose"]["service"])
     _remote_checked(entry, (
@@ -4454,6 +4457,10 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
         f"sh -c {shlex.quote(install)}"
     ), timeout=60)
     _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
+    from sandbox.hosting.autologin import register_script
+    registration = register_script(target, hashlib.sha256(token.encode()).hexdigest(),
+                                   config["user"], issued_at, expires_at)
+    _remote_checked(entry, f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", timeout=60)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
     (save_state or hosting.save_host_state)(state)
     return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
@@ -8468,7 +8475,8 @@ def cmd_host(cfg, args) -> None:
     if (args.action not in {"validate", "secrets", "image"}
             and not getattr(args, "remote", None)):
         die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, refresh-front-door, logs, sync, and login-url")
-    if args.action in {"logs", "status", "diagnose", "refresh-front-door", "retire-delivery"} and (
+    resolved = None
+    if args.action in {"logs", "status", "diagnose", "refresh-front-door", "retire-delivery", "login-url"} and (
             getattr(args, "target", None) or getattr(args, "name", None)):
         # Spec 074: a recorded stack resolves to its rendered manifest, never
         # the template in the current directory (feedback da5d522e).
@@ -8487,6 +8495,9 @@ def cmd_host(cfg, args) -> None:
         args.project_dir, args.environment = resolved.project_dir, resolved.environment
     try:
         validated = hosting.validate_manifest(args.project_dir or ".", args.environment)
+        if (args.action == 'login-url' and resolved is not None
+                and (validated['project'], validated['environment']) != (resolved.project, resolved.environment)):
+            raise hosting.HostingError('recorded stack manifest no longer matches the selected target')
         # Preserve command provenance separately from the manifest's source root.
         validated['_invocation_root'] = str(Path(args.project_dir or '.').resolve())
     except hosting.HostingError as exc:
@@ -8681,6 +8692,8 @@ def cmd_host(cfg, args) -> None:
                 or getattr(args, "email", None) or getattr(args, "save_email", False)):
             _cmd_host_login_link(validated, entry, args)
             return
+        if getattr(args, "list_links", False) or getattr(args, "revoke", None):
+            die("listing or revoking links requires a declared site_gate entry")
         try:
             result = _with_host_writer_lock(
                 validated, args.remote,

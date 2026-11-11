@@ -1039,7 +1039,7 @@ class TestHostingManifest(unittest.TestCase):
         url = hosting.autologin_url(validated, "opaque-token", 1234567890)
         self.assertEqual(
             url,
-            "https://example.test/wp-login.php?sandbox_autologin=opaque-token&expires=1234567890",
+            "https://example.test/wp-login.php?sandbox_autologin=1#opaque-token",
         )
 
     def test_rejects_unsafe_autologin_container_path(self):
@@ -1055,10 +1055,10 @@ class TestHostingManifest(unittest.TestCase):
         token = "not-written-to-the-server"
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         plugin = hosting.render_autologin_mu_plugin(token_hash, "admin", int(time.time()) + 600)
-        self.assertIn(token_hash, plugin)
+        self.assertNotIn(token_hash, plugin)
         self.assertNotIn(token, plugin)
-        self.assertIn("add_site_option", plugin)
-        self.assertIn("SANDBOX_HOST_AUTOLOGIN_EXPIRES_AT", plugin)
+        self.assertIn("update_site_option", plugin)
+        self.assertIn("sandbox_host_autologin_consume", plugin)
 
     def test_existing_host_keeps_its_allocated_loopback_port(self):
         with self._write(_manifest()) as directory:

@@ -1517,6 +1517,33 @@ environments:
       generated: {PG_PASSWORD: 'XSPEED_HUB_SBX_{SLUG}_PG_PASSWORD'}
 ```
 
+A WordPress-only template can declare direct shared stacks on the same remote:
+
+```yaml
+stack:
+  slug: '^[a-z0-9][a-z0-9-]{0,30}$'
+  ports: [mailpit]
+  uses: [dev]
+```
+
+`stack.uses` defaults to `[]`. It accepts at most four distinct literal stack names,
+using lowercase letters, digits and hyphens (1–63 characters, first character
+alphanumeric). The selected controller must already record each stack on the selected
+remote. Plan and confirm validate references before effects; confirm repeats the check
+under the controller registry lock. Invalid values, over-limit lists, duplicates,
+self-reference and missing references have distinct `stack_uses_*` refusal codes.
+Direct cycles are accepted; no transitive expansion occurs.
+
+The relationship is stored on the controller. `stack list` includes `uses` in JSON
+and text; older records default to empty. Delivery preserves relationships and reapply
+replaces them. `stack down` reports `used_by` without refusing teardown. A relationship
+creates no routes, inbox names, stacks or access grants. Continue provisioning inbox
+names through `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
+sections, recorded inbox links and delivered revision evidence. A controller without
+recorded inbox names shows the supported setup command. One-link teammate access
+and per-click sign-in are separate spec 085 work; this declaration alone does not
+grant access.
+
 Placeholders: `{slug}`, `{SLUG}` (upper case, `-` becomes `_`), `{port:<name>}` (the
 name must be listed in `stack.ports`) and `{ref_branch}` (the branch `--ref` was
 resolved from; empty for a detached commit). They are allowed only in `project`,
@@ -2218,6 +2245,42 @@ process and capped at 64 hostnames per round. The page never waits for it: rows 
 "checking" until a result arrives. Only hostnames from Sandbox's own records are probed,
 never wildcards and never anything a request names. A hostname that is tailnet-only,
 such as a `mail-<slug>` route, reads "unreachable" from anywhere outside the tailnet.
+
+Stack cards link to `/hosting/<remote>/<slug>`. The page lists the stack and its
+direct `stack.uses` references, with shared labels, recorded inbox names and revision
+evidence. Missing references and inbox names show setup guidance. Relationship
+expansion stops after one level.
+
+Templates may use stack placeholders in `share.hostname`, named autologin entry
+hostnames and magic-link `request_origin`, `link_origin`, `link_pattern` and
+`required_params` values. Substitutions in `link_pattern` are regex-escaped literals;
+numeric regex quantifiers are preserved. Other autologin fields still reject
+placeholders. For example, `share-{slug}.example.test` gives each rendered stack its
+own gate hostname. These template changes create no live route until apply.
+
+The controller page's WordPress admin action posts exactly `{remote, stack}` to
+`/api/hosting/sign-in` with the panel's same-origin guard. It resolves the recorded
+rendered manifest and uses the same host writer lock as the CLI. A missing WordPress
+autologin declaration, inaccessible private route or unavailable remote refuses the
+action. This currently requires a controller with the rendered stack manifest.
+Server-local sign-in and public teammate access are not implemented by this endpoint.
+Unavailable actions show declaration, manifest, private-gate or controller guidance
+on both own and Shared stack sections before a click. The operation repeats these
+checks at mint time. Named CLI login also refuses a manifest whose project or
+environment no longer matches the recorded selection.
+
+WordPress sign-in tokens travel in URL fragments, then the opener submits them by
+POST. Only hashes enter a WordPress database option. Mint and consume serialize on
+a database advisory lock; at most eight unused links remain, and overflow discards
+the oldest. Reinstalling the generated mu-plugin preserves the option. The panel
+opens a new tab for the one-shot no-store result and keeps it out of polling state
+and browser storage. No GET or list operation mints a sign-in.
+Consumption requires an Origin matching WordPress's configured home origin and
+rejects a foreign Fetch Metadata site value. Missing Origin is refused; opening
+the fragment link in a browser supplies the supported same-origin form POST.
+The opener uses `Referrer-Policy: same-origin` so browser form submissions retain
+their Origin while cross-origin requests receive no referrer. The script removes
+the fragment before submitting; request URLs and referrers contain no token.
 
 The host pages count hosted targets apart from Sandbox instances. The host inventory
 (`/inventory` from the control service, and **this-server** in `sb web` on a server) has a

@@ -1069,7 +1069,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
-        help="host stack up/down: the stack slug; host exec/logs/status/diagnose/refresh-front-door/retire-delivery: a recorded stack to target")
+        help="host stack up/down: the stack slug; host exec/logs/status/diagnose/refresh-front-door/retire-delivery/login-url: a recorded stack to target")
     host_p.add_argument("--ref", default=None, metavar="BRANCH|COMMIT",
         help="host stack up: ref to deploy, resolved on this controller (default: the checkout's HEAD)")
     host_p.add_argument("--port", action="append", default=None, metavar="NAME=PORT",

@@ -522,6 +522,8 @@ def _up(args) -> dict:
 
     def prepare(data: dict) -> tuple[dict | None, dict[str, int], dict]:
         """Checks and port choice shared by plan and confirm; no writes."""
+        stack_template.validate_uses(template, slug, {
+            item["slug"] for item in stack_registry.records_for_remote(data, remote_name)})
         record = data["stacks"].get(stack_registry.record_key(remote_name, slug))
         for other in stack_registry.records_for_slug(data, slug):
             if other.get("remote") != remote_name:
@@ -564,7 +566,7 @@ def _up(args) -> dict:
     def result(mode: str, validated: dict, ports: dict, hostnames: list[str], *, source_root,
                submission, stored: dict, job_id=None, request_id=None, missing=()) -> dict:
         return {"ok": True, "action": "stack-up", "mode": mode, "slug": slug, "remote": remote_name,
-                "project": project, "environment": environment, "ref": ref.ref,
+                "project": project, "environment": environment, "uses": list(template.uses), "ref": ref.ref,
                 "ref_branch": ref.ref_branch, "commit": ref.commit, "hostnames": hostnames,
                 "ports": ports, "manifest": validated["manifest_path"], "source_root": source_root,
                 "template": str(template_path), "submission": submission, "job_id": job_id,
@@ -649,7 +651,7 @@ def _up(args) -> dict:
             # it to last_apply.commit once this one completes (record_delivery).
             "commit": (stack_registry.delivered_commit(previous, _last_apply_view(previous).get("status"))
                        if previous else None),
-            "ports": ports, "manifest": str(manifest_path),
+            "ports": ports, "uses": list(template.uses), "manifest": str(manifest_path),
             "worktrees": [*earlier, str(worktree)],
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
             # Spec 076: sites `sb deploy --stack` linked to this stack outlive a re-apply.
@@ -738,6 +740,7 @@ def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -
     row["mine"] = bool(local) and (not remote_item or local.get("copy_id") == remote_item.get("copy_id"))
     row["remote_record"] = remote_state
     row["last_apply"] = _last_apply_view(local) if local else None
+    row["uses"] = list(local.get("uses") or []) if row["mine"] else []
     if row["mine"]:
         # The remote record holds the commit its claim was made for; this
         # controller's record holds the one an apply delivered.
@@ -826,6 +829,8 @@ def _down(args) -> dict:
     lock_wait = hosting_cmd._host_apply_lock_wait(args)
     with stack_registry.locked() as registry:
         record = registry.get(remote_name, slug)
+        used_by = sorted(item["slug"] for item in stack_registry.records_for_remote(registry.data, remote_name)
+                         if slug in (item.get("uses") or []))
         caller = _caller(_owner_checkout(record), args)
         store = _store(entry, caller)
         remote_item = _remote_stack(store.list(), slug)
@@ -859,7 +864,7 @@ def _down(args) -> dict:
             registry.delete(remote_name, slug)
     return {"ok": True, "action": "stack-down", "slug": slug, "remote": remote_name,
             "project": project, "environment": environment,
-            "released_ports": (record or {}).get("ports") or (remote_item or {}).get("ports") or {},
+            "used_by": used_by, "released_ports": (record or {}).get("ports") or (remote_item or {}).get("ports") or {},
             "destroy": destroyed, "forced_owner": force and bool(remote_item) and not (
                 str((remote_item.get("owner") or {}).get("label", "")).lower() == caller["label"].lower()),
             "was_reaped": bool(remote_item and remote_item.get("state") == "reaped")}
@@ -989,6 +994,7 @@ def _render_text(payload: dict) -> str:
                 lines.append(f"  remote record: {item['remote_record']} (protected until claimed)")
             lines.append(f"  hosts: {', '.join(item.get('hostnames') or [])}")
             lines.append(f"  ports: {ports}")
+            lines.append("  uses: " + (", ".join(item.get("uses") or []) or "none"))
             if last:
                 requested = f", commit {last['commit'][:12]}" if last.get("commit") else ""
                 lines.append(f"  last apply: {last.get('status', 'unknown')} at {last.get('at')} "
@@ -1004,7 +1010,7 @@ def _render_text(payload: dict) -> str:
     if action == "stack-down":
         ports = ", ".join(f"{name}={port}" for name, port in payload["released_ports"].items()) or "none"
         return (f"stack {payload['slug']} torn down ({payload['destroy'].get('state')}); "
-                f"released ports: {ports}")
+                f"released ports: {ports}; used by: {', '.join(payload.get('used_by') or []) or 'none'}")
     if action == "stack-ttl":
         return (f"stack {payload['slug']}: {payload['lifetime']}, expires {_when(payload['expires_at'])}")
     if action == "stack-limits":
@@ -1032,6 +1038,7 @@ def _render_text(payload: dict) -> str:
              f"  lifetime: {payload.get('lifetime')} ({payload.get('lifetime_source')})"
              f"{' canonical' if payload.get('canonical') else ''}, expires {_when(payload.get('expires_at'))}",
              f"  hosts: {', '.join(payload['hostnames'])}",
+             f"  uses: {', '.join(payload.get('uses') or []) or 'none'}",
              f"  ports: {ports}",
              f"  manifest: {payload['manifest']}"]
     if payload["secrets_missing"]:

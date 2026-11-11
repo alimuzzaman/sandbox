@@ -18,6 +18,7 @@ export type Route =
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
   | { page: "hosting" }
+  | { page: "stack"; remote: string; slug: string }
   | { page: "remote"; name: string }
   | { page: "remote-instance"; name: string; instance: string }
   | { page: "notfound" };
@@ -30,6 +31,8 @@ export function parse(pathname: string): Route {
     return { page: "local-host" };
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
   if (parts[0] === "hosting" && parts.length === 1) return { page: "hosting" };
+  if (parts[0] === "hosting" && parts.length === 3)
+    return { page: "stack", remote: decodeURIComponent(parts[1]), slug: decodeURIComponent(parts[2]) };
   if (parts[0] === "remote" && parts[1] && parts.length === 2)
     return { page: "remote", name: decodeURIComponent(parts[1]) };
   if (parts[0] === "remote" && parts[1] && parts[2] === "instance" && parts[3] && parts.length === 4)
@@ -72,6 +75,10 @@ export function instancePath(name: string, console = false): string {
 }
 export const localHostPath = (): string => "/host/local";
 export const hostingPath = (): string => "/hosting";
+export const stackPath = (remote: string, slug: string): string =>
+  `/hosting/${encodeURIComponent(remote)}/${encodeURIComponent(slug)}`;
+export const isHostingRoute = (route: Route = currentRoute()): boolean =>
+  route.page === "hosting" || route.page === "stack";
 // One hosted target's card on /hosting. Server-side rows use "this-server".
 export const hostingAnchor = (remote: string, project: string, environment: string): string =>
   `hosting-${remote}/${project}/${environment}`;

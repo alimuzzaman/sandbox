@@ -232,5 +232,5 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/084-front-door-refresh/plan.md
+at specs/085-stack-page-access/plan.md
 <!-- SPECKIT END -->

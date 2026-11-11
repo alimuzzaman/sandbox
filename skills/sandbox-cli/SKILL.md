@@ -1055,3 +1055,12 @@ When verifying server configuration changes:
    after warming, and origin pass-through after revert.
 3. Compare target and control instances before and after every mutation to prove
    the control instance remains 100% unchanged.
+
+### Direct shared stack declarations (spec 085)
+
+`stack.uses: [dev]` declares up to four existing same-remote stacks recorded by this
+controller. Plan/confirm refuse invalid, duplicate, self or missing names before
+effects. `stack list` returns direct uses; `stack down` reports dependents without
+blocking teardown. It creates no resources or grants. The panel/shared-access work
+is separate and must not be inferred as ready from template parsing support. See
+`docs/remote-hosting.md` for syntax and `specs/085-stack-page-access/plan.md` for readiness.

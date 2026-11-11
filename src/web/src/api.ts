@@ -41,6 +41,15 @@ export async function postAction(
 // without this exact JSON body and panel header, or with an Origin other than
 // its own (contracts/panel-http.md). The result is never cached or kept.
 type ShareTarget = { remote: string; stack: string };
+export type SignInResult = { ok: true; url: string; expires_at: number; one_time: boolean; user: string } | ShareRefused;
+export async function postSignIn(body: ShareTarget): Promise<SignInResult> {
+  const response = await fetch('/api/hosting/sign-in', {
+    method: 'POST', cache: 'no-store', credentials: 'same-origin', redirect: 'error',
+    headers: { 'content-type': 'application/json', 'x-sandbox-panel': 'share' },
+    body: JSON.stringify(body),
+  });
+  return await response.json() as SignInResult;
+}
 export function postShare(body: ShareTarget & { action: "create" }): Promise<ShareCreated | ShareRefused>;
 export function postShare(body: ShareTarget & { action: "list" }): Promise<ShareList | ShareRefused>;
 export function postShare(body: ShareTarget & { action: "revoke"; id: string }): Promise<ShareRevoked | ShareRefused>;

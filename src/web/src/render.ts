@@ -10,6 +10,7 @@ import { hostsView, localHostView, sidebarHostSelector } from "./pages/hosts";
 import { createView } from "./pages/create";
 import { remoteView } from "./pages/remote";
 import { hostingView } from "./pages/hosting";
+import { stackView } from "./pages/stack";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
 import { hostedCountText, showBulkActions } from "./ui/hostlabels";
 import type { Instance } from "./types";
@@ -180,6 +181,7 @@ function detailSignature(route: Route): string {
       store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
+  if (route.page === "stack") return `stack:${route.remote}/${route.slug}:` + store.hostingError + ":" + JSON.stringify(store.hosting);
   if (route.page === "hosting") return "hosting:" + store.hostingError + ":" + JSON.stringify(store.hosting);
   if (route.page === "local-host") {
     const server = thisServer();
@@ -205,6 +207,7 @@ function viewForRoute(route: Route): string {
     case "create": return createView();
     case "usage": return usageView();
     case "hosting": return hostingView();
+    case "stack": return stackView(route.remote, route.slug);
     case "local-host": return localHostView();
     case "remote": return remoteView(route.name, store.remote[route.name]);
     case "remote-instance": return remoteView(route.name, store.remote[route.name], route.instance);

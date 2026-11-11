@@ -5,7 +5,7 @@
 import { esc } from "../dom";
 import { store } from "../state";
 import { theme } from "../theme";
-import { hostingAnchor, hostingTargetPath } from "../router";
+import { hostingAnchor, hostingTargetPath, stackPath } from "../router";
 import { shareButtons } from "./share";
 import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget, LifetimeRow, LifetimeView } from "../types";
 import {
@@ -71,18 +71,20 @@ function hostCell(row: HostingServer): string {
   return `${name}${notes ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">${esc(notes)}</div>` : ""}`;
 }
 
-function refCell(row: HostingServer): string {
+function refCell(row: HostingServer, revision?: HostingStack["page_access"]): string {
+  if (row.origin === "route" && revision && revision.revision_status !== "verified")
+    return `<span class="${theme.quiet}">${revision.revision_status === "not_delivered" ? "not delivered" : "unverified"}</span>`;
   if (!row.ref.branch && !row.ref.commit) return `<span class="${theme.quiet}">unknown</span>`;
   return `<span title="${esc(row.ref.commit || "")}">${row.ref.branch ? `${esc(row.ref.branch)} · ` : ""}<code class="text-[11px]">${esc(short(row.ref.commit))}</code></span>`;
 }
 
-function serversTable(rows: HostingServer[], empty: string): string {
+function serversTable(rows: HostingServer[], empty: string, revision?: HostingStack["page_access"]): string {
   const body = rows.length ? rows.map(row => `<tr class="border-t border-neutral-200 align-top dark:border-neutral-800">
       <td class="break-words p-3 text-[12px]">${hostCell(row)}</td>
-      <td class="p-3 text-[12px] ${theme.muted}">${esc(ORIGIN[row.origin])}</td>
+      <td class="p-3 text-[12px] ${theme.muted}">${esc(row.origin === "route" ? row.hostname.split(".")[0] : ORIGIN[row.origin])}</td>
       <td class="p-3 text-[12px]">${esc(STATE[row.state] || row.state)}</td>
       <td class="p-3 text-[12px]">${healthBadge(row.health)}</td>
-      <td class="break-words p-3 text-[12px]">${refCell(row)}</td></tr>`).join("")
+      <td class="break-words p-3 text-[12px]">${refCell(row, revision)}</td></tr>`).join("")
     : `<tr><td colspan="5" class="p-4 text-[12px] ${theme.quiet}">${esc(empty)}</td></tr>`;
   return `<div class="overflow-x-auto"><table class="w-full min-w-[640px] table-fixed text-left"><colgroup><col class="w-[34%]"><col class="w-[17%]"><col class="w-[13%]"><col class="w-[14%]"><col class="w-[22%]"></colgroup><thead><tr>${["Server", "Kind", "State", "Health", "Built from"]
     .map(label => `<th scope="col" class="px-3 pb-2 pt-1 ${theme.label}">${label}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
@@ -212,21 +214,21 @@ export function hostedTargetsSection(remote: string, hosted: HostedTargets | und
   return `<section>${head}<div class="overflow-x-auto ${theme.panel}"><table class="w-full min-w-[880px] text-left"><thead><tr>${labels.map(([label, title]) => `<th scope="col" ${title ? `title="${esc(title)}"` : ""} class="p-3 ${theme.label}">${esc(label)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div><p class="mt-2 text-[11px] ${theme.quiet}">${esc(CPU_TITLE)}</p></section>`;
 }
 
-function stackCard(stack: HostingStack): string {
+export function stackCard(stack: HostingStack): string {
   const otherPorts = Object.entries(stack.ports).filter(([name]) => name !== "mailpit")
     .map(([name, port]) => `${name} ${port}`).join(", ");
   return `<section id="${esc(cardAnchor(stack))}" class="${theme.panel} scroll-mt-4 overflow-hidden" aria-labelledby="stack-${esc(stack.key)}">
     <header class="flex flex-col gap-2 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0"><div class="${theme.label}">Stack</div>
-        <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold">${esc(stack.slug)}</h2>
+        <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold"><a data-link class="hover:underline" href="${esc(stackPath(stack.source === "this-server" ? "this-server" : stack.remote, stack.slug))}">${esc(stack.slug)}</a></h2>
         <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(stack.project)} · ${esc(stack.environment)} · ${esc(sourceNote(stack.source, stack.remote))}</p></div>
       <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}${shareButtons(stack.remote, stack.slug)}</div>
     </header>
-    <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.")}</div>
+    <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.", stack.page_access)}</div>
     <dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">
-      ${field("Ref", `${esc(stack.ref_branch || stack.ref || "detached")}<div class="mt-0.5"><code class="text-[11px]" title="${esc(stack.commit)}">${esc(short(stack.commit))}</code></div>`)}
+      ${field("Ref", `${esc(stack.ref_branch || stack.ref || "detached")}<div class="mt-0.5">${stack.page_access && stack.page_access.revision_status !== "verified" ? esc(stack.page_access.revision_status === "not_delivered" ? "not delivered" : "unverified") : `<code class="text-[11px]" title="${esc(stack.commit)}">${esc(short(stack.commit))}</code>`}</div>`)}
       ${field("Template", stack.template ? `<code class="text-[11px]">${esc(stack.template)}</code>` : `<span class="${theme.quiet}">unknown</span>`)}
-      ${field("Mailpit", stack.mailpit_port ? `<code>127.0.0.1:${esc(stack.mailpit_port)}</code><div class="mt-0.5 text-[11px] ${theme.quiet}">loopback only, on the server</div>` : `<span class="${theme.quiet}">no mailpit port</span>`)}
+      ${field("Mailpit", stack.page_access ? (stack.page_access.inbox ? `<a href="${esc(stack.page_access.inbox.url)}" target="_blank" rel="noopener noreferrer" class="text-blue-700 hover:underline dark:text-blue-300">Open inbox</a>` : `<span class="${theme.quiet}">${esc(stack.page_access.inbox_reason || "No inbox address recorded.")}</span>`) : stack.mailpit_port ? `<code>127.0.0.1:${esc(stack.mailpit_port)}</code><div class="mt-0.5 text-[11px] ${theme.quiet}">loopback only, on the server</div>` : `<span class="${theme.quiet}">no mailpit port</span>`)}
       ${field("Created", `${esc(when(stack.created_at))}${stack.ttl_expires_at ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">expires ${esc(when(stack.ttl_expires_at))}</div>` : ""}`)}
       ${otherPorts || stack.loopback_port ? field("Ports", `${stack.loopback_port ? `app <code>127.0.0.1:${esc(stack.loopback_port)}</code>` : ""}${otherPorts ? `<div class="mt-0.5">${esc(otherPorts)}</div>` : ""}`) : ""}
     </dl>

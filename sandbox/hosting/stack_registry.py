@@ -64,6 +64,7 @@ class StackRecord(TypedDict, total=False):
     # The commit the latest `stack up` asked for is ``last_apply.commit``.
     commit: str | None
     hostnames: list[str]
+    uses: list[str]  # absent on older controller records
     ports: dict[str, int]
     manifest: str
     worktrees: list[str]

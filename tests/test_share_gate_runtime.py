@@ -14,6 +14,7 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
@@ -718,6 +719,50 @@ class ShortLinkTests(_Gate):
             self.assertTrue(self.manage("mint", "share", stdin=json.dumps(
                 {"link": share.link_record(request, minted), "stack": None}))["ok"])
             self.assertEqual(self.get("/", cookies[1])[0].status, 200)
+
+    def test_concurrent_mints_cannot_pass_the_record_cap(self):
+        """Sol review 2: the count, the check and the write are one step per entry."""
+        self.mint()
+        self.mint()
+        request = share.LinkRequest("share", "site", "/", 3600, None)
+        bodies = [json.dumps({"link": share.link_record(request, share.mint(
+            request, now=self.now, ends_at=self.config["enabled_until_epoch"])), "stack": None})
+            for _ in range(6)]
+        real_prune = runtime.SiteStore.prune
+
+        def slow_prune(store):
+            # Hold every admission at the point a racing mint would slip past the count.
+            real_prune(store)
+            time.sleep(0.05)
+
+        replies = []
+        lock = threading.Lock()
+
+        def mint(body):
+            out = io.StringIO()
+            runtime.manage(self.config, ["mint", "share"], self.state_dir, stdin=io.StringIO(body),
+                           stdout=out, clock=lambda: self.now)
+            with lock:
+                replies.append(json.loads(out.getvalue()))
+
+        with patch.object(runtime, "SITE_MAX_RECORDS", 3), patch.object(runtime.SiteStore, "prune", slow_prune):
+            threads = [threading.Thread(target=mint, args=(body,)) for body in bodies]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(sorted(reply.get("code", "ok") for reply in replies),
+                         ["ok"] + ["site_record_limit"] * 5)
+        self.assertEqual(len(list(self.public.gate.sites["share"].links.glob("*.json"))), 3)
+
+    def test_spent_links_are_listed_so_they_can_be_revoked(self):
+        token, link_id = self.mint(uses=1)
+        cookie = self.cookie(token)
+        listing = self.manage("list", "share")
+        self.assertEqual([(item["id"], item["used"], item["uses"]) for item in listing["links"]], [(link_id, 1, 1)])
+        self.assertEqual(self.manage("revoke", "share", link_id)["revoked_links"], 1)
+        self.assertEqual(self.get("/", cookie)[0].status, 404)
+        self.assertEqual(self.manage("list", "share")["links"], [])
 
     def test_the_guess_rate_limit_covers_short_posts(self):
         statuses = [self.post("token=" + share.new_token())[0].status

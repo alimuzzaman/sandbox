@@ -444,7 +444,8 @@ hostname to `sandbox-login:8080` is no longer needed.
   `terminal_required` and mints nothing, so the link never lands in job output, logs
   or a transcript.
 - `--uses N` (1 to 20, default 1) is how many browsers the link may start a session in.
-- `--list` needs no `--confirm`. It shows ids, times, uses spent and sessions, never a
+- `--list` needs no `--confirm`. It shows ids, times, uses spent (spent links too, until
+  they expire, so they can be revoked) and sessions, never a
   link or a hash.
 - Revoking a link also ends the sessions it started. Revoking ends an open websocket
   within 30 seconds.

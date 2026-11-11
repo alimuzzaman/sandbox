@@ -136,7 +136,7 @@
 - **Decision**: New links are `https://<gate>/s/#<token>`, the token
   `secrets.token_urlsafe(16)` (128 bits, 22 characters). `GET|HEAD /s/` always serves
   the opener page. `POST /s/` reads the token, hashes it, and scans every stored link
-  record of the entry (at most 32), comparing each record's hash to the digest with
+  record of the entry (at most 128, see below), comparing each record's hash to the digest with
   `hmac.compare_digest` and never stopping early. Only a match whose id is a short id
   (R14) counts. Then the existing liveness, Origin, enabled and use-claim checks run,
   and every refusal is the one `_answer_not_found` 404.
@@ -149,7 +149,8 @@
   `stat` calls), which only a holder of a once-valid token can observe.
 - **Bound and limits** (Sol review 1): every stored record is scanned, spent ones
   included, so mint caps the records an entry keeps at 128 (`site_record_limit`) next to
-  the 32 live links. What the answer does not hide: a matched spent record checks its
+  the 32 live links, under a per-entry lock so concurrent mints cannot pass it (Sol
+  review 2). `list` shows spent, unexpired links too, so they can be revoked. What the answer does not hide: a matched spent record checks its
   use markers; a body too large to read closes the connection after the same 404; a
   disabled gate answers 404 before any scan, `/s/` included. Each depends on a token once
   valid, on framing the client chose, or on public gate state, and none helps recover a
@@ -167,8 +168,8 @@
   a stack page is the id without `l-`, so 12 or 32 hex.
 - **Rationale**: The id must be shown (list, revoke, panel, audit) but must not lead
   back to the token: it is 48 bits of a hash of a 128-bit secret. Deriving it from the
-  hash keeps one secret and one random draw. With at most 32 live links per entry a
-  prefix collision is about 32 / 2^48; the second mint is refused and minted again.
+  hash keeps one secret and one random draw. With at most 128 kept records per entry a
+  prefix collision is about 128 / 2^48 (one in two trillion); the second mint is refused and minted again.
 - **Alternatives considered**: A separate random id (the old model): a second value to
   generate and store for no gain once the id leaves the URL. The full hash: it would
   let anyone with the list check a guessed token offline.

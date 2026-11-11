@@ -16,6 +16,8 @@ Security properties worth keeping in mind when changing this file:
 import base64
 import calendar
 import collections
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import html
@@ -415,6 +417,22 @@ class SiteStore:
             return {"ok": False, "code": "site_record_invalid"}
         if self.clock() >= service_ends_at or record["expires_at"] > service_ends_at:
             return {"ok": False, "code": "login_service_expired"}
+        with self._mint_lock():
+            return self._admit(record, stack)
+
+    @contextlib.contextmanager
+    def _mint_lock(self):
+        """One mint at a time per entry, across the separate operator processes, so the
+        live-link and kept-record caps hold under concurrent mints."""
+        descriptor = os.open(self.links.parent / ".mint.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
+    def _admit(self, record, stack):
+        """Count, check and write one link; the caller holds the mint lock."""
         self.prune()
         stored = list(self._links())
         if sum(1 for _, item in stored if self.is_live(item)) >= SITE_MAX_LINKS:
@@ -431,12 +449,16 @@ class SiteStore:
         return {"ok": True, "id": record["id"], "expires_at": record["expires_at"], "uses": record["uses"]}
 
     def listing(self):
-        """Ids, times, scopes and counts only: never a token, a secret, a key or a hash."""
+        """Ids, times, scopes and counts only: never a token, a secret, a key or a hash.
+
+        Spent links are listed too (``used`` equals ``uses``): they count toward
+        SITE_MAX_RECORDS until they expire, so the owner needs their ids to revoke them.
+        """
         self.prune()
         links = [{"id": record["id"], "kind": record["kind"], "scope": record["scope"],
                   "issued_at": record["issued_at"], "expires_at": record["expires_at"],
                   "uses": record["uses"], "used": self.spent(record)}
-                 for _, record in self._links() if self.is_live(record)]
+                 for _, record in self._links()]
         sessions = [{"id": record["id"], "link": record["link"], "created_at": record["created_at"],
                      "expires_at": record["expires_at"]}
                     for _, record in self._sessions() if self.clock() < record["expires_at"]]

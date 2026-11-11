@@ -332,8 +332,8 @@ expired, revoked, spent or malformed token: each gets the same 404.
   to run on the controller instead.
 - Two presses in a row mint two links. Each is shown once; both stay revocable.
 - Two live links whose hashes start with the same 12 hex characters: the second mint
-  is refused and the caller mints again. With at most 32 live links per entry this
-  is about one in ten billion.
+  is refused and the caller mints again. With at most 128 kept links per entry this
+  is about one in two trillion.
 - A visitor opens `/s/` with no fragment, or a fragment of the wrong length: the page
   says the link is incomplete and posts nothing.
 - An old-form link and a new-form link open in the same browser: both sessions live in

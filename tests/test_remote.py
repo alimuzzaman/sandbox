@@ -2587,6 +2587,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args = types.SimpleNamespace(name="myvps", control="https",
                                              control_host="sandbox.example.com", confirm=True,
                                              upload_timeout=611)
+                expected_entry = sr.get_remote("myvps")
                 with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(remote_cmd, "_local_git_revision", return_value="a" * 40), \
                      patch.object(remote_cmd, "_assert_clean_source_revision"), \
@@ -2598,7 +2599,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                         remote_cmd._cmd_provision(args, as_json=True)
                 probe.assert_called_once()
                 upload.assert_called_once_with(
-                    "ubuntu@1.2.3.4", source_revision="a" * 40, upload_timeout=611
+                    expected_entry, source_revision="a" * 40, upload_timeout=611
                 )
                 journal = next((Path(d) / "runtime" / "remote-provision" / "myvps").glob("*.json"))
                 payload = json.loads(journal.read_text())
@@ -3949,6 +3950,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args.ssh_url = "myvps"
                 args.confirm = True
                 args.upload_timeout = 712
+                expected_entry = sr.get_remote("myvps")
                 service = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
                 with patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}), \
                      patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
@@ -3958,7 +3960,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                      patch("builtins.print"):
                     remote_cmd._cmd_service(args, as_json=True)
                 upload.assert_called_once_with(
-                    "ubuntu@1.2.3.4", source_revision="f" * 40, upload_timeout=712
+                    expected_entry, source_revision="f" * 40, upload_timeout=712
                 )
                 self.assertTrue(migrate.call_args.kwargs["legacy_pidfile"])
                 self.assertEqual(migrate.call_args.kwargs["source_revision"], "f" * 40)
@@ -4054,6 +4056,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args.name = "myvps"
                 args.confirm = True
                 args.upload_timeout = 713
+                expected_entry = sr.get_remote("myvps")
                 service = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
                 with patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
                      patch.object(remote_cmd, "_assert_clean_source_revision"), \
@@ -4064,7 +4067,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                      patch("builtins.print"):
                     remote_cmd._cmd_up(args, as_json=True)
                 upload.assert_called_once_with(
-                    "ubuntu@1.2.3.4", source_revision="f" * 40, upload_timeout=713
+                    expected_entry, source_revision="f" * 40, upload_timeout=713
                 )
                 proxy.assert_called_once()
                 self.assertTrue(migrate.call_args.kwargs["confirm"])

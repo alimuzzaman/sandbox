@@ -235,10 +235,16 @@ class TailnetAccessCommandTest(unittest.TestCase):
         code, _ = self.command("enable", confirm=True, write_rc=1)
         self.assertNotEqual(code, 0)
 
-    def test_only_the_owning_controller_may_change_it(self):
+    def test_joined_tailnet_owner_can_change_it_without_local_bearer(self):
         joined = {**OWNER, "control_access": "tailnet", "joined": True}
         del joined["bearer_token"]
-        code, _ = self.command("enable", confirm=True, entry=joined)
+        code, result = self.command("enable", confirm=True, entry=joined, probe="admitted")
+        self.assertEqual((code, result["status"], result["members"]), (0, "enabled", "admitted"))
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_unbound_connection_cannot_change_owner_settings_without_context(self):
+        record = {key: value for key, value in OWNER.items() if key != "bearer_token"}
+        code, _ = self.command("enable", confirm=True, entry=record)
         self.assertNotEqual(code, 0)
         self.assertEqual(self.writes(), [])
 

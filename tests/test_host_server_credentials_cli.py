@@ -2,7 +2,8 @@
 
 Imports and the outer test child are harness setup. After setup, only the
 ordinary synthetic declaration and checked-in CLI version may be opened;
-no controller state is allowed.
+canonical shipped Python imports may also be read by their loader. No
+controller state or import-time effects are allowed.
 """
 import json
 from pathlib import Path
@@ -44,6 +45,7 @@ project = pathlib.Path(sys.argv[1])
 argv = json.loads(sys.argv[2])
 manifest = str(project / 'sandbox.hosting.yml')
 version_file = str(cli.ROOT / 'VERSION')
+code_roots = (cli.ROOT / 'sandbox', cli.ROOT / 'mcp' / 'wp-server')
 violations = []
 manifest_fds = set()
 real_open = os.open
@@ -57,11 +59,30 @@ def forbidden(name):
         violations.append(name)
         raise AssertionError('forbidden CLI boundary: ' + name)
     return fail
+def shipped_loader_access(path, *, directory=False):
+    if not isinstance(path, str):
+        return False
+    candidate = pathlib.Path(path)
+    if (not candidate.is_absolute()
+            or (not directory and candidate.suffix not in ('.py', '.pyc'))
+            or candidate.resolve() != candidate
+            or not any(candidate.is_relative_to(root) for root in code_roots)):
+        return False
+    # Only importlib's code loader gets this allowance. An application reading
+    # configuration, even during module initialization, remains forbidden.
+    frame = sys._getframe(1)
+    while frame is not None:
+        if (frame.f_code.co_name == ('_fill_cache' if directory else 'get_data')
+                and frame.f_globals.get('__name__') == 'importlib._bootstrap_external'):
+            return True
+        frame = frame.f_back
+    return False
 # Audit catches low-level operations even if a new helper bypasses these owners.
 def audit(event, args):
     if event == 'open':
         path, mode, flags = args
-        allowed = (isinstance(path, str) and path in (manifest, version_file)
+        allowed = (isinstance(path, str) and
+                   (path in (manifest, version_file) or shipped_loader_access(path))
                    and not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
         if isinstance(path, int) and path in manifest_fds:
             # os.fdopen wraps the descriptor just returned by the allowed read.
@@ -69,6 +90,10 @@ def audit(event, args):
             allowed = True
         if not allowed:
             forbidden('open')()
+    elif event == 'os.listdir' and shipped_loader_access(args[0], directory=True):
+        # FileFinder enumerates a shipped package while locating its code.
+        # Ordinary application directory reads still reach the trap below.
+        return
     elif (event.startswith(('subprocess.', 'socket.')) or event in {
             'os.system', 'os.posix_spawn', 'os.fork', 'os.exec', 'os.mkdir', 'os.remove',
             'os.rename', 'os.rmdir', 'os.link', 'os.symlink', 'os.chmod', 'os.truncate',

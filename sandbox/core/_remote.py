@@ -5207,6 +5207,10 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     record = remote_mcp_service_record(bind, port, public_url)
     if preserve_credentials and (remote.get('mcp_service') or {}).get('ownership_marker') != record['ownership_marker']:
         raise RuntimeError('remote_service_ownership_unknown: existing service marker cannot be replaced')
+    observed_revision = (remote.get('mcp_service') or {}).get('runtime_revision')
+    if preserve_credentials and (not isinstance(observed_revision, str)
+                                or _REMOTE_MCP_REVISION_RE.fullmatch(observed_revision) is None):
+        raise RuntimeError('owner_service_identity_unavailable: existing unit revision is unavailable')
     if record["runtime_revision"] != staged_source["runtime_revision"]:
         raise ValueError("staged Sandbox runtime record revision does not match exact source")
     plan = {
@@ -5267,6 +5271,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     normalize_program = _REMOTE_HOME_NORMALIZE_PROGRAM
     stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
     credential_preflight = (
+        'grep -Fqx ' + shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + observed_revision)
+        + ' "$unit_path"; '
         'test -f "$env_path" && test ! -L "$env_path" && '
         'test "$(stat -c \'%u:%a\' "$env_path")" = "$(id -u):600"; '
     ) if preserve_credentials else ''

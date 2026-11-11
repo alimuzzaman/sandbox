@@ -30,6 +30,7 @@ class OwnerExecSelection:
     target: ResolvedTarget
     copy_id: str | None
     source_commit: str
+    source_origin_commit: str
     source_dir: str
     compose_files: tuple[str, ...]
     native_keys: tuple[str, ...]
@@ -60,8 +61,8 @@ class OwnerExecSelection:
         return shlex.join(argv)
 
 
-def _output(entry, argv):
-    result = entry.process(shlex.join(argv), timeout=30)
+def _output(run, argv):
+    result = run(argv)
     if result.returncode or result.stderr or len(result.stdout or "") > 65536:
         _refuse()
     return (result.stdout or "").strip()
@@ -69,17 +70,75 @@ def _output(entry, argv):
 
 def read_owner_exec_selection(entry, *, target=None, name=None, environment=None):
     from sandbox.hosting.server_cli_target import require_owner_target
+    context = require_owner_target(entry)
+    snapshot = _read_exec_snapshot(context.owner, entry.remote_name,
+        target=target, name=name, environment=environment,
+        run=lambda argv: entry.process(shlex.join(argv), timeout=30), check=entry.require_current)
+    entry.require_current()
+    return OwnerExecSelection(**snapshot, _entry=entry, _seal=_ISSUER)
+
+
+def inspect_server_exec_target(*, origin_remote_name, target=None, name=None, environment=None):
+    """Installed owner metadata reader; never an operation or process grant.
+
+    The transport must authenticate its caller separately. A subsequent fixed
+    server job must resolve again under its genuine retained process authority;
+    returning this dictionary through a controller cannot issue that authority.
+    """
+    from sandbox.application import server_cli
+    from sandbox.services.process import BoundedProcessRunner
+    reader = getattr(server_cli, "read_current_server_owner", None)
+    if reader is None:
+        raise server_cli.ServerCLIUnavailable("installed owner metadata reader is unavailable")
+    if not isinstance(origin_remote_name, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", origin_remote_name) is None:
+        raise TargetRefusal("host_target_invalid", "original execution alias is invalid")
+    owner = reader()
+    if type(owner) is not server_cli.ServerCliOwner:
+        raise server_cli.ServerCLIUnavailable("current installed owner metadata is unavailable")
+
+    def check():
+        if reader() != owner:
+            _refuse()
+
+    def run(argv):
+        check()
+        # All argv originate in the closed reader below, never in the request.
+        # No shell, provider environment or full container inspect is used.
+        env = {**server_cli.owner_environment(owner), "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+        result = BoundedProcessRunner(max_output=65536, terminate_on_output_limit=True).run(
+            tuple(argv), cwd=owner.home, env=env, timeout=30)
+        check()
+        if result.termination_reason is not None or result.stdout_truncated or result.stderr_truncated:
+            _refuse()
+        return result
+
+    snapshot = _read_exec_snapshot(owner, origin_remote_name,
+        target=target, name=name, environment=environment, run=run, check=check)
+    resolved = snapshot["target"]
+    return {"schema_version": 1, "target_identity": owner.target_identity,
+        "ownership_marker": owner.ownership_marker, "runtime_revision": owner.runtime_revision,
+        "origin_remote_name": origin_remote_name, "project": resolved.project,
+        "environment": resolved.environment, "name": resolved.slug,
+        "copy_id": snapshot["copy_id"], "source_commit": snapshot["source_commit"],
+        "source_origin_commit": snapshot["source_origin_commit"], "source_dir": snapshot["source_dir"],
+        "compose_files": list(snapshot["compose_files"]), "native_keys": list(snapshot["native_keys"]),
+        "selector_digest": "sha256:" + snapshot["fingerprint"]}
+
+
+def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, check):
+    """Metadata only; these plain fields cannot construct execution authority."""
     from sandbox.hosting.lifetime.hoststore import Store, compose_project_for
     from sandbox.hosting.panel_records import read_server_records
     from sandbox.hosting.recovery.repository import RecoveryRepository
     from sandbox.hosting.host_exec import busy_reason
-    context = require_owner_target(entry)
     if bool(target) == bool(name):
         raise TargetRefusal("host_target_invalid", "pass exactly one of --target or --name")
     if name and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name) is None:
         raise TargetRefusal("host_target_invalid", "invalid stack name")
     pair = parse_target(target) if target else None
-    home = Path(context.owner.sandbox_home)
+    home = Path(owner.sandbox_home)
     inventory = Store(home).peek(int(time.time()))
     if inventory.get("truncated"):
         _refuse()
@@ -107,15 +166,17 @@ def read_owner_exec_selection(entry, *, target=None, name=None, environment=None
     commit = summary.get("commit")
     if (summary["last_apply"]["status"] != "succeeded"
             or summary["compose_project"] != compose_project
-            or commit != lifetime.get("commit")
             or not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None):
         _refuse(BUSY)
     stack = summary.get("stack")
     if lifetime.get("kind") == "stack":
         if (not stack or stack.get("slug") != lifetime.get("slug")
-                or stack.get("commit") != commit or stack.get("ports") != lifetime.get("ports")
+                or stack.get("commit") != lifetime.get("commit")
+                or stack.get("ports") != lifetime.get("ports")
                 or re.fullmatch(r"[0-9a-f]{8}", lifetime.get("copy_id") or "") is None):
             _refuse()
+    elif commit != lifetime.get("commit"):
+        _refuse()
     repository = RecoveryRepository()
     state = repository.load()
     if getattr(state, "unreadable", ()):
@@ -132,10 +193,10 @@ def read_owner_exec_selection(entry, *, target=None, name=None, environment=None
     source = home / "deploy-src" / "hosts" / project
     if not source.is_dir() or source.is_symlink() or source.resolve() != source:
         _refuse()
-    if _output(entry, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
+    if _output(run, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
                         "rev-parse", "--verify", "HEAD"]) != commit:
         _refuse()
-    ids = _output(entry, ["docker", "ps", "--filter", "label=com.docker.compose.project=" +
+    ids = _output(run, ["docker", "ps", "--filter", "label=com.docker.compose.project=" +
                          compose_project, "--format", "{{.ID}}"]).splitlines()
     if not ids or len(ids) > 64 or any(re.fullmatch(r"[0-9a-f]{12,64}", item) is None for item in ids):
         _refuse()
@@ -144,7 +205,7 @@ def read_owner_exec_selection(entry, *, target=None, name=None, environment=None
     projection = ('[{{json (index .Config.Labels "com.docker.compose.project")}},'
                   '{{json (index .Config.Labels "com.docker.compose.project.config_files")}},'
                   '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}]')
-    lines = _output(entry, ["docker", "inspect", "--format", projection, *ids]).splitlines()
+    lines = _output(run, ["docker", "inspect", "--format", projection, *ids]).splitlines()
     if len(lines) != len(ids):
         _refuse()
     try:
@@ -170,18 +231,21 @@ def read_owner_exec_selection(entry, *, target=None, name=None, environment=None
             _refuse()
         if path != override:
             relative = path.relative_to(source).as_posix()
-            _output(entry, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
+            _output(run, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
                             "ls-files", "--error-unmatch", "--", relative])
-            _output(entry, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
+            _output(run, ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source),
                             "diff", "--quiet", "HEAD", "--", relative])
     # Bind measured public source/manifest selection and runtime container set,
     # not provider bytes or opaque owner claims from the controller.
     digest = hashlib.sha256(json.dumps({"lifetime": lifetime, "summary": summary,
+        "machine": owner.target_identity, "marker": owner.ownership_marker,
+        "runtime_revision": owner.runtime_revision,
         "containers": sorted(ids), "labels": labels[0], "keys": keys},
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    entry.require_current()
-    resolved = ResolvedTarget(entry.remote_name, project, env,
+    check()
+    resolved = ResolvedTarget(remote_name, project, env,
         "stack" if stack else "plain", str(source), slug=lifetime.get("slug"))
     native_keys = tuple(sorted(set(keys + [resolved.state_key])))
-    return OwnerExecSelection(resolved, lifetime.get("copy_id"), commit, str(source),
-        paths, native_keys, digest, entry, _ISSUER)
+    return {"target": resolved, "copy_id": lifetime.get("copy_id"), "source_commit": commit,
+        "source_origin_commit": lifetime.get("commit"), "source_dir": str(source),
+        "compose_files": paths, "native_keys": native_keys, "fingerprint": digest}

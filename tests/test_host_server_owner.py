@@ -211,10 +211,11 @@ class ServerSelectionTests(OwnerTargetTests):
             side_effect=lambda *a, **k: {"targets": [self.summary], "partial_reasons": []}))
         self.enterContext(patch("sandbox.hosting.recovery.repository.RecoveryRepository.load", side_effect=lambda: self.state))
         self.labels = ["sandbox-host-project-dev", f"{self.compose},{self.override}", str(self.source)]
+        self.published_commit = "e" * 40
         def output(owner, command, **kwargs):
             argv = shlex.split(command)
             if "rev-parse" in argv:
-                value = "e" * 40
+                value = self.published_commit
             elif argv[:2] == ["docker", "ps"]:
                 value = "f" * 12
             elif argv[:2] == ["docker", "inspect"]:
@@ -278,6 +279,36 @@ class ServerSelectionTests(OwnerTargetTests):
         self.labels[1] = str(self.home / "other-compose.yml") + "," + str(self.override)
         with self.assertRaises(TargetRefusal):
             self.selected()
+
+    def test_original_and_published_subtree_revisions_are_distinct_bindings(self):
+        self.summary["commit"] = self.published_commit = "a" * 40
+        selected = self.selected()
+        self.assertEqual(selected.source_commit, "a" * 40)
+        self.assertEqual(selected.source_origin_commit, "e" * 40)
+        self.summary["stack"]["commit"] = "b" * 40
+        with self.assertRaises(TargetRefusal):
+            self.selected()
+
+    def test_metadata_inspection_cannot_issue_execution_selection_or_serialize_owner_proof(self):
+        reader = getattr(sdk, "read_current_server_owner", None)
+        if reader is None:
+            self.skipTest("public SDK owner metadata reader not assembled in this snapshot")
+        from sandbox.services.process import ProcessResult
+        def run(argv, **kwargs):
+            result = self.process.side_effect(self.owner, shlex.join(argv))
+            return ProcessResult(tuple(argv), result.returncode, result.stdout, result.stderr)
+        with patch.object(sdk, "read_current_server_owner", return_value=self.owner), \
+                patch.object(sdk, "owner_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                patch("sandbox.services.process.BoundedProcessRunner.run", side_effect=run), \
+                patch.object(targets, "require_owner_target", side_effect=AssertionError("metadata is not a job grant")):
+            result = selection.inspect_server_exec_target(origin_remote_name="box", name="named")
+        self.assertEqual(result["copy_id"], "1234abcd")
+        self.assertEqual(result["target_identity"], self.owner.target_identity)
+        self.assertEqual(result["source_origin_commit"], "e" * 40)
+        self.assertNotIn("owner", result)
+        self.assertIsInstance(json.loads(json.dumps(result)), dict)
+        with self.assertRaises(targets.OwnerTargetUnavailable):
+            targets.require_owner_target(result)
 
 
 class SubmissionBoundaryTests(unittest.TestCase):

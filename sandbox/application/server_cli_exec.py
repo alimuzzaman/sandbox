@@ -24,13 +24,14 @@ def exec_contract_available():
     import inspect
     try:
         from sandbox.commands.jobs_runtime import configure_start_parser
-        from sandbox.commands.host_exec import _execution_scope
+        from sandbox.commands.host_exec import _execution_scope, SERVER_CLI_EXEC_BINDING_VERSION
         from sandbox.hosting.server_cli_target import OwnerHostTarget, require_owner_target
         from sandbox.hosting.server_target_selection import read_owner_exec_selection
         from sandbox.application.server_cli_targets import installed_inspector
         parser = argparse.ArgumentParser(add_help=False)
         configure_start_parser(parser)
         return ('--server-cli-exec-selector' in parser._option_string_actions
+            and type(SERVER_CLI_EXEC_BINDING_VERSION) is int and SERVER_CLI_EXEC_BINDING_VERSION == 1
             and callable(_execution_scope) and isinstance(OwnerHostTarget, type)
             and callable(require_owner_target) and callable(installed_inspector())
             and 'expected_selector_digest' in inspect.signature(read_owner_exec_selection).parameters)

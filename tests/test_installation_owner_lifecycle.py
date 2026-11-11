@@ -14,5 +14,8 @@ class OwnerIdentityLifecycleTest(unittest.TestCase):
         command = run.call_args.args[1]
         self.assertIn('installation initialize --home "$HOME/sandbox"', command)
         self.assertIn('--layout owner --ownership-marker ' + result['service']['ownership_marker'], command)
-        self.assertLess(command.index('installation initialize'), command.index('systemctl --user restart'))
+        # An earlier occurrence declares rollback(); compare forward activation.
+        activation = command.index('if ! systemctl --user enable')
+        self.assertLess(command.index('installation initialize'), activation)
+        self.assertGreater(command.index('systemctl --user restart', activation), activation)
         self.assertNotIn('hosting.baseline.worker', command)

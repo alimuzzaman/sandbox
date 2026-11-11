@@ -25,7 +25,7 @@ def cmd_uninstall(cfg, args) -> None:
     from sandbox.installation.binding import is_managed_layout
     from sandbox.installation.paths import ManagedPaths
     if (os.environ.get('SANDBOX_MANAGED') == '1'
-            or Path(BASE).resolve() == ManagedPaths().state
+            or Path(BASE).resolve() == ManagedPaths().state.resolve()
             or is_managed_layout(home=BASE)):
         die('managed_uninstall_refused: use the data-preserving managed lifecycle')
     from sandbox.commands.config_setup import cmd_global

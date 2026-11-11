@@ -1541,7 +1541,7 @@ creates no routes, inbox names, stacks or access grants. Continue provisioning i
 names through `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
 sections, recorded inbox links and delivered revision evidence. A controller without
 recorded inbox names shows the supported setup command. One-link teammate access
-and per-click sign-in are separate spec 085 work; this declaration alone does not
+and per-click sign-in are separate spec 088 work; this declaration alone does not
 grant access.
 
 Placeholders: `{slug}`, `{SLUG}` (upper case, `-` becomes `_`), `{port:<name>}` (the

@@ -2,6 +2,11 @@
 
 **Branch**: `feat/stack-page-access` | **Date**: 2026-11-11 | **Spec**: [spec.md](spec.md)
 
+**Numbering provenance**: Renumbered from `085-stack-page-access` to
+`088-stack-page-access` on 2026-11-11 under the coordinator reservation. Existing
+readiness reviews and historical evidence retain their original 085 identity;
+the accepted requirements and review evidence are unchanged.
+
 ## Summary
 
 Give each hosted stack a panel page with its routes, delivered revision, inbox,
@@ -61,7 +66,7 @@ sandbox/hosting/login_service/         # gate operations after short-links merge
 src/web/src/pages/stack.ts             # per-stack page (new)
 src/web/src/{router,render,types,api}.ts
 config/sandbox-web.js                  # generated UI bundle
-specs/085-stack-page-access/           # design and acceptance contracts
+specs/088-stack-page-access/           # design and acceptance contracts
 ```
 
 Use the current panel poller and health cache. A missing stack is a normal page state.

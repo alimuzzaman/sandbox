@@ -24,6 +24,10 @@ from .validation import (
 CURRENT_VERSION = 2
 
 
+class RegistryUpdateConflict(ValueError):
+    """The observed owner record changed before a metadata publication."""
+
+
 class JsonRegistryRepository:
     def __init__(self, path: str | Path, *, replace: Callable = os.replace) -> None:
         self.path = Path(path)
@@ -150,6 +154,29 @@ class JsonRegistryRepository:
                 "label": label,
                 "is_default": bool(is_default),
             }
+            value["instances"][key] = record
+            self._write(value)
+            return dict(record)
+
+    def update_if_current(self, root: str, label: str, *, expected: dict,
+                          changes: dict) -> RegistryRecord:
+        """Atomically publish measured metadata without losing another writer.
+
+        Identity remains owned by the registry. Callers perform measurements
+        before this short transaction; a conflict requires a new measurement.
+        """
+        canonical, selected = canonical_root(root), validate_label(label)
+        if (type(expected) is not dict or type(changes) is not dict or not changes
+                or {"root", "label", "is_default"}.intersection(changes)):
+            raise ValueError("invalid registry metadata update")
+        key = f"{canonical}::{selected}"
+        with self.transaction():
+            value, _migrated = self._read_current()
+            prior = value["instances"].get(key)
+            if prior is None or prior != expected:
+                raise RegistryUpdateConflict("registry record changed")
+            record = {**prior, **changes}
+            validate_record_identity(key, record)
             value["instances"][key] = record
             self._write(value)
             return dict(record)

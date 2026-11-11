@@ -154,6 +154,10 @@ class RegisteredCredentialRecipe:
     owner_native_mutation: tuple = field(repr=False)
     manifest: dict = field(repr=False)
     consumers: tuple = field(repr=False)
+    manifest_bytes: bytes = field(default=b"", repr=False)
+    template_path: Path | None = field(default=None, repr=False)
+    template_digest: str | None = None
+    rendered_ports: tuple[tuple[str, int], ...] = ()
 
 
 class RegisteredCredentialResolver:
@@ -326,8 +330,12 @@ class RegisteredCredentialResolver:
         return result
 
     def _resolve(self, intent):
+        if intent.registration_revision is None:
+            raise ResolutionError("credential_registration_revision_required")
         if intent.action == "stack_up":
             recipe = self.read_recipe(intent)
+            if recipe.registration_digest != intent.registration_revision:
+                raise ResolutionError("credential_registration_changed")
             if self._ledger is None:
                 raise ResolutionError("credential_target_preparation_unavailable")
             preparation = self._ledger.target_preparation(intent.request_scope())
@@ -349,7 +357,7 @@ class RegisteredCredentialResolver:
         if profile is None or not profile.matches(intent):
             raise ResolutionError("credential_profile_changed")
         registrations = record.get(REGISTRATION_FIELD)
-        if (type(registrations) is not dict or set(registrations) - {"schema_version", "targets", "recipes"}
+        if (type(registrations) is not dict or set(registrations) - {"schema_version", "targets", "recipes", "recipe_instances"}
                 or type(registrations["schema_version"]) is not int
                 or registrations["schema_version"] != REGISTRATION_SCHEMA
                 or type(registrations["targets"]) is not dict):
@@ -421,6 +429,8 @@ class RegisteredCredentialResolver:
         consumers = self._consumers(intent, registration["consumer_actions"], hostnames)
         registration_digest = hashlib.sha256(json.dumps(registration, sort_keys=True,
             separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        if registration_digest != intent.registration_revision:
+            raise ResolutionError("credential_registration_changed")
         self._installation(intent)
         return ResolvedCredentialOperation(identity["identity"], canonical.key,
             registration["project"], intent.environment, target, mutations,
@@ -479,7 +489,7 @@ class RegisteredCredentialResolver:
             raise ResolutionError(failed) from None
         return result
 
-    def _read_recipe(self, intent):
+    def _read_recipe(self, intent, *, candidate_registration=None):
         from sandbox.application.context import load_project_descriptor
         from sandbox.hosting.endpoints.local import owner_local, require_current
         from sandbox.hosting.endpoints.authority import CanonicalTarget
@@ -492,22 +502,34 @@ class RegisteredCredentialResolver:
         if (profile is None or (type(intent) is CredentialIntent and not profile.matches(intent))
                 or profile.environment != intent.environment or profile.source_commit != intent.source_commit
                 or profile.artifact_digest != intent.artifact_digest
-                or profile.manifest_digest != intent.manifest_digest):
+                or (profile.template_relative is None and profile.manifest_digest != intent.manifest_digest)):
             raise ResolutionError("credential_profile_changed")
         catalog = record.get(REGISTRATION_FIELD)
-        if (type(catalog) is not dict or catalog.get("schema_version") != REGISTRATION_SCHEMA
-                or type(catalog.get("recipes")) is not dict):
+        if (candidate_registration is None and (type(catalog) is not dict
+                or catalog.get("schema_version") != REGISTRATION_SCHEMA
+                or type(catalog.get("recipes")) is not dict)):
             raise ResolutionError("credential_recipe_registration_unavailable")
-        registration = catalog["recipes"].get(intent.profile_ref)
-        fields = {"project", "environment", "source_commit", "artifact_relative",
+        name = intent.target_ref.target_id if type(intent) is CredentialIntent else intent.name
+        if candidate_registration is not None:
+            registration = candidate_registration
+        elif profile.template_relative is not None:
+            variants = catalog.get("recipe_instances")
+            if type(variants) is not dict:
+                raise ResolutionError("credential_named_recipe_unavailable")
+            registration = variants.get(intent.profile_ref + "/" + name)
+        else:
+            registration = catalog["recipes"].get(intent.profile_ref)
+        fields = {"name", "project", "environment", "source_commit", "artifact_relative",
                   "artifact_digest", "manifest_relative", "manifest_digest",
                   "native_mutations", "consumer_actions"}
+        if profile.template_relative is not None:
+            fields.add("render")
         if type(registration) is not dict or set(registration) != fields:
             raise ResolutionError("credential_recipe_registration_unavailable")
-        if (registration["environment"] != intent.environment
+        if (registration["name"] != name or registration["environment"] != intent.environment
                 or registration["source_commit"] != intent.source_commit
                 or registration["artifact_digest"] != intent.artifact_digest
-                or registration["manifest_digest"] != intent.manifest_digest):
+                or (type(intent) is CredentialIntent and registration["manifest_digest"] != intent.manifest_digest)):
             raise ResolutionError("credential_recipe_registration_changed")
         owner = owner_local()
         if (owner.home != self.home or owner.machine_identity != binding.machine_identity
@@ -530,7 +552,8 @@ class RegisteredCredentialResolver:
             content = stream.read(MAX_MANIFEST_BYTES + 1)
             if (len(content) > MAX_MANIFEST_BYTES
                     or _observation(before) != _observation(os.fstat(stream.fileno()))
-                    or hashlib.sha256(content).hexdigest() != intent.manifest_digest):
+                    or hashlib.sha256(content).hexdigest() != (
+                        profile.manifest_digest if profile.template_relative is not None else registration["manifest_digest"])):
                 raise ResolutionError("credential_manifest_changed")
         # The recipe manifest is part of the measured source tree. A dirty
         # working file cannot change mappings while the artifact stays pinned.
@@ -540,7 +563,21 @@ class RegisteredCredentialResolver:
         measured_blob = hashlib.new(algorithm, b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
         if measured_blob != manifest_blob:
             raise ResolutionError("credential_manifest_source_mismatch")
-        manifest = self._manifest(content)
+        template_path, template_digest, rendered_ports = None, None, ()
+        if profile.template_relative is not None:
+            from .recipe_registration import render_named_recipe
+            if registration["manifest_relative"] != profile.template_relative:
+                raise ResolutionError("credential_recipe_template_changed")
+            manifest, content = render_named_recipe(root=root, checkout=checkout, name=name,
+                profile=profile, template_content=content, render=registration["render"])
+            if hashlib.sha256(content).hexdigest() != registration["manifest_digest"]:
+                raise ResolutionError("credential_manifest_changed")
+            template_path = manifest_path
+            template_digest = profile.manifest_digest
+            rendered_ports = tuple(sorted(registration["render"]["ports"].items()))
+            manifest_path = owner.home / "runtime" / "stacks" / name / "sandbox.hosting.yml"
+        else:
+            manifest = self._manifest(content)
         if manifest.get("project") != registration["project"]:
             raise ResolutionError("credential_manifest_changed")
         environment = manifest.get("environments", {}).get(intent.environment)
@@ -555,9 +592,12 @@ class RegisteredCredentialResolver:
             consumers = self._consumers(intent, registration["consumer_actions"], hostnames)
         else:
             raw_actions = registration["consumer_actions"]
-            if type(raw_actions) is not list or len(raw_actions) > 128:
+            if type(raw_actions) is not dict or len(raw_actions) > 128:
                 raise ResolutionError("credential_consumer_registration_invalid")
-            consumers = tuple(CloudflareRecordAction(**raw) for raw in raw_actions)
+            if any(key != "cloudflare-dns-address" or type(raw) is not dict
+                   for key, raw in raw_actions.items()):
+                raise ResolutionError("credential_consumer_registration_invalid")
+            consumers = tuple(CloudflareRecordAction(**raw) for raw in raw_actions.values())
             if any(action.hostname not in hostnames for action in consumers):
                 raise ResolutionError("credential_consumer_target_changed")
         mutations = registration["native_mutations"]
@@ -576,12 +616,11 @@ class RegisteredCredentialResolver:
             separators=(",", ":"), allow_nan=False).encode()).hexdigest()
         require_current(owner)
         self._installation(intent)
-        name = intent.target_ref.target_id if type(intent) is CredentialIntent else intent.name
         return RegisteredCredentialRecipe(owner, canonical, name, identity["identity"], registration["project"],
             intent.environment, intent.source_commit, root, checkout, manifest_path,
-            intent.manifest_digest, tree, intent.artifact_digest,
+            registration["manifest_digest"], tree, intent.artifact_digest,
             root / _relative(registration["artifact_relative"]), digest, mutations,
-            ports, owner_port, manifest, consumers)
+            ports, owner_port, manifest, consumers, content, template_path, template_digest, rendered_ports)
 
     def _native_ports(self, owner, hosted, binding):
         from sandbox.core._remote import list_remotes

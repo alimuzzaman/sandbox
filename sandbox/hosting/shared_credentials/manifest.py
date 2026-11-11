@@ -13,6 +13,7 @@ from types import MappingProxyType
 
 from .admission import require_committed
 from .consumers import CloudflareRecordConsumer, ConsumerError
+from .application import RuntimeEnvironmentConsumer
 from .models import CredentialIntent
 
 
@@ -32,12 +33,13 @@ def _bind_fixed_consumers(receipt, *, intent: CredentialIntent, consumers: tuple
     for consumer in consumers:
         # Explicit source-owned allowlist; registration cannot wrap arbitrary
         # callbacks, subclasses, commands, URL handlers or user Python objects.
-        if (type(consumer) is not CloudflareRecordConsumer or not consumer.matches(intent)
+        if (type(consumer) not in (CloudflareRecordConsumer, RuntimeEnvironmentConsumer)
+                or not consumer.matches(intent)
                 or consumer.consumer_id in selected):
             raise ConsumerError()
         receipt._issuer._check_consumer(receipt, intent, consumer)
         selected[consumer.consumer_id] = consumer
-    declared = {item.consumer_id for item in intent.mappings if item.kind == "provider"}
+    declared = {item.consumer_id for item in intent.mappings}
     if set(selected) != declared:
         raise ConsumerError()
     key = (os.getpid(), threading.get_ident(), intent.intent_digest())

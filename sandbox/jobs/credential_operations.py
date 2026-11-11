@@ -123,11 +123,17 @@ class OperationEvidence:
     preflight_json: str | None = field(repr=False)
     admission_version: int | None = field(repr=False)
     admitted_at: float | None = field(repr=False)
+    published_at: float | None = field(default=None, repr=False)
 
     def public(self) -> dict:
+        # An internal success CAS precedes exact lease retirement. Lost
+        # publication/retirement is unknown to observers, never implicit ACK.
+        unpublished = self.state is OperationState.SUCCEEDED and self.published_at is None
         return {'schema_version': 1, 'operation_id': self.operation_id,
-                'request_id': self.request_id, 'status': self.state.value,
-                'code': self.code, 'no_effects': self.no_effects,
+                'request_id': self.request_id,
+                'status': 'effects_unknown' if unpublished else self.state.value,
+                'code': 'credential_publication_unknown' if unpublished else self.code,
+                'no_effects': self.no_effects,
                 'names': [{'name': name, 'status': status} for name, status in self.names],
                 'created_at': self.created_at, 'updated_at': self.updated_at,
                 'effective_deadline': self.effective_deadline}
@@ -195,6 +201,10 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         claimed_at REAL NOT NULL, completed_at REAL,
         PRIMARY KEY(operation_id,effect_step)
     )''')
+    connection.execute('''CREATE TABLE IF NOT EXISTS credential_publications (
+        operation_id TEXT PRIMARY KEY REFERENCES credential_operations(operation_id),
+        published_at REAL NOT NULL
+    )''')
     connection.execute('INSERT INTO schema_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',
                        (_VERSION_KEY, str(EXTENSION_VERSION)))
     from .credential_preparations import initialize_schema as initialize_preparations
@@ -234,12 +244,13 @@ class CredentialOperationRepository:
 
     def _find(self, connection, scope, operation_id=None):
         params = self._scope(scope)
-        query = '''SELECT * FROM credential_operations WHERE installation_id=?
+        query = '''SELECT o.*, p.published_at FROM credential_operations o
+            LEFT JOIN credential_publications p ON p.operation_id=o.operation_id WHERE installation_id=?
             AND incarnation=? AND principal_id=? AND project_ref=? AND request_id=?'''
         if operation_id is not None:
             if not _identifier(operation_id):
                 raise LedgerError('credential_operation_invalid')
-            query += ' AND operation_id=?'
+            query += ' AND o.operation_id=?'
             params += (operation_id,)
         return connection.execute(query, params).fetchone()
 
@@ -270,7 +281,7 @@ class CredentialOperationRepository:
             RequestScope(row['installation_id'], row['incarnation'], row['principal_id'],
                          row['project_ref'], row['request_id']), row['project_identity'],
             row['intent_digest'], row['intent_json'], row['preflight_digest'], row['preflight_json'],
-            row['admission_version'], row['admitted_at'])
+            row['admission_version'], row['admitted_at'], row['published_at'])
 
     def lookup(self, scope: RequestScope, *, operation_id: str | None = None) -> OperationEvidence | None:
         """Read-only original scope lookup; None means known absent, error unknown."""
@@ -517,4 +528,36 @@ class CredentialOperationRepository:
             row = self._require(connection, scope, operation_id)
             self._cas(row, expected_version, {'admitted', 'running'})
             self._update(connection, row, 'effects_unknown', 'credential_effects_unknown')
+            return self._evidence(self._require(connection, scope, operation_id))
+
+    def withhold_success(self, scope: RequestScope, operation_id: str, *,
+                         expected_version: int) -> OperationEvidence:
+        """Retirement/publication failed after internal success, never rerun."""
+        with self._transaction(write=True) as connection:
+            row = self._require(connection, scope, operation_id)
+            self._cas(row, expected_version, {'succeeded'})
+            if row['published_at'] is not None:
+                raise LedgerError('credential_publication_conflict')
+            self._update(connection, row, 'effects_unknown', 'credential_effects_unknown')
+            return self._evidence(self._require(connection, scope, operation_id))
+
+    def publish_success(self, scope: RequestScope, operation_id: str, *,
+                        expected_version: int) -> OperationEvidence:
+        """Final metadata CAS after concrete factory completion/lease retirement.
+
+        This repository is not authority. The actual service must validate its
+        private receipt and supervisor observer before this short transaction.
+        A crash before this marker leaves public outcome unknown.
+        """
+        with self._transaction(write=True) as connection:
+            row = self._require(connection, scope, operation_id)
+            self._cas(row, expected_version, {'succeeded'})
+            if row['cancel_requested'] or row['effective_deadline'] <= time.time():
+                raise LedgerError('credential_publication_expired')
+            if row['published_at'] is not None:
+                return self._evidence(row)
+            now = time.time()
+            connection.execute('INSERT INTO credential_publications(operation_id,published_at) VALUES(?,?)',
+                               (operation_id, now))
+            self._update(connection, row, 'succeeded', 'credential_succeeded')
             return self._evidence(self._require(connection, scope, operation_id))

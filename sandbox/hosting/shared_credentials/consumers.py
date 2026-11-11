@@ -33,6 +33,7 @@ class CloudflareRecordAction:
                 or not isinstance(self.zone_id, str)
                 or re.fullmatch(r"[0-9a-f]{32}", self.zone_id) is None
                 or type(self.proxied) is not bool
+                or not isinstance(self.address, str) or len(self.address) > 45 or "%" in self.address
                 or not isinstance(self.hostname, str) or len(self.hostname) > 253
                 or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
                                 r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",

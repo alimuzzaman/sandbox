@@ -48,6 +48,13 @@ class RegisteredCredentialBroker:
             raise BrokerError("credential_profile_changed")
         return profile
 
+    def _resolution(self, intent):
+        if self._resolver is None:
+            # Internal fixture/legacy foundation composition only. The installed
+            # dispatcher requires the concrete resolver, never this absence.
+            return None
+        return self._resolver.resolve(intent).registration_digest
+
     def preflight(self, intent):
         """Return a private proof; public_preflight exposes only names/status.
 
@@ -57,6 +64,7 @@ class RegisteredCredentialBroker:
         and recipient resolution remain the service's independent obligations.
         """
         profile = self._profile(intent)
+        registered_digest = self._resolution(intent)
         keys = tuple(sorted({item.source_key for item in profile.mappings if item.kind == "provider"}))
         try:
             snapshot = self._secrets._hosting_snapshot(profile.source, keys,
@@ -69,10 +77,10 @@ class RegisteredCredentialBroker:
         digest = hashlib.sha256(json.dumps({"intent": intent.intent_digest(),
             "source": intent.source_ref, "source_revision": intent.source_revision,
             "profile": profile.name, "profile_revision": profile.revision,
-            "source_registration": registration},
+            "source_registration": registration, "registered_resolution": registered_digest},
             sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         proof = object.__new__(_PrivateToken)
-        self._proofs[proof] = (intent.canonical_json(), digest, names, registration)
+        self._proofs[proof] = (intent.canonical_json(), digest, names, registration, registered_digest)
         return proof
 
     def public_preflight(self, proof):
@@ -91,6 +99,8 @@ class RegisteredCredentialBroker:
         record = self._proofs.get(proof)
         if record is None or record[0] != intent.canonical_json():
             raise BrokerError("credential_preflight_invalid")
+        if self._resolution(intent) != record[4]:
+            raise BrokerError("credential_resolution_changed")
         if all(status == "present" for _, status in record[2]):
             try:
                 self._secrets._hosting_snapshot(intent.source_ref, tuple(key for key, _ in record[2]),
@@ -101,6 +111,23 @@ class RegisteredCredentialBroker:
         from sandbox.jobs.credential_operations import PreflightEvidence, NameStatus
         return PreflightEvidence(intent.intent_digest(), record[1],
                                  tuple((key, NameStatus(status)) for key, status in record[2]))
+
+    def validate_retained_preflight(self, intent, *, preflight_digest):
+        """Recheck the original issued resolution/source proof, never replace it.
+
+        Completion also uses this path, so a source or recipient registration
+        repaired/changed during consumption cannot turn the old receipt current.
+        An operation recovered without its authentic in-process proof is inspect
+        only; a persisted preflight row cannot reissue this authority.
+        """
+        for proof, record in tuple(self._proofs.items()):
+            if record[0] != intent.canonical_json():
+                continue
+            evidence = self.require_preflight(proof, intent=intent)
+            digest = hashlib.sha256(evidence.canonical_json().encode()).hexdigest()
+            if digest == preflight_digest and all(status == "present" for _, status in record[2]):
+                return
+        raise BrokerError("credential_preflight_invalid")
 
     @staticmethod
     def _committed(receipt, intent):
@@ -129,12 +156,15 @@ class RegisteredCredentialBroker:
                       and all(status == "present" for _, status in record[2])]
         from sandbox.jobs.credential_operations import PreflightEvidence, NameStatus
         for record in candidates:
+            if self._resolution(intent) != record[4]:
+                raise BrokerError("credential_resolution_changed")
             evidence = PreflightEvidence(intent.intent_digest(), record[1],
                 tuple((key, NameStatus(status)) for key, status in record[2]))
             digest = hashlib.sha256(evidence.canonical_json().encode("utf-8")).hexdigest()
             if row.preflight_digest == digest:
                 grant = object.__new__(_PrivateToken)
-                self._grants[grant] = (committed_receipt, intent, record[1], row.operation_id, record[3])
+                self._grants[grant] = (committed_receipt, intent, record[1], row.operation_id,
+                                       record[3], record[4])
                 return grant
         raise BrokerError("credential_preflight_invalid")
 
@@ -142,7 +172,9 @@ class RegisteredCredentialBroker:
         record = self._grants.get(grant)
         if record is None:
             raise BrokerError("credential_grant_invalid")
-        receipt, intent, resolution_digest, operation_id, registration = record
+        receipt, intent, resolution_digest, operation_id, registration, registered_digest = record
+        if self._resolution(intent) != registered_digest:
+            raise BrokerError("credential_resolution_changed")
         profile = self._profile(intent)
         row = self._committed(receipt, intent)
         if row.operation_id != operation_id:
@@ -168,6 +200,8 @@ class RegisteredCredentialBroker:
             # actual delivery, rather than relying on pre-resolution checks.
             self._profile(intent)
             self._committed(receipt, intent)
+            if self._resolution(intent) != registered_digest:
+                raise BrokerError("credential_resolution_changed")
             if require_consumer(intent, consumer_id=consumer_id) is not consumer:
                 raise BrokerError("credential_consumer_changed")
             checkpoint.require_current()
@@ -192,12 +226,17 @@ class RegisteredCredentialBroker:
         return {"code": result["code"]}
 
 
-def _compose_registered_broker(secret_service, authenticated_receipt):
+def _compose_registered_broker(secret_service, authenticated_receipt, *, registered_resolver=None):
     """Trusted orchestration only; never expose this factory through transport."""
     require_authenticated(authenticated_receipt)
+    if registered_resolver is not None:
+        from .resolver import RegisteredCredentialResolver
+        if type(registered_resolver) is not RegisteredCredentialResolver:
+            raise BrokerError("credential_resolver_invalid")
     broker = object.__new__(RegisteredCredentialBroker)
     broker._secrets = secret_service
     broker._actor = authenticated_receipt
+    broker._resolver = registered_resolver
     broker._proofs = {}
     broker._grants = {}
     return broker

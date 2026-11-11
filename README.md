@@ -1592,8 +1592,10 @@ nonempty broker token, and performs one fixed API request per effect checkpoint.
 It returns no provider response or exception text and uses no ambient token
 fallback. Its private registration additionally requires the registered resolver
 to validate the exact action against the committed artifact/target; a matching
-intent digest alone cannot approve another hostname. That production resolver,
-application runtime-secret consumer, public dispatcher and factory remain missing.
+intent digest alone cannot approve another hostname. The read-only registered
+resolver and native-lock adapters now have source implementations. Application
+runtime-secret consumption, public dispatch and complete factory integration
+remain pending.
 No provider request was executed while implementing this source.
 
 Creation now has an internal retained
@@ -1604,6 +1606,16 @@ reservation freezes that exact metadata into its canonical intent. A host claim
 must later present the genuine committed credential receipt and match the
 retained preparation. No read initializes an identity, and a dictionary or
 `trusted` flag cannot authorize the claim. The production caller remains pending.
+
+The [registered resolution contract](specs/086-shared-server-secret-use/contracts/registered-resolution-v1.md)
+separates recipe/source reads before target preparation from existing-target
+resolution. Recipe reads measure the complete registered source artifact and
+manifest and compare the exact native owner/legacy alias lock set. The broker
+pins that registration in its original preflight proof and rechecks it, together
+with source revision, at delivery and completion. These adapters do not advertise
+an installed capability or claim GS acceptance. The
+[authentication contract](specs/086-shared-server-secret-use/contracts/auth-transport-v1.md)
+documents real gate receipts and the separate live original-owner-peer bridge.
 
 Broker delivery must remain confined to the reviewed intended server consumer.
 Explicit minimal recipient environments or approved protected runtime-secret

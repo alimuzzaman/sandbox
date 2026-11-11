@@ -90,7 +90,7 @@ class ServerCLIContractTest(unittest.TestCase):
 
 
 class ServerCLIDispatchTest(unittest.TestCase):
-    def dispatch(self, *, capability=None):
+    def dispatch(self, *, capability=None, capability_error=None):
         record = {'joined': True, 'provisioned': True, 'control_transport': 'tailscale',
             'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
         observed = {'schema_version': 1, 'ok': True, 'target_identity': 'c' * 24,
@@ -104,6 +104,7 @@ class ServerCLIDispatchTest(unittest.TestCase):
                 mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport') as factory:
             transport = factory.return_value
             transport.control.return_value = observed
+            transport.control.side_effect = capability_error
             transport.submit_server_cli.return_value = {'ok': True, 'job_id': 'd' * 32}
             try:
                 result = cli.dispatch_server_cli('box', ['host', 'stack', 'list'],
@@ -121,6 +122,13 @@ class ServerCLIDispatchTest(unittest.TestCase):
         self.assertEqual(submission.argv, ('host', 'stack', 'list'))
         self.assertNotEqual(submission.project_identity, 'server-cli')
         transport.control.assert_called_once_with('box', ['job-capabilities'])
+
+    def test_capability_transport_failure_cannot_be_unknown_job_acceptance(self):
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+        result, transport = self.dispatch(capability_error=RemoteJobTransportError('synthetic discovery failure'))
+        self.assertIsInstance(result, cli.ServerCLIUnavailable)
+        self.assertEqual(result.code, 'server_cli_capability_unavailable')
+        transport.submit_server_cli.assert_not_called()
 
     def test_missing_contract_or_real_target_pin_change_cannot_submit(self):
         for fields in ({'capabilities': []}, {'target_identity': 'e' * 24},

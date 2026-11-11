@@ -132,10 +132,17 @@ def capabilities() -> dict:
     revision = owner.runtime_revision
     if not re.fullmatch('[0-9a-f]{24}', revision):
         raise ServerCLIUnavailable('installed CLI revision is unavailable')
+    from sandbox.application.server_cli_targets import installed_inspector, CONTRACT as INSPECTION_CONTRACT
+    try:
+        installed_inspector()
+        inspection = [INSPECTION_CONTRACT]
+    except ServerCLIUnavailable:
+        inspection = []
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
             'target_metadata': _receiver_routing_metadata(owner),
+            'inspection_capabilities': inspection,
             'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT]}
 
 
@@ -170,19 +177,51 @@ def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
         return {}  # Missing/ambiguous routing evidence is not denied owner access.
 
 
+def _command_head(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Inspect documented global options without discarding their semantics."""
+    index = 0
+    while index < len(values) and values[index].startswith('-'):
+        option = values[index]
+        if option == '--strict-runtime':
+            index += 1
+        elif option in {'--instance', '--label'}:
+            if index + 1 >= len(values):
+                raise ServerCLIUnavailable('global CLI selector needs its value')
+            index += 2
+        elif option.startswith(('--instance=', '--label=')):
+            index += 1
+        elif option in {'--help', '-h', '--version'}:
+            return ()  # The CLI exits without executing a command.
+        else:
+            raise ServerCLIUnavailable('global CLI option is unavailable in retained commands')
+    return values[index:]
+
+
 def _command_argv(argv) -> tuple[str, ...]:
     values = validate_argv(tuple(argv))
     if values[0] in {'sb', 'sandbox'} or Path(values[0]).is_absolute():
         raise ServerCLIUnavailable('server CLI expects command argv without an executable')
     # Secret values and free-form secret-printing shells are not a job contract.
     # Provider-specific normal commands consume the server store themselves.
-    if values[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
-        raise ServerCLIUnavailable('secret value output is unavailable through server CLI jobs')
-    if (values[:2] == ('host', 'exec')
-            or any(flag in values for flag in ('--stdin', '--token-stdin', '--interactive'))):
-        raise ServerCLIStdinUnavailable('retained server CLI stdin transport is unavailable; no job was accepted')
+    from sandbox.application.command_selection import selected_command, CommandSelectionUnavailable
     from sandbox.services.redaction import require_safe_argv
     require_safe_argv(values)
+    try:
+        selected = selected_command(values)
+    except CommandSelectionUnavailable:
+        raise ServerCLIUnavailable('retained command does not match the installed CLI grammar') from None
+    if selected is None:
+        # Non-CLI embeddings have no canonical parser. Preserve safe legacy
+        # prefixes, but ambiguous sensitive syntax cannot grant execution.
+        selected = _command_head(values)
+        if (selected[:1] in {('secrets',), ('host',)} and len(selected) > 1
+                and selected[1].startswith('-')):
+            raise ServerCLIUnavailable('canonical installed CLI selection is unavailable')
+    if selected[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
+        raise ServerCLIUnavailable('secret value output is unavailable through server CLI jobs')
+    if (selected[:2] == ('host', 'exec')
+            or any(flag in values for flag in ('--stdin', '--token-stdin', '--interactive'))):
+        raise ServerCLIStdinUnavailable('retained server CLI stdin transport is unavailable; no job was accepted')
     return values
 
 
@@ -519,7 +558,7 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     unknown acceptance, streams child stdio, or invokes a self remote alias.
     """
     from sandbox.core import _remote
-    from sandbox.transports.remote_jobs import RemoteJobTransport
+    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
     from sandbox.resources.context import authenticated_target_identity
     from sandbox.services.redaction import require_safe_argv
     from sandbox.config.facade import project_identity
@@ -546,10 +585,27 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     if not isinstance(entry, dict) or entry.get('joined') is not True or entry.get('control_transport') != 'tailscale':
         raise ServerCLIUnavailable('server CLI requires an admitted joined Tailnet registration')
     identity = authenticated_target_identity(remote_name)
+    # A fresh identity read may have safely reconnected the observed revision
+    # cache. Use that current registration, preserving the original owner pin.
+    current = _remote.get_remote(remote_name)
+    if (not isinstance(current, dict) or current.get('joined') is not True
+            or current.get('control_transport') != 'tailscale'
+            or (current.get('mcp_service') or {}).get('ownership_marker') !=
+               (entry.get('mcp_service') or {}).get('ownership_marker')
+            or ('control_identity' in current and current['control_identity'] !=
+                {'schema_version': 1, 'target_identity': identity['target_identity']})):
+        raise ServerCLIUnavailable('joined owner registration changed during identity observation')
+    entry = current
     transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
         ssh_run=_remote.ssh_run, remote_lookup=lambda name: entry if name == remote_name else None,
         remote_sb_path=_remote.remote_sb_path)
-    observed = transport.control(remote_name, ['job-capabilities'])
+    try:
+        observed = transport.control(remote_name, ['job-capabilities'])
+    except RemoteJobTransportError:
+        # This constant operation only observes the installed contract. The
+        # source/job submission below has not been invoked, even if its reply
+        # is unavailable. Do not strand a request as unknown acceptance.
+        raise ServerCLIUnavailable('installed server CLI capability could not be observed') from None
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
             or observed.get('target_identity') != identity['target_identity']
             or observed.get('runtime_revision') != (entry.get('mcp_service') or {}).get('runtime_revision')

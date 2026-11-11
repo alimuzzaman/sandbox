@@ -95,7 +95,7 @@ class ServerCLIDispatchTest(unittest.TestCase):
             'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
         observed = {'schema_version': 1, 'ok': True, 'target_identity': 'c' * 24,
             'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24,
-            'capabilities': [cli.CONTRACT, 'job.acceptance-receipt.v1']}
+            'capabilities': [cli.CONTRACT, 'job.acceptance-receipt.v1', 'job.source-content.v1']}
         if capability:
             observed.update(capability)
         with mock.patch.object(_remote, 'get_remote', return_value=record), \

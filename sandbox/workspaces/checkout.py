@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import errno
 import hashlib
 import json
@@ -448,13 +449,25 @@ def _publish(staging_name: str, plan: MaterializationPlan, parent_fd: int, *,
         pass
 
 
+@contextmanager
+def _checkout_admission(root):
+    from sandbox.workspaces.content import checkout_guard, CheckoutAdmissionError
+    try:
+        with checkout_guard(root):
+            yield
+    except CheckoutAdmissionError as error:
+        code = ('workspace_materialization_busy' if error.code == 'checkout_admission_busy'
+                else 'workspace_lock_unavailable')
+        raise WorkspaceMaterializationError(code, 'workspace admission lock is unavailable') from None
+
+
 def materialize(plan: MaterializationPlan, *,
                 link: Callable[[str, str], object] = os.link,
                 publish_rename: Callable[..., object] = os.rename) -> CheckoutMaterializationReceipt:
     if type(plan) is not MaterializationPlan:
         raise WorkspaceMaterializationError('workspace_plan_invalid', 'materialization plan is invalid')
-    from sandbox.workspaces.content import checkout_guard, active_checkout_rows
-    with checkout_guard(plan.workspace_path):
+    from sandbox.workspaces.content import active_checkout_rows
+    with _checkout_admission(plan.workspace_path):
         live = active_checkout_rows(plan.workspace_path)
         if live:
             if len(live) > 128:

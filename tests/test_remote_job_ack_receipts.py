@@ -27,13 +27,14 @@ class RetainedAckTests(unittest.TestCase):
         self.addCleanup(self.repository.close)
         self.service = JobService(self.repository, JobStorage(self.server, free_disk_reserve=0),
                                   None, launcher=lambda _descriptor: None)
-        self.source = SourceIdentity('sha256:deployed', 'a' * 40, 'b' * 64)
+        self.source = SourceIdentity('sha256:deployed', 'a' * 40, 'b' * 64, 'sha256:' + 'e' * 64)
         server = JobSubmission('test', str(self.server), 'project', 'local', 'unit', ('echo', 'ok'),
                                60, self.source, request_id='once')
         row, _ = self.repository.accept(server)
         self.receipt = self.service._accepted(row, replay=False)
         self.deployed = {'target_path': str(self.server), 'identity': self.source.identity,
-            'commit': self.source.commit, 'dirty_digest': self.source.dirty_digest, 'dirty': True}
+            'commit': self.source.commit, 'dirty_digest': self.source.dirty_digest, 'dirty': True,
+            'content_digest': self.source.content_digest}
         self.client = replace(server, target_kind='remote', remote_name='box',
                               project_root=str(self.root), source=SourceIdentity('caller'))
         self.calls = []
@@ -45,7 +46,7 @@ class RetainedAckTests(unittest.TestCase):
             text = self.wire if isinstance(self.wire, str) else json.dumps(self.wire)
             return SimpleNamespace(returncode=0, stdout=text, stderr='')
         self.deploy = Mock(return_value=self.deployed)
-        self.record = {'provisioned': True, 'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT]}
+        self.record = {'provisioned': True, 'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT, 'job.source-content.v1']}
         self.transport = RemoteJobTransport(deploy=self.deploy, ssh_run=run,
                                              remote_lookup=lambda _name: self.record)
         self.enterContext(patch.object(self.transport, '_prepare_workspace', return_value=str(self.server)))
@@ -66,10 +67,11 @@ class RetainedAckTests(unittest.TestCase):
             ('request_id', 'other'), ('request_id', None), ('acceptance_contract', 'older'),
             ('request_digest', 'invalid'), ('source.identity', 'other'),
             ('source.commit', 'c' * 40), ('source.dirty_digest', 'd' * 64), ('source.dirty', False),
+            ('source.content_digest', 'sha256:' + 'f' * 64), ('source.content_digest', None),
             ('source.dirty', 1),
         ]
         missing = ('request_id', 'request_digest', 'acceptance_contract', 'source',
-                   'source.identity', 'source.commit', 'source.dirty_digest')
+                   'source.identity', 'source.commit', 'source.dirty_digest', 'source.content_digest')
         for key, value, remove in [(k, v, False) for k, v in changes] + [(k, None, True) for k in missing]:
             with self.subTest(field=key, remove=remove):
                 self.wire = copy.deepcopy(self.receipt)
@@ -124,7 +126,7 @@ class RetainedAckTests(unittest.TestCase):
 
     def test_clean_deployment_empty_digest_becomes_absent_wire_flag_and_retained_none(self):
         self.deployed.update(dirty=False, dirty_digest='')
-        clean = SourceIdentity(self.source.identity, self.source.commit)
+        clean = SourceIdentity(self.source.identity, self.source.commit, content_digest=self.source.content_digest)
         row, _ = self.repository.accept(JobSubmission('test', str(self.server), 'project', 'local', 'unit',
             ('echo', 'ok'), 60, clean, request_id='clean'))
         self.wire = self.service._accepted(row, replay=False)
@@ -134,12 +136,15 @@ class RetainedAckTests(unittest.TestCase):
 
     def _real_clean_deployment_metadata(self):
         # Exercise the actual overlay/identity builder; replace only effect ports.
+        def update(*args, **kwargs):
+            kwargs['content_receipt']['content_digest'] = self.source.content_digest
+            return 0
         with patch.object(_remote, 'capture_uncommitted', return_value=('', [])), \
                 patch.object(_remote, 'remote_network_capacity_admission', return_value={'ok': True}), \
                 patch.object(_remote, 'ensure_deploy_repo', return_value=str(self.server)), \
                 patch.object(_remote, 'current_branch', return_value='dev'), \
                 patch.object(_remote, 'push_commits', return_value='a' * 40), \
-                patch.object(_remote, 'update_target_to', return_value=0):
+                patch.object(_remote, 'update_target_to', side_effect=update):
             result = _remote.deploy_exact_working_tree(self.record, self.root)
         self.assertFalse(result['dirty'])
         self.assertTrue(result['dirty_digest'], 'real clean overlays retain a fingerprint')
@@ -152,7 +157,7 @@ class RetainedAckTests(unittest.TestCase):
         result = self._real_clean_deployment_metadata()
         self.deployed.clear()
         self.deployed.update(result)
-        clean_source = SourceIdentity(result['identity'], result['commit'], result['dirty_digest'])
+        clean_source = SourceIdentity(result['identity'], result['commit'], result['dirty_digest'], result['content_digest'])
         submission = JobSubmission('test', str(self.server), 'project', 'local', 'unit',
             ('echo', 'ok'), 60, clean_source, request_id='real-clean')
         row, _ = self.repository.accept(submission)
@@ -174,7 +179,27 @@ class RetainedAckTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_matrix_receipts_match_each_original_workspace_despite_server_order(self):
-        server_items = [JobSubmission('test', str(self.server), 'project', 'local', label,
+        from tests.subprocess_support import run_test_process
+        from sandbox.workspaces.content import content_digest
+        from sandbox.services.source_fingerprint import EMPTY_OVERLAY_FINGERPRINT
+        root = self.root / 'matrix-source'
+        root.mkdir()
+        (root / 'source.txt').write_text('measured matrix fixture')
+        def git(*args):
+            return run_test_process(['git', '-C', str(root), *args],
+                env={'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+                     'GIT_AUTHOR_NAME': 'fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+                     'GIT_COMMITTER_NAME': 'fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'},
+                capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        git('init', '-q')
+        git('add', '.')
+        git('commit', '-qm', 'matrix fixture')
+        self.source = SourceIdentity('sha256:measured-matrix', git('rev-parse', 'HEAD'),
+                                     EMPTY_OVERLAY_FINGERPRINT, content_digest(root))
+        self.deployed.update(target_path=str(root), identity=self.source.identity,
+            commit=self.source.commit, dirty_digest=self.source.dirty_digest,
+            content_digest=self.source.content_digest, dirty=False)
+        server_items = [JobSubmission('test', str(root), 'project', 'local', label,
             ('echo', label), 60 + index, self.source, workspace_mode='isolated', request_id=label)
             for index, label in enumerate(('first', 'second'))]
         self.wire = self.service.submit_matrix(server_items)

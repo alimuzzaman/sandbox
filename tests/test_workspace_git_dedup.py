@@ -409,8 +409,14 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             source.mkdir()
             plan = plan_materialization(source, root / "workspace")
             original_mkdir = checkout.os.mkdir
+            original_open = checkout.os.open
             original_close = checkout.os.close
+            opened = []
             closed = []
+            def opening(*args, **kwargs):
+                descriptor = original_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
             def mkdir(name, *args, **kwargs):
                 if ".staging-" in str(name):
                     raise OSError(errno.ENOSPC, "injected staging failure")
@@ -419,12 +425,13 @@ class WorkspaceGitDedupTests(unittest.TestCase):
                 closed.append(descriptor)
                 return original_close(descriptor)
             with patch.object(checkout.os, "mkdir", side_effect=mkdir), \
+                    patch.object(checkout.os, "open", side_effect=opening), \
                     patch.object(checkout.os, "close", side_effect=close), \
                     self.assertRaises(WorkspaceMaterializationError) as raised:
                 materialize(plan)
             self.assertEqual(raised.exception.code, "workspace_staging_unavailable")
             self.assertFalse((root / materialization_lock_name(plan.source_path)).exists())
-            self.assertEqual(len(closed), 2)
+            self.assertCountEqual(closed, opened)
 
     def test_source_open_failure_closes_parent_once_with_bounded_error(self):
         from sandbox.workspaces import checkout
@@ -436,13 +443,14 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             plan = plan_materialization(source, root / "workspace")
             original_open = checkout.os.open
             original_close = checkout.os.close
-            calls = [0]
+            acquired = []
             closed = []
             def opened(*args, **kwargs):
-                calls[0] += 1
-                if calls[0] == 2:
+                if args[0] == source.name and kwargs.get('dir_fd') is not None:
                     raise PermissionError(errno.EACCES, "sensitive injected path")
-                return original_open(*args, **kwargs)
+                descriptor = original_open(*args, **kwargs)
+                acquired.append(descriptor)
+                return descriptor
             def closed_once(descriptor):
                 closed.append(descriptor)
                 return original_close(descriptor)
@@ -452,7 +460,35 @@ class WorkspaceGitDedupTests(unittest.TestCase):
                 materialize(plan)
             self.assertEqual(raised.exception.code, "workspace_source_unavailable")
             self.assertNotIn("sensitive", str(raised.exception))
-            self.assertEqual(len(closed), 1)
+            self.assertCountEqual(closed, acquired)
+
+    def test_admission_anchor_failure_is_bounded_and_closes_its_parent(self):
+        from sandbox.workspaces import checkout
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'source'
+            source.mkdir()
+            plan = plan_materialization(source, root / 'workspace')
+            original_open, original_close = checkout.os.open, checkout.os.close
+            opened, closed = [], []
+            def opening(name, *args, **kwargs):
+                if str(name).startswith('.sandbox-admission-'):
+                    raise PermissionError(errno.EACCES, 'sensitive injected anchor')
+                descriptor = original_open(name, *args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+            def closing(descriptor):
+                closed.append(descriptor)
+                return original_close(descriptor)
+            with patch.object(checkout.os, 'open', side_effect=opening), \
+                    patch.object(checkout.os, 'close', side_effect=closing), \
+                    patch.object(checkout, '_copy_worktree') as copy, \
+                    self.assertRaises(WorkspaceMaterializationError) as failure:
+                materialize(plan)
+            self.assertEqual(failure.exception.code, 'workspace_lock_unavailable')
+            self.assertNotIn('sensitive', str(failure.exception))
+            self.assertCountEqual(closed, opened)
+            copy.assert_not_called()
 
     def test_lock_acquisition_failure_closes_both_descriptors_once(self):
         from sandbox.workspaces import checkout
@@ -464,8 +500,14 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             plan = plan_materialization(source, root / "workspace")
             lock_name = materialization_lock_name(plan.source_path)
             original_mkdir = checkout.os.mkdir
+            original_open = checkout.os.open
             original_close = checkout.os.close
+            opened = []
             closed = []
+            def opening(*args, **kwargs):
+                descriptor = original_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
             def mkdir(name, *args, **kwargs):
                 if name == lock_name:
                     raise PermissionError(errno.EACCES, "sensitive injected path")
@@ -474,12 +516,13 @@ class WorkspaceGitDedupTests(unittest.TestCase):
                 closed.append(descriptor)
                 return original_close(descriptor)
             with patch.object(checkout.os, "mkdir", side_effect=mkdir), \
+                    patch.object(checkout.os, "open", side_effect=opening), \
                     patch.object(checkout.os, "close", side_effect=closed_once), \
                     self.assertRaises(WorkspaceMaterializationError) as raised:
                 materialize(plan)
             self.assertEqual(raised.exception.code, "workspace_lock_unavailable")
             self.assertNotIn("sensitive", str(raised.exception))
-            self.assertEqual(len(closed), 2)
+            self.assertCountEqual(closed, opened)
             self.assertFalse((root / lock_name).exists())
 
     def test_lock_release_failure_never_returns_a_released_receipt(self):

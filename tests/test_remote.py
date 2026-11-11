@@ -1525,10 +1525,13 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             git("commit", "-qm", "init")
             git("checkout", "-q", "--detach")
             self.assertIsNone(sr.current_branch(directory, allow_detached=True))
+            def measured_update(*args, **kwargs):
+                kwargs['content_receipt']['content_digest'] = 'sha256:' + 'f' * 64
+                return 0
             with patch.object(sr, "remote_network_capacity_admission", return_value={"ok": True}), \
                  patch.object(sr, "ensure_deploy_repo", return_value="/srv/deploy/proj"), \
                  patch.object(sr, "push_commits", return_value="e" * 40) as push, \
-                 patch.object(sr, "update_target_to", return_value=0):
+                 patch.object(sr, "update_target_to", side_effect=measured_update):
                 result = sr.deploy_exact_working_tree(
                     {"ssh": "example.test", "_remote_name": "myvps"}, directory,
                 )

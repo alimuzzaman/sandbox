@@ -26,6 +26,10 @@ used by refresh, through the SQLite acceptance commit. A changed tree is refused
 before acceptance, rather than acknowledging earlier source metadata for later
 bytes. The existing request identity must be preserved when investigating it.
 
+Contending copy or admission calls return a bounded busy refusal instead of
+waiting indefinitely for the checkout lock. Lock-access failures return a bounded
+error without exposing the underlying filesystem diagnostic.
+
 An admitted or still-leased job prevents another refresh of its checkout. Exact
 request replay returns the retained receipt without copying over job output;
 new submissions still require a byte check. CI uses a prepared verified copy

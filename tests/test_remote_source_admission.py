@@ -225,6 +225,34 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
         accepted = self.service.submit(old)
         self.assertEqual(accepted['job_id'], row['job_id'])
 
+    def test_actual_retained_ack_binds_measured_bytes_and_replay(self):
+        import copy
+        from sandbox.jobs.acceptance import require_retained_acceptance
+        pin = content_digest(self.source)
+        workspace = self.root / 'receipt'
+        materialize(self.plan(workspace, pin))
+        submission = self.submission(workspace, pin)
+        accepted = self.service.submit(submission)
+        expected = {'identity': self.identity, 'commit': self.commit_a,
+                    'dirty_digest': None, 'dirty': False, 'content_digest': pin}
+        self.assertEqual(accepted['source'], expected)
+        require_retained_acceptance(accepted, request_id='original-A', source=expected)
+        self.assertEqual(accepted['request_digest'], submission.canonical_digest())
+        for replacement in (None, 'sha256:' + 'f' * 64, 'invalid'):
+            contrary = copy.deepcopy(accepted)
+            if replacement is None:
+                contrary['source'].pop('content_digest')
+            else:
+                contrary['source']['content_digest'] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                require_retained_acceptance(contrary, request_id='original-A', source=expected)
+        (workspace / 'job-output.txt').write_text('original execution output')
+        replay = self.service.submit(submission)
+        self.assertTrue(replay['idempotent_replay'])
+        self.assertEqual(replay['job_id'], accepted['job_id'])
+        self.assertEqual(replay['source'], expected)
+        self.assertEqual(len(self.launched), 1)
+
     def test_transport_single_matrix_and_ci_carry_the_same_content_pin(self):
         pin = content_digest(self.source)
         proof = {'target_path': str(self.source), 'identity': self.identity,
@@ -232,7 +260,7 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
         calls = []
         transport = RemoteJobTransport(deploy=lambda *a, **k: proof,
             remote_lookup=lambda name: {'provisioned': True,
-                'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.source-content.v1']},
+                'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.source-content.v1', 'job.acceptance-receipt.v1']},
             ssh_run=lambda record, command, **kwargs: SimpleNamespace(returncode=0, stdout='{}'),
             remote_sb_path=lambda record: '/fixed/sb')
         def prepare(remote, source, label, **kwargs):
@@ -298,7 +326,7 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
 
     def test_missing_installed_content_contract_refuses_before_deployment(self):
         from sandbox.transports.remote_jobs import RemoteJobTransportError
-        record = {'provisioned': True, 'capabilities': ['job.exec', 'job.execution-policy.v1'],
+        record = {'provisioned': True, 'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.acceptance-receipt.v1'],
                   'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
         def no_deploy(*args, **kwargs):
             self.fail('no source staging before real capability discovery')
@@ -306,7 +334,7 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
             remote_lookup=lambda name: record)
         observed = {'ok': True, 'schema_version': 1, 'ownership_marker': 'a' * 24,
                     'runtime_revision': 'b' * 24,
-                    'capabilities': ['job.exec', 'job.execution-policy.v1']}
+                    'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.acceptance-receipt.v1']}
         item = replace(self.submission(self.source, content_digest(self.source)),
                        target_kind='remote', remote_name='box')
         with patch.object(transport, 'control', return_value=observed):

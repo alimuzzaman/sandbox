@@ -13,6 +13,12 @@ CONTRACT = 'job.source-content.v1'
 _held = threading.local()
 
 
+class CheckoutAdmissionError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 def source_content_available():
     """Installed assembly observation; never an execution/actor grant."""
     try:
@@ -136,25 +142,31 @@ def checkout_guard(root):
     if key in held:
         yield
         return
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     name = '.sandbox-admission-' + hashlib.sha256(key.encode()).hexdigest()[:32] + '.lock'
-    fd = -1
+    parent = fd = -1
     try:
-        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
-            raise ValueError('checkout admission lock is unsafe')
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
-            raise ValueError('checkout admission lock changed')
+        try:
+            parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError('unsafe admission anchor')
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+                raise ValueError('changed admission anchor')
+        except BlockingIOError:
+            raise CheckoutAdmissionError('checkout_admission_busy') from None
+        except (OSError, ValueError):
+            raise CheckoutAdmissionError('checkout_admission_unavailable') from None
         held[key] = fd
         yield
     finally:
         held.pop(key, None)
         if fd >= 0:
             os.close(fd)
-        os.close(parent)
+        if parent >= 0:
+            os.close(parent)
 
 
 def verify_content(root, expected, expected_commit=None):

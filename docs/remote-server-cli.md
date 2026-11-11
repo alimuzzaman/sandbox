@@ -18,6 +18,13 @@ An empty overlay still has its canonical fingerprint. Receipt reconciliation
 keeps that fingerprint and the original request digest unchanged, while reporting
 the source as clean. Fingerprint presence alone does not imply modified files.
 
+Measured deployments also carry `source.content_digest`. Acceptance returns
+that measurement from the original retained submission, and the client checks
+it against the independently measured deployment. Missing or contrary evidence
+stays acceptance unknown. Legacy submissions omit the optional field, preserving
+their original canonical request digests and replay receipts. New materialized
+submissions require the installed `job.source-content.v1` contract.
+
 Joined execution observes current installed contracts before deployment, even
 when its local metadata already lists them. Discovery replaces known component
 claims while preserving unrelated capabilities, so a stale registration cannot

@@ -36,3 +36,4 @@
   value, the `/s/<id>` URL form, cookie attributes and the 7/30-day limits. These are
   requirements, not implementation choices, so they stay.
 - Validation pass 1: all items pass.
+- 2026-11-11: re-validated after the panel follow-up (Story 6, FR-029..FR-034, SC-007..SC-008). All items still pass; no clarification markers.

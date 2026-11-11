@@ -27,3 +27,25 @@ renderer branch (checked once by hand during development).
 6. For a stack: `sb host share create --remote R --stack <slug> --json`, open it, reload, and
    check that the sign-in links change and that a used WordPress link is refused the second
    time.
+
+## Panel "Share this stack" (2026-11-11 follow-up)
+
+Automated: `python3 -m unittest tests.test_web_share` (route gate, body checks, refusal
+mapping, no-store, link absent from `/api/hosting`, nothing written to stdout or
+stderr). The node suite `src/web/tests/sharelabels.test.ts` runs from
+`tests/test_web_poller.py` where node 24 is installed.
+
+Manual, on a controller with a stack whose target sets `share.agent_mint: true`
+(orchestrator, after the panel deploy):
+
+1. Open `/hosting`, press "Share this stack" on the card and confirm. The dialog shows
+   the link, expiry and use limit. Copy it and open it in a private window: the stack
+   page renders.
+2. Close the dialog and reload: the link is nowhere on the page, and DevTools shows no
+   `localStorage` or `sessionStorage` entry holding it.
+3. "Live links": the new link is listed with its expiry; revoke it, and the private
+   window's reload answers 404.
+4. On a stack without `agent_mint`, the button shows `agent_mint_not_enabled` with the
+   fix; on one without a `share:` block, `stack_share_not_declared` with the fix.
+5. `curl -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:<port>/api/hosting/share`
+   answers 403 (no Origin, no panel header).

@@ -6,11 +6,15 @@ import shlex
 import subprocess
 import sys
 import time
+from contextlib import ExitStack, contextmanager
+import datetime
+import hashlib
 
 import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 from sandbox.hosting import host_exec, target_resolution
 from sandbox.hosting.host_exec import ExecRefusal, ExecRequest
+from sandbox.hosting.server_cli_target import host_target, is_owner_target, can_operate_host
 
 
 def _refuse(code: str, message: str, *, as_json: bool, exit_code: int) -> None:
@@ -53,12 +57,30 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
         raise ExecRefusal(host_exec.USAGE, "host exec requires --service", host_exec.EXIT_USAGE)
     if not getattr(args, "remote", None):
         raise ExecRefusal(host_exec.USAGE, "host exec requires --remote", host_exec.EXIT_USAGE)
-    entry = remote.get_remote(args.remote)
+    entry = host_target(args.remote)
     if not entry:
         raise ExecRefusal(host_exec.REMOTE_UNKNOWN, f"no remote named '{args.remote}'")
-    if not entry.get("provisioned"):
+    if not can_operate_host(entry):
         raise ExecRefusal(host_exec.REMOTE_NOT_PROVISIONED,
                           f"remote '{args.remote}' is not provisioned")
+    if is_owner_target(entry):
+        from sandbox.hosting.server_target_selection import read_owner_exec_selection
+        selected = read_owner_exec_selection(entry,
+            target=getattr(args, "target", None), name=getattr(args, "name", None),
+            environment=getattr(args, "environment", None))
+        context = entry.require_current()
+        remaining = int((datetime.datetime.fromisoformat(context.deadline_at.replace("Z", "+00:00"))
+                         - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+        if remaining <= 0:
+            raise ExecRefusal(host_exec.TIMED_OUT, "original server CLI deadline expired")
+        request = ExecRequest(target=selected.target, service=service, argv=tuple(argv),
+            timeout_seconds=min(timeout, remaining), capture=bool(getattr(args, "json", False)),
+            owner_selection=selected)
+        prefix = selected.compose_prefix()
+        services = _deployed_services(entry, prefix)
+        if service not in services:
+            raise ExecRefusal(host_exec.UNKNOWN_SERVICE, "service is absent from the selected server target")
+        return request, entry, prefix
     state = hosting.load_host_state()
     target = target_resolution.resolve(
         args.remote, target=getattr(args, "target", None), name=getattr(args, "name", None),
@@ -93,12 +115,59 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
     return request, entry, prefix
 
 
+@contextmanager
+def _execution_scope(request, entry):
+    """Native alias locks plus the existing physical target lease, held once."""
+    selected = request.owner_selection
+    if selected is None:
+        yield
+        return
+    from sandbox.hosting.server_target_selection import OwnerExecSelection
+    from sandbox.hosting.recovery.repository import RecoveryRepository
+    from sandbox.hosting import target_lease
+    if type(selected) is not OwnerExecSelection or not is_owner_target(entry):
+        raise ExecRefusal(host_exec.TRANSPORT_FAILED, "current server target evidence is required")
+    repository = RecoveryRepository()
+    with ExitStack() as held:
+        for key in selected.native_keys:
+            held.enter_context(repository.effect_lock(key, timeout_seconds=0))
+        selected.require_current()
+        context = entry.require_current()
+        # One job cannot take over another live job's physical lease merely
+        # because both execute as the same shared Linux owner.
+        owner = hashlib.sha256(("server-cli-exec:" + context.job_id).encode()).hexdigest()[:32]
+        lease = target_lease.acquire(lambda command: entry.process(command, timeout=30),
+            target_lease.lease_path(entry.sandbox_home(), selected.target.project,
+                                    selected.target.environment), owner)
+        clean_exit = False
+        try:
+            selected.require_current()
+            yield
+            selected.require_current()
+            clean_exit = True
+        finally:
+            if clean_exit:
+                # Do not acknowledge successful cleanup on an unavailable
+                # process result. The generic release helper is best-effort.
+                result = entry.process(target_lease.command(lease["path"], lease["token"],
+                    lease["owner"], "release"), timeout=30)
+                if result.returncode:
+                    raise RuntimeError("host_exec_lease_retirement_unknown")
+
+
 def cmd_host_exec(args) -> None:
     as_json = bool(getattr(args, "json", False))
     try:
         request, entry, prefix = _prepare(args)
         command = host_exec.remote_command(prefix, request)
-        ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
+        process_options = {}
+        if is_owner_target(entry):
+            from sandbox.application.server_cli import owner_command_args, owner_environment
+            context = entry.require_current()
+            ssh_argv = owner_command_args(context.owner, command)
+            process_options = {"env": owner_environment(context.owner), "cwd": context.owner.home}
+        else:
+            ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
         audit = host_exec.AuditLog()
     except ExecRefusal as exc:
         _refuse(exc.code, exc.detail, as_json=as_json, exit_code=exc.exit_code)
@@ -110,7 +179,14 @@ def cmd_host_exec(args) -> None:
     started = time.monotonic()
     with audit:
         try:
-            outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source())
+            with _execution_scope(request, entry):
+                outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source(),
+                                        **process_options)
+                if request.owner_selection is not None and outcome.code in {
+                        host_exec.WATCHDOG_EXPIRED, host_exec.INTERRUPTED}:
+                    # Preserve the physical fence when descendant completion
+                    # cannot be established. Never replay the command here.
+                    raise RuntimeError("host_exec_effects_unknown")
         except KeyboardInterrupt:
             outcome = host_exec.ExecOutcome(
                 exit_code=130, code=host_exec.INTERRUPTED,

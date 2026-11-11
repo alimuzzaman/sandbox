@@ -254,6 +254,15 @@ class ServerSelectionTests(OwnerTargetTests):
         with self.assertRaises(TargetRefusal):
             self.selected()
         self.process.assert_not_called()
+
+    def test_corrupt_alias_partition_is_not_treated_as_absent_history(self):
+        from sandbox.hosting.state_partition.layout import HostState
+        state = HostState(self.state)
+        state.unreadable = frozenset({"opaque-damaged-key"})
+        self.state = state
+        with self.assertRaises(TargetRefusal):
+            self.selected()
+        self.process.assert_not_called()
         self.summary["last_apply"]["status"] = "succeeded"
         self.state["hosts"]["old-alias/project/dev"]["recovery_uncertainty"] = {"unknown": True}
         with self.assertRaises(TargetRefusal):

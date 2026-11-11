@@ -858,7 +858,7 @@ def _cmd_service(args, as_json: bool) -> None:
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
                 _invalidate_readiness(name, before=True)
                 staged_source = _upload_runtime_source(
-                    entry["ssh"], source_revision=source_revision,
+                    entry, source_revision=source_revision,
                     upload_timeout=upload_timeout
                 )
                 _assert_clean_source_revision(source_revision)
@@ -943,7 +943,7 @@ def _cmd_service(args, as_json: bool) -> None:
                     "--confirm --json"
                 )
                 try:
-                    result = sr.ssh_run(entry["ssh"], command, timeout=180)
+                    result = sr.ssh_run(entry, command, timeout=180)
                 except (subprocess.SubprocessError, OSError) as exc:
                     raise RuntimeError("CI cleanup broker installation was interrupted") from exc
                 try:
@@ -1682,7 +1682,7 @@ def _read_exact_source_file(source_revision: str, relative_path: str) -> bytes:
 
 
 def _upload_runtime_source(
-        ssh_target: str, *, source_revision: str,
+        remote_or_target: dict | str, *, source_revision: str,
         upload_timeout: int = _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT,
 ) -> dict[str, str]:
     """Stage one clean exact Git object without reading mutable worktree bytes."""
@@ -1773,7 +1773,7 @@ def _upload_runtime_source(
     )
     try:
         ssh_res = sr.ssh_process(
-            ssh_target, remote_cmd, input_data=archive,
+            remote_or_target, remote_cmd, input_data=archive,
             timeout=upload_timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -2081,7 +2081,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     try:
         _record_provision_event(journal, "runtime_staging")
         staged_source = _upload_runtime_source(
-            ssh_target, source_revision=source_revision, upload_timeout=upload_timeout)
+            entry, source_revision=source_revision, upload_timeout=upload_timeout)
         _record_provision_event(journal, "runtime_staged")
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "runtime_staging_failed", status="failed", detail=str(e))
@@ -2098,7 +2098,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     try:
         _record_provision_event(journal, "bootstrap_running")
         res = subprocess.run(
-            sr.ssh_command_args(ssh_target, cmd),
+            sr.ssh_command_args(entry, cmd),
             capture_output=True, text=True, timeout=1800, check=False,
         )
     except (subprocess.SubprocessError, OSError) as e:
@@ -2292,7 +2292,7 @@ def _cmd_up(args, as_json: bool) -> None:
         source_revision = _local_git_revision()
         _invalidate_readiness(name, before=True)
         staged_source = _upload_runtime_source(
-            entry["ssh"], source_revision=source_revision, upload_timeout=upload_timeout)
+            entry, source_revision=source_revision, upload_timeout=upload_timeout)
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
             control_url = control_url or f"http://{tailscale_ip}:{port}"

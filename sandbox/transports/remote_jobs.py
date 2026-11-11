@@ -742,6 +742,25 @@ class RemoteJobTransport:
         self._validate_deployment(deployed)
         return self._submit_deployed(remote, deployed, submission)
 
+    def submit_server_cli(self, submission, remote: dict, capability: dict) -> dict:
+        """Use the installed fixed CLI contract, without project instance ensure."""
+        from dataclasses import replace
+        from sandbox.application.server_cli import KIND, CONTRACT
+        if (submission.kind != KIND or submission.target_kind != 'remote'
+                or remote.get('joined') is not True or remote.get('control_transport') != 'tailscale'
+                or CONTRACT not in capability.get('capabilities', ())):
+            raise RemoteJobTransportError('installed server CLI capability is unavailable', retryable=False)
+        require_safe_argv(submission.argv)
+        provenance = dict(submission.execution_policy_provenance or {})
+        provenance.update({'server_cli.target_identity': capability['target_identity'],
+                           'server_cli.runtime_revision': capability['runtime_revision'],
+                           'server_cli.ownership_marker': capability['ownership_marker']})
+        submission = replace(submission, execution_policy_provenance=provenance)
+        deployed = self._deploy(remote, submission.project_root,
+                                deployment_timeout=submission.deadline_seconds)
+        self._validate_deployment(deployed)
+        return self._submit_deployed(remote, deployed, submission)
+
     def submit_many(self, submissions: list) -> dict:
         """Accept matrix children after one exact-tree deployment.
 
@@ -923,7 +942,12 @@ class RemoteJobTransport:
         if submission.request_id:
             args += ["--request-id", submission.request_id]
         argv = list(submission.argv)
-        if submission.kind == "runtime-exec":
+        if submission.kind == 'server-cli':
+            provenance = submission.execution_policy_provenance or {}
+            args += ['--server-cli', '--server-cli-target', provenance['server_cli.target_identity'],
+                     '--server-cli-revision', provenance['server_cli.runtime_revision'],
+                     '--server-cli-marker', provenance['server_cli.ownership_marker']]
+        elif submission.kind == "runtime-exec":
             # Generic Compose commands belong in the selected remote project
             # instance, not in the VPS host environment.  The outer durable
             # job owns all output and deadline handling while this controller

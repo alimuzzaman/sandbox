@@ -1,0 +1,46 @@
+# Fixed server CLI jobs
+
+This source contract is not installed acceptance. A server lacking the assembled
+`job-capabilities` / `job-start --server-cli` contract is unavailable for this
+adapter. It must not be described as denying an admitted owner. The managed
+installation feature remains separate and paused.
+
+`sandbox.application.server_cli.dispatch_server_cli(remote_name, argv, *,
+project_dir, request_id, timeout_seconds=900)` submits before controller secret
+preflight. `argv` starts with the CLI command, without an executable. The adapter
+validates authenticated machine and service pins, reads actual installed CLI
+capabilities, stages exact source through the existing transfer, and uses the
+existing durable job repository, scheduler, supervisor and retained output. It
+returns the original server acceptance receipt. Unknown acceptance is not retried.
+The fixed installed executable is selected on the server, with no project PATH,
+project script, self remote alias, instance ensure or SSH loop.
+
+The server binds the original request, source identity, machine, ownership marker,
+CLI revision and deadline in the retained job. `current_server_cli_context()`
+returns a `ServerCLIContext` only for the actual retained running child: PID,
+parent PID, boot/start identities, fixed argv and target provenance must agree.
+An environment job ID is a lookup key, never authority. The bounded wait covers
+the supervisor committing its child identity. Cancellation, expiry and replacement
+refuse the context.
+
+`context.owner` is a frozen `ServerCliOwner` containing the actual Linux UID,
+account home, Sandbox home, fixed executable, machine identity, marker and runtime
+revision. These derive from the current account and selected nonsecret service
+unit; the separate EnvironmentFile is never opened. This establishes current
+owner-layout execution, not immutable root-controlled release authority.
+
+Host adapters must consume the typed owner target instead of resolving a self
+alias. `validate_owner_current(owner)` rechecks the actual retained child before
+effects. `owner_process(owner, command, *, timeout=30, input_data=None)` runs an
+existing trusted host command locally with that proof and original deadline. It
+does not skip target/native/lifetime locks or turn a dictionary flag into local
+authority. Host/CI selection and credential-consuming recipe integration must be
+assembled and tested before claiming a complete stack workflow.
+
+The fixed CLI job receives explicit HOME, SANDBOX_HOME, account, PATH, locale and
+user-runtime/DBus coordinates, plus fixed supervisor audit keys. No parent
+environment is copied, no SSH agent/key is passed, and no provider value is sent
+from the controller. Normal server commands resolve the Linux owner's existing
+secret store. Secret value-output commands are unavailable through this retained
+adapter. No per-controller role, credential approval or new broker grant is
+introduced.

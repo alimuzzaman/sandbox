@@ -88,6 +88,14 @@ Tailscale SSH on another server. Their multiplexing is disabled before launching
 UNIX socket path, including OpenSSH's temporary suffix, cannot fit; no command is
 retried and no socket is moved to a shared directory.
 
+Hermes repository authentication and interactive chat use the same joined SSH
+policy, including TTY handling and credential input through stdin. Runtime source
+upload, provisioning, service start/migration and broker cleanup retain the full
+registration through the shared transport. Pro-plugin rsync derives its destination
+operand and SSH command from the same resolved endpoint. These changes preserve
+existing nonjoined owner SSH behavior; they do not remove the separate lifecycle
+credential or normal host/CI secret-preflight prerequisites.
+
 Every direct `remote ssh` command requires `--confirm`, including read-only commands,
 and a short `--reason`.
 

@@ -349,10 +349,11 @@ class ShareRecoveryPureTests(unittest.TestCase):
         if node is None:
             self.skipTest("node is unavailable")
         version = run_test_process([node, "--version"], capture_output=True, text=True, timeout=10)
-        match = re.match(r"v(\d+)", version.stdout)
-        if not match or int(match.group(1)) < 24:
-            self.skipTest("node 24 or newer runs TypeScript tests directly")
-        result = run_test_process([node, "--test", "src/web/tests/share-recovery.test.ts"],
+        match = re.match(r"v(\d+)\.(\d+)", version.stdout)
+        if not match or tuple(map(int, match.groups())) < (22, 13):
+            self.skipTest("node 22.13 or newer provides stripTypeScriptTypes")
+        result = run_test_process([node, "--experimental-strip-types", "--test",
+                                   "src/web/tests/share-recovery.test.ts"],
                                   cwd=ROOT, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout[-4000:] + result.stderr[-1000:])
 

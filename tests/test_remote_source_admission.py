@@ -260,16 +260,19 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
         self.git('config', 'receive.denyCurrentBranch', 'updateInstead')
         client = self.root / 'client'
         run_test_process(['git', 'clone', '-q', str(self.source), str(client)],
+                         env={'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'},
                          timeout=5, capture_output=True, check=True)
         (client / 'version.txt').write_text('B')
         for arguments in (('add', '.'), ('-c', 'user.name=fixture', '-c',
                 'user.email=fixture@example.invalid', 'commit', '-qm', 'B')):
             run_test_process(['git', '-C', str(client), *arguments],
+                             env={'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'},
                              timeout=5, capture_output=True, check=True)
         with patch.object(_remote, 'git_ssh_url', return_value=str(self.source)), \
                 patch.object(_remote, 'git_ssh_command', return_value='/usr/bin/false'), \
                 patch.object(_remote, '_ensure_ssh_control_dir'), \
-                patch.object(_remote, 'git_environment', side_effect=lambda **kwargs: synthetic_environment()):
+                patch.object(_remote, 'git_environment', side_effect=lambda **kwargs: synthetic_environment(
+                    {'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'})):
             pushed = _remote.push_commits({}, client, str(self.source), 'main')
         self.assertEqual((self.source / 'version.txt').read_text(), 'A')
         self.assertEqual(self.git('rev-parse', 'HEAD'), pushed)

@@ -63,7 +63,7 @@ class TargetObservationTests(unittest.TestCase):
                 mock.patch('sandbox.resources.context.authenticated_target_identity',
                     return_value={'target_identity': OWNER.target_identity}), \
                 mock.patch.object(_remote, 'deploy_exact_working_tree', side_effect=AssertionError('no staging')), \
-                mock.patch('sandbox.jobs.service.JobService.submit', side_effect=AssertionError('no job')):
+                mock.patch('sandbox.application.job_service.JobService.submit', side_effect=AssertionError('no job')):
             return targets.observe_server_cli_target('box', name='fixture', budget_seconds=2)
 
     def test_client_uses_fixed_control_command_without_local_project_or_job(self):

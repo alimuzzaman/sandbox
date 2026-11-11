@@ -1245,6 +1245,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--debounce", type=float, default=0.5,
         help="minimum quiet window after a transfer in watch mode (0.1-10; default 0.5)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
+    host_p.add_argument("--credential-scope", choices=("personal-local",), default=None,
+        help="explicitly use this controller's existing credential workflow")
 
 
     preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")
@@ -1590,6 +1592,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         args.label = pre_command_label
     if not args.cmd:
         p.print_help()
+        return
+
+    command_spec = COMMAND_SPECS.get(args.cmd)
+    if (command_spec is not None and command_spec.preconfiguration_dispatch is not None
+            and command_spec.preconfiguration_dispatch(args)):
         return
 
     # Spec 072: before any command effect, fast-forward this controller to a

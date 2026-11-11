@@ -24,6 +24,7 @@ from sandbox.core._config import ensure_pyyaml
 from sandbox.hosting import hostname_ownership, stack_registry, stack_template
 from sandbox.hosting.lifetime import client as lifetime_client, hoststore, naming
 from sandbox.hosting.stack_template import StackRef, StackTemplateError
+from sandbox.hosting.server_cli_target import host_target, is_owner_target
 
 CONFIRMATION_REQUIRED = "stack_confirmation_required"
 REF_UNRESOLVED = "stack_ref_unresolved"
@@ -31,6 +32,7 @@ SLUG_IN_USE = "stack_slug_in_use"
 APPLY_IN_PROGRESS = "stack_apply_in_progress"
 NOT_FOUND = "stack_not_found"
 SUBMISSION_FAILED = "stack_submission_failed"
+SUBMISSION_UNKNOWN = "stack_submission_unknown"
 DESTROY_FAILED = "stack_destroy_failed"
 PROBE_UNAVAILABLE = "stack_port_probe_unavailable"
 SECRETS_MISSING = "stack_secrets_missing"
@@ -212,7 +214,13 @@ def _last_apply_view(record: dict) -> dict:
 def _refuse_if_active(record: dict | None) -> None:
     if not record:
         return
-    job = job_view((record.get("last_apply") or {}).get("job_id"))
+    last = record.get("last_apply") or {}
+    job = job_view(last.get("job_id"))
+    if (not job and (last.get("job_id") or last.get("status") in
+            {"submitting", "submitted", "acceptance_unknown", "submission_failed"})):
+        raise StackCommandError(SUBMISSION_UNKNOWN,
+            f"stack {record.get('slug')} original apply request {last.get('request_id')} "
+            "has no established acceptance/outcome; inspect that original request/job before another apply")
     if job and job.get("lifecycle") in ACTIVE_LIFECYCLES:
         raise StackCommandError(
             APPLY_IN_PROGRESS,
@@ -225,11 +233,16 @@ def _submission_timeout(validated: dict) -> int:
 
 
 def _submit(argv: list[str]) -> str:
+    from sandbox.core._paths import BASE
+    from sandbox.services.environment import compatible_subprocess_environment
     try:
         result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=180,
-                                env=dict(os.environ))
+                                env=compatible_subprocess_environment({"SANDBOX_HOME": str(BASE)}))
     except subprocess.TimeoutExpired:
-        raise StackCommandError(SUBMISSION_FAILED, "job-start did not answer within 180 seconds") from None
+        raise StackCommandError(SUBMISSION_UNKNOWN,
+            "job-start acceptance is unknown after its response deadline; inspect the original request") from None
+    except OSError:
+        raise StackCommandError(SUBMISSION_FAILED, "job-start could not be launched") from None
     lines = [line for line in (result.stdout or "").splitlines() if line.strip().startswith("{")]
     payload = None
     if lines:
@@ -238,9 +251,14 @@ def _submit(argv: list[str]) -> str:
         except json.JSONDecodeError:
             payload = None
     job_id = payload.get("job_id") if isinstance(payload, dict) else None
-    if result.returncode != 0 or not isinstance(job_id, str) or not job_id:
-        detail = remote.redact_text((result.stderr or result.stdout or "no output").strip())[-500:]
-        raise StackCommandError(SUBMISSION_FAILED, f"job-start refused the apply: {detail}")
+    if (result.returncode != 0 or not isinstance(job_id, str)
+            or re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{32})", job_id) is None
+            or payload.get("ok") is False):
+        if (isinstance(payload, dict) and payload.get("status") == "refused"
+                and payload.get("acceptance") == "not_accepted"):
+            raise StackCommandError(SUBMISSION_FAILED, "job-start explicitly refused before acceptance")
+        raise StackCommandError(SUBMISSION_UNKNOWN,
+            "job-start returned no valid original acceptance receipt; inspect the original request")
     return job_id
 
 
@@ -265,8 +283,8 @@ def _refuse(args, exc: Exception) -> None:
 def _entry(remote_name: str | None) -> dict:
     if not remote_name:
         raise StackCommandError(REMOTE_UNKNOWN, "--remote is required")
-    entry = remote.get_remote(remote_name)
-    if not isinstance(entry, dict):
+    entry = host_target(remote_name)
+    if not isinstance(entry, dict) and not is_owner_target(entry):
         raise StackCommandError(REMOTE_UNKNOWN, f"no remote named {remote_name!r}")
     return entry
 
@@ -670,7 +688,8 @@ def _up(args) -> dict:
         try:
             job_id = _submit(argv)
         except StackCommandError as exc:
-            record["last_apply"].update({"status": "submission_failed", "error": exc.detail[:500]})
+            record["last_apply"].update({"status": "acceptance_unknown" if exc.code == SUBMISSION_UNKNOWN
+                else "refused", "error": exc.detail[:500]})
             registry.put(record)
             raise
         record["last_apply"].update({"job_id": job_id, "status": "submitted"})

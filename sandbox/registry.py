@@ -24,6 +24,9 @@ class CommandSpec:
     # the compatibility writers must be skipped for this invocation.
     predispatch_policy: Callable | None = None
     help: str | None = None
+    # The command may route a parsed request before local configuration or
+    # credential lookup. True means it handled the complete invocation.
+    preconfiguration_dispatch: Callable | None = None
 
 
 class CommandRegistry:

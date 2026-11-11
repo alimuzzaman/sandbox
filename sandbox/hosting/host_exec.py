@@ -69,6 +69,7 @@ class ExecRequest:
     argv: tuple[str, ...]
     timeout_seconds: int = TIMEOUT_DEFAULT
     capture: bool = False
+    owner_selection: object = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple) or not self.argv or not all(
@@ -244,7 +245,8 @@ def classify(returncode: int, elapsed: float, timeout_seconds: int, *,
     return returncode, OK if returncode == 0 else FAILED
 
 
-def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotonic) -> ExecOutcome:
+def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotonic,
+        env=None, cwd=None) -> ExecOutcome:
     """Run one SSH child; stream or capture its output; never read stdin."""
     capture = request.capture
     started = clock()
@@ -253,6 +255,7 @@ def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotoni
             ssh_argv, stdin=stdin,
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
+            env=env, cwd=cwd,
         )
     except OSError as exc:
         message = f"could not start ssh: {exc.strerror or exc}\n".encode()

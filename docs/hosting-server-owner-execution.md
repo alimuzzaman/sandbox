@@ -16,14 +16,20 @@ original job and returns its validated capture and underlying exit code.
 `--target PROJECT/ENVIRONMENT` is also supported. Non-joined targets and explicit
 personal-local execution keep their existing paths.
 
-The UTF-8 v1 batch contract transfers original non-TTY stdin once through the SDK's
-hash-bound anonymous input facility, bounded to 1 MiB and a 30-second intake
-deadline. TTY input remains empty as in existing host exec. No named payload
-file or source upload is created. Running-job observations return no child
-output. Terminal capture is bounded and passes through existing job redaction.
-Plain output and JSON retain UTF-8 replacement semantics; JSON additionally
-identifies the original request and job. This is not binary parity, a live
-stream or an interactive TTY contract.
+The default batch contract transfers original non-TTY stdin once through the
+SDK's hash-bound anonymous input facility, bounded to 1 MiB and a 30-second
+intake deadline. TTY input remains empty as in existing host exec. No named
+input file or source upload is created. Running-job observations return no
+child output. Terminal stdout and stderr are retained as private, bounded
+artifacts. These intended output bytes are not lexically scrubbed. Plain output
+writes the verified exact bytes; JSON uses UTF-8 replacement and identifies the
+original request and job. Ordinary job logs contain capture metadata, not the
+artifact bytes. This is bounded batch output, without live streaming or an
+interactive TTY.
+
+The SDK's explicit `output_mode='utf8'` selects the older redacted log-capture
+profile. It is not the normal joined host-exec caller's output mode, and the
+caller never silently downgrades to it when artifact capture is unavailable.
 
 Preacceptance unavailability, lost acceptance and unavailable observation of an
 accepted job are distinct errors. The latter retains the known job ID. None

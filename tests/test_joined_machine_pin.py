@@ -121,11 +121,11 @@ class JoinedMachinePinTest(unittest.TestCase):
                                 installed_protocol=local_protocol()).as_mapping()
         def put(_name, *, _expected, **fields):
             record.update(fields)
-        with mock.patch.object(sr, "get_remote", side_effect=lambda _name: dict(record)), \
+        with mock.patch.object(sr, "get_remote", side_effect=lambda _name, **_kw: dict(record)), \
                 mock.patch.object(sr, "put_remote", side_effect=put), \
                 mock.patch.object(sr, "_remote_mcp_runtime_revision", return_value="d" * 24), \
                 mock.patch("sandbox.remote_runtime.verdict.strict_requested", return_value=False), \
-                mock.patch.object(sr, "remote_host_memory_request", side_effect=lambda *a: evidence()), \
+                mock.patch.object(sr, "remote_host_memory_request", side_effect=lambda *a, **_kw: evidence()), \
                 mock.patch.object(sr, "remote_mcp_service_status", return_value={
                     "runtime_revision_state": "mismatch", "compatibility": verdict}) as status:
             code, result = run(command._cmd_service, SimpleNamespace(name="refresh", ssh_url="box"), {})

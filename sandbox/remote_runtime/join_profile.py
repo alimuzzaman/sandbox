@@ -11,7 +11,7 @@ MACHINE_PROGRAM = (
 
 
 def adopt_join_profile(record, evidence, requested, *, machine_probe, nginx_probe):
-    if requested != 'nginx':
+    if requested not in (None, 'nginx'):
         raise FrontDoorError('joined_profile_unsupported', 'joined profile adoption supports explicit nginx only')
     if record.get('front_door') not in (None, 'nginx'):
         raise FrontDoorError('joined_profile_mismatch', 'an existing front-door pin cannot be replaced')
@@ -28,6 +28,18 @@ def adopt_join_profile(record, evidence, requested, *, machine_probe, nginx_prob
             or any(not isinstance(row, dict) or not isinstance(row.get('processes', []), list)
                    for row in listeners)):
         raise FrontDoorError('joined_profile_unavailable', 'nginx metadata shape is invalid')
+    if any(not isinstance(process, str) for row in listeners for process in row.get('processes', [])):
+        raise FrontDoorError('joined_profile_unavailable', 'listener ownership metadata is invalid')
+    if requested is None:
+        # A missing legacy field is not evidence for the historical Caddy
+        # default. Adopt only an observed unique public listener owner.
+        observed = facts.get('listeners_observed') is True and bool(listeners)
+        if (observed and caddy.get('installed') is True and caddy.get('observed') is True
+                and caddy.get('active') is True
+                and all(row.get('processes') and set(row['processes']) == {'caddy'} for row in listeners)):
+            return {'front_door': 'caddy'}
+        if not observed or any(not row.get('processes') or set(row['processes']) != {'nginx'} for row in listeners):
+            raise FrontDoorError('joined_profile_unproven', 'the existing front door is not uniquely observed')
     if (facts.get('nginx_installed') is not True or facts.get('active') is not True
             or facts.get('config_valid') is not True or facts.get('includes_conf_d') is not True
             or caddy.get('observed') is not True or facts.get('listeners_observed') is not True

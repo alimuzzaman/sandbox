@@ -111,7 +111,7 @@ def _revision_mismatch_message(installed: object, controller: object,
             f"checkout at the installed revision")
 
 
-def _require_compatible_runtime(remote: str, record: dict) -> None:
+def _require_compatible_runtime(remote: str, record: dict, *, timeout_seconds=None) -> None:
     """Spec 061 FR-003: admit the registered runtime when it is this exact
     revision, or when the live status verdict says it serves this
     controller's protocol. The live probe runs only on a revision difference.
@@ -125,7 +125,8 @@ def _require_compatible_runtime(remote: str, record: dict) -> None:
     if installed == controller and not strict_requested():
         return
     try:
-        status = _remote.remote_runtime_status_for_operation(record)
+        status = (_remote.remote_runtime_status_for_operation(record) if timeout_seconds is None else
+                  _remote.remote_runtime_status_for_operation(record, timeout_seconds=timeout_seconds))
     except Exception:  # noqa: BLE001 - remote detail is never forwarded
         status = None
     ok, state = admitted(status)
@@ -138,7 +139,7 @@ def _require_compatible_runtime(remote: str, record: dict) -> None:
     )
 
 
-def _build_host_memory_service(remote: str | None = None):
+def _build_host_memory_service(remote: str | None = None, *, budget_seconds=15):
     """Build the remote-only Feature 046 controller service."""
     if not remote:
         raise ValueError("remote_required")
@@ -146,7 +147,7 @@ def _build_host_memory_service(remote: str | None = None):
     from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
     from .host_memory.service import HostMemoryService
 
-    record = _remote.get_remote(remote)
+    record = _remote.get_remote(remote, budget_seconds=budget_seconds)
     if not isinstance(record, dict):
         raise ValueError("unknown_remote")
     _require_compatible_runtime(remote, record)
@@ -168,7 +169,7 @@ def _build_host_memory_service(remote: str | None = None):
 
 def host_memory_status(remote: str, *, budget_seconds: float = 15):
     """Return the bounded status envelope without exposing service authority."""
-    return _build_host_memory_service(remote).status(budget_seconds)
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).status(budget_seconds)
 
 
 def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) -> dict:
@@ -178,15 +179,24 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
     The adapter validates the service marker, revision and entire status schema.
     """
     import re
+    import time
     from sandbox.core import _remote
-    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError, validate_request
 
-    record = _remote.get_remote(remote)
+    validate_request({'action': 'host_memory_status', 'remote_name': remote, 'budget_seconds': budget_seconds})
+    deadline = time.monotonic() + budget_seconds
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise RemoteProtocolError('remote_budget_exhausted', 'authenticated identity observation exhausted its operation budget')
+        return value
+    record = _remote.get_remote(remote, budget_seconds=remaining())
     if not isinstance(record, dict):
         raise ValueError("recovery_target_identity_unavailable")
-    _require_compatible_runtime(remote, record)
-    adapter = HostMemoryRemote(remote, record, _remote.remote_host_memory_request)
-    value = adapter.call("host_memory_status", budget_seconds=budget_seconds)
+    _require_compatible_runtime(remote, record, timeout_seconds=remaining())
+    adapter = HostMemoryRemote(remote, record, lambda selected, payload:
+        _remote.remote_host_memory_request(selected, payload, timeout_seconds=remaining()))
+    value = adapter.call("host_memory_status", budget_seconds=remaining())
     identity = value.get("target_identity")
     if (value.get("evidence_state") not in {"known", "partial", "unmanaged"}
             or not isinstance(identity, str)

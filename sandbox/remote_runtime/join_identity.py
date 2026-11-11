@@ -5,14 +5,14 @@ from sandbox.resources.host_memory.models import HEX24
 from sandbox.resources.host_memory.remote import RemoteProtocolError, validate_response
 
 
-def discover_join_identity(name: str, record: dict, request) -> dict:
+def discover_join_identity(name: str, record: dict, request, *, budget_seconds=15) -> dict:
     """Read the installed schema-1 status contract without SSH or owner tokens.
 
     First admission trusts the selected tailnet service. Subsequent adoption
     preserves every existing pin, including the machine identity.
     """
     response = request(record, {"action": "host_memory_status", "remote_name": name,
-                                "budget_seconds": 15})
+                                "budget_seconds": budget_seconds})
     service = response.get("service") if isinstance(response, dict) else None
     if not isinstance(service, dict):
         raise RemoteProtocolError("remote_service_ownership_unknown", "service identity is unavailable")

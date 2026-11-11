@@ -1334,9 +1334,12 @@ and can usually diagnose itself.
 ## Roadmap
 
 Joined tailnet controllers now discover and pin authenticated service and machine
-identity. Existing joins missing that metadata can use
-`./sb remote service refresh NAME --json` without reprovisioning the server or
-receiving its owner's bearer token. See
+identity. Ordinary access automatically repairs missing joined metadata and
+adopts a front-door profile only when same-machine observations prove it. This
+does not reprovision the server or copy its owner's bearer token. Status separates
+HTTP admission from SSH access and unknown unit ownership. Tailnet SSH excludes
+public/key-based fallback. Optional `./sb remote service refresh NAME --json`
+remains available. See
 [remote transport status](docs/remote-transport-status.md) for pin preservation,
 runtime compatibility and remaining SSH boundaries.
 

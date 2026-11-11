@@ -30,6 +30,12 @@ def discover_join_identity(name: str, record: dict, request) -> dict:
     pinned_identity = record.get("control_identity", {})
     if not isinstance(pinned_service, dict) or not isinstance(pinned_identity, dict):
         raise RemoteProtocolError("remote_service_ownership_unknown", "registered identity is invalid")
+    if 'control_identity' in record and (
+            set(pinned_identity) != {'schema_version', 'target_identity'}
+            or type(pinned_identity.get('schema_version')) is not int or pinned_identity['schema_version'] != 1
+            or not isinstance(pinned_identity.get('target_identity'), str)
+            or not HEX24.fullmatch(pinned_identity['target_identity'])):
+        raise RemoteProtocolError('remote_target_identity_mismatch', 'registered machine identity is invalid')
     for field, observed, code in (
             ("ownership_marker", marker, "remote_service_ownership_unknown"),
             ("runtime_revision", revision, "remote_runtime_revision_mismatch")):

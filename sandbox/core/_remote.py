@@ -4826,8 +4826,8 @@ def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = N
             raise TimeoutError('runtime compatibility observation budget expired')
         return value
     def observe():
-        return (remote_mcp_service_status(remote) if timeout_seconds is None
-                else remote_mcp_service_status(remote, timeout_seconds=remaining()))
+        return (remote_mcp_service_status(remote, _refresh_revision_cache=False) if timeout_seconds is None
+                else remote_mcp_service_status(remote, timeout_seconds=remaining(), _refresh_revision_cache=False))
     status = observe()
     if not strict_requested():
         return status
@@ -4843,7 +4843,8 @@ def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = N
                        recheck=observe, **kwargs)
 
 
-def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18) -> dict:
+def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18,
+                              _refresh_revision_cache: bool = True) -> dict:
     """Keep live Tailnet admission distinct from SSH unit/credential metadata."""
     from sandbox.remote_runtime.join_adoption import joined
     if not joined(remote):
@@ -4859,12 +4860,20 @@ def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18) -> d
         return remote_host_memory_request(selected, payload, timeout_seconds=min(5, remaining))
     try:
         discover_join_identity(remote.get('_remote_name') or 'joined', remote, request,
-                               budget_seconds=min(5, timeout_seconds))
+                               budget_seconds=min(5, timeout_seconds),
+                               allow_revision_cache=not _refresh_revision_cache)
         admission = {'state': 'admitted', 'method': 'tailnet', 'code': None}
     except RemoteProtocolError as exc:
-        # An endpoint answering with a different pin is a real identity failure,
-        # never a reason to replace the registration or grant new authority.
-        raise
+        if (exc.code != 'remote_runtime_revision_mismatch'
+                or not remote.get('_remote_name')):
+            raise
+        from sandbox.remote_runtime.join_revision import reconnect_join_record
+        available = deadline - time.monotonic()
+        if available <= 0:
+            raise RemoteProtocolError('remote_budget_exhausted', 'service revision observation exhausted its budget')
+        remote = reconnect_join_record(remote['_remote_name'], remote,
+            budget_seconds=available)
+        admission = {'state': 'admitted', 'method': 'tailnet', 'code': None}
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         if 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
             admission = {'state': 'denied', 'method': 'tailnet', 'code': 'remote_access_denied'}

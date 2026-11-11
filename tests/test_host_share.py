@@ -465,6 +465,16 @@ class CommandTests(unittest.TestCase):
             host_share.revoke_share("dev", "l-" + "b" * 12, target="mockups/dev")
         self.assertEqual(revoked.call_args.args[2], "l-" + "b" * 12)
 
+    def test_a_pasted_link_given_to_revoke_never_reaches_the_audit(self):
+        for value in (f"https://{GATE}/s/#{CANARY}", CANARY, hashlib.sha256(CANARY.encode()).hexdigest()):
+            with self.subTest(value=value[:12]), patch.object(share, "audit_path", return_value=self.audit), \
+                    self.assertRaises(share.ShareRefusal) as raised:
+                host_share.revoke_share("dev", value, target="mockups/dev")
+            self.assertEqual(raised.exception.code, "site_link_unknown")
+        records = [json.loads(line) for line in self.audit.read_text().splitlines()]
+        self.assertEqual([record["link_id"] for record in records], [None, None, None])
+        self.assert_no_leak()
+
     def test_cli_parses_share_verbs(self):
         home = tempfile.mkdtemp(dir=self.directory.name)
         done = run_test_process([sys.executable, str(ROOT / "sb"), "host", "share", "revoke", "nope", "--remote",

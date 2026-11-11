@@ -1133,9 +1133,16 @@ class SiteCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["revoked_sessions"], 2)
         self.assertIn(f"site revoke mockup {LINK_ID}", self.commands[0])
-        # A 075-length id is no longer a valid target.
-        code, out, _ = self._run(revoke="l-000000000001")
-        self.assertEqual((code, json.loads(out)["code"]), (1, "site_link_unknown"))
+        # A short id (spec 081 Story 7, what this command mints now) reaches the gate too.
+        short = "l-" + hashlib.sha256(CANARY.encode()).hexdigest()[:12]
+        code, out, _ = self._run(revoke=short)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"site revoke mockup {short}", self.commands[0])
+        for bad in ("l-00000000001", "l-" + "0" * 13, "s-" + "0" * 12):
+            with self.subTest(target=bad):
+                code, out, _ = self._run(revoke=bad)
+                self.assertEqual((code, json.loads(out)["code"]), (1, "site_link_unknown"))
+                self.assertEqual(self.commands, [])
 
     def test_revoke_target_is_checked_before_the_remote(self):
         code, out, _ = self._run(revoke="x; rm -rf /")

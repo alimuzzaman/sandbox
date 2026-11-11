@@ -675,6 +675,12 @@ class ShortLinkTests(_Gate):
         answers = {name: self.answer(*self.post(urllib.parse.urlencode({"token": token})))
                    for name, token in cases.items()}
         answers["no_field"] = self.answer(*self.post(""))
+        answers["non_ascii"] = self.answer(*self.post("token=" + urllib.parse.quote("\u00e9" * 22)))
+        answers["foreign_origin"] = self.answer(*self.request(
+            "POST", share.LINK_PREFIX, body=urllib.parse.urlencode({"token": live}),
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://evil.example.test"}))
+        # Too large to read: the connection is closed after the answer, but the answer is the same.
+        answers["oversized"] = self.answer(*self.post("token=" + "A" * (runtime.MAX_CONFIRM_BODY + 1)))
         reference = answers.pop("wrong")
         self.assertEqual(reference[0], 404)
         for name, answer in answers.items():
@@ -694,6 +700,24 @@ class ShortLinkTests(_Gate):
                                   side_effect=lambda a, b: calls.append(1) or real(a, b)):
                     self.post(urllib.parse.urlencode({"token": token}))
                 self.assertEqual(len(calls), stored)
+
+    def test_kept_records_are_bounded_spent_ones_included(self):
+        """Every POST /s/ scans the stored records, so mint caps them (spent ones too)."""
+        with patch.object(runtime, "SITE_MAX_RECORDS", 3):
+            tokens = [self.mint(uses=1) for _ in range(3)]
+            cookies = [self.cookie(token) for token, _ in tokens]
+            request = share.LinkRequest("share", "site", "/", 3600, None)
+            minted = share.mint(request, now=self.now, ends_at=self.config["enabled_until_epoch"])
+            refused = self.manage("mint", "share", stdin=json.dumps(
+                {"link": share.link_record(request, minted), "stack": None}))
+            self.assertEqual(refused["code"], "site_record_limit")
+            self.assertEqual(len(list(self.public.gate.sites["share"].links.glob("*.json"))), 3)
+            # Spent links keep their sessions; revoking one makes room.
+            self.assertEqual(self.get("/", cookies[0])[0].status, 200)
+            self.manage("revoke", "share", tokens[0][1])
+            self.assertTrue(self.manage("mint", "share", stdin=json.dumps(
+                {"link": share.link_record(request, minted), "stack": None}))["ok"])
+            self.assertEqual(self.get("/", cookies[1])[0].status, 200)
 
     def test_the_guess_rate_limit_covers_short_posts(self):
         statuses = [self.post("token=" + share.new_token())[0].status

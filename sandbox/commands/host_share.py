@@ -337,7 +337,9 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
     except Exception as exc:  # noqa: BLE001
         refusal = _refusal_from(exc)
         _audit(found, "revoke", remote_name=remote_name, target_label=label, outcome="refused",
-               code=refusal.code, entry=name_, link_id=link_id if isinstance(link_id, str) else None)
+               code=refusal.code, entry=name_,
+               # Only a well-formed id: a pasted token or link must not reach the audit.
+               link_id=link_id if isinstance(link_id, str) and share.REVOKE_TARGET_RE.fullmatch(link_id) else None)
         raise refusal from None
     _audit(found, "revoke", remote_name=remote_name, target_label=label, outcome="ok", entry=name_,
            link_id=link_id)

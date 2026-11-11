@@ -328,7 +328,8 @@ Refusal codes: `share_not_declared`, `agent_mint_not_enabled`, `terminal_require
 `job_output_refused`, `share_ttl_invalid`, `share_scope_invalid`, `uses_out_of_range`,
 `share_entry_required`, `share_entry_unknown`, `stack_unknown`, `stack_share_not_declared`,
 `share_options_conflict`,
-`site_link_limit` (32 live links), `site_link_unknown`, `site_entry_unknown` (the running
+`site_link_limit` (32 live links), `site_record_limit` (128 links kept, spent ones included,
+until they expire or are revoked), `site_link_unknown`, `site_entry_unknown` (the running
 service predates the entry: run `host apply`), `login_service_expired`, `email_required`,
 `share_failed`.
 
@@ -450,6 +451,7 @@ hostname to `sandbox-login:8080` is no longer needed.
 
 Refusal codes: `terminal_required`, `uses_out_of_range`, `site_options_conflict`,
 `site_gate_only` (site options on another entry), `site_link_limit` (32 live links),
+`site_record_limit` (128 links kept, spent ones included),
 `site_link_unknown`, and `site_entry_unknown` (the running service predates the entry:
 run `host apply`).
 

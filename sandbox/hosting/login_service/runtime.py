@@ -71,6 +71,9 @@ HEALTH_TIMEOUT_SECONDS = 3
 HEALTH_CACHE_SECONDS = 30
 SITE_MAX_USES = 20
 SITE_MAX_LINKS = 32
+# Link records kept, spent ones included (their sessions need them) until they expire or
+# are revoked. Every POST /s/ scans them all, so this bounds that unauthenticated work.
+SITE_MAX_RECORDS = 128
 SITE_MAX_SESSIONS = 512
 SITE_ATTEMPTS = 30
 SITE_ATTEMPT_WINDOW_SECONDS = 60
@@ -413,10 +416,13 @@ class SiteStore:
         if self.clock() >= service_ends_at or record["expires_at"] > service_ends_at:
             return {"ok": False, "code": "login_service_expired"}
         self.prune()
-        if sum(1 for _, item in self._links() if self.is_live(item)) >= SITE_MAX_LINKS:
+        stored = list(self._links())
+        if sum(1 for _, item in stored if self.is_live(item)) >= SITE_MAX_LINKS:
             return {"ok": False, "code": "site_link_limit"}
+        if len(stored) >= SITE_MAX_RECORDS or len(list(self.links.glob("*.json"))) >= SITE_MAX_RECORDS:
+            return {"ok": False, "code": "site_record_limit"}
         target = self.links / f"{record['token_sha256']}.json"
-        if target.exists() or any(item["id"] == record["id"] for _, item in self._links()):
+        if target.exists() or any(item["id"] == record["id"] for _, item in stored):
             return {"ok": False, "code": "site_record_invalid"}
         if stack is not None:
             # Before the link: a live stack link always finds its page.

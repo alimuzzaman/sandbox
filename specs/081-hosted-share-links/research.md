@@ -147,6 +147,13 @@
   work: revoked links have no file, and expired ones are still scanned like any other
   record until pruned. A matched live record then checks its use markers (at most 20
   `stat` calls), which only a holder of a once-valid token can observe.
+- **Bound and limits** (Sol review 1): every stored record is scanned, spent ones
+  included, so mint caps the records an entry keeps at 128 (`site_record_limit`) next to
+  the 32 live links. What the answer does not hide: a matched spent record checks its
+  use markers; a body too large to read closes the connection after the same 404; a
+  disabled gate answers 404 before any scan, `/s/` included. Each depends on a token once
+  valid, on framing the client chose, or on public gate state, and none helps recover a
+  token.
 - **Alternatives considered**: Opening `links/<digest>.json` directly (the old path):
   fast, but an expired-unpruned record costs a read and a parse that an unknown token
   does not. Answering `/s/` with 404 while no link is live: hides an idle gate but

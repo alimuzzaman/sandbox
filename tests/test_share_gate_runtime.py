@@ -4,14 +4,17 @@ Covers what 075's site tests do not: path scope and traversal refusals, unlimite
 links, several shares in one cookie, the link-file recheck, no-index on every gate
 answer, robots.txt, and the stack page with its per-view sign-in links.
 """
+import base64
 import hashlib
 import hmac
 import http.client
 import io
 import json
 import re
+import secrets
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
@@ -29,6 +32,11 @@ HUB = "hub.dev.example.test"
 QA_HOST = "login.dev.example.test"
 WP_KEY = "ab" * 32
 TAG = "noindex, nofollow, noarchive"
+
+
+def _legacy_id():
+    """An old-form (2026-11-10) link id: 128 random bits. LEGACY(081 short links)."""
+    return "l-" + secrets.token_hex(16)
 
 
 class _Gate(unittest.TestCase):
@@ -98,11 +106,28 @@ class _Gate(unittest.TestCase):
         connection.close()
         return response, data
 
-    def open(self, token, *, cookie=None, link_id=None):
+    def mint_legacy(self, *, scope="/", uses=None, ttl=share.DEFAULT_TTL_SECONDS):
+        """A link in the old `/s/l-<32 hex>#<43>` form, as a gate holds it until it expires."""
+        token = secrets_token()
+        issued = int(self.now)
+        record = {"schema": "sandbox.share-link.v2", "entry": "share", "id": _legacy_id(),
+                  "token_sha256": hashlib.sha256(token.encode()).hexdigest(), "issued_at": issued,
+                  "expires_at": issued + ttl, "uses": uses, "scope": scope, "kind": "site"}
+        reply = self.manage("mint", "share", stdin=json.dumps({"link": record, "stack": None}))
+        self.assertTrue(reply["ok"], reply)
+        self.ids[token] = record["id"]
+        return token, record["id"]
+
+    def path_for(self, token, link_id=None):
+        """`/s/` for a short link; `/s/<id>` for an old-form one."""
+        link_id = link_id or self.ids.get(token, "")
+        return share.LINK_PREFIX + (link_id if len(link_id) == 34 else "")
+
+    def open(self, token, *, cookie=None, link_id=None, path=None):
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         if cookie:
             headers["Cookie"] = cookie
-        return self.request("POST", share.LINK_PREFIX + (link_id or self.ids[token]),
+        return self.request("POST", path or self.path_for(token, link_id),
                             body=urllib.parse.urlencode({"token": token}), headers=headers)
 
     def cookie(self, token, cookie=None):
@@ -117,10 +142,11 @@ class _Gate(unittest.TestCase):
 class LinkModelTests(_Gate):
     def test_url_form_is_random_and_names_no_path(self):
         token, link_id = self.mint(scope="/designs/home/")
-        url = share.share_url(GATE, link_id, token)
-        self.assertRegex(url, rf"^https://{re.escape(GATE)}/s/l-[0-9a-f]{{32}}#[A-Za-z0-9_-]{{43}}$")
+        url = share.share_url(GATE, token)
+        self.assertRegex(url, rf"^https://{re.escape(GATE)}/s/#[A-Za-z0-9_-]{{22}}$")
         self.assertNotIn("designs", url)
-        self.assertNotEqual(share.new_link_id(), share.new_link_id())
+        self.assertNotIn(link_id, url)
+        self.assertNotEqual(share.new_token(), share.new_token())
 
     def test_default_link_lives_seven_days_and_sessions_follow_the_link(self):
         token, _ = self.mint()
@@ -144,20 +170,20 @@ class LinkModelTests(_Gate):
         token, _ = self.mint(uses=2)
         self.assertEqual([self.open(token)[0].status for _ in range(3)], [303, 303, 404])
 
-    def test_opener_page_answers_only_for_a_live_id_and_is_not_indexed(self):
-        token, link_id = self.mint()
+    def test_legacy_opener_page_answers_only_for_a_live_id_and_is_not_indexed(self):
+        token, link_id = self.mint_legacy()
         response, body = self.request("GET", share.LINK_PREFIX + link_id)
         self.assertEqual(response.status, 200)
         self.assertIn(b'<meta name="robots" content="noindex, nofollow">', body)
         self.assertEqual(response.getheader("X-Robots-Tag"), TAG)
         self.assertNotIn(token.encode(), body)
-        self.assertEqual(self.request("GET", share.LINK_PREFIX + share.new_link_id())[0].status, 404)
+        self.assertEqual(self.request("GET", share.LINK_PREFIX + _legacy_id())[0].status, 404)
         self.assertEqual(self.request("GET", share.LINK_PREFIX + "l-short")[0].status, 404)
         self.assertEqual(self.upstream_store["requests"], [])
 
-    def test_a_token_only_opens_its_own_id(self):
-        token, _ = self.mint()
-        _, other = self.mint()
+    def test_a_legacy_token_only_opens_its_own_id(self):
+        token, _ = self.mint_legacy()
+        _, other = self.mint_legacy()
         self.assertEqual(self.open(token, link_id=other)[0].status, 404)
         self.assertEqual(self.open(token)[0].status, 303)
 
@@ -329,9 +355,11 @@ class NoIndexTests(_Gate):
         token, link_id = self.mint()
         cookie = self.cookie(token)
         answers = [self.request("GET", "/"), self.request("GET", "/robots.txt"),
-                   self.request("GET", share.LINK_PREFIX + link_id), self.open(token),
+                   self.request("GET", share.LINK_PREFIX), self.open(token),
                    self.get("/page", cookie), self.request("GET", "/", host="unknown.example.test"),
-                   self.request("GET", share.LINK_PREFIX + share.new_link_id())]
+                   self.request("GET", share.LINK_PREFIX + _legacy_id()),
+                   self.request("POST", share.LINK_PREFIX, body="token=x",
+                                headers={"Content-Type": "application/x-www-form-urlencoded"})]
         for response, _ in answers:
             with self.subTest(status=response.status):
                 self.assertEqual(response.getheader("X-Robots-Tag"), TAG)
@@ -437,7 +465,7 @@ class StackPageTests(_Gate):
         self.assertIn(HUB, text)
         self.assertIn('class="up"', text)
         self.assertIn("not checked", text)
-        wp = re.search(r'href="(https://wp\.dev\.example\.test/\?sandbox_share_login=([0-9a-f]{32})#([^"]+))"', text)
+        wp = re.search(r'href="(https://wp\.dev\.example\.test/\?sandbox_share_login=([0-9a-f]{12})#([^"]+))"', text)
         self.assertIsNotNone(wp)
         self.assertEqual(wp.group(2), link_id[2:])
         exp, nonce, mac = wp.group(3).split(".")
@@ -532,7 +560,7 @@ class StackPageTests(_Gate):
 
     def test_a_sign_in_record_naming_an_unknown_stack_link_is_dead(self):
         self.public.gate.mint_sign_in("qa", "qa@dev.example.test", int(self.now) + 300,
-                                      ("share", share.new_link_id()))
+                                      ("share", _legacy_id()))
         self.assertFalse(self.public.gate.is_live("qa"))
         self.public.gate.mint_sign_in("qa", "qa@dev.example.test", int(self.now) + 300, ("nope", "l-x"))
         self.assertFalse(self.public.gate.is_live("qa"))
@@ -574,6 +602,268 @@ class HealthTests(_Gate):
         for status, label in ((200, "up"), (302, "redirect"), (401, "up_login"), (403, "up_login"),
                               (404, "client_error"), (502, "server_error"), (None, "unreachable")):
             self.assertEqual(runtime.classify(status), label)
+
+
+
+class ShortLinkTests(_Gate):
+    """Spec 081 Story 7: `https://<gate>/s/#<token>`, one 128-bit token, no id in the URL."""
+
+    def post(self, body):
+        return self.request("POST", share.LINK_PREFIX, body=body,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"})
+
+    @staticmethod
+    def answer(response, body):
+        """Everything a client sees, minus the clock."""
+        return response.status, body, sorted((name, value) for name, value in response.getheaders()
+                                             if name.lower() != "date")
+
+    def test_the_new_form_round_trips(self):
+        token, link_id = self.mint(scope="/designs/")
+        url = share.share_url(GATE, token)
+        self.assertEqual(len(url), len(GATE) + 34)
+        parts = urllib.parse.urlsplit(url)
+        self.assertEqual((parts.scheme, parts.netloc, parts.path, parts.query), ("https", GATE, "/s/", ""))
+        self.assertEqual(parts.fragment, token)
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{22}$")
+        self.assertEqual(len(urllib.parse.unquote(token).encode()), 22)
+        self.assertEqual(self.request("GET", parts.path)[0].status, 200)
+        response, _ = self.post(urllib.parse.urlencode({"token": parts.fragment}))
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/designs/")
+        cookie = response.getheader("Set-Cookie")
+        self.assertIn("HttpOnly", cookie)
+        self.assertTrue(cookie.startswith(runtime.SHARE_COOKIE + "="))
+        self.assertNotIn(token, cookie)
+        self.assertEqual(self.get("/designs/a", cookie.split(";", 1)[0])[0].status, 200)
+        self.assertIn(f"link={link_id}", " ".join(self.logs))
+
+    def test_the_opener_page_is_the_same_whatever_links_exist(self):
+        before = self.answer(*self.request("GET", share.LINK_PREFIX))
+        token, link_id = self.mint()
+        during = self.answer(*self.request("GET", share.LINK_PREFIX))
+        self.manage("revoke", "share", link_id)
+        after = self.answer(*self.request("GET", share.LINK_PREFIX))
+        self.assertEqual(before[0], 200)
+        self.assertEqual(before, during)
+        self.assertEqual(during, after)
+        self.assertNotIn(token.encode(), during[1])
+        self.assertEqual(self.request("HEAD", share.LINK_PREFIX)[0].status, 200)
+        # Anything else under /s/ that is not an old-form id is the plain 404.
+        for path in ("/s/x", "/s/l-" + "a" * 12, "/s//", "/s/#t"):
+            with self.subTest(path=path):
+                self.assertEqual(self.request("GET", path)[0].status, 404)
+
+    def bad_tokens(self):
+        """Every kind of bad token, each against a gate that holds live links too."""
+        live, _ = self.mint()
+        expired, _ = self.mint(ttl=share.MIN_TTL_SECONDS)
+        revoked, revoked_id = self.mint()
+        self.manage("revoke", "share", revoked_id)
+        spent, _ = self.mint(uses=1)
+        self.assertEqual(self.open(spent)[0].status, 303)
+        legacy, _ = self.mint_legacy()
+        self.now += share.MIN_TTL_SECONDS + 1
+        wrong = share.new_token()
+        return live, {
+            "wrong": wrong, "unknown": "A" * 22, "expired": expired, "revoked": revoked, "spent": spent,
+            "old_form": legacy, "too_short": live[:21], "too_long": live + "A", "bad_chars": "!" * 22,
+            "empty": "", "case_changed": live.swapcase() if live.swapcase() != live else wrong,
+        }
+
+    def test_every_bad_token_gets_the_same_404(self):
+        live, cases = self.bad_tokens()
+        answers = {name: self.answer(*self.post(urllib.parse.urlencode({"token": token})))
+                   for name, token in cases.items()}
+        answers["no_field"] = self.answer(*self.post(""))
+        answers["non_ascii"] = self.answer(*self.post("token=" + urllib.parse.quote("\u00e9" * 22)))
+        answers["foreign_origin"] = self.answer(*self.request(
+            "POST", share.LINK_PREFIX, body=urllib.parse.urlencode({"token": live}),
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://evil.example.test"}))
+        # Too large to read: the connection is closed after the answer, but the answer is the same.
+        answers["oversized"] = self.answer(*self.post("token=" + "A" * (runtime.MAX_CONFIRM_BODY + 1)))
+        reference = answers.pop("wrong")
+        self.assertEqual(reference[0], 404)
+        for name, answer in answers.items():
+            with self.subTest(case=name):
+                self.assertEqual(answer, reference)
+        # The live link was never touched by the probes.
+        self.assertEqual(self.open(live)[0].status, 303)
+
+    def test_every_bad_token_does_the_same_lookup_work(self):
+        _, cases = self.bad_tokens()
+        stored = len(list(self.public.gate.sites["share"]._links()))
+        real = hmac.compare_digest
+        for name, token in cases.items():
+            with self.subTest(case=name):
+                calls = []
+                with patch.object(runtime.hmac, "compare_digest",
+                                  side_effect=lambda a, b: calls.append(1) or real(a, b)):
+                    self.post(urllib.parse.urlencode({"token": token}))
+                self.assertEqual(len(calls), stored)
+
+    def test_kept_records_are_bounded_spent_ones_included(self):
+        """Every POST /s/ scans the stored records, so mint caps them (spent ones too)."""
+        with patch.object(runtime, "SITE_MAX_RECORDS", 3):
+            tokens = [self.mint(uses=1) for _ in range(3)]
+            cookies = [self.cookie(token) for token, _ in tokens]
+            request = share.LinkRequest("share", "site", "/", 3600, None)
+            minted = share.mint(request, now=self.now, ends_at=self.config["enabled_until_epoch"])
+            refused = self.manage("mint", "share", stdin=json.dumps(
+                {"link": share.link_record(request, minted), "stack": None}))
+            self.assertEqual(refused["code"], "site_record_limit")
+            self.assertEqual(len(list(self.public.gate.sites["share"].links.glob("*.json"))), 3)
+            # Spent links keep their sessions; revoking one makes room.
+            self.assertEqual(self.get("/", cookies[0])[0].status, 200)
+            self.manage("revoke", "share", tokens[0][1])
+            self.assertTrue(self.manage("mint", "share", stdin=json.dumps(
+                {"link": share.link_record(request, minted), "stack": None}))["ok"])
+            self.assertEqual(self.get("/", cookies[1])[0].status, 200)
+
+    def test_concurrent_mints_cannot_pass_the_record_cap(self):
+        """Sol review 2: the count, the check and the write are one step per entry."""
+        self.mint()
+        self.mint()
+        request = share.LinkRequest("share", "site", "/", 3600, None)
+        bodies = [json.dumps({"link": share.link_record(request, share.mint(
+            request, now=self.now, ends_at=self.config["enabled_until_epoch"])), "stack": None})
+            for _ in range(6)]
+        real_prune = runtime.SiteStore.prune
+
+        def slow_prune(store):
+            # Hold every admission at the point a racing mint would slip past the count.
+            real_prune(store)
+            time.sleep(0.05)
+
+        replies = []
+        lock = threading.Lock()
+
+        def mint(body):
+            out = io.StringIO()
+            runtime.manage(self.config, ["mint", "share"], self.state_dir, stdin=io.StringIO(body),
+                           stdout=out, clock=lambda: self.now)
+            with lock:
+                replies.append(json.loads(out.getvalue()))
+
+        with patch.object(runtime, "SITE_MAX_RECORDS", 3), patch.object(runtime.SiteStore, "prune", slow_prune):
+            threads = [threading.Thread(target=mint, args=(body,)) for body in bodies]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(sorted(reply.get("code", "ok") for reply in replies),
+                         ["ok"] + ["site_record_limit"] * 5)
+        self.assertEqual(len(list(self.public.gate.sites["share"].links.glob("*.json"))), 3)
+
+    def test_spent_links_are_listed_so_they_can_be_revoked(self):
+        token, link_id = self.mint(uses=1)
+        cookie = self.cookie(token)
+        listing = self.manage("list", "share")
+        self.assertEqual([(item["id"], item["used"], item["uses"]) for item in listing["links"]], [(link_id, 1, 1)])
+        self.assertEqual(self.manage("revoke", "share", link_id)["revoked_links"], 1)
+        self.assertEqual(self.get("/", cookie)[0].status, 404)
+        self.assertEqual(self.manage("list", "share")["links"], [])
+
+    def test_the_guess_rate_limit_covers_short_posts(self):
+        statuses = [self.post("token=" + share.new_token())[0].status
+                    for _ in range(runtime.SITE_ATTEMPTS + 1)]
+        self.assertEqual(statuses[:-1], [404] * runtime.SITE_ATTEMPTS)
+        self.assertEqual(statuses[-1], 429)
+
+    def test_the_id_is_the_hash_prefix_and_not_the_token(self):
+        token, link_id = self.mint()
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        self.assertEqual(link_id, "l-" + digest[:12])
+        self.assertEqual(share.short_link_id(token), link_id)
+        self.assertNotIn(link_id[2:], token)
+        self.assertNotIn(token, link_id)
+        listing = self.manage("list", "share")
+        self.assertEqual([item["id"] for item in listing["links"]], [link_id])
+        self.assertNotIn(token, json.dumps(listing))
+        self.assertNotIn(digest, json.dumps(listing))
+        # The id opens nothing, wherever it is posted.
+        for body in (f"token={link_id}", f"token={link_id[2:]}", f"token={digest[:22]}"):
+            with self.subTest(body=body):
+                self.assertEqual(self.post(body)[0].status, 404)
+        self.assertEqual(self.request("GET", share.LINK_PREFIX + link_id)[0].status, 404)
+
+    def test_the_gate_refuses_a_short_id_that_is_not_its_hash_prefix(self):
+        request = share.LinkRequest("share", "site", "/", 3600, None)
+        minted = share.mint(request, now=self.now, ends_at=self.config["enabled_until_epoch"])
+        record = share.link_record(request, minted)
+        for link_id in ("l-" + "0" * 12, "l-" + record["token_sha256"][1:13], "l-" + record["token_sha256"][:11],
+                        "l-" + record["token_sha256"][:12].upper()):
+            with self.subTest(link_id=link_id):
+                self.assertEqual(self.manage("mint", "share", stdin=json.dumps(
+                    {"link": {**record, "id": link_id}, "stack": None}))["code"], "site_record_invalid")
+        self.assertTrue(self.manage("mint", "share", stdin=json.dumps({"link": record, "stack": None}))["ok"])
+        # The same link twice is refused, and the first stays.
+        self.assertEqual(self.manage("mint", "share", stdin=json.dumps({"link": record, "stack": None}))["code"],
+                         "site_record_invalid")
+
+    def test_revoke_by_short_id_and_all(self):
+        first, first_id = self.mint()
+        second, _ = self.mint()
+        legacy, _ = self.mint_legacy()
+        cookie = self.cookie(first)
+        self.assertEqual(self.manage("revoke", "share", first_id)["revoked_links"], 1)
+        self.assertEqual(self.get("/", cookie)[0].status, 404)
+        self.assertEqual(self.open(first)[0].status, 404)
+        self.assertEqual(self.open(second)[0].status, 303)
+        self.assertEqual(self.manage("revoke", "share", "all")["revoked_links"], 2)
+        self.assertEqual(self.open(second)[0].status, 404)
+        self.assertEqual(self.open(legacy)[0].status, 404)
+
+    def test_legacy_links_still_open_and_revoke_by_their_old_id(self):
+        token, link_id = self.mint_legacy(scope="/old/")
+        self.assertEqual(self.request("GET", share.LINK_PREFIX + link_id)[0].status, 200)
+        # An old token is never accepted on the short path.
+        self.assertEqual(self.open(token, path=share.LINK_PREFIX)[0].status, 404)
+        response, _ = self.open(token)
+        self.assertEqual((response.status, response.getheader("Location")), (303, "/old/"))
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        short, _ = self.mint(scope="/new/")
+        both = self.cookie(short, cookie)
+        self.assertEqual(self.get("/old/a", both)[0].status, 200)
+        self.assertEqual(self.get("/new/a", both)[0].status, 200)
+        self.assertEqual(self.manage("revoke", "share", link_id)["revoked_links"], 1)
+        self.assertEqual(self.get("/old/a", both)[0].status, 404)
+        self.assertEqual(self.get("/new/a", both)[0].status, 200)
+
+    def test_a_short_token_never_opens_an_id_path(self):
+        token, link_id = self.mint()
+        legacy_token, legacy_id = self.mint_legacy()
+        self.assertEqual(self.open(token, path=share.LINK_PREFIX + link_id)[0].status, 404)
+        self.assertEqual(self.open(token, path=share.LINK_PREFIX + legacy_id)[0].status, 404)
+        self.assertEqual(self.open(token)[0].status, 303)
+        self.assertEqual(self.open(legacy_token)[0].status, 303)
+
+    def test_the_opener_script_takes_both_token_lengths_and_its_hash_matches(self):
+        script = runtime._SITE_SCRIPT
+        pattern = re.search(r"location\.hash\.match\(/(.+?)/\)", script).group(1)
+        for fragment, matches in (("#" + "a" * 22, True), ("#" + "a" * 43, True), ("#" + "a" * 21, False),
+                                  ("#" + "a" * 23, False), ("#" + "a" * 44, False), ("#", False),
+                                  ("#sandbox_autologin=" + "a" * 22, False)):
+            with self.subTest(length=len(fragment)):
+                self.assertEqual(bool(re.search(pattern, fragment)), matches)
+        response, body = self.request("GET", share.LINK_PREFIX)
+        digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+        self.assertIn(f"script-src 'sha256-{digest}'", response.getheader("Content-Security-Policy"))
+        self.assertIn(script.encode(), body)
+        self.assertIn("history.replaceState", script)
+
+    def test_the_token_reaches_no_log(self):
+        token, link_id = self.mint()
+        cookie = self.cookie(token)
+        self.get("/", cookie)
+        self.post("token=" + share.new_token())
+        self.manage("list", "share")
+        self.manage("revoke", "share", link_id)
+        self.open(token)
+        blob = "\n".join(self.logs)
+        self.assertIn("share_opened", blob)
+        for value in (token, hashlib.sha256(token.encode()).hexdigest(), cookie.split("=", 1)[1]):
+            self.assertNotIn(value, blob)
 
 
 if __name__ == "__main__":

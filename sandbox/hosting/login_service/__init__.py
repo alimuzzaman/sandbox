@@ -53,7 +53,6 @@ _SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_hos
 _CAPTURE_FIELDS = {"service", "adapter", "api_url", "username", "credential_secret"}
 _ENTRY_FIELDS = {"mode", "requires_email", "hostname", "path", "ttl_seconds", "magic_link", "landing_path",
                  "upstream"}
-_SITE_REVOKE_TARGET = re.compile(r"all|[ls]-[0-9a-f]{32}")
 _SHARE_FIELDS = {"hostname", "private", "agent_mint", "stack_sign_in"}
 _SHARE_SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_host_suffixes"}
 _MAGIC_FIELDS = {"request_url", "request_origin", "link_origin", "link_path", "link_pattern",
@@ -656,7 +655,9 @@ def install_script(target: str) -> str:
 
 
 def valid_revoke_target(value: object) -> bool:
-    return isinstance(value, str) and bool(_SITE_REVOKE_TARGET.fullmatch(value))
+    """One link (short or old-form id), one session, or ``all``: the share module's rule."""
+    from sandbox.hosting import share
+    return isinstance(value, str) and bool(share.REVOKE_TARGET_RE.fullmatch(value))
 
 
 def site_command(prefix: str, verb: str, entry: str, *extra: str) -> str:
@@ -686,6 +687,8 @@ def parse_site_reply(output: object) -> dict:
 
 _SITE_REFUSALS = {
     "site_link_limit": "this entry already has the maximum number of live share links; revoke some first",
+    "site_record_limit": "this entry keeps the maximum number of share links, spent ones included, "
+                         "until they expire; revoke spent links (or all) first",
     "site_link_unknown": "no live share link or session has that id",
     "site_entry_unknown": "the running login service does not know this site_gate entry; run `./sb host apply` first",
     "login_service_expired": "autologin.login_service.enabled_until has passed",

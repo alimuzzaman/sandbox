@@ -68,7 +68,8 @@ class JoinedRevisionReconnectTests(unittest.TestCase):
     def test_machine_or_marker_change_never_reconnects(self):
         for changed in (evidence(identity='f' * 24, revision='d' * 24),
                         evidence(marker='f' * 24, revision='d' * 24)):
-            with self.subTest(changed=changed), mock.patch.object(self.request, 'return_value', changed):
+            with self.subTest(changed=changed):
+                self.request.return_value = changed
                 with self.assertRaises(RemoteProtocolError):
                     context.authenticated_target_identity('box', budget_seconds=2)
                 self.writer.assert_not_called()

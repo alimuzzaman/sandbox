@@ -47,6 +47,7 @@ from sandbox.hosting.recovery.models import (
 from sandbox.hosting.recovery.repository import RecoveryRepository
 from sandbox.hosting.recovery.service import RecoveryAuthorityError, RecoveryService
 from sandbox.resources.host_memory.remote import RemoteProtocolError
+from sandbox.hosting.server_cli_target import host_target, is_owner_target, can_operate_host, push_host_commits
 
 
 _HOST_SYNC_WATCH_EXCLUDES = frozenset({
@@ -222,7 +223,7 @@ def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None
     failure = None
     failure_emitted = False
     try:
-        if not entry.get("provisioned"):
+        if not can_operate_host(entry):
             raise RuntimeError("remote is not provisioned")
         service, workspace_id, source_root = _host_sync_service(validated, remote_name, entry)
         common = {
@@ -951,7 +952,7 @@ def _remote_disk_free_mb(entry: dict, home: str) -> int:
             diagnostics_error = "remote diagnostics omitted disk_free_mb"
         except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
             diagnostics_error = str(exc) or type(exc).__name__
-    if entry.get("ssh"):
+    if is_owner_target(entry) or entry.get("ssh"):
         result = remote.ssh_run(
             entry,
             f"set -eu; df -Pm {shlex.quote(home)} | awk 'NR == 2 {{print $4; exit}}'",
@@ -981,7 +982,7 @@ def _prepare_host_apply(entry: dict, home: str, validated: dict) -> str | None:
     """
     # Empty entries are used by offline unit tests and fail later on their first
     # real remote operation. Every registered remote has one of these identities.
-    if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
+    if not entry or not (is_owner_target(entry) or entry.get("ssh") or remote.control_ready(entry)):
         return None
     minimum = int(validated["deploy"].get("min_free_disk_mb", 1024))
     free = _remote_disk_free_mb(entry, home)
@@ -2597,6 +2598,10 @@ def _host_config_digest(validated: dict, runtime: dict, *, binding_key: bytes | 
 
 def _registered_host_identity(entry: dict, remote_name: str, home: str) -> str:
     """Bind the non-secret registered target without persisting private values."""
+    if is_owner_target(entry):
+        if remote_name != entry.remote_name or home != entry.sandbox_home():
+            raise RecoveryAuthorityError("server CLI owner target changed")
+        return entry.identity_digest()
     from sandbox.delivery.context import registered_host_digest
     return registered_host_digest(entry, remote_name, home)
 
@@ -2636,7 +2641,7 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
 def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
                              *, allow_zone_ssl_change: bool) -> dict:
     """Recompute every registration-derived apply precondition under its guard."""
-    if not entry.get("provisioned"):
+    if not can_operate_host(entry):
         raise hosting.HostingError("registered remote changed before host apply")
     if not entry.get("origin_ipv4"):
         raise hosting.HostingError(
@@ -2660,6 +2665,10 @@ def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
 
 def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = False) -> str:
     """Use the authenticated identity port; optional telemetry is independent."""
+    from sandbox.hosting.server_cli_target import selected_owner_target
+    current = selected_owner_target(remote_name)
+    if current is not None:
+        return current.require_current().target_identity
     from sandbox.resources.context import authenticated_target_identity
     try:
         return authenticated_target_identity(remote_name)["target_identity"]
@@ -2681,8 +2690,8 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
     effect is recorded, so another controller's lease is a refusal with no effect.
     """
     with remote.registered_remote_lock(remote.registration_lock_name(remote_name)):
-        current = remote.get_remote(remote_name)
-        if not isinstance(current, dict) or not current.get("provisioned"):
+        current = host_target(remote_name)
+        if not can_operate_host(current):
             raise RecoveryAuthorityError("registered remote is unavailable")
         home = remote.resolve_sandbox_home(current)
         expected = operation.get("evidence") or {}
@@ -2767,6 +2776,17 @@ def _host_delivery_guidance(validated: dict, remote_name: str, *,
         req_token = secrets.token_hex(6)
         env_name = validated.get("environment", "env")
         request_id = f"deploy-{env_name}-{req_token}"
+    from sandbox.hosting.server_cli_target import selected_owner_target
+    owner_target = selected_owner_target(remote_name)
+    if owner_target is not None:
+        from sandbox.application.server_cli import local_server_cli_submission_argv
+        context = owner_target.require_current()
+        return local_server_cli_submission_argv(context.owner,
+            ["host", "apply", "--project-dir",
+             validated.get('manifest_root') or validated['project_root'],
+             "--remote", remote_name, "--environment", validated["environment"], "--confirm"],
+            project_dir=validated["project_root"], request_id=request_id,
+            source_commit=source_commit, timeout_seconds=int(timeout), parent_job_id=context.job_id)
     # Admission binds the job to exactly the source root; without
     # --exact-project-dir, job-start would record the checkout above a source
     # in a subfolder and the apply would refuse with recovery_source_mismatch.
@@ -2799,7 +2819,15 @@ def _host_recovery_eligibility(validated: dict, remote_name: str) -> dict:
         else:
             failures.append(exc.code)
     try:
-        identity = authenticated_target_identity(remote_name)
+        from sandbox.hosting.server_cli_target import selected_owner_target
+        local_target = selected_owner_target(remote_name)
+        if local_target is not None:
+            current_owner = local_target.require_current()
+            identity = {"target_identity": current_owner.target_identity,
+                        "ownership_marker": current_owner.owner.ownership_marker,
+                        "runtime_revision": current_owner.runtime_revision}
+        else:
+            identity = authenticated_target_identity(remote_name)
     except RemoteProtocolError as exc:
         if exc.code == "remote_runtime_revision_mismatch":
             failures.append("remote_runtime_revision_mismatch")
@@ -3463,7 +3491,7 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         },
         "health": {"state": "unavailable", "reason": "remote status not observed"},
     }
-    if not entry.get("provisioned"):
+    if not can_operate_host(entry):
         result["health"] = {"state": "unavailable", "reason": "remote is not provisioned"}
         return result
     try:
@@ -4287,7 +4315,7 @@ def front_door_refresh_request(remote_name: str | None, *, target: str | None = 
                 environment=environment)
             project_dir, environment = resolved.project_dir, resolved.environment
         validated = hosting.validate_manifest(project_dir or ".", environment)
-        entry = remote.get_remote(remote_name)
+        entry = host_target(remote_name)
         if not entry:
             raise front_door_refresh.FrontDoorRefreshRefused(
                 front_door_refresh.UNAVAILABLE, f"no remote named '{remote_name}'")
@@ -4339,7 +4367,7 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
             "status": "unavailable",
             "reason": "observation_unavailable",
         }
-    if not entry.get("provisioned"):
+    if not can_operate_host(entry):
         result["disk"]["reason"] = "remote is not provisioned"
         result["image_state"] = {"state": "unavailable", "reason": "remote is not provisioned"}
         return result
@@ -5389,13 +5417,15 @@ def _controller_lease_owner() -> str:
 def _acquire_host_apply_lease(entry: dict, validated: dict) -> dict | None:
     """Spec 081 rollout: the remote target lease (sandbox/hosting/target_lease.py)."""
     from sandbox.hosting import target_lease
-    if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
+    if not entry or not (is_owner_target(entry) or entry.get("ssh") or remote.control_ready(entry)):
         return None
     path = target_lease.lease_path(remote.resolve_sandbox_home(entry),
                                    validated["project"], validated["environment"])
+    owner = (_controller_lease_owner() if not is_owner_target(entry) else
+             hashlib.sha256(("server-cli:" + entry.require_current().job_id).encode()).hexdigest()[:32])
     try:
         return target_lease.acquire(lambda command: remote.ssh_run(entry, command, timeout=60),
-                                    path, _controller_lease_owner())
+                                    path, owner)
     except target_lease.LeaseHeld as exc:
         raise hosting.HostingError(f"host_apply_lease_held: {exc}; see docs/remote-hosting.md") from None
     except target_lease.LeaseUnavailable as exc:
@@ -5549,13 +5579,13 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             ) from cleanup_error
         raise
     if source_artifact['kind'] == 'git_subtree':
-        sha = remote.push_commits(entry, source_checkout, target, branch,
+        sha = push_host_commits(entry, source_checkout, target, branch,
             source_ref=published_commit, resolved_sha=published_commit)
     else:
         # A stack publishes to the immutable sandbox-source-<sha> ref, so a
         # force-pushed PR branch never reads as a diverged deploy branch.
         stack_source = bool(validated.get("stack"))
-        sha = remote.push_commits(entry, validated['project_root'], target,
+        sha = push_host_commits(entry, validated['project_root'], target,
             None if stack_source else branch,
             resolved_sha=published_commit, source_root=None, allow_detached=stack_source)
     if sha != published_commit:
@@ -7108,7 +7138,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                             str(Path(validated["manifest_path"]).relative_to(source_root)))
                         disposition = "replayed"
                     else:
-                        registered_entry = remote.get_remote(args.remote)
+                        registered_entry = host_target(args.remote)
                         key, _version = personal_secrets.hosting_binding_key(create=False)
                         scoped_key = _host_image_target_configuration_key(key, machine, target_id)
                         _host_image_prepare_candidate_inputs(validated, registered_entry, plan,
@@ -7120,7 +7150,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                             snapshot_id, provider_revision, input_contract=input_contract)
                         transport = RegisteredRemoteActivationTransport(
                             argv_runner=_host_image_argv_runner(
-                                remote.get_remote(args.remote),
+                                host_target(args.remote),
                                 compose_snapshot_provider=prepare_selector),
                             target_identity_observer=lambda: {
                                 "machine_identity": machine, "target_identity": target_id},
@@ -7747,7 +7777,7 @@ def _cmd_host_image(validated: dict, args) -> None:
             target_key = hosting.state_key(args.remote, validated)
             with activation_repository.operation_transaction(target_key), \
                     remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
-                entry = remote.get_remote(args.remote)
+                entry = host_target(args.remote)
                 if not entry:
                     raise ValueError("registered remote is unavailable")
                 if target_key != hosting.state_key(args.remote, validated):
@@ -8027,7 +8057,7 @@ def _cmd_host_image(validated: dict, args) -> None:
             proof_target = proof.target.as_mapping() if not is_v2 else proof.target.as_mapping()
             with activation_repository.operation_transaction(proof_target["target_identity"]), \
                     remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
-                entry = remote.get_remote(args.remote)
+                entry = host_target(args.remote)
                 if not entry or proof_target["target_identity"] != hosting.state_key(args.remote, validated) \
                         or proof_target["machine_identity"] != _authenticated_machine_identity(
                             args.remote, allow_partial=is_v2):
@@ -8190,7 +8220,7 @@ def _cmd_host_image_status(validated: dict, args) -> None:
 
     try:
         with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
-            if not remote.get_remote(args.remote):
+            if not host_target(args.remote):
                 raise ValueError("registered remote unavailable")
             target = hosting.state_key(args.remote, validated)
         recovery = RecoveryRepository()
@@ -8230,7 +8260,7 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
                 # registered transport, or the runtime observation helper.
                 authority = transaction["recovery_context"]["target"]
                 with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
-                    entry = remote.get_remote(args.remote)
+                    entry = host_target(args.remote)
                     if entry is None or authority["target_identity"] != target:
                         raise ValueError("evidence_changed")
                     binding, _version = personal_secrets.hosting_binding_key(create=False)
@@ -8303,7 +8333,7 @@ def _cmd_host_destroy(args) -> None:
         die("host destroy requires --remote and --target <project>/<environment>")
     try:
         project, environment = destroy.parse_target(getattr(args, "target", None) or "")
-        entry = remote.get_remote(args.remote)
+        entry = host_target(args.remote)
         if not entry:
             die(f"no remote named '{args.remote}'")
         if args.confirm:
@@ -8332,7 +8362,7 @@ def _cmd_host_heal(args) -> None:
     from sandbox.hosting import heal
     if not getattr(args, "remote", None):
         die("host heal requires --remote")
-    entry = remote.get_remote(args.remote)
+    entry = host_target(args.remote)
     if not entry:
         die(f"no remote named '{args.remote}'")
     project = getattr(args, "project", None)
@@ -8576,7 +8606,7 @@ def cmd_host(cfg, args) -> None:
                 die(eligibility["code"] + "; controller runtime revision does not match remote; "
                     f"run from a checkout matching the remote revision, or update the remote with: ./sb remote up --remote {args.remote}")
             die(eligibility["code"] + "; prepare with: " + shlex.join(eligibility["prepare_argv"]))
-    entry = remote.get_remote(args.remote)
+    entry = host_target(args.remote)
     if not entry:
         die(f"no remote named '{args.remote}'")
     state = hosting.load_host_state()
@@ -8671,7 +8701,7 @@ def cmd_host(cfg, args) -> None:
                 print(f"  apply log: {result['apply_log']}")
         return
     if args.action == "logs":
-        if not entry.get("provisioned"):
+        if not can_operate_host(entry):
             die(f"remote '{args.remote}' is not provisioned")
         try:
             if getattr(args, "apply_log", False):
@@ -8701,7 +8731,7 @@ def cmd_host(cfg, args) -> None:
         # Listing share links is read-only; minting and revoking stay protected.
         if not args.confirm and not getattr(args, "list_links", False):
             die("host login-url is protected; pass --confirm to issue a one-time admin link")
-        if not entry.get("provisioned"):
+        if not can_operate_host(entry):
             die(f"remote '{args.remote}' is not provisioned")
         if (validated.get("login_service") or getattr(args, "service", None)
                 or getattr(args, "email", None) or getattr(args, "save_email", False)):
@@ -8774,8 +8804,8 @@ def cmd_host(cfg, args) -> None:
                 # Resolve registration only after target ownership. Supported
                 # re-registration cannot repoint it before durable authority
                 # and effects finish.
-                current_entry = remote.get_remote(args.remote)
-                if not isinstance(current_entry, dict):
+                current_entry = host_target(args.remote)
+                if not isinstance(current_entry, dict) and not is_owner_target(current_entry):
                     raise hosting.HostingError("registered remote changed before host apply")
                 state = hosting.load_host_state()
                 target_rec = state.get("hosts", {}).get(target_key) or {}
@@ -9062,6 +9092,10 @@ def _server_static_declarations(args, selection):
 
 def host_preconfiguration_dispatch(args, *, static: bool = True) -> bool:
     """Handle every server/mixed request before controller configuration access."""
+    if static:
+        from sandbox.hosting.server_cli_dispatch import dispatch_host_if_selected
+        if dispatch_host_if_selected(args):
+            return True
     from sandbox.hosting.credential_selection import (
         DeclarationError, PersonalLocalSelection, selection_from_args,
         INVALID, UNSUPPORTED, INVENTORY_UNAVAILABLE,

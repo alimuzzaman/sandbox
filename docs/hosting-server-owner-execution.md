@@ -79,6 +79,11 @@ bytes reach `apply.log` and the bounded public tail used for return, progress
 and errors. Phase timestamps, useful diagnostics and the actual exit status
 remain visible. Legacy controller transport keeps its existing path.
 
+The streaming scrubber retains complete exact values across whitespace emission
+boundaries as well as partial prefixes across pipe reads. Overlapping exact
+values cannot be split when an earlier match moves that boundary. Values with
+spaces, tabs, newlines or UTF-8 characters keep the same exact-match protection.
+
 The helper and child stay in the original durable process group and use the
 SDK's original deadline/cancellation guard. A missing/malformed completion
 receipt or post-child log failure fences that same job as unknown, withholds

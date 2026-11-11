@@ -303,11 +303,24 @@ class StreamingRedactor:
         context = _PENDING_CREDENTIAL_CONTEXT.search(data)
         if context is not None:
             keep_from = min(keep_from, context.start())
-        for secret in self._exact_values:
-            raw = secret.encode()
+        exact_bytes = tuple(secret.encode() for secret in self._exact_values)
+        for raw in exact_bytes:
             for size in range(1, min(len(raw) - 1, len(data)) + 1):
                 if data.endswith(raw[:size]):
                     keep_from = min(keep_from, len(data) - size)
+        # A whitespace boundary can cut a complete exact value, even at EOF
+        # or with a non-whitespace suffix. Never emit either half separately.
+        # Moving the boundary may cut an overlapping earlier value, so repeat
+        # until it is safe for every exact value, regardless of their order.
+        while keep_from:
+            previous = keep_from
+            for raw in exact_bytes:
+                start = data.rfind(raw, max(0, keep_from - len(raw) + 1),
+                                   keep_from + len(raw) - 1)
+                if start >= 0 and start + len(raw) > keep_from:
+                    keep_from = start
+            if keep_from == previous:
+                break
         complete, pending = data[:keep_from], data[keep_from:]
         if len(pending) > self.max_pending_bytes:
             self._discarding = True

@@ -128,6 +128,24 @@ class ApplyOutputTests(unittest.TestCase):
                         manager.__exit__(None, None, None)
         self.process.assert_not_called()
 
+    def test_whitespace_value_at_eof_and_pipe_boundary_is_scrubbed_before_retention(self):
+        self.canary = 'alpha beta'
+        for prefix, suffix in (('', ''), ('', 'Z'), ('p ' * 32764, '')):
+            with self.subTest(prefix_bytes=len(prefix), suffix=suffix):
+                initializer = self.root / 'whitespace.py'
+                initializer.write_text('import sys\nsys.stdout.write(' + repr(prefix + self.canary + suffix) + ')\n')
+                log = self.root / ('whitespace-' + str(len(prefix)) + suffix + '.log')
+                progress = []
+                with apply_output.owner_apply_output_scope(self.entry):
+                    apply_output.bind_owner_apply_output(self.entry, [self.canary])
+                    result = hosting._remote_checked(self.entry,
+                        shlex.join([sys.executable, str(initializer)]), timeout=9,
+                        progress=progress.append, log_path=str(log), log_phase='initializer_run')
+                for text in (log.read_text(), result, '\n'.join(progress)):
+                    self.assertNotIn(self.canary, text)
+                    self.assertIn('[REDACTED]', text)
+                self.assertIn('event=finished', log.read_text())
+
     def test_value_or_reversible_encoding_in_argv_refuses_before_dispatch(self):
         with apply_output.owner_apply_output_scope(self.entry):
             apply_output.bind_owner_apply_output(self.entry, [self.canary])
@@ -167,6 +185,63 @@ class ApplyOutputTests(unittest.TestCase):
                     log_path=str(log), log_phase='initializer_run')
         self.assertEqual(destination.read_text(), 'keep this')
         self.assertFalse(targets.owner_effect_unknown(self.entry))
+
+    def test_invalid_completion_receipts_retain_each_original_apply_fence(self):
+        receipts = (
+            (0, '', ''), (0, '{}', ''),
+            (0, json.dumps({'schema_version': 2, 'status': 'exited', 'exit_code': 0, 'output': ''}), ''),
+            (0, json.dumps({'schema_version': 1, 'status': 'unknown'}), ''),
+            (0, json.dumps({'schema_version': 1, 'status': 'exited', 'exit_code': True, 'output': ''}), ''),
+            (0, json.dumps({'schema_version': 1, 'status': 'exited', 'exit_code': 0, 'output': []}), ''),
+            (7, '', ''), (0, '', self.canary),
+        )
+        for index, (code, output, error) in enumerate(receipts):
+            with self.subTest(receipt=index):
+                context = replace(self.context, job_id=hashlib.sha256(str(index).encode()).hexdigest()[:32],
+                                  request_id='invalid-output-' + str(index))
+                self.current.return_value = self.selected.return_value = context
+                entry = targets.selected_owner_target('box')
+                self.process.reset_mock()
+                self.process.side_effect = None
+                self.process.return_value = subprocess.CompletedProcess([], code, output, error)
+                def unleased(*args, **kwargs):
+                    apply_output.bind_owner_apply_output(entry, [self.canary])
+                    return hosting._remote_checked(entry, 'true', log_path=str(self.root / 'invalid.log'))
+                with patch.object(hosting, 'guard_server_execution', create=True), \
+                        patch.object(hosting, '_acquire_host_apply_lease', return_value={'fixture': True}), \
+                        patch.object(hosting, '_apply_host_unleased', side_effect=unleased), \
+                        patch.object(hosting, '_release_host_apply_lease') as release, \
+                        self.assertRaises(sdk.ServerCLIEffectUnknown) as failure:
+                    hosting._apply_host({}, entry, 'box', {})
+                self.assertNotIn(self.canary, str(failure.exception))
+                self.assertTrue(targets.owner_effect_unknown(entry))
+                self.process.assert_called_once()
+                release.assert_not_called()
+
+    def test_hardlinked_wrong_mode_and_nonregular_logs_refuse_before_initializer(self):
+        marker = self.root / 'initializer-started'
+        initializer = self.root / 'marked.py'
+        initializer.write_text('from pathlib import Path\nPath(' + repr(str(marker)) + ').touch()\n')
+        command = shlex.join([sys.executable, str(initializer)])
+        destination = self.root / 'original-private.log'
+        destination.write_text('keep this')
+        destination.chmod(0o600)
+        linked = self.root / 'hardlinked.log'
+        os.link(destination, linked)
+        wrong_mode = self.root / 'wrong-mode.log'
+        wrong_mode.write_text('keep this')
+        wrong_mode.chmod(0o644)
+        nonregular = self.root / 'directory.log'
+        nonregular.mkdir()
+        for log in (linked, wrong_mode, nonregular):
+            with self.subTest(path=log.name), apply_output.owner_apply_output_scope(self.entry):
+                apply_output.bind_owner_apply_output(self.entry, [self.canary])
+                with self.assertRaises(apply_output.OutputUnavailable):
+                    hosting._remote_checked(self.entry, command, log_path=str(log), log_phase='initializer_run')
+                self.assertFalse(marker.exists())
+                self.assertFalse(targets.owner_effect_unknown(self.entry))
+        self.assertEqual(destination.read_text(), 'keep this')
+        self.assertEqual(wrong_mode.read_text(), 'keep this')
 
     def test_post_child_log_sync_failure_is_unknown_not_pre_effect_refusal(self):
         process = Mock(stdout=io.BytesIO(('public ' + self.canary + '\n').encode()))

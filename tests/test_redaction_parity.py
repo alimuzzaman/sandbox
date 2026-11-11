@@ -96,6 +96,33 @@ class SharedRedactionTests(unittest.TestCase):
         rendered = redactor.feed(b"x" * (redactor.max_pending_bytes + 1)) + redactor.finish()
         self.assertEqual(rendered.decode(), REDACTION_FAILED)
 
+    def test_exact_values_with_whitespace_remain_whole_at_every_chunk_boundary(self):
+        values = ('alpha beta', 'alpha\tbeta', 'alpha\nbeta', ' alpha beta ',
+                  'alpha βeta')
+        for secret in values:
+            for suffix in ('', 'Z', '\npublic done\n'):
+                source = ('public start\n' + secret + suffix).encode()
+                for first in range(len(source) + 1):
+                    with self.subTest(secret=secret, suffix=suffix, first=first):
+                        redactor = StreamingRedactor([secret])
+                        rendered = (redactor.feed(source[:first])
+                            + redactor.feed(source[first:]) + redactor.finish())
+                        self.assertNotIn(secret.encode(), rendered)
+                        self.assertIn(b'public start', rendered)
+                        self.assertEqual(redactor.consumed_bytes, len(source))
+
+    def test_overlapping_exact_matches_cannot_be_cut_by_an_earlier_boundary_move(self):
+        secrets = ('alpha beta', 'beta gamma')
+        source = b'public alpha beta gammaZ'
+        for order in (secrets, secrets[::-1]):
+            for cut in range(len(source) + 1):
+                with self.subTest(order=order, cut=cut):
+                    redactor = StreamingRedactor(order)
+                    rendered = redactor.feed(source[:cut]) + redactor.feed(source[cut:]) + redactor.finish()
+                    for secret in order:
+                        self.assertNotIn(secret.encode(), rendered)
+                    self.assertIn(b'public ', rendered)
+
     def test_credential_like_argv_is_detected_without_rewriting(self):
         unsafe = [
             ["tool", "--token", ASSIGNMENT_TOKEN],

@@ -221,16 +221,21 @@ the route marker that apply checks.
   `sandbox-verify` query). A gate behind a public target's Basic Auth gets its
   credentials. The application's own health is still checked on its loopback port.
   Image activation does not re-render the route, so it checks privacy without the tag.
-- **No Cloudflare proxying.** `private: true` refuses `cloudflare.proxied: true`, so no
-  Cloudflare cache can keep serving pages from before the site went private.
+- **No Cloudflare proxying.** `private: true` refuses `cloudflare.proxied: true`, and the
+  apply refuses, before any effect, when Cloudflare still proxies any of the target's
+  names (or the shared coverage wildcard). Make them DNS-only and purge the Cloudflare
+  cache first, so no cached page outlives the switch and a DNS rollback never turns
+  proxying back on.
 - **A private apply closes the public name first.** Before it touches the runtime, an
-  apply of a private manifest removes the previous front-door route unless that route is
-  one Sandbox rendered private and nobody changed since (its last line is
-  `# sandbox-private-route v1 <sha256 of the text above>`), and reads it back to confirm.
-  If the removal cannot be confirmed, the apply stops before the runtime changes. The
-  first private apply over a route without that mark (including one rendered private
-  before the mark existed) therefore leaves the hostnames unrouted, the gate included,
-  until the new route is live.
+  apply of a private manifest reads the front-door route (a failed read stops the
+  apply), keeps it only if it is one Sandbox rendered private and nobody changed since
+  (its last line is `# sandbox-private-route v1 <sha256 of the text above>`), removes it
+  otherwise, and validates and reloads the front door either way, so the running
+  configuration matches the disk. nginx also waits until the removed route's marker
+  stops answering. If any of that cannot be confirmed, the apply stops before the
+  runtime changes. The first private apply over a route without the mark (including
+  one rendered private before the mark existed) therefore leaves the hostnames
+  unrouted, the gate included, until the new route is live.
 - **A failed apply fails closed.** The apply recreates the containers before it installs
   the new route, and a failure does not roll them back. For a private manifest a private
   route the apply already installed stays, a marked private previous route goes back,

@@ -16,6 +16,7 @@ import stat
 from types import MappingProxyType
 
 _ISSUER = object()
+_UNKNOWN_JOBS = set()
 
 
 class OwnerTargetUnavailable(RuntimeError):
@@ -48,6 +49,9 @@ class OwnerHostTarget(Mapping):
         from sandbox.application.server_cli import validate_owner_current
         if type(self) is not OwnerHostTarget or getattr(self, "_seal", None) is not _ISSUER:
             raise OwnerTargetUnavailable("genuine current owner target is required")
+        if owner_effect_unknown(self):
+            from sandbox.application.server_cli import ServerCLIEffectUnknown
+            raise ServerCLIEffectUnknown("original owner operation completion is unknown")
         current = validate_owner_current(self._context.owner)
         if current != self._context:
             raise OwnerTargetUnavailable("original server CLI context changed")
@@ -71,19 +75,31 @@ class OwnerHostTarget(Mapping):
     def process(self, command, *, timeout=30, input_data=None):
         from sandbox.application.server_cli import owner_process
         current = self.require_current()
-        result = owner_process(current.owner, command, timeout=timeout, input_data=input_data)
-        self.require_current()
+        return self._complete_process(lambda: owner_process(current.owner, command,
+            timeout=timeout, input_data=input_data))
+
+    def _complete_process(self, run):
+        try:
+            result = run()
+        except Exception as error:
+            if getattr(error, "completion_unknown", False):
+                _UNKNOWN_JOBS.add(self._context.job_id)
+            raise
+        try:
+            self.require_current()
+        except Exception:
+            _UNKNOWN_JOBS.add(self._context.job_id)
+            from sandbox.application.server_cli import ServerCLIEffectUnknown
+            raise ServerCLIEffectUnknown("owner authority changed after process execution") from None
         return result
 
     def process_bounded(self, command, *, timeout=30, input_data=None,
                         max_output=65536, terminate_on_output_limit=True):
         from sandbox.application.server_cli import owner_process_bounded
         current = self.require_current()
-        result = owner_process_bounded(current.owner, command, timeout=timeout,
-            input_data=input_data, max_output=max_output,
-            terminate_on_output_limit=terminate_on_output_limit)
-        self.require_current()
-        return result
+        return self._complete_process(lambda: owner_process_bounded(current.owner, command,
+            timeout=timeout, input_data=input_data, max_output=max_output,
+            terminate_on_output_limit=terminate_on_output_limit))
 
     def stream(self, command, *, timeout=30, on_line=None):
         """One captured local invocation; never an SSH retry or second launch.
@@ -209,6 +225,15 @@ def require_owner_target(target):
     return target.require_current()
 
 
+def owner_effect_unknown(target):
+    """Negative-only fence; it never establishes an actor or effect grant.
+
+    Reissuing another target in the same retained CLI job cannot clear it.
+    """
+    return (type(target) is OwnerHostTarget and getattr(target, "_seal", None) is _ISSUER
+            and target._context.job_id in _UNKNOWN_JOBS)
+
+
 def host_target(remote_name):
     """Hosting-only selection; the generic remote registry stays unchanged."""
     target = selected_owner_target(remote_name)
@@ -237,4 +262,4 @@ def push_host_commits(target, *args, **kwargs):
 
 
 __all__ = ["OwnerHostTarget", "OwnerTargetUnavailable", "selected_owner_target", "require_owner_target",
-           "host_target", "is_owner_target", "can_operate_host", "push_host_commits"]
+           "host_target", "is_owner_target", "can_operate_host", "push_host_commits", "owner_effect_unknown"]

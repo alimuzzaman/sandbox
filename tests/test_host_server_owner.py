@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -120,7 +121,8 @@ class OwnerTargetTests(unittest.TestCase):
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.owner = sdk.ServerCliOwner(os.geteuid(), str(self.home), str(self.home),
             str(self.home / "sb"), "a" * 24, "b" * 24, "c" * 24)
-        self.context = sdk.ServerCLIContext(1, "d" * 32, "original", str(self.home), "project",
+        job_id = hashlib.sha256(self.id().encode()).hexdigest()[:32]
+        self.context = sdk.ServerCLIContext(1, job_id, "original", str(self.home), "project",
             "source", "e" * 40, None, "a" * 24, "c" * 24,
             (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(),
             ("host", "exec"), "box", MappingProxyType({"front_door": "nginx"}), self.owner)
@@ -141,7 +143,7 @@ class OwnerTargetTests(unittest.TestCase):
             self.current.side_effect = sdk.ServerCLIUnavailable("revoked")
             return subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch.object(sdk, "owner_process", side_effect=revoke) as run:
-            with self.assertRaises(sdk.ServerCLIUnavailable):
+            with self.assertRaises(sdk.ServerCLIEffectUnknown):
                 self.entry.process("fixed-command")
         run.assert_called_once()
 
@@ -168,9 +170,22 @@ class OwnerTargetTests(unittest.TestCase):
                 "manifest_root": str(self.home / "manifest"), "environment": "dev"},
                 "box", request_id="original-apply", source_commit="e" * 40)
         self.assertEqual(result, ["fixed-child"])
-        self.assertEqual(child.call_args.kwargs["parent_job_id"], "d" * 32)
+        self.assertEqual(child.call_args.kwargs["parent_job_id"], self.context.job_id)
         self.assertEqual(child.call_args.kwargs["request_id"], "original-apply")
         self.assertIn("box", child.call_args.args[1])
+
+    def test_unknown_owner_process_retains_physical_lease_and_cannot_reissue_target(self):
+        from sandbox.commands import hosting
+        with patch.object(hosting, "_acquire_host_apply_lease", return_value={"token": "held"}), \
+                patch.object(hosting, "_release_host_apply_lease") as release, \
+                patch.object(sdk, "owner_process", side_effect=sdk.ServerCLIEffectUnknown("unknown")) as process, \
+                patch.object(hosting, "_apply_host_unleased", side_effect=lambda *a, **k: self.entry.process("effect")):
+            with self.assertRaises(sdk.ServerCLIEffectUnknown):
+                hosting._apply_host({}, self.entry, "box", {})
+        release.assert_not_called()
+        process.assert_called_once()
+        with self.assertRaises(sdk.ServerCLIEffectUnknown):
+            targets.selected_owner_target("box")
 
 
 class ServerSelectionTests(OwnerTargetTests):

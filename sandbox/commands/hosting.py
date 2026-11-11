@@ -5432,7 +5432,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *
     try:
         return _apply_host_unleased(validated, entry, remote_name, runtime, *args, **kwargs)
     finally:
-        _release_host_apply_lease(entry, lease)
+        from sandbox.hosting.server_cli_target import owner_effect_unknown
+        if not owner_effect_unknown(entry):
+            _release_host_apply_lease(entry, lease)
 
 
 def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime: dict,
@@ -5654,6 +5656,12 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
 
     def rollback() -> None:
         nonlocal reservation
+        from sandbox.hosting.server_cli_target import owner_effect_unknown
+        if owner_effect_unknown(entry):
+            # A timed-out child may still be mutating. Retain authority and
+            # avoid racing it with provider or runtime rollback effects.
+            from sandbox.application.server_cli import ServerCLIEffectUnknown
+            raise ServerCLIEffectUnknown("owner apply completion is unknown; rollback withheld")
         failures: list[str] = []
         try:
             _release_host_apply_reservation(entry, reservation)

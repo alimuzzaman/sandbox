@@ -43,6 +43,12 @@ descriptor passed to the local process; it is not staged or logged. Captures
 remain bounded. Lost job-start acceptance remains unknown under the original
 request, and prevents blind stack replay.
 
+An unknown owner process outcome also blocks later process calls in that same
+retained job, including a reissued same-server target. Apply withholds provider
+and runtime rollback while the original child may still write, and keeps its
+physical lease. A timeout of the exec client does not prove container-side
+descendants stopped, so owner exec keeps that lease as well.
+
 This source increment requires the assembled `job.server-cli.v1` adapter from
 the access transport feature. Old installations must report capability
 unavailability before source submission. No capability is added by this hosting

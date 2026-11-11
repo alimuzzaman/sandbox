@@ -185,6 +185,92 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
         self.assertEqual((workspace / 'version.txt').read_text(), 'A')
         self.assertEqual(self.repository.submission_snapshot(accepted['job_id'])['source']['content_digest'], pin)
 
+    def test_terminal_original_replay_preserves_output_through_transport_preparation(self):
+        pin = content_digest(self.source)
+        suffix = hashlib.sha256(b'shared').hexdigest()[:14]
+        workspace = Path(str(self.source) + '-workspace-' + suffix)
+        materialize(self.plan(workspace, pin))
+        submission = self.submission(workspace, pin)
+        accepted = self.service.submit(submission)
+        self.repository.transition(accepted['job_id'], 'running')
+        self.repository.transition(accepted['job_id'], 'succeeded', exit_code=0)
+        self.repository.release_leases(accepted['job_id'])
+        output = workspace / 'job-output.bin'
+        output.write_bytes(b'original terminal output\x00\xff')
+        proof = {'identity': self.identity, 'commit': self.commit_a,
+                 'content_digest': pin, 'target_path': str(self.source)}
+        package = Path(__file__).resolve().parents[1]
+        def local_transport(record, command, **kwargs):
+            return run_test_process(shlex.split(command),
+                env={'SANDBOX_HOME': str(self.root)},
+                timeout=5, capture_output=True, text=True, check=False)
+        transport = RemoteJobTransport(deploy=None, ssh_run=local_transport,
+                                       remote_lookup=lambda name: self.fail('preparation must not resolve a different target'),
+                                       remote_sb_path=lambda record: str(package / 'sb'))
+        for changed in (False, True):
+            with self.subTest(shared_source_changed=changed):
+                if changed:
+                    self.publish_b()
+                prepared = transport._prepare_workspace({}, str(self.source), 'shared',
+                    source_proof=proof, request_id=submission.request_id,
+                    project_identity=submission.project_identity)
+                self.assertEqual(prepared, str(workspace))
+                self.assertEqual(output.read_bytes(), b'original terminal output\x00\xff')
+                replay = self.service.submit(submission)
+                self.assertTrue(replay['idempotent_replay'])
+                self.assertEqual(replay['job_id'], accepted['job_id'])
+                self.assertEqual(replay['request_digest'], accepted['request_digest'])
+        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(self.repository.submission_snapshot(accepted['job_id'])['source']['content_digest'], pin)
+
+    def test_actual_digest_observes_bytes_executable_links_and_directory_shape(self):
+        baseline = content_digest(self.source, expected_commit=self.commit_a)
+        version = self.source / 'version.txt'
+        original_mode = version.stat().st_mode & 0o777
+        version.write_bytes(b'changed\x00\xff')
+        self.assertNotEqual(content_digest(self.source), baseline)
+        version.write_text('A')
+        self.assertEqual(content_digest(self.source), baseline)
+        version.chmod(original_mode ^ 0o100)
+        self.assertNotEqual(content_digest(self.source), baseline)
+        version.chmod(original_mode)
+        link = self.source / 'linked'
+        link.symlink_to('version.txt')
+        first_link = content_digest(self.source)
+        link.unlink()
+        link.symlink_to('other.txt')
+        self.assertNotEqual(content_digest(self.source), first_link)
+        link.unlink()
+        directory = self.source / 'empty-directory'
+        directory.mkdir()
+        self.assertNotEqual(content_digest(self.source), baseline)
+        directory.rmdir()
+        self.assertEqual(content_digest(self.source), baseline)
+
+    def test_cross_process_checkout_contention_is_bounded_and_releases(self):
+        import sys
+        package = str(Path(__file__).resolve().parents[1])
+        program = ('import sys\n'
+            'from sandbox.workspaces.content import checkout_guard, CheckoutAdmissionError\n'
+            'try:\n'
+            ' with checkout_guard(sys.argv[1]): print("acquired")\n'
+            'except CheckoutAdmissionError as error: print(error.code)\n')
+        def observe():
+            return run_test_process([sys.executable, '-B', '-c', program, str(self.source)],
+                env={'PYTHONPATH': package}, timeout=3, capture_output=True, text=True, check=True).stdout.strip()
+        with checkout_guard(self.source):
+            self.assertEqual(observe(), 'checkout_admission_busy')
+        self.assertEqual(observe(), 'acquired')
+
+    def test_reentrant_guard_preserves_body_error_and_releases(self):
+        original = RuntimeError('synthetic original body failure')
+        with self.assertRaises(RuntimeError) as caught:
+            with checkout_guard(self.source), checkout_guard(self.source):
+                raise original
+        self.assertIs(caught.exception, original)
+        with checkout_guard(self.source):
+            pass
+
     def test_actual_matrix_refuses_changed_child_before_accepting_parent(self):
         pin_a = content_digest(self.source)
         children = []
@@ -198,6 +284,25 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source_content_changed'):
             self.service.submit_matrix(children, allow_project_variants=True)
         self.assertEqual(self.repository.list(), [])
+
+    def test_matrix_missing_measurements_refuse_before_any_parent_child_or_launch(self):
+        pin = content_digest(self.source)
+        for missing in ((0, 1), (1,), (0,)):
+            with self.subTest(missing_children=missing):
+                children = []
+                for i in range(2):
+                    workspace = self.root / ('missing-' + str(missing) + '-' + str(i))
+                    materialize(self.plan(workspace, pin))
+                    item = replace(self.submission(workspace, pin, kind='test',
+                        request='matrix-' + str(i)), workspace_label='child-' + str(i),
+                        workspace_mode='isolated')
+                    if i in missing:
+                        item = replace(item, source=SourceIdentity(self.identity, self.commit_a))
+                    children.append(item)
+                with self.assertRaisesRegex(ValueError, 'measured_source_contract_required'):
+                    self.service.submit_matrix(children, allow_project_variants=True)
+                self.assertEqual(self.repository.list(), [])
+                self.assertEqual(self.launched, [])
 
     def test_actual_matrix_accepts_clean_and_dirty_pinned_children(self):
         (self.source / 'dirty.bin').write_bytes(b'\xff\x00dirty')

@@ -468,7 +468,8 @@ def materialize(plan: MaterializationPlan, *,
         raise WorkspaceMaterializationError('workspace_plan_invalid', 'materialization plan is invalid')
     from sandbox.workspaces.content import active_checkout_rows
     with _checkout_admission(plan.workspace_path):
-        live = active_checkout_rows(plan.workspace_path)
+        live = active_checkout_rows(plan.workspace_path, request_id=plan.request_id,
+                                    project_identity=plan.project_identity)
         if live:
             if len(live) > 128:
                 raise WorkspaceMaterializationError('workspace_materialization_busy', 'checkout admission inventory exceeds its bounded read')

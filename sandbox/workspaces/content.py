@@ -178,8 +178,9 @@ def verify_content(root, expected, expected_commit=None):
         raise ValueError('source_content_changed')
 
 
-def active_checkout_rows(root):
-    """Read real original-job rows through the repository's bounded reader."""
+def active_checkout_rows(root, *, request_id=None, project_identity=None):
+    """Read relevant live/replay rows through the repository's bounded reader."""
     from sandbox.core._paths import RUNTIME_DIR
     from sandbox.jobs.registry import read_checkout_admissions
-    return read_checkout_admissions(Path(RUNTIME_DIR) / 'jobs' / 'registry.sqlite3', root)
+    return read_checkout_admissions(Path(RUNTIME_DIR) / 'jobs' / 'registry.sqlite3', root,
+        request_id=request_id, project_identity=project_identity)

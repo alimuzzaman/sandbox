@@ -30,13 +30,18 @@ Contending copy or admission calls return a bounded busy refusal instead of
 waiting indefinitely for the checkout lock. Lock-access failures return a bounded
 error without exposing the underlying filesystem diagnostic.
 
-An admitted or still-leased job prevents another refresh of its checkout. Exact
-request replay returns the retained receipt without copying over job output;
+An admitted or still-leased job prevents another refresh of its checkout. For
+measured jobs, exact request replay also finds completed original records after
+their leases have been released. It returns the retained receipt without copying over job output;
 new submissions still require a byte check. CI uses a prepared verified copy
 instead of recopying a subsequently changed shared deployment. Unused nullable
 content fields do not alter legacy request digests. Older runtime capabilities
 do not authorize the new source contract; update through the supported lifecycle
 before relying on it. This contract adds no operator role or credential grant.
+
+A matrix checks every child's measured-source requirement and every supplied
+measurement before admitting its parent. A missing measurement in any new
+materialized child refuses the batch before any parent, child or launch.
 
 ## Normal operation
 

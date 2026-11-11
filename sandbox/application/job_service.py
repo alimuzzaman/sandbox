@@ -40,6 +40,13 @@ SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
 
 
+def _require_measured_materialization(submission):
+    if (submission.materialization_source_root is not None
+            and submission.source.content_digest is None
+            and submission.retry_of_job_id is None):
+        raise ValueError('measured_source_contract_required')
+
+
 def _launch_failure(stage: str, exc: BaseException) -> dict:
     """Bounded launch-failure evidence: stage, exception class, errno only.
 
@@ -148,10 +155,7 @@ class JobService:
             )
             if replay is not None:
                 return self._accepted(replay, replay=True)
-            if (submission.materialization_source_root is not None
-                    and submission.source.content_digest is None
-                    and submission.retry_of_job_id is None):
-                raise ValueError('measured_source_contract_required')
+            _require_measured_materialization(submission)
             # Workspace validation/materialization and durable acceptance share
             # the same controller lock as terminal deletion. A checkout cannot
             # disappear between these two commits.
@@ -1708,6 +1712,8 @@ class JobService:
     def submit_matrix(self, submissions: list[JobSubmission], *, allow_project_variants: bool = False) -> dict:
         from contextlib import ExitStack
         from sandbox.workspaces.content import checkout_guard, verify_content
+        for item in submissions:
+            _require_measured_materialization(item)
         with ExitStack() as stack:
             roots = sorted({item.project_root for item in submissions if item.source.content_digest is not None})
             for root in roots:

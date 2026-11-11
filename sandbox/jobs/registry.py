@@ -389,8 +389,8 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
     return payload
 
 
-def read_checkout_admissions(database, checkout):
-    """Read live original-job bindings without creating/migrating runtime state."""
+def read_checkout_admissions(database, checkout, *, request_id=None, project_identity=None):
+    """Read live bindings and the exact replay candidate without mutating state."""
     database = Path(database)
     if not database.exists():
         return []
@@ -400,8 +400,9 @@ def read_checkout_admissions(database, checkout):
         return [dict(row) for row in connection.execute(
             "SELECT job_id,request_id,project_identity,source_identity,submission_json FROM jobs "
             "WHERE project_root=? AND (lifecycle IN ('accepted','queued','running','cancelling') "
-            "OR EXISTS (SELECT 1 FROM workspace_leases l WHERE l.job_id=jobs.job_id)) LIMIT 129",
-            (str(Path(checkout).resolve(strict=False)),))]
+            "OR EXISTS (SELECT 1 FROM workspace_leases l WHERE l.job_id=jobs.job_id) "
+            "OR (request_id=? AND project_identity=?)) LIMIT 129",
+            (str(Path(checkout).resolve(strict=False)), request_id, project_identity))]
     finally:
         connection.close()
 

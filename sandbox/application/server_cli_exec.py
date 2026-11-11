@@ -20,6 +20,20 @@ from sandbox.jobs.models import JobSubmission, SourceIdentity, validate_argv
 CONTRACT = 'job.server-cli.exec-stdin.v1'
 
 
+def capture_contract_available():
+    try:
+        from sandbox.commands.host_exec import SERVER_CLI_EXEC_CAPTURE_VERSION
+        from sandbox.application.server_cli_capture import prepare_server_cli_capture
+        from sandbox.application.command_selection import selected_invocation
+        selected = selected_invocation(['host', 'exec', '--exec-capture-artifacts',
+            '--remote', 'capture-probe', '--service', 'capture-probe', '--', 'true'])
+        return (exec_contract_available() and type(SERVER_CLI_EXEC_CAPTURE_VERSION) is int
+                and SERVER_CLI_EXEC_CAPTURE_VERSION == 1 and callable(prepare_server_cli_capture)
+                and selected is not None and selected.command == ('host', 'exec'))
+    except (ImportError, ValueError):
+        return False
+
+
 def exec_contract_available():
     """Only assembled receiver handlers; never infer readiness from a snapshot."""
     import argparse
@@ -83,7 +97,12 @@ def _selector(value):
     fields = {'schema_version', 'origin_remote_name', 'target', 'name', 'environment',
         'selector_digest', 'service', 'target_identity', 'ownership_marker', 'runtime_revision',
         'deadline_at', 'target_metadata', 'stdin_sha256', 'stdin_size'}
-    if (set(result) != fields or type(result['schema_version']) is not int or result['schema_version'] != 1
+    if set(result) - fields == {'output_contract'}:
+        output_contract = result.pop('output_contract')
+    else:
+        output_contract = 'utf8.v1'
+    if (set(result) != fields or not isinstance(output_contract, str) or output_contract not in {'utf8.v1', 'artifact.v1'}
+            or type(result['schema_version']) is not int or result['schema_version'] != 1
             or not isinstance(result['selector_digest'], str)
             or re.fullmatch(r'sha256:[0-9a-f]{64}', result['selector_digest']) is None
             or not isinstance(result['service'], str)
@@ -93,6 +112,7 @@ def _selector(value):
             or type(result['stdin_size']) is not int or not 0 <= result['stdin_size'] <= 1 << 20):
         raise ServerCLIUnavailable('server exec selector fields are invalid')
     result['target_metadata'] = validate_target_metadata(result['target_metadata'])
+    result['output_contract'] = output_contract
     remaining_deadline(result['deadline_at'])
     return result
 
@@ -116,6 +136,8 @@ def receive_server_cli_exec(args, *, stdin_fd):
         command = command[1:]
     command = _exec_argv(command)
     selector = _selector(getattr(args, 'server_cli_exec_selector', None))
+    if selector['output_contract'] == 'artifact.v1' and not capture_contract_available():
+        raise ServerCLIUnavailable('installed binary exec capture is not assembled')
     owner = read_current_server_owner()
     for field in ('target_identity', 'ownership_marker', 'runtime_revision'):
         if selector[field] != getattr(owner, field):
@@ -156,6 +178,7 @@ def receive_server_cli_exec(args, *, stdin_fd):
             'server_cli.target_selector_digest': snapshot['selector_digest'],
             'server_cli.exec_service': selector['service'],
             'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
+            'server_cli.output_contract': selector['output_contract'],
             'server_cli.target_snapshot': json.dumps({key: value for key, value in snapshot.items() if key != 'ok'},
                 sort_keys=True, separators=(',', ':')),
             'server_cli.absolute_deadline_at': selector['deadline_at'],
@@ -164,7 +187,8 @@ def receive_server_cli_exec(args, *, stdin_fd):
         argv = ([owner.executable] + (['--strict-runtime'] if strict_requested() else []) +
             ['host', 'exec', '--remote', selector['origin_remote_name'], '--target',
              snapshot['project'] + '/' + snapshot['environment'], '--service', selector['service'],
-             '--timeout', str(seconds), '--json', '--', *command])
+             '--timeout', str(seconds), '--json'] +
+             (['--exec-capture-artifacts'] if selector['output_contract'] == 'artifact.v1' else []) + ['--', *command])
         submission = JobSubmission(kind='server-cli', project_root=root, project_identity=canonical['identity'],
             target_kind='local', workspace_label='server-exec', argv=tuple(argv),
             deadline_seconds=policy.deadline_seconds,
@@ -195,7 +219,7 @@ class ServerCLIExecObservationUnavailable(RuntimeError):
 
 
 def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, request_id,
-                           timeout_seconds=300):
+                           timeout_seconds=300, output_mode='artifact'):
     """Send original stdin by FD, without a controller checkout or secret source."""
     from sandbox.core import _remote
     from sandbox.resources.context import authenticated_target_identity
@@ -204,7 +228,7 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
     from sandbox.remote_runtime.verdict import strict_requested
     from types import SimpleNamespace
     from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
-    if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
+    if (not isinstance(output_mode, str) or output_mode not in {'artifact', 'utf8'} or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
             or not isinstance(request_id, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', request_id) is None
             or not isinstance(service, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', service) is None):
         raise ServerCLIUnavailable('server exec request is invalid')
@@ -233,6 +257,10 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             or not isinstance(installed.get('server_exec_capabilities'), list)
             or installed['server_exec_capabilities'] != [CONTRACT]):
         raise ServerCLIUnavailable('installed server exec contract is unavailable or changed')
+    if output_mode == 'artifact':
+        from sandbox.application.server_cli_capture import CONTRACT as CAPTURE_CONTRACT
+        if installed.get('server_exec_capture_capabilities') != [CAPTURE_CONTRACT]:
+            raise ServerCLIUnavailable('installed binary capture contract is unavailable; no job was submitted')
     if not any(item['name'] == service and item['index'] == 1 for item in snapshot['services']):
         raise ServerCLIUnavailable('selected owner service has no unique running first container')
     with capture_input(stdin_fd, timeout_seconds=min(30, remaining())) as original_input:
@@ -242,6 +270,7 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             'service': service, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': owner.runtime_revision,
             'deadline_at': deadline.isoformat(),
+            'output_contract': 'artifact.v1' if output_mode == 'artifact' else 'utf8.v1',
             'target_metadata': validate_target_metadata({key: record[key] for key in
                 ('origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port') if key in record}),
             'stdin_sha256': original_input.binding['sha256'], 'stdin_size': original_input.binding['size']}
@@ -273,6 +302,7 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
         'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
         'server_cli.remote_name': remote_name, 'server_cli.target_selector_digest': snapshot['selector_digest'],
         'server_cli.exec_service': service, 'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
+        'server_cli.output_contract': selector['output_contract'],
         'server_cli.stdin_sha256': original_input.binding['sha256'],
         'server_cli.stdin_size': str(original_input.binding['size']),
         'server_cli.absolute_deadline_at': deadline.isoformat()}
@@ -379,8 +409,17 @@ def read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15):
                 or outcome['ok'] != (outcome['exit_code'] == 0 and outcome['code'] == 'ok')
                 or outcome.get('remote') != remote_name or outcome.get('target') != proof.get('server_cli.exec_target')
                 or outcome.get('service') != proof.get('server_cli.exec_service')
-                or any(not isinstance(outcome.get(key), str) for key in ('stdout', 'stderr'))
                 or any(type(outcome.get(key)) is not bool for key in ('stdout_truncated', 'stderr_truncated'))):
+            raise ServerCLIExecObservationUnavailable(receipt)
+        if proof.get('server_cli.output_contract') == 'artifact.v1':
+            from sandbox.application.server_cli_capture import read_server_cli_capture, CaptureUnavailable
+            try:
+                decoded = read_server_cli_capture(outcome, receipt=receipt, state=state,
+                    control=lambda argv: transport.control(remote_name, argv, timeout=remaining()))
+            except CaptureUnavailable:
+                raise ServerCLIExecObservationUnavailable(receipt) from None
+            return {**result, 'result': decoded}
+        if ('capture' in outcome or any(not isinstance(outcome.get(key), str) for key in ('stdout', 'stderr'))):
             raise ServerCLIExecObservationUnavailable(receipt)
         return {**result, 'result': outcome}
     except (RemoteJobTransportError, RemoteProtocolError, ServerCLIUnavailable, OSError, ValueError, TypeError, KeyError):

@@ -1,7 +1,8 @@
 # Phase 0 research: Unified tailnet sharing
 
-Date: 2026-11-11. Source inspection only. No external API, credentials, network
-probe, test, compile/import or runtime behavior was exercised.
+Date: 2026-11-11. Local source inspection and public official documentation reads
+only. No authenticated API, credentials, target network probe, test, compile/import
+or runtime behavior was exercised.
 
 ## Established from reviewed intent and local source
 
@@ -49,6 +50,30 @@ probe, test, compile/import or runtime behavior was exercised.
   advertising an unsupported generic URL option.
 
 ## Resolution needed before Phase 1
+
+### Official documentation evidence and candidate seam
+
+Tailscale documents application grants as permissions attached to source/destination
+connections and exposes them through LocalAPI, Serve capability headers and tsnet.
+It recommends LocalAPI over the diagnostic whois command for application code.
+[Application capabilities](https://tailscale.com/docs/features/access-control/grants/grants-app-capabilities).
+
+Tailscale also documents inspecting a node's capability data with whois and checking
+policy application for users/tags through policy preview.
+[Troubleshooting grants](https://tailscale.com/docs/reference/troubleshooting/grants).
+
+Design inference: authenticated receiver-side capability inspection is a candidate
+delegation-authority seam, not evidence that Sandbox currently has one. A capability
+on actor-to-receiver access does not automatically prove permission for every third-
+party node/service/path selected by the actor. The design still needs an explicit,
+approved delegation policy, unforgeable initiating-actor binding through the existing
+management transport, destination identity, and revocation/freshness semantics.
+No custom tailnet policy was created, credentials read, LocalAPI queried or target
+contacted. Introducing or changing live policy would require separate authorization.
+
+Public docs do not establish this installation's enabled capability, trusted actor
+mapping or approved target policy. Do not manufacture those claims in source or use
+current tailnet-name records as a permissive substitute.
 
 Root/security owner must identify or approve the supported authority source and
 actor-binding model; then source/documentation research can establish its exact

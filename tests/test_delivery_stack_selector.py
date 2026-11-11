@@ -88,6 +88,18 @@ class InspectThroughRecordedScopeTests(unittest.TestCase):
         self.assertEqual(selectors["recorded_scope"],
                          {"project_identity": "fixture-project", "project_root_digest": OLD_ROOT})
 
+    def test_a_record_of_another_project_gives_no_recorded_scope(self):
+        resolved = target_resolution.ResolvedTarget(
+            remote="fixture-remote", project="site", environment="qa", kind="stack",
+            project_dir="/sandbox/runtime/stacks/site", slug="site")
+        other = _recorded(target={"remote": "fixture-remote", "project": "other", "environment": "qa"})
+        state = {"hosts": {resolved.state_key: {"hosting_operation": other}}}
+        args = types.SimpleNamespace(remote="fixture-remote", name="site", target=None,
+                                     project_dir=None, environment=None, label=None)
+        with patch.object(target_resolution, "resolve", return_value=resolved), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state):
+            self.assertNotIn("recorded_scope", delivery_cmd._recorded_target_selectors(args))
+
     def test_an_unknown_stack_refuses_with_the_resolution_code(self):
         args = types.SimpleNamespace(remote="fixture-remote", name="missing", target=None,
                                      project_dir=None, environment=None, label=None)
@@ -127,6 +139,17 @@ class InspectThroughRecordedScopeTests(unittest.TestCase):
         with self.assertRaises(DeliveryError):
             service.inspect(project_dir="/stack", remote="fixture-remote", environment="qa",
                             recorded_scope={"project_identity": "fixture-project"})
+
+        def other_runtime(**query):
+            return {**resolver(**query), "runtime_identity": "another-hosted-project"}
+
+        confined = DeliveryService(repository, target_resolver=other_runtime)
+        for selectors in ({"request_id": "stack-attempt"}, {}):
+            with self.subTest(selectors=selectors), self.assertRaises(DeliveryError) as caught:
+                confined.inspect(project_dir="/stack", remote="fixture-remote", environment="qa",
+                                 recorded_scope={"project_identity": "fixture-project",
+                                                 "project_root_digest": OLD_ROOT}, **selectors)
+            self.assertEqual(caught.exception.code, "binding_mismatch")
 
 
 if __name__ == "__main__":

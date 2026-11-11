@@ -4144,6 +4144,7 @@ def _refresh_host_front_door(validated: dict, entry: dict, remote_name: str, *,
             prepared = _prepare_front_door_refresh(
                 validated, entry, remote_name, hosting.load_host_state(), secret_values)
             return {"ok": True, "action": "plan", **prepared["summary"]}
+        _host_edge(entry)  # front_door.require_capability(HOST_ROUTES) before lock, lease or audit
         key = hosting.state_key(remote_name, validated)
         try:
             port = RecoveryRepository().target_mutation_port("sync")
@@ -4193,11 +4194,20 @@ def _refresh_host_front_door_leased(validated: dict, entry: dict, remote_name: s
             audit.write(op="end", outcome="refused", code=refusal.code, **audit_fields)
             raise refusal from None
         reloaded = False
+        action = "unchanged"
         try:
             if not prepared["unchanged"]:
                 reloaded = True
+                action = "refreshed"
                 edge.configure(name, prepared["rendered"], previous, log_path=apply_log)
             _verify_front_door_refresh(validated, secret_values, prepared)
+            # Reporting is inside the failure boundary: a refresh whose outcome cannot be
+            # recorded and audited is rolled back like one that failed verification.
+            _record_front_door_refresh(prepared["key"], {
+                "state": action, "route_before": summary["route_before"],
+                "route_after": summary["route_after"], "code": None, "restore": None},
+                declaration=front_door_refresh.declaration_digest(validated))
+            audit.write(op="end", outcome=action, **audit_fields)
         except Exception as exc:
             detail = _front_door_refresh_safe(exc, secret_values)
             restore = None
@@ -4211,8 +4221,12 @@ def _refresh_host_front_door_leased(validated: dict, entry: dict, remote_name: s
                 except Exception as restore_exc:
                     restore = "restore_failed"
                     detail += "; restore failed: " + _front_door_refresh_safe(restore_exc, secret_values)
-            audit.write(op="end", outcome="failed", code=front_door_refresh.FAILED,
-                        restore=restore, **audit_fields)
+            # The outcome above is what the caller gets, whatever reporting does now.
+            try:
+                audit.write(op="end", outcome="failed", code=front_door_refresh.FAILED,
+                            restore=restore, **audit_fields)
+            except Exception as audit_exc:
+                detail += "; outcome not audited: " + _front_door_refresh_safe(audit_exc, secret_values)
             try:
                 _record_front_door_refresh(prepared["key"], {
                     "state": "failed", "route_before": summary["route_before"],
@@ -4222,18 +4236,6 @@ def _refresh_host_front_door_leased(validated: dict, entry: dict, remote_name: s
                 detail += "; outcome not recorded: " + _front_door_refresh_safe(record_exc, secret_values)
             raise front_door_refresh.FrontDoorRefreshRefused(
                 front_door_refresh.FAILED, detail, restore=restore) from None
-        action = "refreshed" if reloaded else "unchanged"
-        audit.write(op="end", outcome=action, **audit_fields)
-        try:
-            _record_front_door_refresh(prepared["key"], {
-                "state": action, "route_before": summary["route_before"],
-                "route_after": summary["route_after"], "code": None, "restore": None},
-                declaration=front_door_refresh.declaration_digest(validated))
-        except Exception as exc:
-            raise front_door_refresh.FrontDoorRefreshRefused(
-                front_door_refresh.UNAVAILABLE,
-                f"the front door was {action} and verified, but the outcome could not be "
-                f"recorded: {_front_door_refresh_safe(exc, secret_values)}") from None
     return {"ok": True, "action": action, **summary}
 
 

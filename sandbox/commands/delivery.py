@@ -136,6 +136,7 @@ def _recorded_target_selectors(args):
     operation = record.get("hosting_operation") if isinstance(record, dict) else None
     target = (operation.get("target") or {}) if isinstance(operation, dict) else {}
     if (isinstance(operation, dict) and target.get("remote") == args.remote
+            and target.get("project") == resolved.project
             and target.get("environment") == resolved.environment
             and isinstance(operation.get("project_identity"), str)
             and isinstance(operation.get("project_root_digest"), str)):

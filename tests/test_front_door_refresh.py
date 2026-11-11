@@ -221,6 +221,48 @@ class RefreshPublicTargetTests(unittest.TestCase):
         self.assertEqual(error.restore, "restore_failed")
         self.assertIn("restore failed", error.message)
 
+    def test_an_audit_failure_never_hides_a_failed_restore(self):
+        target = _Refresh(self)
+        target.verify.side_effect = RuntimeError("primary answered 502")
+        target.restore.side_effect = RuntimeError("reload refused")
+        real_write = refresh.AuditLog.write
+
+        def failing_end(audit, **fields):
+            if fields.get("op") == "end":
+                raise OSError(28, "No space left on device")
+            return real_write(audit, **fields)
+
+        with patch.object(refresh.AuditLog, "write", failing_end):
+            error = target.refused(refresh.FAILED)
+        self.assertEqual(error.restore, "restore_failed")
+        self.assertIn("not audited", error.message)
+        self.assertEqual(target.state["hosts"][target.key]["front_door_refresh"]["restore"],
+                         "restore_failed")
+
+    def test_an_outcome_that_cannot_be_recorded_rolls_the_route_back(self):
+        target = _Refresh(self)
+        previous = target.live["route"]
+        real_record = hosting_cmd._record_front_door_refresh
+
+        def failing_success(key, fields, **kwargs):
+            if fields["state"] == "refreshed":
+                raise OSError(5, "Input/output error")
+            return real_record(key, fields, **kwargs)
+
+        with patch.object(hosting_cmd, "_record_front_door_refresh", side_effect=failing_success):
+            error = target.refused(refresh.FAILED)
+        self.assertEqual(error.restore, "restored")
+        self.assertEqual(target.live["route"], previous)
+        self.assertEqual(target.audit()[-1]["outcome"], "failed")
+
+    def test_an_unsupported_front_door_refuses_before_lock_lease_or_audit(self):
+        target = _Refresh(self)
+        target.entry["front_door"] = "unknown-door"
+        with self.assertRaises(refresh.FrontDoorRefreshRefused):
+            target.run()
+        target.fx.lease.assert_not_called()
+        self.assertEqual(target.audit(), [])
+
     def test_a_re_run_after_an_interrupted_refresh_converges(self):
         target = _Refresh(self)
         target.state["hosts"][target.key]["front_door_refresh"] = {"state": "started", "at": 1}

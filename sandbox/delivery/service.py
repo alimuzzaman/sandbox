@@ -524,6 +524,11 @@ class DeliveryService:
                 selected = None
                 result["selected_operation"] = None
                 return bounded_projection(result)
+        if recorded_scope is not None and selected is not None and \
+                selected["target"].get("runtime_identity") != target.get("runtime_identity"):
+            # Spec 084: a scope reached through a hosting record is confined to that
+            # record's hosted runtime (one checkout can serve several hosted projects).
+            raise DeliveryError("binding_mismatch")
         # For a retained old incarnation, recorded projections are read using
         # its exact target; current observations always use the selected target.
         recorded_target = selected["target"] if selected is not None else target

@@ -1230,7 +1230,9 @@ What it does:
   same checks an apply's edge step uses, privacy and route tag included.
 - On any failure after the reload, puts the previous route back (the apply's fail-closed
   restore) and reports `front_door_refresh_failed` with `restore`: `restored`, `removed`
-  or `restore_failed`.
+  or `restore_failed`. Recording and auditing the outcome are part of that boundary: a
+  refresh whose outcome cannot be saved is rolled back too, and a later audit or record
+  error never replaces the reported restore outcome.
 - Never touches Compose, containers, initializers, the checkout, DNS records, zone
   settings or certificates, and never records a delivery attempt. It needs no runtime
   proof and no durable job.

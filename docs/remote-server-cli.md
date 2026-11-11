@@ -81,6 +81,14 @@ secret store. Secret value-output commands are unavailable through this retained
 adapter. No per-controller role, credential approval or new broker grant is
 introduced.
 
+Retained-command restrictions use the actual installed CLI parser before
+dispatch. Global selector abbreviations and valid options before a host action
+cannot hide secret-output or missing-stdin commands. Parser diagnostics are
+suppressed on this validation path. An embedding without the installed parser
+refuses ambiguous sensitive syntax. Original argv, including explicit strict
+runtime intent, remains intact for the fixed child; command selection does not
+copy environment values or dispatch a command.
+
 Installed discovery can fill a missing origin from a unique actual public network
 interface address. It never queries an Internet address service, guesses a
 hostname, or overwrites explicit routing metadata. Ambiguous or private-only

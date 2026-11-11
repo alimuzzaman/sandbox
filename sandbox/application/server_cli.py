@@ -196,17 +196,25 @@ def _command_argv(argv) -> tuple[str, ...]:
         raise ServerCLIUnavailable('server CLI expects command argv without an executable')
     # Secret values and free-form secret-printing shells are not a job contract.
     # Provider-specific normal commands consume the server store themselves.
-    selected = _command_head(values)
-    if (selected[:1] in {('secrets',), ('host',)} and len(selected) > 1
-            and selected[1].startswith('-')):
-        raise ServerCLIUnavailable('retained commands require the action before its options')
+    from sandbox.application.command_selection import selected_command, CommandSelectionUnavailable
+    from sandbox.services.redaction import require_safe_argv
+    require_safe_argv(values)
+    try:
+        selected = selected_command(values)
+    except CommandSelectionUnavailable:
+        raise ServerCLIUnavailable('retained command does not match the installed CLI grammar') from None
+    if selected is None:
+        # Non-CLI embeddings have no canonical parser. Preserve safe legacy
+        # prefixes, but ambiguous sensitive syntax cannot grant execution.
+        selected = _command_head(values)
+        if (selected[:1] in {('secrets',), ('host',)} and len(selected) > 1
+                and selected[1].startswith('-')):
+            raise ServerCLIUnavailable('canonical installed CLI selection is unavailable')
     if selected[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
         raise ServerCLIUnavailable('secret value output is unavailable through server CLI jobs')
     if (selected[:2] == ('host', 'exec')
             or any(flag in values for flag in ('--stdin', '--token-stdin', '--interactive'))):
         raise ServerCLIStdinUnavailable('retained server CLI stdin transport is unavailable; no job was accepted')
-    from sandbox.services.redaction import require_safe_argv
-    require_safe_argv(values)
     return values
 
 

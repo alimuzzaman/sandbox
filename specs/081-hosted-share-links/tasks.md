@@ -119,9 +119,9 @@ Implementation:
 
 Close-out:
 
-- [ ] T046 [US7] Run the touched suites on xspeed-dev (`sb job-start --remote xspeed-dev --cancel-on-stall --profile unit`) through Haiku helpers and compare with an `origin/latest` baseline
-- [ ] T047 [US7] Sol review on `codex_office` (`gpt-6.1-sol`, high, read-only) of `git diff origin/latest..HEAD`; fix every finding with a test until it says safe; record that human sign-off is needed before release
-- [ ] T048 [US7] Push `feat/short-share-links` by name and write the handback to `/Users/alim/Sites/git/.scratch/sandbox/handbacks/feat-short-share-links.md`
+- [x] T046 [US7] Run the touched suites on xspeed-dev (`sb job-start --remote xspeed-dev --cancel-on-stall --profile unit`) through Haiku helpers and compare with an `origin/latest` baseline
+- [x] T047 [US7] Sol review on `codex_office` (`gpt-6.1-sol`, high, read-only) of `git diff origin/latest..HEAD`; fix every finding with a test until it says safe; record that human sign-off is needed before release
+- [x] T048 [US7] Push `feat/short-share-links` by name and write the handback to `/Users/alim/Sites/git/.scratch/sandbox/handbacks/feat-short-share-links.md`
 
 Follow-up (not in this change):
 

@@ -188,10 +188,10 @@ environments:
     host:
       primary: mockups.dev.example.test     # answers 404 while private
       aliases:
-        - {hostname: s7k2.dev.example.test, mode: serve}   # the gate hostname
+        - {hostname: s.dev.example.test, mode: serve}      # the gate hostname
     cloudflare: {proxied: false, tls: acme}
     share:
-      hostname: s7k2.dev.example.test
+      hostname: s.dev.example.test
       private: true                         # every other hostname answers 404
       agent_mint: true                      # agents may make links and receive them
       image: python:3.13-alpine@sha256:<digest>
@@ -209,8 +209,9 @@ A few answers stay, and none of them reaches the application: `robots.txt` (deny
 hostname, the HTTP-to-HTTPS redirect and ACME challenge files on port 80, and on nginx
 the route marker that apply checks.
 
-- Pick a gate hostname that says nothing, such as a few random characters. It is the
-  only public way in.
+- Pick a short gate hostname, such as `s.<zone>`: a link is the hostname plus 34
+  characters. The hostname is not a secret; only the token is. It is still the only
+  public way in, so give it no other route.
 - **Apply verification follows privacy.** Every gate hostname must answer
   `/__sandbox/gate-check` with the gate's own 404, marked `X-Sandbox-Gate: 1`; the gate
   reserves that path ahead of every link, session and upstream. With `private: true`,
@@ -285,6 +286,12 @@ of the above.
 ./sb host share revoke l-<id>|s-<id>|all --remote R --project-dir . [--json]
 ```
 
+A link reads `https://s.dev.example.test/s/#<token>`: the gate hostname, `/s/#`, and a
+22-character token. `list` and `revoke` name it by its id, `l-` and 12 hex characters
+taken from the token's hash; the id cannot be turned back into the link. Links minted
+before 2026-11-11 read `/s/l-<32 hex>#<43 characters>` and keep working, revoked by that
+id, until they expire (30 days at most).
+
 Pick the target with `--project-dir` (plus `--environment`), `--target <project>/<env>`,
 or `--name <stack slug>`. `--entry` picks a `site_gate` entry when there is more than
 one; the `share` block's entry is the default. MCP tools `host_share_create`,
@@ -321,7 +328,8 @@ Refusal codes: `share_not_declared`, `agent_mint_not_enabled`, `terminal_require
 `job_output_refused`, `share_ttl_invalid`, `share_scope_invalid`, `uses_out_of_range`,
 `share_entry_required`, `share_entry_unknown`, `stack_unknown`, `stack_share_not_declared`,
 `share_options_conflict`,
-`site_link_limit` (32 live links), `site_link_unknown`, `site_entry_unknown` (the running
+`site_link_limit` (32 live links), `site_record_limit` (128 links kept, spent ones included,
+until they expire or are revoked), `site_link_unknown`, `site_entry_unknown` (the running
 service predates the entry: run `host apply`), `login_service_expired`, `email_required`,
 `share_failed`.
 
@@ -363,7 +371,7 @@ On a controller, each stack card on the `sb web` Hosting page has **Share this s
 and **Live links**. Share asks once, then mints a stack link with the defaults (7 days,
 no use limit) through `create_share(remote, stack=<slug>, caller="panel")`, so it needs
 `share.agent_mint: true` like any agent. The link is shown once, with a copy button,
-its expiry and use limit. It is never saved: not in the page's data, browser storage,
+its expiry and use limit; it reads `https://<gate>/s/#<token>`. It is never saved: not in the page's data, browser storage,
 the URL or a log. Close the dialog and it is gone; revoke it from Live links, which
 lists ids, expiry and uses for links and sessions, never a link itself.
 
@@ -411,7 +419,7 @@ hostname to `sandbox-login:8080` is no longer needed.
 - `upstream` is `http://<service>:<port>`, where the service is one of
   `compose.background_services`, and has no path, query or credentials. The gate
   connects to nowhere else.
-- Links open at `/s/<id>` on the gate hostname. A declared `path` is accepted for
+- Links open at `/s/#<token>` on the gate hostname. A declared `path` is accepted for
   compatibility and unused. `ttl_seconds` (60 to 3600, default 900) is the default
   lifetime of a `host login-url` link; `host share create --ttl` goes up to 30 days.
   `requires_email` is false or omitted.
@@ -427,7 +435,7 @@ hostname to `sandbox-login:8080` is no longer needed.
 ./sb host login-url --project-dir . --environment dev --remote myvps \
   --service mockup --confirm [--uses 3] [--ttl-seconds 600] [--json]
 ./sb host login-url ... --service mockup --list [--json]
-./sb host login-url ... --service mockup --revoke l-<32 hex> --confirm   # or s-..., or all
+./sb host login-url ... --service mockup --revoke l-<12 hex> --confirm   # or s-..., or all
 ```
 
 - **The link is shown once, on your terminal.** The command writes it to the controlling
@@ -436,23 +444,31 @@ hostname to `sandbox-login:8080` is no longer needed.
   `terminal_required` and mints nothing, so the link never lands in job output, logs
   or a transcript.
 - `--uses N` (1 to 20, default 1) is how many browsers the link may start a session in.
-- `--list` needs no `--confirm`. It shows ids, times, uses spent and sessions, never a
+- `--list` needs no `--confirm`. It shows ids, times, uses spent (spent links too, until
+  they expire, so they can be revoked) and sessions, never a
   link or a hash.
 - Revoking a link also ends the sessions it started. Revoking ends an open websocket
   within 30 seconds.
 
 Refusal codes: `terminal_required`, `uses_out_of_range`, `site_options_conflict`,
 `site_gate_only` (site options on another entry), `site_link_limit` (32 live links),
+`site_record_limit` (128 links kept, spent ones included),
 `site_link_unknown`, and `site_entry_unknown` (the running service predates the entry:
 run `host apply`).
 
 ### Gate contract
 
-- **Link.** `https://<hostname>/s/<id>#<token>`: a 128-bit id (`l-` and 32 hex) and a
-  256-bit token in the fragment, so no request line or access log holds the token. The
-  page at `/s/<id>` clears the fragment and posts the token by itself, so previews that
-  do not run scripts never use the link. It answers only while that id is live, and 404
-  otherwise: a prober learns nothing without an id.
+- **Link.** `https://<hostname>/s/#<token>`: one 128-bit token (22 URL-safe characters)
+  in the fragment, so no request line, access log or `Referer` holds it. The page at
+  `/s/` clears the fragment and posts the token by itself, so previews that do not run
+  scripts never use the link. The page is the same whatever links exist, so it tells a
+  prober nothing. The gate stores only the token's SHA-256 and finds the link by
+  comparing that hash, in constant time, with every stored record. A link's public id
+  is `l-` and the first 12 hex characters of the hash.
+- **Old-form links.** A link minted before 2026-11-11, `/s/l-<32 hex>#<43 characters>`,
+  opens on its own path until it expires: that page answers only while its id is live.
+  Nothing mints this form any more, and the path goes once the last such link has
+  expired.
 - **Records.** Links (`sandbox.share-link.v2`: id, token hash, issue and expiry, uses or
   none, scope, kind), spent-use markers, sessions and stack pages are files under
   `/run/sandbox-login/sites/<entry>/` on the service tmpfs, mode 0600, named by SHA-256
@@ -466,7 +482,7 @@ run `host apply`).
   stack page) with `Referrer-Policy: no-referrer`.
 - **Refusals.** Expired, spent, revoked, malformed and unknown links, and an `Origin`
   other than the gate's (or `null`, which browsers send from a `no-referrer` page), all
-  get the same 404. More than 30 link attempts per entry in 60 seconds
+  get the same 404, with the same body and headers, after the same lookup. More than 30 link attempts per entry in 60 seconds
   get 429.
 - **Forwarding.** Only origin-form targets with exactly one `Host` header equal to the
   gate hostname are forwarded. The gate sends `Host: <hostname>`, drops hop-by-hop

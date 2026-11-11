@@ -10,8 +10,10 @@ import contextlib
 import http.client
 import io
 import json
+import re
 import threading
 import unittest
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest import mock
@@ -20,14 +22,17 @@ from sandbox.commands import host_share
 from sandbox.commands import ui_dash
 from sandbox.hosting.share import ShareRefusal
 
-LINK_ID = "l-" + "a" * 32
+ROOT = Path(__file__).resolve().parents[1]
+# A short-form link (spec 081 Story 7): no id in the URL, one 22-character token.
+LINK_ID = "l-" + "a" * 12
+LEGACY_LINK_ID = "l-" + "a" * 32  # LEGACY(081 short links)
 SESSION_ID = "s-" + "b" * 32
-CANARY = "canary-token-7c1d9e0b5a4f8e2d3c6b"
-LINK = f"https://share.dev.example.test/s/{LINK_ID}#{CANARY}"
+CANARY = "c4naryT0ken7c1d9e0b5a4"
+LINK = f"https://s.dev.example.test/s/#{CANARY}"
 SECRET = "planted-secret-value-6666666666"
 CREATED = {"ok": True, "link": LINK, "link_id": LINK_ID, "target": "demo-hub/dev", "entry": "share",
            "kind": "stack", "scope": "/__sandbox/stack", "expires_at": 1_800_000_000,
-           "expires_clamped": False, "uses": None, "hostname": "share.dev.example.test"}
+           "expires_clamped": False, "uses": None, "hostname": "s.dev.example.test"}
 
 
 class ShareRouteTest(unittest.TestCase):
@@ -174,6 +179,8 @@ class ShareRouteTest(unittest.TestCase):
             {"action": "revoke", "remote": "xspeed-dev", "stack": "demo"},
             {"action": "revoke", "remote": "xspeed-dev", "stack": "demo", "id": "all"},
             {"action": "revoke", "remote": "xspeed-dev", "stack": "demo", "id": "l-short"},
+            {"action": "revoke", "remote": "xspeed-dev", "stack": "demo", "id": "l-" + "a" * 13},
+            {"action": "revoke", "remote": "xspeed-dev", "stack": "demo", "id": "s-" + "a" * 12},
         ]
         for body in cases:
             with self.subTest(body):
@@ -215,7 +222,7 @@ class ShareRouteTest(unittest.TestCase):
         self.assertEqual(set(body["sessions"][0]), {"id", "link", "created_at", "expires_at"})
 
     def test_revoke_takes_one_id(self):
-        for link_id in (LINK_ID, SESSION_ID):
+        for link_id in (LINK_ID, LEGACY_LINK_ID, SESSION_ID):
             with self.subTest(link_id):
                 status, _, body, _ = self.post({"action": "revoke", "remote": "xspeed-dev", "stack": "demo",
                                                 "id": link_id})
@@ -250,6 +257,25 @@ class ShareRouteTest(unittest.TestCase):
                            ("stderr", err.getvalue().encode())):
             with self.subTest(name):
                 self.assertNotIn(CANARY.encode(), text)
+
+
+class ShareDialogSourceTests(unittest.TestCase):
+    """The dialog shows the link once: as an input's value, never in markup or storage."""
+
+    def test_the_link_is_set_as_a_property_only(self):
+        source = (ROOT / "src/web/src/pages/share.ts").read_text(encoding="utf-8")
+        uses = [line.strip() for line in source.splitlines() if re.search(r"\.link\b", line)
+                and "row.link" not in line and "holdsLink" not in line]
+        self.assertEqual(uses, ["input.value = result.link;"])
+        self.assertNotIn("localStorage", source)
+        self.assertNotIn("sessionStorage", source)
+        self.assertNotIn("setAttribute(\"value\"", source)
+
+    def test_the_bundle_carries_the_id_rule_for_short_and_old_ids(self):
+        labels = (ROOT / "src/web/src/ui/sharelabels.ts").read_text(encoding="utf-8")
+        rule = re.search(r"return (/\^.+\$/)\.test\(id\)", labels).group(1)
+        self.assertIn("{12}", rule)
+        self.assertIn(rule, (ROOT / "config/sandbox-web.js").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

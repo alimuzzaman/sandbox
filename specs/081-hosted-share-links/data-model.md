@@ -22,12 +22,15 @@ entry named `share`. Its upstream is `http://<compose.service>:<container_port>`
 | Field | Type | Rule |
 |---|---|---|
 | `entry` | str | The `site_gate` entry |
-| `id` | str | `l-` + 32 lowercase hex (128 bits) |
-| `token_sha256` | str | 64 hex; matches the file name |
+| `id` | str | `l-` + the first 12 hex of `token_sha256` (short form, 2026-11-11); an old-form record keeps `l-` + 32 random hex until it expires |
+| `token_sha256` | str | 64 hex; matches the file name. A short-form token is 22 base64url characters (128 bits); an old-form one 43 |
 | `issued_at`, `expires_at` | int | `60 <= expires - issued <= 2592000` |
 | `uses` | int or null | 1 to 20, or null for no limit |
 | `scope` | str | `/`, a folder ending `/`, or an exact path; passes the path rules |
 | `kind` | str | `site` or `stack` |
+
+A stored short id must equal `l-` + `token_sha256[:12]`, and no two records of an entry
+may share an id.
 
 State: live (unexpired and, with a limit, with a slot free), then spent, expired or
 revoked (file removed). Use markers: `used/<token_sha256>.<slot>`, created with
@@ -50,7 +53,7 @@ revoked (file removed). Use markers: `used/<token_sha256>.<slot>`, created with
 | `link` | str | Link id; removed with the link |
 | `title` | str | Stack slug (`[a-z0-9-]{1,63}`) |
 | `hosts` | list | `{hostname, role, probe: "internal" or "public"}`; at most 16; every hostname on `allowed_host_suffixes` |
-| `wordpress` | obj or null | `{kid, key, url}`: `kid` 32 hex, `key` 64 hex, `url` = `https://<primary><request_path>` |
+| `wordpress` | obj or null | `{kid, key, url}`: `kid` the link id without `l-` (12 or 32 hex), `key` 64 hex, `url` = `https://<primary><request_path>` |
 | `sign_in` | list | `{entry, email?}` for each `stack_sign_in` entry |
 
 ## WordPress share key (mu-plugin `sandbox-share-<expires_at>-<kid>.php`)

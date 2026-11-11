@@ -4549,7 +4549,7 @@ def _mint_site_link(validated: dict, entry: dict, remote_name: str, state: dict,
     except share.ShareRefusal as exc:
         raise login.LoginServiceError(
             "login_link_failed" if exc.code == "share_failed" else exc.code, exc.message) from None
-    return {"link": share.share_url(config["hostname"], minted.link_id, minted.token),
+    return {"link": share.share_url(config["hostname"], minted.token),
             "link_id": minted.link_id, "expires_at": minted.expires_at,
             "uses": uses, "service": name, "hostname": config["hostname"]}
 

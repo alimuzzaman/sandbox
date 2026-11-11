@@ -43,6 +43,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.plugin_check",
     "sandbox.commands.zip",
     "sandbox.commands.remote",
+    "sandbox.commands.installation",
     "sandbox.commands.deploy",
     "sandbox.commands.delivery",
     "sandbox.commands.hosting",

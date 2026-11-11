@@ -34,6 +34,7 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
 from sandbox.hosting import edge_cache
+from sandbox.hosting.front_door import refresh as front_door_refresh
 from sandbox.hosting.stack_template import branch_allowed
 from sandbox.hosting.zone_coverage import COVERAGE_NAME_INELIGIBLE, COVERAGE_STORE_UNAVAILABLE, CoverageError, targets
 from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
@@ -1294,6 +1295,22 @@ class _CaddyHostEdge:
             return _origin_certificate(self.entry, validated, runtime, state_entry, client, home)
         return None, None, None
 
+    def existing_certificate_for_refresh(self, proxied: bool, validated: dict, name: str):
+        """Check only (spec 084): the certificate paths the route already uses."""
+        if not proxied:
+            # Caddy manages these site addresses' certificates itself; the refresh
+            # serves exactly the names the installed route serves, so none is added.
+            return None, None
+        base = f"/etc/caddy/certs/{name}"
+        cert_path, key_path = f"{base}/origin.pem", f"{base}/origin.key"
+        present = remote.ssh_run(
+            self.entry, f"test -s {shlex.quote(cert_path)} -a -s {shlex.quote(key_path)}", timeout=30)
+        if present.returncode != 0:
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.CERTIFICATE_MISSING,
+                "the route's Cloudflare origin certificate is not on the remote")
+        return cert_path, key_path
+
     def render(self, validated: dict, port: int, cert_path, key_path,
                secret_values: dict) -> str:
         basic_hash = None
@@ -1397,6 +1414,23 @@ class _NginxHostEdge:
         # DNS-only and not issued yet: serve the ACME challenge first, issue
         # after the DNS step points the hostname here (after_dns).
         return None, None, None
+
+    def existing_certificate_for_refresh(self, proxied: bool, validated: dict, name: str):
+        """Check only (spec 084): a certificate covering every name, never issued here."""
+        hostnames = sorted({route["hostname"] for route in validated["routes"]})
+        route = self.route_name(name)
+        if proxied:
+            present = self.nginx.origin_certificate_present(self.entry, route, hostnames)
+            paths = self.nginx.origin_paths(route)
+        else:
+            present = self.nginx.public_certificate_present(self.entry, route, hostnames)
+            paths = self.nginx.public_paths(route)
+        if not present:
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.CERTIFICATE_MISSING,
+                "the route has no certificate covering every declared name; a refresh "
+                "never issues one")
+        return paths
 
     def render(self, validated: dict, port: int, cert_path, key_path,
                secret_values: dict) -> str:
@@ -3605,7 +3639,9 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
             "no record was changed")
     try:
         summary = retire_interrupted_operation(
-            validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup)
+            validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup,
+            recorded_operation=lambda: ((hosting.load_host_state().get("hosts") or {}).get(
+                hosting.state_key(remote_name, validated)) or {}).get("hosting_operation"))
     except DeliveryError as exc:
         payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
                    "original_request_id": original.strip()}
@@ -3954,12 +3990,297 @@ def _continue_host_edge_only_unleased(validated: dict, entry: dict, remote_name:
             "certificate": certificate,
             "records": _first_adoption_records(recorded.get("records"), changes),
             "caddy_name": caddy_name, "edge": edge_state,
+            "front_door_declaration": front_door_refresh.declaration_digest(validated),
         }
         if edge.mode != "caddy":
             result["record"]["front_door"] = edge.mode
 
     hosting.apply_with_rollback(apply, rollback)
     return result
+
+
+def _front_door_refresh_safe(text: object, secret_values: dict) -> str:
+    """Error text fit for output and the record: secrets and private values redacted."""
+    safe = str(text)
+    for secret in (secret_values or {}).values():
+        if secret:
+            safe = safe.replace(secret, "[REDACTED]")
+    return remote.redact_text(safe)[:800]
+
+
+def _prepare_front_door_refresh(validated: dict, entry: dict, remote_name: str,
+                                state: dict, secret_values: dict) -> dict:
+    """Every check and the render of a refresh (spec 084); no remote change.
+
+    Reads only: the target record, the installed route (strictly), the certificate
+    files, the remote's nginx facts and, for a private target, its Cloudflare
+    records. Raises ``FrontDoorRefreshRefused`` with a stable code.
+    """
+    from sandbox.hosting import login_service as login
+    refused = front_door_refresh.FrontDoorRefreshRefused
+    key = hosting.state_key(remote_name, validated)
+    record = (state.get("hosts") or {}).get(key)
+    if not isinstance(record, dict):
+        raise refused(front_door_refresh.NO_ROUTE, "the target is not deployed on this controller")
+    reason = front_door_refresh.fence_reason(record)
+    if reason:
+        raise refused(front_door_refresh.FENCED, reason)
+    auth = validated.get("basic_auth") or {}
+    if auth and not secret_values.get(auth["password_secret"]):
+        raise refused(front_door_refresh.SECRETS_MISSING,
+                      f"basic auth secret {auth['password_secret']} is unavailable")
+    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    edge = _host_edge(entry)  # front_door.require_capability(HOST_ROUTES), before any effect
+    intent = _desired_edge_intent(validated, entry)
+    binding = front_door_refresh.check_recorded_binding(
+        record, validated, desired_records=intent["records"], front_door=edge.mode,
+        route_name=caddy_name)
+    edge.preflight(validated, caddy_name)
+    try:
+        previous = edge.read_strict(caddy_name)
+    except Exception as exc:
+        raise refused(front_door_refresh.ROUTE_UNREADABLE,
+                      _front_door_refresh_safe(exc, secret_values)) from None
+    if previous is None:
+        raise refused(front_door_refresh.NO_ROUTE, "the remote has no installed route for this target")
+    private = login.is_private(validated.get("login_service"))
+    if private:
+        _refuse_proxied_records_for_private(
+            cloudflare.Client(), validated, {"records": intent["records"]})
+    cert_path, key_path = edge.existing_certificate_for_refresh(
+        intent["proxied"], validated, caddy_name)
+    port = binding.loopback_port
+    old_tag = front_door_refresh.route_tag_of(previous)
+    gated = bool(login.gate_hostnames(validated.get("login_service")))
+    rendered = route_tag = None
+    unchanged = False
+    if gated and old_tag:
+        # Same route text with the installed tag means nothing to reload.
+        candidate = edge.render({**validated, "route_tag": old_tag}, port, cert_path,
+                                key_path, secret_values)
+        if candidate == previous:
+            rendered, route_tag, unchanged = candidate, old_tag, True
+    if rendered is None:
+        route_tag = _route_tag(validated)
+        render_validated = {**validated, "route_tag": route_tag} if route_tag else validated
+        rendered = edge.render(render_validated, port, cert_path, key_path, secret_values)
+        unchanged = rendered == previous
+    front_door_refresh.check_no_weakening(
+        previous, rendered, private=private, marked_private=hosting.is_marked_private_route,
+        https_before=_route_serves_https(previous), https_after=_route_serves_https(rendered))
+    gates = sorted(login.gate_hostnames(validated.get("login_service")))
+    return {"edge": edge, "key": key, "caddy_name": caddy_name, "previous": previous,
+            "rendered": rendered, "route_tag": route_tag, "unchanged": unchanged,
+            "binding": binding, "private": private, "intent": intent,
+            "summary": {
+                "target": f"{validated['project']}/{validated['environment']}",
+                "front_door": edge.mode, "route_name": caddy_name, "loopback_port": port,
+                "private": private, "gate_hostnames": gates,
+                "hostnames": sorted(route["hostname"] for route in validated["routes"]),
+                "route_before": front_door_refresh.digest_text(previous),
+                "route_after": front_door_refresh.digest_text(rendered),
+                "legacy_binding": binding.legacy, "would_reload": not unchanged}}
+
+
+def _record_front_door_refresh(key: str, fields: dict, *, declaration: str | None = None) -> None:
+    """Keep the refresh outcome on the target; nothing else in the record changes."""
+    with RecoveryRepository().state_lock():
+        state = hosting.load_host_state()
+        record = (state.get("hosts") or {}).get(key)
+        if not isinstance(record, dict):
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.NO_ROUTE, "the target record disappeared during the refresh")
+        record["front_door_refresh"] = {"at": int(time.time()), **fields}
+        if declaration is not None:
+            record["front_door_declaration"] = declaration
+        hosting.save_host_state(state)
+
+
+def _verify_front_door_refresh(validated: dict, secret_values: dict, prepared: dict) -> None:
+    """The same proof an apply's edge step gives, for the routes as they are now."""
+    kwargs = {"healthcheck_path": (validated.get("healthcheck") or {}).get("path") or "/",
+              "basic_auth_enabled": bool(validated.get("basic_auth")),
+              **_privacy_verify_kwargs(validated)}
+    if prepared["route_tag"]:
+        kwargs["route_tag"] = prepared["route_tag"]
+    if validated.get("basic_auth"):
+        auth = validated["basic_auth"]
+        kwargs["basic_auth_credentials"] = (auth["username"], secret_values[auth["password_secret"]])
+    coverage = validated.get("dns_coverage") or {}
+    if coverage.get("mode") == "shared":
+        targets.verify_shared(validated["routes"], coverage["zone"], _verify_edge, **kwargs)
+    else:
+        _verify_edge(validated["routes"], **kwargs)
+
+
+def _front_door_refresh_refusal(exc: BaseException, secret_values: dict):
+    """One stable-code refusal for any failure before the route changed."""
+    if isinstance(exc, front_door_refresh.FrontDoorRefreshRefused):
+        return exc
+    text = str(exc)
+    code = getattr(exc, "code", None)
+    if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]*", code) is None:
+        match = re.match(r"^([a-z][a-z0-9_]+):", text)
+        code = match.group(1) if match else front_door_refresh.UNAVAILABLE
+    return front_door_refresh.FrontDoorRefreshRefused(
+        code, _front_door_refresh_safe(text, secret_values) or type(exc).__name__)
+
+
+def _refresh_host_front_door(validated: dict, entry: dict, remote_name: str, *,
+                             confirm: bool) -> dict:
+    """Re-render and reload only the target's front-door route (spec 084).
+
+    Without ``confirm`` it answers the plan. With it, under the target's effect lock
+    and remote lease, it re-checks everything, audits, reloads the route (unless it
+    is unchanged), verifies it, and on any failure puts the previous route back
+    through the apply's fail-closed restore. It never touches Compose, containers,
+    initializers, the checkout, DNS records or certificates, and it records no
+    delivery attempt. Every failure raises ``FrontDoorRefreshRefused``.
+    """
+    secret_values: dict = {}
+    try:
+        secret_values, _missing = _secret_status(validated)
+        if not confirm:
+            prepared = _prepare_front_door_refresh(
+                validated, entry, remote_name, hosting.load_host_state(), secret_values)
+            return {"ok": True, "action": "plan", **prepared["summary"]}
+        key = hosting.state_key(remote_name, validated)
+        try:
+            port = RecoveryRepository().target_mutation_port("sync")
+            with port.target_mutation_transaction(key):
+                lease = _acquire_host_apply_lease(entry, validated)
+                try:
+                    return _refresh_host_front_door_leased(
+                        validated, entry, remote_name, secret_values)
+                finally:
+                    _release_host_apply_lease(entry, lease)
+        except TimeoutError:
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.FENCED, "another host apply or recovery owns this target") from None
+    except Exception as exc:  # noqa: BLE001 -- every failure leaves with a stable code
+        raise _front_door_refresh_refusal(exc, secret_values) from None
+
+
+def _refresh_host_front_door_leased(validated: dict, entry: dict, remote_name: str,
+                                    secret_values: dict) -> dict:
+    target = f"{validated['project']}/{validated['environment']}"
+    audit_fields = {"controller": _controller_lease_owner(), "remote": remote_name,
+                    "target": target}
+    with front_door_refresh.AuditLog(front_door_refresh.audit_path(RUNTIME_DIR)) as audit:
+        try:
+            # Re-read under the lease: an apply that finished meanwhile changes the record.
+            with RecoveryRepository().state_lock():
+                state = hosting.load_host_state()
+            prepared = _prepare_front_door_refresh(
+                validated, entry, remote_name, state, secret_values)
+        except Exception as exc:
+            refusal = _front_door_refresh_refusal(exc, secret_values)
+            audit.write(op="end", outcome="refused", code=refusal.code, **audit_fields)
+            raise refusal from None
+        summary = prepared["summary"]
+        edge, name, previous = prepared["edge"], prepared["caddy_name"], prepared["previous"]
+        home = remote.resolve_sandbox_home(entry)
+        apply_log = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}/apply.log"
+        audit_fields.update(front_door=summary["front_door"], route_before=summary["route_before"],
+                            route_after=summary["route_after"])
+        audit.write(op="start", outcome="started", **audit_fields)
+        try:
+            _record_front_door_refresh(prepared["key"], {
+                "state": "started", "route_before": summary["route_before"],
+                "route_after": summary["route_after"], "code": None, "restore": None})
+        except Exception as exc:
+            refusal = _front_door_refresh_refusal(exc, secret_values)
+            audit.write(op="end", outcome="refused", code=refusal.code, **audit_fields)
+            raise refusal from None
+        reloaded = False
+        try:
+            if not prepared["unchanged"]:
+                reloaded = True
+                edge.configure(name, prepared["rendered"], previous, log_path=apply_log)
+            _verify_front_door_refresh(validated, secret_values, prepared)
+        except Exception as exc:
+            detail = _front_door_refresh_safe(exc, secret_values)
+            restore = None
+            if reloaded:
+                try:
+                    # Not live as "this apply's own private route": the previous route is
+                    # the marked private route (or the public one), so it goes back.
+                    restore = _restore_edge_fail_closed(
+                        edge, name, previous, validated=validated, new_edge_live=False,
+                        log_path=apply_log)
+                except Exception as restore_exc:
+                    restore = "restore_failed"
+                    detail += "; restore failed: " + _front_door_refresh_safe(restore_exc, secret_values)
+            audit.write(op="end", outcome="failed", code=front_door_refresh.FAILED,
+                        restore=restore, **audit_fields)
+            try:
+                _record_front_door_refresh(prepared["key"], {
+                    "state": "failed", "route_before": summary["route_before"],
+                    "route_after": summary["route_after"],
+                    "code": front_door_refresh.FAILED, "restore": restore})
+            except Exception as record_exc:
+                detail += "; outcome not recorded: " + _front_door_refresh_safe(record_exc, secret_values)
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.FAILED, detail, restore=restore) from None
+        action = "refreshed" if reloaded else "unchanged"
+        audit.write(op="end", outcome=action, **audit_fields)
+        try:
+            _record_front_door_refresh(prepared["key"], {
+                "state": action, "route_before": summary["route_before"],
+                "route_after": summary["route_after"], "code": None, "restore": None},
+                declaration=front_door_refresh.declaration_digest(validated))
+        except Exception as exc:
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.UNAVAILABLE,
+                f"the front door was {action} and verified, but the outcome could not be "
+                f"recorded: {_front_door_refresh_safe(exc, secret_values)}") from None
+    return {"ok": True, "action": action, **summary}
+
+
+def front_door_refresh_request(remote_name: str | None, *, target: str | None = None,
+                               name: str | None = None, project_dir: str | None = None,
+                               environment: str | None = None, confirm: bool = False) -> dict:
+    """The MCP entry (spec 084): the CLI's JSON answer, never an exception."""
+    try:
+        if not remote_name:
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.UNAVAILABLE, "remote is required")
+        if target or name:
+            from sandbox.hosting import target_resolution
+            resolved = target_resolution.resolve(
+                remote_name, target=target, name=name, project_dir=project_dir,
+                environment=environment)
+            project_dir, environment = resolved.project_dir, resolved.environment
+        validated = hosting.validate_manifest(project_dir or ".", environment)
+        entry = remote.get_remote(remote_name)
+        if not entry:
+            raise front_door_refresh.FrontDoorRefreshRefused(
+                front_door_refresh.UNAVAILABLE, f"no remote named '{remote_name}'")
+        return _refresh_host_front_door(validated, entry, remote_name, confirm=bool(confirm))
+    except Exception as exc:  # noqa: BLE001 -- a tool answers, it never raises
+        return _front_door_refresh_refusal(exc, {}).payload()
+
+
+def _cmd_host_refresh_front_door(validated: dict, entry: dict, remote_name: str, args) -> None:
+    try:
+        result = _refresh_host_front_door(
+            validated, entry, remote_name, confirm=bool(getattr(args, "confirm", False)))
+    except front_door_refresh.FrontDoorRefreshRefused as exc:
+        if getattr(args, "json", False):
+            print(json.dumps(exc.payload(), sort_keys=True))
+            raise SystemExit(1)
+        die(str(exc))
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+        return
+    if result["action"] == "plan":
+        print(f"front-door refresh plan for {result['target']} ({result['front_door']}): "
+              f"{'would reload' if result['would_reload'] else 'route unchanged'}; "
+              f"route {result['route_before']} -> {result['route_after']}"
+              + ("; legacy binding (no recorded declaration yet)" if result["legacy_binding"] else "")
+              + "; pass --confirm to refresh")
+        return
+    ok(f"front door {result['action']} for {result['target']} ({result['front_door']})")
 
 
 def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
@@ -5618,6 +5939,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             "recorded_revision": sha,
             "caddy_name": caddy_name,
             "edge": edge_state,
+            "front_door_declaration": front_door_refresh.declaration_digest(validated),
         })
         if dns_cov.get("mode") == "shared":
             state["hosts"][key]["dns_coverage"] = {
@@ -8072,7 +8394,9 @@ def cmd_host(cfg, args) -> None:
         if missing:
             die("host image requires explicit " + ", ".join(missing) +
                 "; no manifest or state was opened")
-    if args.action in {"recover", "retire-delivery"}:
+    if args.action in {"recover", "retire-delivery"} and not (
+            args.action == "retire-delivery"
+            and (getattr(args, "target", None) or getattr(args, "name", None))):
         missing = []
         if not isinstance(getattr(args, "project_dir", None), str) or not args.project_dir.strip():
             missing.append("--project-dir")
@@ -8116,8 +8440,8 @@ def cmd_host(cfg, args) -> None:
     # error never depends on (or races with) manifest or Compose generation.
     if (args.action not in {"validate", "secrets", "image"}
             and not getattr(args, "remote", None)):
-        die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, logs, sync, and login-url")
-    if args.action in {"logs", "status", "diagnose"} and (
+        die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, refresh-front-door, logs, sync, and login-url")
+    if args.action in {"logs", "status", "diagnose", "refresh-front-door", "retire-delivery"} and (
             getattr(args, "target", None) or getattr(args, "name", None)):
         # Spec 074: a recorded stack resolves to its rendered manifest, never
         # the template in the current directory (feedback da5d522e).
@@ -8170,7 +8494,7 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, logs, sync, and login-url")
+        die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, refresh-front-door, logs, sync, and login-url")
     branch = None
     if args.action == "apply":
         if not args.confirm:
@@ -8205,6 +8529,9 @@ def cmd_host(cfg, args) -> None:
     state = hosting.load_host_state()
     if args.action == "retire-delivery":
         _cmd_host_retire_delivery(validated, args.remote, args)
+        return
+    if args.action == "refresh-front-door":
+        _cmd_host_refresh_front_door(validated, entry, args.remote, args)
         return
     if args.action == "recover":
         _cmd_host_recover(validated, entry, args.remote, args)

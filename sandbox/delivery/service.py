@@ -456,7 +456,8 @@ class DeliveryService:
         return result
 
     def inspect(self, *, project_dir, remote, environment=None, label=None,
-                operation_id=None, request_id=None, observe=False, limit=10, cursor=None):
+                operation_id=None, request_id=None, observe=False, limit=10, cursor=None,
+                recorded_scope=None):
         if type(project_dir) is not str or not project_dir or "\x00" in project_dir or len(project_dir.encode("utf-8")) > 4096:
             raise DeliveryError("delivery_contract_invalid")
         identifier(remote)
@@ -475,7 +476,12 @@ class DeliveryService:
                 raise DeliveryError("delivery_contract_invalid") from None
         if type(observe) is not bool or type(limit) is not int or not 1 <= limit <= 50 or (cursor is not None and (observe or operation_id is not None or request_id is not None)):
             raise DeliveryError("delivery_contract_invalid")
-        target = validate_target(self.target_resolver(project_dir=project_dir, remote=remote, environment=environment, label=label))
+        if recorded_scope is not None and (
+                environment is None or not isinstance(recorded_scope, dict)
+                or set(recorded_scope) != {"project_identity", "project_root_digest"}):
+            raise DeliveryError("delivery_contract_invalid")
+        resolver_selectors = {"recorded_scope": recorded_scope} if recorded_scope is not None else {}
+        target = validate_target(self.target_resolver(project_dir=project_dir, remote=remote, environment=environment, label=label, **resolver_selectors))
         if target["remote_name"] != remote or target["environment"] != environment or target["label"] != label:
             raise DeliveryError("binding_mismatch")
         scope = {key: target[key] for key in ("project_identity", "project_root_digest", "remote_name", "target_kind", "environment", "label")}

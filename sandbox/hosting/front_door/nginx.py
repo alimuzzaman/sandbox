@@ -966,6 +966,16 @@ def ensure_origin_certificate(entry: dict, name: str, hostnames: list[str], clie
                                  "issuer": "origin-ca"}
 
 
+def origin_certificate_present(entry: dict, name: str, hostnames: list[str]) -> bool:
+    """Check only (spec 084): the origin certificate exists for exactly these names."""
+    cert_path, key_path = origin_paths(name)
+    names_path = f"{cert_path.rsplit('/', 1)[0]}/hostnames"
+    check = _ssh(entry, _SUDO + (
+        f"$SUDO test -s {shlex.quote(cert_path)} -a -s {shlex.quote(key_path)} && "
+        f"$SUDO cat {shlex.quote(names_path)}"), timeout=30)
+    return check.returncode == 0 and (check.stdout or "").strip() == ",".join(sorted(hostnames))
+
+
 def public_paths(name: str) -> tuple[str, str]:
     return (f"/etc/letsencrypt/live/sandbox-{name}/fullchain.pem",
             f"/etc/letsencrypt/live/sandbox-{name}/privkey.pem")

@@ -24,6 +24,10 @@ def configure_parser(parser):
                                            "trace-owner-status", "trace-owner-record"))
     parser.add_argument("--project-dir")
     parser.add_argument("--remote")
+    parser.add_argument("--name", metavar="STACK",
+                        help="inspect: a recorded hosted stack; reads the delivery scope its hosting record names")
+    parser.add_argument("--target", metavar="PROJECT/ENVIRONMENT",
+                        help="inspect: a recorded hosted target; reads the delivery scope its hosting record names")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--environment")
     target.add_argument("--label")
@@ -106,6 +110,40 @@ def format_projection(result):
     return "\n".join(lines)
 
 
+def _recorded_target_selectors(args):
+    """Resolve `--name`/`--target` to a manifest dir and the scope its hosting record names.
+
+    A hosted stack's attempts are recorded under the checkout each `stack up` made, and
+    a later `stack up` replaces it; the target's hosting record keeps the identity its
+    last attempt was admitted under (spec 084).
+    """
+    from sandbox.core import _hosting
+    from sandbox.hosting import target_resolution
+    if getattr(args, "label", None) is not None:
+        return {"schema_version": 1, "ok": False, "error": {
+            "code": "delivery_contract_invalid", "message": "--name/--target select a hosted target; drop --label"}}
+    try:
+        resolved = target_resolution.resolve(
+            args.remote, target=getattr(args, "target", None), name=getattr(args, "name", None),
+            project_dir=getattr(args, "project_dir", None), environment=getattr(args, "environment", None))
+    except _hosting.HostingError as exc:
+        return {"schema_version": 1, "ok": False, "error": {
+            "code": getattr(exc, "code", None) or "host_target_invalid",
+            "message": getattr(exc, "detail", None) or str(exc)}}
+    selectors = {"project_dir": resolved.project_dir, "remote": args.remote,
+                 "environment": resolved.environment, "label": None}
+    record = (_hosting.load_host_state().get("hosts") or {}).get(resolved.state_key) or {}
+    operation = record.get("hosting_operation") if isinstance(record, dict) else None
+    target = (operation.get("target") or {}) if isinstance(operation, dict) else {}
+    if (isinstance(operation, dict) and target.get("remote") == args.remote
+            and target.get("environment") == resolved.environment
+            and isinstance(operation.get("project_identity"), str)
+            and isinstance(operation.get("project_root_digest"), str)):
+        selectors["recorded_scope"] = {"project_identity": operation["project_identity"],
+                                       "project_root_digest": operation["project_root_digest"]}
+    return selectors
+
+
 def cmd_delivery(cfg, args):
     trace_mode = args.action != 'inspect' or getattr(args, 'trace_id', None) is not None or getattr(args, 'trace_request_id', None) is not None
     if trace_mode:
@@ -126,6 +164,19 @@ def cmd_delivery(cfg, args):
             'code': 'delivery_contract_invalid', 'message': 'Invalid delivery selectors.'}}
         print(json.dumps(result) if getattr(args, 'json', False) else format_projection(result))
         raise SystemExit(1)
+    if getattr(args, "name", None) or getattr(args, "target", None):
+        selected = _recorded_target_selectors(args)
+        if selected.get("ok") is False:
+            print(json.dumps(selected) if getattr(args, "json", False) else format_projection(selected))
+            raise SystemExit(1)
+        result = inspect_with_factory(_service_factory, **selected, **{
+            name: getattr(args, name, None) if getattr(args, name, None) is not None else default
+            for name, default in (("operation_id", None), ("request_id", None), ("observe", False),
+                                  ("limit", 10), ("cursor", None))})
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")) if getattr(args, "json", False) else format_projection(result))
+        if not result["ok"]:
+            raise SystemExit(1)
+        return
     result = inspect_with_factory(_service_factory, **{
         name: (getattr(args, name, default) if getattr(args, name, default) is not None else default) for name, default in (
             ("project_dir", None), ("remote", None), ("environment", None), ("label", None),

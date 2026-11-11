@@ -1048,8 +1048,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`), or make share links (`host share create|list|revoke`)")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, refresh only the front-door route (`host refresh-front-door`), sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`), or make share links (`host share create|list|revoke`)")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "refresh-front-door", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share"])
     host_p.add_argument("image_action", nargs="?",
         choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke"],
         help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, `host tailnet-name add|list|renew|remove`, or `host share create|list|revoke ID|all`; `host image recover` is distinct from failed-apply `host recover`")
@@ -1069,7 +1069,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
-        help="host stack up/down: the stack slug; host exec/logs/status/diagnose: a recorded stack to target")
+        help="host stack up/down: the stack slug; host exec/logs/status/diagnose/refresh-front-door/retire-delivery: a recorded stack to target")
     host_p.add_argument("--ref", default=None, metavar="BRANCH|COMMIT",
         help="host stack up: ref to deploy, resolved on this controller (default: the checkout's HEAD)")
     host_p.add_argument("--port", action="append", default=None, metavar="NAME=PORT",
@@ -1117,11 +1117,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
     host_p.add_argument("--target", default=None, metavar="PROJECT/ENVIRONMENT",
-                        help="host destroy/heal: the recorded target (no manifest needed); host exec/logs/status/diagnose: the recorded target, a stack's rendered manifest when one matches")
+                        help="host destroy/heal: the recorded target (no manifest needed); host exec/logs/status/diagnose/refresh-front-door/retire-delivery: the recorded target, a stack's rendered manifest when one matches")
     host_p.add_argument("--clear-fenced", action="store_true",
                         help="host destroy: remove a target still fenced by a stale apply or recovery record")
     host_p.add_argument("--confirm", action="store_true",
-        help="allow protected host apply or separately confirmed edge continuation")
+        help="allow protected host apply, a front-door refresh, or separately confirmed edge continuation")
     host_p.add_argument("--revision", default=None,
         help="exact Git revision for `host image build-local` (default: HEAD)")
     host_p.add_argument("--receipt-version", choices=["v1", "v2"], default="v1",

@@ -132,6 +132,16 @@ when the record is already terminal, and when the request is unknown. Use it
 only after `./sb delivery inspect` shows the attempt has no
 `terminal_snapshot_digest` and its job has stopped.
 
+For a hosted stack, name it instead (spec 084): `sb delivery inspect --remote NAME --name
+<stack> --json` and `sb host retire-delivery --remote NAME --name <stack>
+--original-request-id APPLY_REQUEST --confirm --json` (or `--target <project>/<env>`).
+Both read the delivery scope the target's hosting record names. Each `stack up` makes a
+new checkout, and an attempt stays recorded under the checkout it was admitted from, so
+neither that checkout (it holds the template) nor the rendered stack directory reaches it
+otherwise. Retire with `--project-dir <rendered stack dir>` falls back to the recorded
+scope too, only for the exact request id the record names. The request to retire is the
+target's `hosting_operation.request_id`, which a refused apply also prints.
+
 ## Deployment trace v1
 
 The deployment trace is a separate diagnostic owner for one full command. It

@@ -422,7 +422,8 @@ class CommandTests(unittest.TestCase):
         from tools import manifest
         self.assertIn("share", manifest.DEFAULT_MCP_GROUPS)
         self.assertEqual(manifest.BUILTIN_TOOL_NAMES["share"],
-                         ("host_share_create", "host_share_list", "host_share_revoke"))
+                         ("host_share_create", "host_share_list", "host_share_revoke",
+                          "host_front_door_refresh"))
 
     def test_cli_parses_share_verbs(self):
         home = tempfile.mkdtemp(dir=self.directory.name)

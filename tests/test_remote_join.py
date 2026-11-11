@@ -8,6 +8,7 @@ from unittest import mock
 
 import sandbox.core._remote as sr
 from sandbox.commands import remote as remote_command
+from tests.host_memory_fixtures import status_state
 
 TAILNET = "100.64.0.9"
 INVENTORY = {"ok": True, "inventory_schema": 1, "transport": "control"}
@@ -67,6 +68,10 @@ class JoinTest(unittest.TestCase):
             (sr, "get_remote"): mock.Mock(return_value=existing),
             (sr, "put_remote"): self.put,
             (sr, "_remote_control_request"): self.control,
+            (sr, "remote_host_memory_request"): mock.Mock(return_value={
+                "resource_schema": 1, "host_memory_schema": 1, "transport": "control",
+                "service": {"ownership_marker": "a" * 24, "runtime_revision": "b" * 24},
+                "result": status_state(target_identity="c" * 24)}),
             (remote_command.subprocess, "run"): self.ssh,
             (remote_command.socket, "getaddrinfo"): resolve or mock.Mock(
                 return_value=[(2, 1, 6, "", (TAILNET, 0))]),

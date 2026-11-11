@@ -653,7 +653,10 @@ def register_workspace_deployment_receipt(
     return receipt_id
 
 
-def put_remote(name: str, _lock_timeout: float = 30, **fields) -> dict:
+_ANY_REMOTE = object()
+
+
+def put_remote(name: str, _lock_timeout: float = 30, *, _expected=_ANY_REMOTE, **fields) -> dict:
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's
     idempotency expectation, applied to registration too)."""
@@ -661,6 +664,11 @@ def put_remote(name: str, _lock_timeout: float = 30, **fields) -> dict:
                                 timeout_seconds=_lock_timeout), \
             _registry_write_lock():
         block = _remote_block()
+        if _expected is not _ANY_REMOTE:
+            expected = ({k: v for k, v in _expected.items() if k != "_remote_name"}
+                        if isinstance(_expected, dict) else _expected)
+            if block.get(name) != expected:
+                raise RuntimeError("remote_registration_changed")
         entry = dict(block.get(name) or {})
         entry.update({k: v for k, v in fields.items() if v is not None})
         block[name] = entry

@@ -556,8 +556,10 @@ nginx = shutil.which("nginx") or ("/usr/sbin/nginx" if os.path.exists("/usr/sbin
 out["nginx_installed"] = bool(nginx)
 caddy_bin = shutil.which("caddy")
 rc, text = run(["systemctl", "is-active", "caddy"])
-out["sandbox_caddy"] = {"installed": bool(caddy_bin), "active": text.strip() == "active"}
+out["sandbox_caddy"] = {"installed": bool(caddy_bin), "active": text.strip() == "active",
+    "observed": rc in (0, 3, 4) and text.strip() in ("active", "inactive", "failed", "unknown")}
 rc, text = run(["ss", "-H", "-ltnp", "( sport = :80 or sport = :443 )"])
+listeners_observed = rc == 0
 listeners = []
 for line in text.splitlines():
     parts = line.split()
@@ -567,6 +569,7 @@ for line in text.splitlines():
     procs = sorted(set(re.findall(r'\\("([^"]+)"', line)))
     listeners.append({"address": parts[3][:80], "port": port, "processes": procs[:8]})
 out["listeners"] = listeners[:32]
+out["listeners_observed"] = listeners_observed and len(listeners) <= 32
 import glob
 out["caddy_routes"] = len(glob.glob("/etc/caddy/conf.d/sandbox-*.caddy"))
 out["nginx_routes"] = len(glob.glob(os.path.join(CONF_DIR, FILE_PREFIX + "*.conf")))

@@ -47,14 +47,17 @@ def validate_target_snapshot(value, *, owner, origin_remote_name):
                    ('target_identity', 'ownership_marker', 'runtime_revision'))):
         raise ServerCLIUnavailable('owner target metadata identity changed or is unavailable')
     for field in ('source_commit', 'source_origin_commit'):
-        if not isinstance(value[field], str) or re.fullmatch(r'[0-9a-f]{40,64}', value[field]) is None:
+        if not isinstance(value[field], str) or re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', value[field]) is None:
             raise ServerCLIUnavailable('owner target source evidence is unavailable')
     for field in ('project', 'environment'):
         if not _text(value[field], 128):
             raise ServerCLIUnavailable('owner target tuple is invalid')
-    for field in ('name', 'copy_id'):
-        if value[field] is not None and not _text(value[field], 128):
-            raise ServerCLIUnavailable('owner target lifetime is invalid')
+    if (value['name'] is not None and (not isinstance(value['name'], str)
+            or re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', value['name']) is None)):
+        raise ServerCLIUnavailable('owner target name is invalid')
+    if (value['copy_id'] is not None and (not isinstance(value['copy_id'], str)
+            or re.fullmatch(r'[0-9a-f]{8}', value['copy_id']) is None)):
+        raise ServerCLIUnavailable('owner target lifetime is invalid')
     for path in [value['source_dir'], *(value['compose_files'] if isinstance(value['compose_files'], list) else [])]:
         if not _text(path) or not PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts:
             raise ServerCLIUnavailable('owner target measured paths are invalid')

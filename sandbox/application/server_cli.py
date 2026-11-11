@@ -15,8 +15,13 @@ import pwd
 import shlex
 import stat
 import subprocess
+import ipaddress
+from types import MappingProxyType
 import sys
 import time
+import math
+import tempfile
+from contextlib import nullcontext
 
 from sandbox.jobs.models import JobSubmission, SourceIdentity, validate_argv, validate_job_id
 
@@ -26,6 +31,11 @@ KIND = 'server-cli'
 
 class ServerCLIUnavailable(RuntimeError):
     code = 'server_cli_capability_unavailable'
+
+
+class ServerCLIEffectUnknown(RuntimeError):
+    code = 'server_cli_effect_unknown'
+    completion_unknown = True
 
 
 @dataclass(frozen=True)
@@ -141,10 +151,65 @@ class ServerCLIContext:
     runtime_revision: str
     deadline_at: str
     argv: tuple[str, ...]
+    origin_remote_name: str
+    target_metadata: object
     owner: ServerCliOwner
 
 
-def current_server_cli_context() -> ServerCLIContext:
+def validate_target_metadata(value) -> dict:
+    """Routing observations only; no key, token, ssh/config or role fields."""
+    if not isinstance(value, dict) or set(value) - {'origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port'}:
+        raise ServerCLIUnavailable('original target routing metadata is invalid')
+    result = dict(value)
+    for field, version in (('origin_ipv4', 4), ('origin_ipv6', 6)):
+        if field in result:
+            try:
+                address = ipaddress.ip_address(result[field])
+            except (ValueError, TypeError):
+                raise ServerCLIUnavailable('original target address metadata is invalid') from None
+            if address.version != version:
+                raise ServerCLIUnavailable('original target address family changed')
+            result[field] = str(address)
+    if 'front_door' in result and result['front_door'] not in {'nginx', 'caddy'}:
+        raise ServerCLIUnavailable('original target front door is invalid')
+    if 'mcp_port' in result and (type(result['mcp_port']) is not int or not 1 <= result['mcp_port'] <= 65535):
+        raise ServerCLIUnavailable('original control port metadata is invalid')
+    return result
+
+
+def server_cli_context_if_selected() -> ServerCLIContext | None:
+    """None only for no selected server-CLI job; invalid selection never falls back."""
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.jobs.registry import JobRepository
+    selected = os.environ.get('SANDBOX_DURABLE_EXECUTION_KIND') == KIND
+    job_id = os.environ.get('SANDBOX_DURABLE_JOB_ID', '')
+    if not job_id:
+        if selected:
+            raise ServerCLIUnavailable('selected server CLI job identity is missing')
+        return None
+    try:
+        validate_job_id(job_id)
+    except ValueError:
+        raise ServerCLIUnavailable('selected durable job identity is invalid') from None
+    registry = Path(RUNTIME_DIR) / 'jobs' / 'registry.sqlite3'
+    if not registry.is_file() or registry.is_symlink() or registry.stat().st_uid != os.geteuid():
+        raise ServerCLIUnavailable('selected durable job registry is unavailable')
+    repository = JobRepository(registry)
+    try:
+        try:
+            row = repository.get(job_id)
+        except Exception:
+            raise ServerCLIUnavailable('selected durable job evidence is unavailable') from None
+    finally:
+        repository.close()
+    if selected or row.get('kind') == KIND:
+        return current_server_cli_context()
+    if not isinstance(row.get('kind'), str) or not row['kind']:
+        raise ServerCLIUnavailable('selected durable job kind is unavailable')
+    return None  # Existing ordinary durable execution remains ordinary.
+
+
+def _read_server_cli_context() -> ServerCLIContext:
     """Prove this kernel child against its retained original server job.
 
     Environment carries only a lookup key. It cannot assert authority: the
@@ -192,26 +257,119 @@ def current_server_cli_context() -> ServerCLIContext:
             raise ServerCLIUnavailable('retained server CLI job deadline expired')
         owner = _current_owner()
         provenance = json.loads(row.get('execution_policy_provenance_json') or '{}')
+        if row.get('parent_job_id'):
+            ancestor = repository.get(row['parent_job_id'])
+            if ancestor.get('kind') != KIND or ancestor.get('lifecycle') not in {'running', 'succeeded'}:
+                raise ServerCLIUnavailable('original parent job no longer permits execution')
+            deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.parent_deadline_at']))
+            if datetime.now(timezone.utc) >= deadline:
+                raise ServerCLIUnavailable('original parent job deadline expired')
+        origin_remote_name = provenance.get('server_cli.remote_name')
+        target_metadata = validate_target_metadata(json.loads(provenance.get('server_cli.target_metadata', '{}')))
         if (provenance.get('server_cli.target_identity') != owner.target_identity
                 or provenance.get('server_cli.runtime_revision') != owner.runtime_revision
-                or provenance.get('server_cli.ownership_marker') != owner.ownership_marker):
+                or provenance.get('server_cli.ownership_marker') != owner.ownership_marker
+                or not isinstance(origin_remote_name, str)
+                or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,63}', origin_remote_name)):
             raise ServerCLIUnavailable('original job target or installed service identity changed')
         return ServerCLIContext(1, job_id, row['request_id'], row['project_root'],
             row['project_identity'], row['source_identity'], row.get('source_commit'),
             row.get('source_dirty_digest'), owner.target_identity, owner.runtime_revision,
-            deadline.isoformat(), argv[1:], owner)
+            deadline.isoformat(), argv[1:], origin_remote_name, MappingProxyType(target_metadata), owner)
     finally:
         repository.close()
 
 
+def current_server_cli_context() -> ServerCLIContext:
+    try:
+        return _read_server_cli_context()
+    except ServerCLIUnavailable:
+        raise
+    except Exception:
+        raise ServerCLIUnavailable('retained server CLI evidence is unavailable') from None
+
+
 def validate_owner_current(owner: ServerCliOwner) -> ServerCLIContext:
     """A typed value alone is insufficient: revalidate this actual retained child."""
-    if not isinstance(owner, ServerCliOwner):
+    if type(owner) is not ServerCliOwner:
         raise ServerCLIUnavailable('typed current server CLI owner is required')
     context = current_server_cli_context()
     if context.owner != owner:
         raise ServerCLIUnavailable('current server CLI target identity changed')
     return context
+
+
+def local_server_cli_submission_argv(owner: ServerCliOwner, argv, *, project_dir: str,
+                                    request_id: str, source_commit: str,
+                                    timeout_seconds: int, parent_job_id: str) -> list[str]:
+    """Build one nested fixed CLI job from current kernel/retained authority."""
+    context = validate_owner_current(owner)
+    if parent_job_id != context.job_id:
+        raise ServerCLIUnavailable('nested server CLI parent must be this original job')
+    if not isinstance(source_commit, str) or not re.fullmatch('[0-9a-f]{40}', source_commit):
+        raise ValueError('nested server CLI requires exact source commit')
+    from sandbox.config.runtime import resolve_execution_policy
+    import base64
+    values = fixed_argv(argv)[1:]
+    remaining = math.floor((datetime.fromisoformat(context.deadline_at) - datetime.now(timezone.utc)).total_seconds())
+    if remaining <= 0:
+        raise ServerCLIUnavailable('original server CLI deadline expired')
+    policy = resolve_execution_policy({}, execution_profile='exec',
+                                      timeout_seconds=min(timeout_seconds, remaining))
+    key = 'nested-' + hashlib.sha256((parent_job_id + '\0' + request_id).encode()).hexdigest()[:32]
+    encoded = base64.b64encode(json.dumps(policy.as_dict(), sort_keys=True, separators=(',', ':')).encode()).decode()
+    return [owner.executable, 'job-start', '--local', '--server-cli',
+        '--server-cli-target', owner.target_identity, '--server-cli-revision', owner.runtime_revision,
+        '--server-cli-marker', owner.ownership_marker, '--server-cli-origin', context.origin_remote_name,
+        '--server-cli-target-metadata', json.dumps(dict(context.target_metadata), sort_keys=True, separators=(',', ':')),
+        '--parent-job-id', parent_job_id, '--project-dir', str(Path(project_dir).resolve()),
+        '--project-identity', context.project_identity, '--request-id', key,
+        '--source-identity', source_commit, '--source-commit', source_commit,
+        '--timeout', str(policy.deadline_seconds), '--execution-policy-json', encoded, '--json', '--', *values]
+
+
+def validate_nested_parent(parent_job_id: str, *, target_identity: str,
+                           marker: str, revision: str, origin_remote_name: str,
+                           timeout_seconds: int) -> str:
+    """Validate an actual current kernel descendant, not a serialized owner grant."""
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.jobs.registry import JobRepository
+    from sandbox.jobs.process import capture_process_identity
+    validate_job_id(parent_job_id)
+    repository = JobRepository(Path(RUNTIME_DIR) / 'jobs/registry.sqlite3')
+    try:
+        row = repository.snapshot(parent_job_id)
+    finally:
+        repository.close()
+    process = row.get('process') or {}
+    proof = json.loads(row.get('execution_policy_provenance_json') or '{}')
+    if (row.get('kind') != KIND or row.get('lifecycle') != 'running'
+            or proof.get('server_cli.target_identity') != target_identity
+            or proof.get('server_cli.ownership_marker') != marker
+            or proof.get('server_cli.runtime_revision') != revision
+            or proof.get('server_cli.remote_name') != origin_remote_name):
+        raise ServerCLIUnavailable('original nested CLI parent binding is unavailable')
+    ancestor = capture_process_identity(process.get('child_pid'))
+    if (ancestor is None or ancestor.host_boot_id != process.get('host_boot_id')
+            or ancestor.start_identity != process.get('child_start_identity')):
+        raise ServerCLIUnavailable('original parent process identity changed')
+    current = os.getppid()
+    for _ in range(64):
+        if current == process.get('child_pid'):
+            break
+        if current <= 1:
+            raise ServerCLIUnavailable('nested CLI is not an original job descendant')
+        raw = Path('/proc', str(current), 'stat').read_text()
+        current = int(raw.rpartition(')')[2].split()[1])
+    else:
+        raise ServerCLIUnavailable('nested CLI ancestry is unavailable')
+    deadline = datetime.fromisoformat(row['started_at'].replace('Z', '+00:00')) + timedelta(seconds=row['deadline_seconds'])
+    if proof.get('server_cli.parent_deadline_at'):
+        deadline = min(deadline, datetime.fromisoformat(proof['server_cli.parent_deadline_at']))
+    remaining = math.floor((deadline - datetime.now(timezone.utc)).total_seconds())
+    if remaining <= 0:
+        raise ServerCLIUnavailable('nested CLI exceeds original remaining deadline')
+    return deadline.isoformat()
 
 
 def owner_environment(owner: ServerCliOwner) -> dict[str, str]:
@@ -225,9 +383,30 @@ def owner_environment(owner: ServerCliOwner) -> dict[str, str]:
             'XDG_RUNTIME_DIR': runtime, 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=' + runtime + '/bus'}
 
 
+def owner_command_args(owner: ServerCliOwner, command: str) -> list[str]:
+    """Validated local argv for callers retaining their own bounded stdin FD."""
+    validate_owner_current(owner)
+    if not isinstance(command, str) or not command or '\0' in command:
+        raise ValueError('local owner command is invalid')
+    return ['/bin/sh', '-c', command]
+
+
 def owner_process(owner: ServerCliOwner, command: str, *, timeout: float = 30,
                   input_data=None) -> subprocess.CompletedProcess:
     """Same-server local process channel, retaining native command/target guards."""
+    result = owner_process_bounded(owner, command, timeout=timeout, input_data=input_data)
+    if result.stdout_truncated or result.stderr_truncated:
+        raise ServerCLIEffectUnknown('bounded owner output is incomplete; effect completion is unknown')
+    stdout, stderr = result.stdout, result.stderr
+    if isinstance(input_data, (bytes, bytearray)):
+        stdout, stderr = stdout.encode(), stderr.encode()
+    return subprocess.CompletedProcess(result.argv, result.returncode, stdout=stdout, stderr=stderr)
+
+
+def owner_process_bounded(owner: ServerCliOwner, command: str, *, timeout: float = 30,
+                          input_data=None, max_output: int = 1_048_576,
+                          terminate_on_output_limit: bool = True):
+    from sandbox.services.process import BoundedProcessRunner
     context = validate_owner_current(owner)
     if not isinstance(command, str) or not command or '\0' in command:
         raise ValueError('local owner command is invalid')
@@ -235,14 +414,28 @@ def owner_process(owner: ServerCliOwner, command: str, *, timeout: float = 30,
     remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
     if remaining <= 0:
         raise ServerCLIUnavailable('original server CLI deadline expired')
-    kwargs = {'capture_output': True, 'check': False, 'cwd': owner.home,
-              'timeout': min(timeout, remaining), 'env': owner_environment(owner),
-              'text': not isinstance(input_data, (bytes, bytearray))}
-    if input_data is None:
-        kwargs['stdin'] = subprocess.DEVNULL
-    else:
-        kwargs['input'] = input_data
-    return subprocess.run(['/bin/sh', '-c', command], **kwargs)
+    if input_data is not None and not isinstance(input_data, (str, bytes, bytearray)):
+        raise ValueError('owner process input must be bytes or text')
+    # Anonymous owner-only input, never a named shared temporary credential file.
+    # File stdin avoids pipe-writer deadlock and stays within the runner deadline.
+    with (tempfile.TemporaryFile() if input_data is not None else nullcontext(None)) as source:
+        if source is not None:
+            source.write(input_data.encode() if isinstance(input_data, str) else input_data)
+            source.seek(0)
+        result = BoundedProcessRunner(max_output=max_output,
+            terminate_on_output_limit=terminate_on_output_limit).run(
+                ['/bin/sh', '-c', command], cwd=owner.home, env=owner_environment(owner),
+                timeout=min(timeout, remaining), stdin_source=source, start_new_session=False)
+    # Remain in the original durable process group: its supervisor can still
+    # terminate grandchildren after this caller exits. A local timeout does not
+    # prove that every effect or escaped descendant stopped, so never retry it.
+    if result.termination_reason is not None:
+        raise ServerCLIEffectUnknown('owner command completion is unknown; inspect the original retained job')
+    try:
+        validate_owner_current(owner)
+    except ServerCLIUnavailable:
+        raise ServerCLIEffectUnknown('original owner job changed after dispatch; effect completion is unknown') from None
+    return result
 
 
 class FixedServerCLI:
@@ -253,6 +446,9 @@ class FixedServerCLI:
         proof = submission.execution_policy_provenance or {}
         if (submission.kind != KIND or submission.target_kind != 'local'
                 or submission.argv[0] != owner.executable
+                or not submission.request_id
+                or not isinstance(proof.get('server_cli.remote_name'), str)
+                or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,63}', proof['server_cli.remote_name'])
                 or proof.get('server_cli.target_identity') != owner.target_identity
                 or proof.get('server_cli.runtime_revision') != owner.runtime_revision
                 or proof.get('server_cli.ownership_marker') != owner.ownership_marker):
@@ -272,6 +468,7 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     from sandbox.resources.context import authenticated_target_identity
     from sandbox.services.redaction import require_safe_argv
     from sandbox.config.facade import project_identity
+    from sandbox.config.runtime import resolve_execution_policy
     values = validate_argv(tuple(argv))
     require_safe_argv(values)
     if not request_id:
@@ -279,11 +476,17 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     # JobSubmission validates all caller input before lookup or transport.
     root = str(Path(project_dir).resolve())
     canonical = project_identity({'root': root})
+    policy = resolve_execution_policy({}, workspace='server-cli', execution_profile='exec',
+                                      timeout_seconds=timeout_seconds)
     submission = JobSubmission(kind=KIND, project_root=root,
         project_identity=canonical['identity'], target_kind='remote', remote_name=remote_name,
-        workspace_label='server-cli', argv=values, deadline_seconds=timeout_seconds,
+        workspace_label='server-cli', argv=values, deadline_seconds=policy.deadline_seconds,
         source=SourceIdentity('server-cli-request'), request_id=request_id,
-        execution_profile='exec', output_profile='smart')
+        execution_profile=policy.execution_profile, output_profile='smart',
+        deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
+        stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
+        cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+        execution_policy_provenance=policy.provenance)
     entry = _remote.get_remote(remote_name)
     if not isinstance(entry, dict) or entry.get('joined') is not True or entry.get('control_transport') != 'tailscale':
         raise ServerCLIUnavailable('server CLI requires an admitted joined Tailnet registration')

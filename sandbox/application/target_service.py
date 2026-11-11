@@ -78,9 +78,11 @@ class TargetResolutionError(ValueError):
 
 class TargetService:
     def __init__(self, *, config_loader: Callable, remote_lookup: Callable,
-                 remote_list: Callable | None = None) -> None:
+                 remote_list: Callable | None = None,
+                 capability_discovery: Callable | None = None) -> None:
         self._config_loader = config_loader
         self._remote_lookup = remote_lookup
+        self._capability_discovery = capability_discovery
         # Selection fallback must enumerate through an explicit read-only
         # catalog API.  A name lookup is intentionally never called with
         # ``None`` because production adapters may treat that as an invalid
@@ -161,6 +163,15 @@ class TargetService:
                 )
             if request.required_capability is not None:
                 capabilities = remote.get("capabilities")
+                if (remote.get('joined') is True and self._capability_discovery is not None
+                        and (not isinstance(capabilities, (list, tuple, set))
+                             or request.required_capability not in capabilities)):
+                    from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+                    try:
+                        remote = self._capability_discovery(remote_name, remote)
+                    except ExecutionCapabilityUnavailable as exc:
+                        raise TargetResolutionError(exc.code, str(exc), remote_name=remote_name) from None
+                    capabilities = remote.get('capabilities')
                 if not isinstance(capabilities, (list, tuple, set)) \
                         or request.required_capability not in capabilities:
                     raise TargetResolutionError(

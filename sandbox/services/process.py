@@ -105,7 +105,7 @@ class ProcessRunner(Protocol):
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
             timeout: float | None = None, cancellation=None,
-            json_output: bool = False) -> ProcessResult: ...
+            json_output: bool = False, stdin_source=None, start_new_session: bool = True) -> ProcessResult: ...
 
 
 class BoundedProcessRunner:
@@ -196,9 +196,9 @@ class BoundedProcessRunner:
         return not any(reader.is_alive() for reader in readers)
 
     @classmethod
-    def _terminate_process_tree(cls, process: subprocess.Popen[bytes]) -> None:
+    def _terminate_process_tree(cls, process: subprocess.Popen[bytes], *, own_group: bool = True) -> None:
         """Terminate a POSIX process group, or only the immediate process elsewhere."""
-        if os.name == "posix":
+        if os.name == "posix" and own_group:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -221,7 +221,7 @@ class BoundedProcessRunner:
         # PID/PGID to be reused before the final group signal.
         time.sleep(cls._TERMINATION_GRACE)
 
-        if os.name == "posix":
+        if os.name == "posix" and own_group:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -248,7 +248,9 @@ class BoundedProcessRunner:
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
             timeout: float | None = None, cancellation=None,
-            json_output: bool = False) -> ProcessResult:
+            json_output: bool = False, stdin_source=None, start_new_session: bool = True) -> ProcessResult:
+        if type(start_new_session) is not bool:
+            raise ValueError('process session selection must be boolean')
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("argv must be a non-empty argument sequence")
         if (not all(isinstance(item, str) and "\x00" not in item for item in argv)
@@ -288,9 +290,9 @@ class BoundedProcessRunner:
                 )
         process = subprocess.Popen(
             command, cwd=cwd, env=None if env is None else ExplicitEnvironment(env),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin_source is None else stdin_source,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-            start_new_session=os.name == "posix", bufsize=0,
+            start_new_session=os.name == "posix" and start_new_session, bufsize=0,
         )
         output = {name: _BoundedEdgeCapture(self.max_output)
                   for name in ("stdout", "stderr")}
@@ -386,7 +388,10 @@ class BoundedProcessRunner:
             # pipe holder can delay readers, but its old numeric group ID may
             # already belong to an unrelated process.
             if not leader_reaped:
-                self._terminate_process_tree(process)
+                if start_new_session:
+                    self._terminate_process_tree(process)
+                else:
+                    self._terminate_process_tree(process, own_group=False)
             drained = self._join_readers(readers, self._DRAIN_GRACE)
             if not drained:
                 # Do not let descendants that escaped the process group retain

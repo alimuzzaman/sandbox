@@ -105,7 +105,7 @@ class ProcessRunner(Protocol):
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
             timeout: float | None = None, cancellation=None,
-            json_output: bool = False, stdin_source=None, start_new_session: bool = True) -> ProcessResult: ...
+            json_output: bool = False, stdin: int | None = None, start_new_session: bool = True) -> ProcessResult: ...
 
 
 class BoundedProcessRunner:
@@ -248,7 +248,7 @@ class BoundedProcessRunner:
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
             timeout: float | None = None, cancellation=None,
-            json_output: bool = False, stdin_source=None, start_new_session: bool = True) -> ProcessResult:
+            json_output: bool = False, stdin: int | None = None, start_new_session: bool = True) -> ProcessResult:
         if type(start_new_session) is not bool:
             raise ValueError('process session selection must be boolean')
         if isinstance(argv, (str, bytes)) or not argv:
@@ -267,6 +267,10 @@ class BoundedProcessRunner:
                     for key, value in env.items()):
                 raise ValueError("env must contain NUL-free string keys and values")
         command = tuple(argv)
+        if stdin is not None:
+            if type(stdin) is not int or stdin < 0:
+                raise ValueError('stdin must be an open file descriptor')
+            os.fstat(stdin)
         deadline = None if timeout is None else time.monotonic() + timeout
         terminal_status = None
         initial_state = None
@@ -290,7 +294,7 @@ class BoundedProcessRunner:
                 )
         process = subprocess.Popen(
             command, cwd=cwd, env=None if env is None else ExplicitEnvironment(env),
-            stdin=subprocess.DEVNULL if stdin_source is None else stdin_source,
+            stdin=subprocess.DEVNULL if stdin is None else stdin,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             start_new_session=os.name == "posix" and start_new_session, bufsize=0,
         )

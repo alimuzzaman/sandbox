@@ -182,9 +182,15 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
         _refuse()
     repository = RecoveryRepository()
     state = repository.load()
+    if getattr(state, "unreadable", ()):
+        # A damaged partition contains only an opaque key hash; it cannot be
+        # proven unrelated to the selected physical target or alias set.
+        _refuse()
     keys = sorted(key for key in state["hosts"] if
                   isinstance(key, str) and key.split("/")[1:] == [project, env])
     for key in keys:
+        if not isinstance(state["hosts"][key], dict):
+            _refuse()
         if busy_reason(state["hosts"][key], None):
             _refuse(BUSY)
     source = home / "deploy-src" / "hosts" / project

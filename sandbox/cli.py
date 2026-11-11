@@ -1116,6 +1116,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
+    for option in ("scope", "project", "source", "source-revision", "profile", "profile-revision"):
+        host_p.add_argument("--credential-" + option, default=None, metavar="REFERENCE",
+            help="disabled server credential groundwork; scope is personal-local (default) or server")
     host_p.add_argument("--target", default=None, metavar="PROJECT/ENVIRONMENT",
                         help="host destroy/heal: the recorded target (no manifest needed); host exec/logs/status/diagnose/refresh-front-door/retire-delivery: the recorded target, a stack's rendered manifest when one matches")
     host_p.add_argument("--clear-fenced", action="store_true",
@@ -1562,6 +1565,14 @@ Per-project (each plugin carries its own sandbox.config.json):
     if "host" in raw_argv and "--" in raw_argv:
         from sandbox.hosting.host_exec import split_passthrough
         head_argv, host_exec_argv = split_passthrough(raw_argv)
+    # Argparse errors can contain arbitrary values, including unknown options.
+    # Credential requests use the same fixed diagnostic before any startup work.
+    if "host" in head_argv and any(token.startswith("--credential-") for token in head_argv):
+        from sandbox.commands.hosting import credential_argument_error
+        def credential_parse_error(message):
+            credential_argument_error("--json" in head_argv)
+        p.error = credential_parse_error
+        host_p.error = credential_parse_error
     args = p.parse_args(head_argv)
     if host_exec_argv is not None:
         if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "exec":
@@ -1571,6 +1582,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "share":
         # `host share revoke ID|all` reuses the optional positional slot.
         args.share_id, args.tailnet_hostname = args.tailnet_hostname, None
+    command_spec = COMMAND_SPECS.get(getattr(args, "cmd", None))
+    if (command_spec is not None and command_spec.preconfiguration_dispatch is not None
+            and command_spec.preconfiguration_dispatch(args)):
+        return
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) != "tailnet-name":
         # Spec 078 added an optional FQDN positional and three sub-actions;
         # every other host action keeps refusing them as argparse did.

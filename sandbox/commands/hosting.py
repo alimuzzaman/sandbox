@@ -214,6 +214,7 @@ def _host_sync_boundary_failure() -> dict:
 
 
 def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None:
+    guard_server_execution(args)
     service = None
     source_root = None
     workspace_id = None
@@ -400,6 +401,7 @@ def _secret_status(validated: dict) -> tuple[dict[str, str], list[str]]:
 
 
 def _cmd_host_image_build_local(args) -> None:
+    guard_server_execution(args)
     from sandbox.config.descriptors import _load_mapping, primary_config
     from sandbox.hosting import local_images
 
@@ -512,6 +514,7 @@ def _cmd_host_image_build_local(args) -> None:
 
 
 def _cmd_host_image_storage_admission(args) -> None:
+    guard_server_execution(args)
     from sandbox.hosting import local_images
     from sandbox.transports import remote_local_images
     if not args.remote or (not args.receipt and (not args.project or not args.environment)):
@@ -546,6 +549,7 @@ def _cmd_host_image_storage_admission(args) -> None:
 
 
 def _cmd_host_image_push_local(args) -> None:
+    guard_server_execution(args)
     from sandbox.delivery.context import registered_host_digest
     from sandbox.hosting import local_images
     from sandbox.transports import remote_local_images
@@ -625,6 +629,7 @@ def _declared_secret_sources(validated: dict) -> set[str]:
 
 
 def _cmd_host_secrets(validated: dict, args) -> None:
+    guard_server_execution(args)
     values, missing = _secret_status(validated)
     generated = set(validated["secrets"]["generated"].values())
     set_key = getattr(args, "set_secret", None)
@@ -3633,6 +3638,7 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
     case `host recover` cannot resolve: recovery needs a complete runtime
     observation, and an interrupted owner leaves none.
     """
+    guard_server_execution(args)
     from sandbox.delivery.hosting import retire_interrupted_operation
     from sandbox.delivery.models import DeliveryError
 
@@ -3706,6 +3712,7 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
 
 
 def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> None:
+    guard_server_execution(args)
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities()
     required = {
@@ -3863,6 +3870,7 @@ def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
 def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                              _request: RecoveryRequest, operation: dict) -> dict:
     """Continue only the declared Caddy/Cloudflare edge for a proven runtime."""
+    guard_server_execution(validated)
     lease = _acquire_host_apply_lease(entry, validated)
     try:
         return _continue_host_edge_only_unleased(validated, entry, remote_name, _request, operation)
@@ -4289,6 +4297,7 @@ def front_door_refresh_request(remote_name: str | None, *, target: str | None = 
 
 
 def _cmd_host_refresh_front_door(validated: dict, entry: dict, remote_name: str, args) -> None:
+    guard_server_execution(args)
     try:
         result = _refresh_host_front_door(
             validated, entry, remote_name, confirm=bool(getattr(args, "confirm", False)))
@@ -4553,6 +4562,7 @@ def _cmd_host_site_link(validated: dict, entry: dict, args, declaration: dict, r
     A minted link is written once to the controlling terminal and nowhere else: not to
     stdout, ``--json``, logs, host state or the remote command line.
     """
+    guard_server_execution(args)
     from sandbox.hosting import login_service as login
     name = args.service
     listing = bool(getattr(args, "list_links", False))
@@ -4635,6 +4645,7 @@ def _utc(epoch: object) -> str:
 
 def _cmd_host_login_link(validated: dict, entry: dict, args) -> None:
     """Issue a link for a named login-service entry and report it."""
+    guard_server_execution(args)
     from sandbox.hosting import login_service as login
 
     def refuse(code: str, message: str) -> None:
@@ -5397,6 +5408,7 @@ def _release_host_apply_lease(entry: dict, lease: dict | None) -> None:
 
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *args, **kwargs) -> dict:
+    guard_server_execution(validated)
     lease = _acquire_host_apply_lease(entry, validated)
     try:
         return _apply_host_unleased(validated, entry, remote_name, runtime, *args, **kwargs)
@@ -5412,6 +5424,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                 active_image_lease=None,
                 allow_record_overwrite: bool = False,
                 before_effects=None, summary_recorder=None) -> dict:
+    guard_server_execution(validated)
     # Validate genuine retained child/source evidence before secret publication or effects.
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
@@ -6049,6 +6062,7 @@ def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | N
 
 def _cmd_host_stage(args) -> None:
     """Static Feature 050 dispatch with no manifest/Compose/runtime preflight."""
+    guard_server_execution(args)
     if getattr(args, "stage_status", False) and not getattr(args, "verified_plan", None):
         _cmd_host_stage_discover(args)
         return
@@ -6201,6 +6215,7 @@ def _cmd_host_stage(args) -> None:
 
 def _cmd_host_stage_discover(args) -> None:
     """Read one stage request's ledger status by ID when its plan is gone."""
+    guard_server_execution(args)
     request_id = getattr(args, "request_id", None)
     if not isinstance(request_id, str) or not request_id.strip():
         die("host stage --stage-status requires --request-id; no staging state was opened")
@@ -6219,6 +6234,7 @@ def _cmd_host_stage_discover(args) -> None:
 
 def _cmd_host_image_verify(args) -> None:
     """Verify the additive v2 release bundle before manifest or runtime access."""
+    guard_server_execution(args)
     required = {
         "--machine-plan-set-policy": getattr(args, "machine_plan_set_policy", None),
         "--signed-receipt-directory": getattr(args, "signed_receipt_directory", None),
@@ -6751,6 +6767,7 @@ def _host_image_staging_policy_path(scope_id: str, plan_set_digest: str | None =
 
 def _cmd_host_image_forward_review(validated: dict, args) -> None:
     """Read the exact native successor subject without minting any approval."""
+    guard_server_execution(args)
     from sandbox.hosting.images.activation.repository import ActivationRepository
     from sandbox.hosting.images.activation.settlement_forward import required_predecessor
     from sandbox.hosting.images.activation.settlement_store import SettlementApprovalStore
@@ -6808,6 +6825,7 @@ def _cmd_host_image_forward_review(validated: dict, args) -> None:
 
 
 def _cmd_host_image_authority(validated: dict, args) -> None:
+    guard_server_execution(args)
     from sandbox.hosting.images.provisioning import (
         read_installed_authority, public_authority_projection, target_policy_selector,
     )
@@ -6825,6 +6843,7 @@ def _cmd_host_image_authority(validated: dict, args) -> None:
 
 def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     """Prepare one dependency-ordered, target-locked v2 machine artifact."""
+    guard_server_execution(args)
     from sandbox.transports.remote_hosting_activation import RemoteActivationError
 
     phase = getattr(args, "provision_phase", None)
@@ -7672,6 +7691,7 @@ def _host_image_retained_delivery(validated, remote_name, result, owner_state):
 
 
 def _cmd_host_image(validated: dict, args) -> None:
+    guard_server_execution(args)
     action = getattr(args, "image_action", None)
     response_schema = 0
     delivery_attempt = None
@@ -8164,6 +8184,7 @@ def _cmd_host_image(validated: dict, args) -> None:
 
 
 def _cmd_host_image_status(validated: dict, args) -> None:
+    guard_server_execution(args)
     from sandbox.hosting.images.activation.repository import ActivationRepository
     from sandbox.hosting.images.activation.status import activation_status
 
@@ -8186,6 +8207,7 @@ def _cmd_host_image_status(validated: dict, args) -> None:
 
 
 def _cmd_host_image_settle(validated: dict, args) -> None:
+    guard_server_execution(args)
     from sandbox.hosting.images.activation.repository import ActivationRepository
     from sandbox.hosting.images.activation.settlement_cli import run_settlement
     from sandbox.hosting.images.activation.settlement_observer import SettlementObserver
@@ -8275,6 +8297,7 @@ def _host_apply_lock_wait(args) -> int:
 
 def _cmd_host_destroy(args) -> None:
     """Remove one hosted target from recorded state; dry run without --confirm."""
+    guard_server_execution(args)
     from sandbox.hosting import destroy
     if not getattr(args, "remote", None):
         die("host destroy requires --remote and --target <project>/<environment>")
@@ -8305,6 +8328,7 @@ def _cmd_host_destroy(args) -> None:
 
 def _cmd_host_heal(args) -> None:
     """Spec 066: list, and with --confirm start, restart-exhausted hosted services."""
+    guard_server_execution(args)
     from sandbox.hosting import heal
     if not getattr(args, "remote", None):
         die("host heal requires --remote")
@@ -8330,6 +8354,8 @@ def _cmd_host_heal(args) -> None:
 
 
 def cmd_host(cfg, args) -> None:
+    if host_preconfiguration_dispatch(args):
+        return
     if args.action == "exec":
         from sandbox.commands.host_exec import cmd_host_exec
         cmd_host_exec(args)
@@ -8960,6 +8986,117 @@ def cmd_host(cfg, args) -> None:
         )
 
 
+def _credential_emit(args, code: str, *, success: bool = False) -> None:
+    from dataclasses import asdict
+    from sandbox.hosting.credential_selection import INVENTORY_UNAVAILABLE, STATIC_VALIDATED, UnsupportedResult
+    payload = {"ok": success, "code": code, "availability": "unverified", "execution": "disabled"}
+    if not success:
+        payload = {"ok": False, **asdict(UnsupportedResult(code))}
+    if code == STATIC_VALIDATED:
+        payload.update(scope="server", declarations="valid")
+    elif code == INVENTORY_UNAVAILABLE:
+        payload.update(scope="server", inventory="unavailable")
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(code + ": execution disabled; credential availability unverified."
+              + (" Inventory unavailable." if code == INVENTORY_UNAVAILABLE else ""))
+    if not success:
+        raise SystemExit(2)
+
+
+def credential_argument_error(json_output: bool) -> None:
+    from argparse import Namespace
+    from sandbox.hosting.credential_selection import INVALID
+    _credential_emit(Namespace(json=json_output), INVALID)
+
+
+def _server_static_declarations(args, selection):
+    # This reader never invokes hosting.load_manifest or full validation, which
+    # can run setup, resolve source roots or consult the checkout.
+    from sandbox.hosting.credential_selection import (
+        DeclarationError, StaticValidationResult, parse_declarations,
+    )
+    try:
+        import yaml
+    except ImportError:
+        raise DeclarationError() from None
+    try:
+        path = Path(getattr(args, "project_dir", None) or ".") / "sandbox.hosting.yml"
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise DeclarationError()
+            content = stream.read(1024 * 1024 + 1)
+        if len(content) > 1024 * 1024:
+            raise DeclarationError()
+        # Aliases can expand beyond the file bound; declarations need none.
+        for index, token in enumerate(yaml.scan(content)):
+            if index >= 16384 or isinstance(token, yaml.tokens.AliasToken):
+                raise DeclarationError()
+        class DeclarationLoader(yaml.SafeLoader):
+            def construct_mapping(self, node, deep=False):
+                mapping = {}
+                for key_node, value_node in node.value:
+                    key = self.construct_object(key_node, deep=deep)
+                    if not isinstance(key, str) or key in mapping:
+                        raise DeclarationError()
+                    mapping[key] = self.construct_object(value_node, deep=deep)
+                return mapping
+        manifest = yaml.load(content, Loader=DeclarationLoader)
+        if getattr(args, "all", False):
+            if getattr(args, "environment", None) is not None:
+                raise DeclarationError()
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("environments"), dict):
+                raise DeclarationError()
+            mappings = tuple(sorted(item for name in manifest["environments"]
+                                    for item in parse_declarations(manifest, name)))
+            if not manifest["environments"]:
+                raise DeclarationError()
+        else:
+            mappings = parse_declarations(manifest, getattr(args, "environment", None))
+        return StaticValidationResult(selection, mappings)
+    except (OSError, ValueError, TypeError, RecursionError, yaml.YAMLError):
+        raise DeclarationError() from None
+
+
+def host_preconfiguration_dispatch(args, *, static: bool = True) -> bool:
+    """Handle every server/mixed request before controller configuration access."""
+    from sandbox.hosting.credential_selection import (
+        DeclarationError, PersonalLocalSelection, selection_from_args,
+        INVALID, UNSUPPORTED, INVENTORY_UNAVAILABLE,
+    )
+    try:
+        selection = selection_from_args(args)
+    except DeclarationError:
+        _credential_emit(args, INVALID)
+    if isinstance(selection, PersonalLocalSelection):
+        return False
+    if getattr(args, "generate_secrets", False) or getattr(args, "set_secret", None) is not None:
+        _credential_emit(args, UNSUPPORTED)
+    action = getattr(args, "action", None)
+    if static and action == "validate":
+        try:
+            result = _server_static_declarations(args, selection)
+        except DeclarationError:
+            _credential_emit(args, INVALID)
+        _credential_emit(args, result.code, success=True)
+        return True
+    if static and action == "secrets" and not (
+            getattr(args, "generate_secrets", False) or getattr(args, "set_secret", None)):
+        _credential_emit(args, INVENTORY_UNAVAILABLE)
+    _credential_emit(args, UNSUPPORTED)
+    return True
+
+
+def guard_server_execution(args) -> None:
+    # Direct handlers refuse even when called with an action copied from validate.
+    from argparse import Namespace
+    if isinstance(args, dict):
+        args = Namespace(**args)
+    host_preconfiguration_dispatch(args, static=False)
+
+
 def _host_predispatch_policy(args) -> bool:
     """Keep observation recovery ahead of compatibility state writers."""
     return getattr(args, "action", None) in {"recover", "stage", "image", "plan", "apply", "stack"}
@@ -8968,4 +9105,5 @@ def _host_predispatch_policy(args) -> bool:
 register_specs((CommandSpec(
     "host", cmd_host, owner=__name__, scope="global", legacy_id="host",
     predispatch_policy=_host_predispatch_policy,
+    preconfiguration_dispatch=host_preconfiguration_dispatch,
 ),))

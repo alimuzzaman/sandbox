@@ -1270,6 +1270,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--debounce", type=float, default=0.5,
         help="minimum quiet window after a transfer in watch mode (0.1-10; default 0.5)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
+    host_p.add_argument('--exec-capture-artifacts', action='store_true', help=argparse.SUPPRESS)
 
 
     preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")

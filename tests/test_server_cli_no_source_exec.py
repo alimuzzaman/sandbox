@@ -28,7 +28,7 @@ def selector(data=b'fixture'):
 
 
 class NoSourceReceiverTests(unittest.TestCase):
-    def receive(self, *, changes=None, input_data=b'fixture', observations=None):
+    def receive(self, *, changes=None, input_data=b'fixture', observations=None, capture_available=False):
         value = {**selector(), **(changes or {})}
         args = SimpleNamespace(server_cli=True, local=True, remote=None, request_id='original-exec',
             parent_job_id=None, command=['--', 'cat'], server_cli_exec_selector=json.dumps(value))
@@ -45,6 +45,7 @@ class NoSourceReceiverTests(unittest.TestCase):
             original.seek(0)
             with mock.patch.object(execute, 'read_current_server_owner', return_value=OWNER), \
                     mock.patch.object(execute, 'exec_contract_available', return_value=True), \
+                    mock.patch.object(execute, 'capture_contract_available', return_value=capture_available), \
                     mock.patch.object(execute, 'inspect_current_server_target',
                         side_effect=observations or [{'ok': True, **snapshot()}, {'ok': True, **snapshot()}]), \
                     mock.patch('sandbox.application.context.durable_job_dependencies', return_value={'job_service': self.service}), \
@@ -95,9 +96,18 @@ class NoSourceReceiverTests(unittest.TestCase):
             self.receive(changes={'deadline_at': (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()})
         self.service.submit.assert_not_called()
 
+    def test_binary_receiver_selects_only_bound_artifact_mode_and_fixed_capture_flag(self):
+        self.receive(changes={'output_contract': 'artifact.v1'}, capture_available=True)
+        submission = self.captured['submission']
+        self.assertIn('--exec-capture-artifacts', submission.argv)
+        self.assertEqual(submission.execution_policy_provenance['server_cli.output_contract'], 'artifact.v1')
+        with self.assertRaises(ServerCLIUnavailable):
+            self.receive(changes={'output_contract': 'artifact.v1'}, capture_available=False)
+        self.service.submit.assert_not_called()
+
 
 class NoSourceClientTests(unittest.TestCase):
-    def invoke(self, *, payload=None, terminated=None):
+    def invoke(self, *, payload=None, terminated=None, output_mode='utf8'):
         record = {'joined': True, 'provisioned': True, 'control_transport': 'tailscale',
             'ssh': 'alim@212.95.33.238', 'tailscale_host': '100.64.1.2', 'front_door': 'nginx',
             'mcp_service': {'ownership_marker': OWNER.ownership_marker, 'runtime_revision': OWNER.runtime_revision}}
@@ -121,6 +131,7 @@ class NoSourceClientTests(unittest.TestCase):
                     'server_cli.runtime_revision': OWNER.runtime_revision,
                     'server_cli.remote_name': 'box', 'server_cli.target_selector_digest': snapshot()['selector_digest'],
                     'server_cli.exec_service': 'wordpress', 'server_cli.exec_target': 'fixture/dev',
+                    'server_cli.output_contract': selected['output_contract'],
                     'server_cli.stdin_sha256': selected['stdin_sha256'],
                     'server_cli.stdin_size': str(selected['stdin_size']),
                     'server_cli.absolute_deadline_at': selected['deadline_at']}}}
@@ -136,11 +147,13 @@ class NoSourceClientTests(unittest.TestCase):
                     mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.control', return_value={
                         'ok': True, 'target_identity': OWNER.target_identity,
                         'ownership_marker': OWNER.ownership_marker, 'runtime_revision': OWNER.runtime_revision,
-                        'server_exec_capabilities': [execute.CONTRACT]}), \
+                        'server_exec_capabilities': [execute.CONTRACT],
+                        'server_exec_capture_capabilities': ['job.server-cli.capture-artifact.v1']}), \
                     mock.patch('sandbox.remote_runtime.verdict.strict_requested', return_value=False), \
                     mock.patch.object(_remote, 'deploy_exact_working_tree', side_effect=AssertionError('no controller source')):
                 return execute.submit_server_cli_exec('box', snapshot=snapshot(), service='wordpress',
-                    argv=['cat'], stdin_fd=original.fileno(), request_id='original-exec', timeout_seconds=30)
+                    argv=['cat'], stdin_fd=original.fileno(), request_id='original-exec', timeout_seconds=30,
+                    output_mode=output_mode)
 
     def test_no_source_submission_uses_private_keyless_tailnet_and_exact_original_stdin_once(self):
         receipt = self.invoke()
@@ -166,6 +179,12 @@ class NoSourceClientTests(unittest.TestCase):
         with self.assertRaises(ServerCLIUnavailable):
             self.invoke(payload={'ok': False, 'status': 'refused', 'code': 'server_cli_exec_unavailable'})
         self.assertEqual(len(self.calls), 1)
+
+    def test_binary_submission_binds_artifact_mode_without_putting_payload_in_argv(self):
+        self.invoke(output_mode='artifact')
+        parts = shlex.split(self.calls[0][0][-1])
+        selected = json.loads(parts[parts.index('--server-cli-exec-selector') + 1])
+        self.assertEqual(selected['output_contract'], 'artifact.v1')
 
     def test_missing_installed_capability_refuses_before_original_stdin_or_submit(self):
         with mock.patch.object(_remote, 'get_remote', return_value={

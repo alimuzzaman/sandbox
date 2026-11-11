@@ -134,13 +134,18 @@ export interface HostingView {
 export interface ShareCreated {
   ok: true; link: string; link_id: string; target: string; entry: string; kind: string;
   scope: string; expires_at: number; expires_clamped: boolean; uses: number | null;
-  hostname: string; notes?: string[];
+  hostname: string; notes?: string[]; attempt_id?: string; phase?: SharePhase;
 }
 export interface ShareLinkRow { id: string; kind: string; scope: string; issued_at: number; expires_at: number; uses: number | null; used: number }
 export interface ShareSessionRow { id: string; link: string; created_at: number; expires_at: number }
-export interface ShareList { ok: true; target: string; entry: string; links: ShareLinkRow[]; sessions: ShareSessionRow[] }
+export type SharePhase = "prepared" | "minting" | "active" | "revoking" | "cleanup_pending" | "revoked" | "expired";
+export interface ShareGap { stack: string; target: string; hostname?: string; piece: string; code: string; fix: string }
+export interface ShareGrant { target: string; entry: string; id: string; expires_at: number; status: "live" | "unknown"; reason_code: string }
+export interface ShareAttempt { attempt_id: string; phase: SharePhase; link_id: string; expires_at: number; still_live?: ShareGrant[] }
+export interface SharePartial { ok: false; attempt_id?: string; phase: "cleanup_pending"; still_live: ShareGrant[]; code: string; message: string }
+export interface ShareList { ok: boolean; target?: string; entry?: string; links: ShareLinkRow[]; sessions: ShareSessionRow[]; attempts: ShareAttempt[]; partial_reasons?: string[] }
 export interface ShareRevoked { ok: true; target: string; entry: string; revoked_links: number; revoked_sessions: number; revoked_keys: number }
-export interface ShareRefused { ok: false; code: string; message: string }
+export interface ShareRefused { ok: false; code: string; message: string; gaps?: ShareGap[] }
 
 export interface ActionResult {
   ok?: boolean;

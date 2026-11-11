@@ -29,6 +29,7 @@ from sandbox.hosting import login_service as login  # noqa: E402
 from sandbox.hosting import share  # noqa: E402
 from sandbox.hosting.front_door import nginx  # noqa: E402
 from sandbox.hosting.share import stack_page  # noqa: E402
+from sandbox.hosting.share import attempts as share_attempts  # noqa: E402
 from tests.subprocess_support import run_test_process  # noqa: E402
 
 IMAGE = "python:3.13-alpine@sha256:" + "a" * 64
@@ -82,7 +83,8 @@ class ManifestTests(unittest.TestCase):
         validated = _validate(_environment(_share()))
         declaration = validated["login_service"]
         self.assertEqual(declaration["share"], {"hostname": GATE, "private": True, "agent_mint": True,
-                                                "stack_sign_in": []})
+                                                "stack_sign_in": [], "route_sign_in": {},
+                                                "inbox_sign_in": None, "linked_access": {}})
         entry = declaration["entries"]["share"]
         self.assertEqual((entry["mode"], entry["hostname"], entry["upstream"]),
                          ("site_gate", GATE, "http://web:8080"))
@@ -624,6 +626,116 @@ class StackPageTests(unittest.TestCase):
             page = stack_page.build(found, validated["login_service"], request_email="qa@dev.example.test")
         self.assertEqual(page["sign_in"], [{"entry": "qa", "email": "qa@dev.example.test"}])
         self.assertEqual(login.gate_hostnames(validated["login_service"]), {GATE, "login.dev.example.test"})
+
+
+class FanoutRoutingTests(unittest.TestCase):
+    def test_durable_revoke_checks_explicit_selectors_before_cleanup(self):
+        target = share_attempts.Target("dev", "mockups", "dev")
+        parent = share_attempts.Parent(target, "parent-stack")
+        grant = share_attempts.Grant(target, "share", "l-" + "a" * 12, 2000)
+        attempt = share_attempts.Attempt("a-" + "b" * 32, parent, 1000, 2000, "active", (grant,))
+        project_dir = "/explicit/project"
+        selectors = [
+            {"target": "other/dev"},
+            {"name": "other-stack"},
+            {"stack": "other-stack"},
+            {"environment": "production"},
+            {"entry": "other-entry"},
+            {"project_dir": project_dir},
+        ]
+        with patch.object(host_share.fanout, "recorded", return_value=(attempt,)), \
+             patch.object(host_share.fanout, "revoke_attempt") as revoke, \
+             patch.object(host_share, "revoke_on_gate") as gate_revoke, \
+             patch.object(stack_page, "remove_wordpress_keys") as remove_keys, \
+             patch.object(host_share.hosting, "validate_manifest",
+                          return_value={"project": "other", "environment": "dev"}), \
+             patch.object(host_share, "resolve_target") as resolve, \
+             patch.object(host_share, "_audit"):
+            for selector in selectors:
+                with self.subTest(selector=next(iter(selector))), self.assertRaises(share.ShareRefusal) as raised:
+                    host_share.revoke_share("dev", grant.id, **selector)
+                self.assertEqual(raised.exception.code, "share_options_conflict")
+                self.assertNotIn("other", raised.exception.message)
+                revoke.assert_not_called()
+                gate_revoke.assert_not_called()
+                remove_keys.assert_not_called()
+            resolve.assert_not_called()
+
+    def test_durable_revoke_accepts_matching_selectors_and_id_only_recovery(self):
+        target = share_attempts.Target("dev", "mockups", "dev")
+        parent = share_attempts.Parent(target, "parent-stack")
+        grant = share_attempts.Grant(target, "share", "l-" + "a" * 12, 2000)
+        attempt = share_attempts.Attempt("a-" + "b" * 32, parent, 1000, 2000, "active", (grant,))
+        project_dir = "/explicit/project"
+        with patch.object(host_share.fanout, "recorded", return_value=(attempt,)), \
+             patch.object(host_share.fanout, "revoke_attempt", return_value={"ok": True}) as revoke, \
+             patch.object(host_share.hosting, "validate_manifest",
+                          return_value={"project": "mockups", "environment": "dev"}), \
+             patch.object(host_share, "resolve_target", side_effect=AssertionError("replacement resolution")), \
+             patch.object(host_share, "_audit"):
+            for selector in ({"target": "mockups/dev"}, {"name": "parent-stack"},
+                             {"stack": "parent-stack"}, {"environment": "dev"},
+                             {"entry": "share"}, {"project_dir": project_dir}, {}):
+                host_share.revoke_share("dev", grant.id, **selector)
+            self.assertEqual(revoke.call_count, 7)
+
+    def test_stack_create_uses_fanout_and_keeps_partial_result_private(self):
+        partial = {"ok": False, "attempt_id": "a-" + "a" * 32,
+                   "phase": "cleanup_pending", "still_live": []}
+        with patch.object(host_share.fanout, "recorded", return_value=()), \
+             patch.object(host_share, "resolve_target") as resolve, \
+             patch.object(host_share, "_declaration", return_value={"share": {"agent_mint": True}}), \
+             patch.object(login, "assert_applicable"), \
+             patch.object(host_share, "_entry_name", return_value="share"), \
+             patch.object(host_share.fanout, "create", return_value=partial), \
+             patch.object(host_share, "_audit"):
+            result = host_share.create_share("dev", stack="parent")
+        self.assertEqual(result, partial)
+        self.assertNotIn("link", result)
+
+    def test_early_recorded_lookup_failure_is_audited(self):
+        with patch.object(host_share.fanout, "recorded", side_effect=RuntimeError("ledger unavailable")), \
+             patch.object(host_share, "_audit") as audit:
+            with self.assertRaises(share.ShareRefusal):
+                host_share.revoke_share("dev", "all", stack="parent")
+        self.assertEqual(audit.call_args.kwargs["outcome"], "refused")
+
+    def test_cli_partial_create_does_not_format_a_success_link(self):
+        args = SimpleNamespace(remote="dev", image_action="create", json=True)
+        partial = {"ok": False, "attempt_id": "a-" + "a" * 32,
+                   "phase": "cleanup_pending", "still_live": []}
+        output = io.StringIO()
+        with patch.object(host_share, "create_share", return_value=partial), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                host_share.cmd_host_share(args)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue()), partial)
+
+    def test_cli_partial_list_is_nonzero_and_shows_retained_attempts(self):
+        grant_id = "l-" + "b" * 12
+        attempt_id = "a-" + "a" * 32
+        for reason in ("current_parent_unavailable", "durable_cleanup_pending"):
+            partial = {"ok": False, "target": "stack:parent", "entry": "share",
+                       "links": [], "sessions": [], "partial_reasons": [reason],
+                       "attempts": [{"attempt_id": attempt_id, "phase": "cleanup_pending",
+                                     "target": "dev/parent/dev", "grants": [
+                                         {"id": grant_id, "target": "dev/child/dev",
+                                          "entry": "share", "status": "unknown"}]}]}
+            for as_json in (False, True):
+                with self.subTest(reason=reason, json=as_json):
+                    args = SimpleNamespace(remote="dev", image_action="list", json=as_json)
+                    output = io.StringIO()
+                    with patch.object(host_share, "list_shares", return_value=partial), \
+                            contextlib.redirect_stdout(output):
+                        with self.assertRaises(SystemExit) as raised:
+                            host_share.cmd_host_share(args)
+                    self.assertEqual(raised.exception.code, 1)
+                    if as_json:
+                        self.assertEqual(json.loads(output.getvalue()), partial)
+                    else:
+                        for value in ("Inventory incomplete", reason, attempt_id, grant_id,
+                                      "dev/child/dev", "unknown", "cleanup_pending"):
+                            self.assertIn(value, output.getvalue())
 
 
 if __name__ == "__main__":

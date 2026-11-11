@@ -163,14 +163,25 @@ def _check_allowed_string(value: str, path: tuple, ports: tuple[str, ...]) -> No
         raise StackTemplateError(TEMPLATE_INVALID, f"{_display(path)} contains an unbalanced brace")
 
 
+_ROUTE_KEYS_PATH = ("environments", "*", "share", "route_sign_in")
+_LINKED_KEYS_PATH = ("environments", "*", "share", "linked_access")
+
+
+def _hostname_keys(path: tuple) -> bool:
+    return _matches(path, _ROUTE_KEYS_PATH) or _matches(path, _LINKED_KEYS_PATH)
+
+
 def _scan(node: object, path: tuple, ports: tuple[str, ...]) -> None:
     if _is_exempt(path):
         return
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(key, str) and _BRACE_RE.search(key):
-                raise StackTemplateError(
-                    TEMPLATE_INVALID, f"{_display(path + (key,))}: mapping keys cannot hold placeholders")
+                if _hostname_keys(path):
+                    _check_allowed_string(key, path + (key,), ports)
+                else:
+                    raise StackTemplateError(
+                        TEMPLATE_INVALID, f"{_display(path + (key,))}: mapping keys cannot hold placeholders")
             _scan(value, path + (key,), ports)
         return
     if isinstance(node, list):
@@ -277,7 +288,13 @@ def _substitute(value: str, context: dict[str, str], *, regex: bool = False) -> 
 
 def _render_node(node: object, path: tuple, context: dict[str, str]) -> object:
     if isinstance(node, dict):
-        return {key: _render_node(value, path + (key,), context) for key, value in node.items()}
+        rendered = {}
+        for key, value in node.items():
+            name = _substitute(key, context) if _hostname_keys(path) else key
+            if name in rendered:
+                raise StackTemplateError(TEMPLATE_INVALID, f"rendered {_display(path)} keys collide")
+            rendered[name] = _render_node(value, path + (key,), context)
+        return rendered
     if isinstance(node, list):
         return [_render_node(item, path + (index,), context) for index, item in enumerate(node)]
     if isinstance(node, str) and _is_allowed(path) and not _is_exempt(path):

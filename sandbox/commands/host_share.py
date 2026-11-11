@@ -20,7 +20,7 @@ import sandbox.core._remote as remote
 from sandbox.hosting import login_service as login
 from sandbox.hosting import share, target_resolution
 from sandbox.hosting.share import ShareRefusal
-from sandbox.hosting.share import stack_page
+from sandbox.hosting.share import stack_page, fanout
 
 # The MCP tools set this, so a target without the agent opt-in never reaches for a
 # terminal that may belong to the person's coding session.
@@ -143,6 +143,7 @@ def mint_link(validated: dict, entry: dict, request: share.LinkRequest, *,
 def _audit(found: ShareTarget | None, op: str, *, remote_name: str, target_label: str, outcome: str,
            code: str | None = None, **fields) -> None:
     """Controller record always; server record when the target is known. Never blocks."""
+    fields.setdefault("entry", None)
     record = share.audit_record(
         op, remote=remote_name, target=target_label, outcome=outcome, code=code,
         controller=share.controller_name(),
@@ -150,16 +151,15 @@ def _audit(found: ShareTarget | None, op: str, *, remote_name: str, target_label
     try:
         share.append_audit(record)
     except OSError as exc:
-        print(f"sb host share: warning: audit record not written: {exc.strerror or exc}", file=sys.stderr)
+        print("sb host share: warning: controller audit record not written", file=sys.stderr)
     if found is None:
         return
     from sandbox.commands.hosting import _remote_checked
     try:
         home = remote.resolve_sandbox_home(found.entry)
         _remote_checked(found.entry, share.remote_audit_command(home, record), timeout=30)
-    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
-        print("sb host share: warning: server audit record not written: "
-              + remote.redact_text(str(exc))[:200], file=sys.stderr)
+    except Exception:
+        print("sb host share: warning: server audit record not written", file=sys.stderr)
 
 
 def _operator_terminal():
@@ -180,32 +180,37 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
     label = target or (f"stack:{stack}" if stack else name) or "unresolved"
     request = None
     try:
+        if sum(bool(value) for value in (target, name, stack)) > 1:
+            raise ShareRefusal("share_options_conflict", "pass at most one of --target, --name or --stack")
         if os.environ.get(JOB_ENV):
             raise ShareRefusal("job_output_refused",
                                "a durable job stores its output, and a share link must not land there")
+        if stack:
+            for previous in fanout.recorded(remote_name, stack=stack):
+                if previous.phase not in ("active", "revoked", "expired"):
+                    cleanup = fanout.revoke_attempt(previous)
+                    if not cleanup["ok"]:
+                        _audit(None, "create", remote_name=remote_name, target_label=label,
+                               outcome="refused", code="share_cleanup_pending")
+                        return cleanup
         found = resolve_target(remote_name, target=target, name=name, stack=stack,
                                project_dir=project_dir, environment=environment)
         label = found.label
-        declaration = _declaration(found)
-        login.assert_applicable(declaration, now=time.time())
-        name_ = _entry_name(declaration, entry)
+        declaration = (found.validated.get("login_service") or {}) if stack else _declaration(found)
+        if not stack:
+            login.assert_applicable(declaration, now=time.time())
+        name_ = (entry or share.SHARE_ENTRY) if stack else _entry_name(declaration, entry)
         if stack and path is not None:
             raise ShareRefusal("share_options_conflict", "--path does not apply to a stack page")
-        if stack and name_ != share.SHARE_ENTRY:
-            # The page probes the stack's hostnames through the share entry's upstream.
-            raise ShareRefusal(
-                "stack_share_not_declared",
-                f"stack {stack} has no `share:` block in its manifest; add one (hostname, agent_mint) "
-                "to the stack template and run `sb host stack up` again")
         if email is not None and not stack:
             raise ShareRefusal("share_options_conflict", "--email applies only to --stack")
         request = share.LinkRequest(
             entry=name_, kind="stack" if stack else "site",
             scope=share.STACK_PAGE_PATH if stack else share.validate_scope(path),
             ttl_seconds=share.parse_ttl(ttl), uses=share.parse_uses(uses))
-        agent_mint = bool((login.share_declaration(declaration) or {}).get("agent_mint"))
+        agent_mint = False if stack else bool((login.share_declaration(declaration) or {}).get("agent_mint"))
         terminal = None
-        if not agent_mint:
+        if not agent_mint and not stack:
             if caller != "cli" or os.environ.get(CALLER_ENV):
                 raise ShareRefusal(
                     "agent_mint_not_enabled",
@@ -217,10 +222,17 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
                     "terminal_required",
                     "this target does not allow agent-made links, so the link is shown only on the "
                     "owner's terminal; set `share.agent_mint: true` to return it in --json")
-        stack_record = None
         if stack:
-            stack_record = stack_page.build(found, declaration, request_email=email)
-        result = _mint_locked(found, request, stack_record)
+            result = fanout.create(found, request, email=email, requested_entry=entry)
+            if result.get("ok") is False:
+                _audit(found, "create", remote_name=remote_name, target_label=label,
+                       outcome="refused", code="share_cleanup_pending", entry=request.entry)
+                return result
+        else:
+            result = _mint_locked(found, request, None)
+        if stack:
+            from dataclasses import replace
+            request = replace(request, entry=result["entry"])
         minted = result.pop("_minted")
         result["link_id"] = minted.link_id
         link = share.share_url(result["hostname"], minted.token)
@@ -279,20 +291,34 @@ def list_shares(remote_name: str, *, target: str | None = None, name: str | None
                 stack: str | None = None, project_dir: str | None = None,
                 environment: str | None = None, entry: str | None = None) -> dict:
     found, label, name_ = None, target or name or stack or "unresolved", entry
+    rows = ()
     try:
+        if sum(bool(value) for value in (target, name, stack)) > 1:
+            raise ShareRefusal("share_options_conflict", "pass at most one of --target, --name or --stack")
+        if stack:
+            rows = fanout.recorded(remote_name, stack=stack)
         found = resolve_target(remote_name, target=target, name=name, stack=stack,
                                project_dir=project_dir, environment=environment)
         label = found.label
         name_ = _entry_name(_declaration(found), entry)
         reply = _remote_site(found, "list", name_)
+        if reply.get("ok") is not True or not isinstance(reply.get("links"), list) or not isinstance(reply.get("sessions"), list):
+            raise ShareRefusal("share_list_unavailable", "current gate grants could not be confirmed")
     except Exception as exc:  # noqa: BLE001
         refusal = _refusal_from(exc)
         _audit(found, "list", remote_name=remote_name, target_label=label, outcome="refused",
                code=refusal.code, entry=name_)
+        if stack and rows:
+            return {"ok": False, "target": f"stack:{stack}", "entry": name_, "links": [], "sessions": [],
+                    "attempts": [fanout.summary(row) for row in rows],
+                    "partial_reasons": ["current_parent_unavailable"]}
         raise refusal from None
     _audit(found, "list", remote_name=remote_name, target_label=label, outcome="ok", entry=name_)
-    return {"ok": True, "target": label, "entry": name_, "links": list(reply.get("links") or []),
-            "sessions": list(reply.get("sessions") or [])}
+    incomplete = any(row.phase not in ("active", "revoked", "expired") for row in rows)
+    return {"ok": not incomplete, "target": label, "entry": name_, "links": list(reply.get("links") or []),
+            "sessions": list(reply.get("sessions") or []),
+            **({"attempts": [fanout.summary(row) for row in rows]} if stack else {}),
+            **({"partial_reasons": ["durable_cleanup_pending"]} if incomplete else {})}
 
 
 def revoke_on_gate(found: ShareTarget, name: str, link_id: str) -> dict:
@@ -316,11 +342,68 @@ def revoke_on_gate(found: ShareTarget, name: str, link_id: str) -> dict:
     return {**reply, "revoked_keys": keys}
 
 
+def _check_recorded_revoke_selectors(remote_name: str, attempt, *, target: str | None = None,
+                                    name: str | None = None, stack: str | None = None,
+                                    project_dir: str | None = None, environment: str | None = None,
+                                    entry: str | None = None) -> None:
+    """Bind explicit selectors to the durable original identity before cleanup effects."""
+    original = attempt.parent.target
+    compatible = original.remote == remote_name
+    if target is not None:
+        try:
+            compatible = compatible and target_resolution.parse_target(target) == (
+                original.project, original.environment)
+        except Exception:
+            compatible = False
+    if name is not None and name != attempt.parent.stack:
+        compatible = False
+    if stack is not None and stack != attempt.parent.stack:
+        compatible = False
+    if environment is not None and environment != original.environment:
+        compatible = False
+    if entry is not None and (not attempt.grants or entry != attempt.grants[0].entry):
+        compatible = False
+    if project_dir is not None:
+        try:
+            # The supplied manifest can confirm identity, but never grants authority
+            # to resolve or clean up a replacement runtime.
+            declared = hosting.validate_manifest(project_dir, original.environment)
+            compatible = compatible and declared.get("project") == original.project \
+                and declared.get("environment") == original.environment
+        except Exception:
+            compatible = False
+    if not compatible:
+        raise ShareRefusal("share_options_conflict", "explicit selectors do not match the recorded share target")
+
+
 def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, name: str | None = None,
                  stack: str | None = None, project_dir: str | None = None,
                  environment: str | None = None, entry: str | None = None) -> dict:
     found, label, name_ = None, target or name or stack or "unresolved", entry
     try:
+        if sum(value is not None for value in (target, name, stack)) > 1:
+            raise ShareRefusal("share_options_conflict", "pass at most one of --target, --name or --stack")
+        if isinstance(link_id, str) and share.LINK_ID_RE.fullmatch(link_id):
+            # Find the retained original by ID first; a conflicting --stack must
+            # be refused, not hide the row and fall through to a current runtime.
+            rows = fanout.recorded(remote_name, link_id=link_id)
+            if rows:
+                label = f"stack:{rows[0].parent.stack}"
+                name_ = rows[0].grants[0].entry if rows[0].grants else None
+                _check_recorded_revoke_selectors(
+                    remote_name, rows[0], target=target, name=name, stack=stack,
+                    project_dir=project_dir, environment=environment, entry=entry)
+                result = fanout.revoke_attempt(rows[0])
+                _audit(None, "revoke", remote_name=remote_name, target_label=f"stack:{rows[0].parent.stack}",
+                       outcome="ok" if result["ok"] else "refused", link_id=link_id,
+                       code=None if result["ok"] else "share_cleanup_pending", entry=entry)
+                return result
+        if stack and link_id == "all":
+            result = _revoke_stack_all(remote_name, stack, entry=entry)
+            _audit(None, "revoke", remote_name=remote_name, target_label=f"stack:{stack}", entry=entry,
+                   outcome="ok" if result["ok"] else "refused", link_id="all",
+                   code=None if result["ok"] else "share_cleanup_pending")
+            return result
         if not isinstance(link_id, str) or not share.REVOKE_TARGET_RE.fullmatch(link_id):
             raise ShareRefusal("site_link_unknown", "pass a link id (l-...), a session id (s-...), or all")
         found = resolve_target(remote_name, target=target, name=name, stack=stack,
@@ -348,6 +431,70 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
             "revoked_keys": reply.get("revoked_keys", 0)}
 
 
+def _revoke_stack_all(remote_name, stack, *, entry=None):
+    """Original durable ids plus legacy grants on this parent's current gate only."""
+    rows = fanout.recorded(remote_name, stack=stack)
+    results, reasons = [], []
+    for row in rows:
+        try:
+            results.append(fanout.revoke_attempt(row))
+        except Exception:
+            results.append(fanout.pending(row))
+            reasons.append("durable_cleanup_unconfirmed")
+    try:
+        found = resolve_target(remote_name, stack=stack)
+        selected = _entry_name(_declaration(found), entry)
+        from sandbox.commands.hosting import _host_share_effects
+        # Keep lookup and legacy cleanup under the same target lease. Never send
+        # 'all' to a companion or infer that its gate belongs to this parent.
+        with _host_share_effects((fanout.target(found),)):
+            reply = _remote_site(found, "list", selected)
+            if (reply.get("ok") is not True or not isinstance(reply.get("links"), list)
+                    or not isinstance(reply.get("sessions"), list)):
+                raise ValueError("unconfirmed current grants")
+            ids = []
+            for grant in [*reply["links"], *reply["sessions"]]:
+                ident = grant.get("id") if isinstance(grant, dict) else None
+                if not isinstance(ident, str) or not share.REVOKE_TARGET_RE.fullmatch(ident) or ident == "all":
+                    raise ValueError("invalid current grant")
+                ids.append((ident, grant.get("link")))
+            protected = {grant.id for row in fanout.recorded(remote_name)
+                         for grant in row.grants if row.parent.stack != stack}
+            durable = {grant.id for row in rows for grant in row.grants}
+            for ident, source in dict.fromkeys(ids):
+                if ident in protected or source in protected or ident in durable or source in durable:
+                    continue
+                try:
+                    result = revoke_on_gate(found, selected, ident)
+                    if any(type(result.get(key)) is not int or result[key] < 0
+                           for key in ("revoked_links", "revoked_sessions", "revoked_keys")):
+                        raise ValueError("invalid revoke receipt")
+                    results.append({"ok": True, **result})
+                    _audit(found, "revoke", remote_name=remote_name, target_label=found.label,
+                           entry=selected, link_id=ident, outcome="ok")
+                except Exception:
+                    reasons.append("legacy_cleanup_unconfirmed")
+                    results.append({"ok": False, "still_live": [{"target": found.label, "entry": selected,
+                        "id": ident, "expires_at": None, "status": "unknown", "reason_code": "legacy_cleanup_unconfirmed"}]})
+                    _audit(found, "revoke", remote_name=remote_name, target_label=found.label,
+                           entry=selected, link_id=ident, outcome="refused", code="legacy_cleanup_unconfirmed")
+    except Exception:
+        reasons.append("current_parent_unavailable")
+    failed = [result for result in results if not result["ok"]]
+    counts = {key: sum(result.get(key, 0) for result in results)
+              for key in ("revoked_links", "revoked_sessions", "revoked_keys")}
+    result = {"ok": not failed and not reasons, "target": f"stack:{stack}", "entry": entry,
+              **counts}
+    if failed or reasons:
+        result.update(phase="cleanup_pending", code="share_cleanup_pending",
+                      message="Some original or current grants could not be confirmed revoked.",
+                      still_live=[grant for row in failed for grant in row.get("still_live", [])],
+                      partial_reasons=sorted(set(reasons)))
+        if rows:
+            result["attempt_id"] = rows[0].id
+    return result
+
+
 def _utc(epoch: object) -> str:
     try:
         return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(int(epoch)))
@@ -366,6 +513,9 @@ def cmd_host_share(args) -> None:
             result = create_share(args.remote, path=getattr(args, "share_path", None),
                                   ttl=getattr(args, "ttl", None), uses=getattr(args, "uses", None),
                                   email=getattr(args, "email", None), caller="cli", **selector)
+            if result.get("ok") is False:
+                print(json.dumps(result, sort_keys=True) if as_json else result.get("message", "Share cleanup remains unconfirmed."))
+                raise SystemExit(1)
             line = (f"Share link {result['link_id']} for {result['hostname']}"
                     f" ({result['kind']}, scope {result['scope']}), "
                     + (f"{result['uses']} use(s)" if result["uses"] else "no use limit")
@@ -383,19 +533,34 @@ def cmd_host_share(args) -> None:
                    for item in result["links"]]
                 + [f"  {item.get('id')} from {item.get('link')}, expires {_utc(item.get('expires_at'))}"
                    for item in result["sessions"]])
+            for attempt in result.get("attempts", []):
+                text += (f"\n  Attempt {attempt['attempt_id']} {attempt['target']}"
+                         f" {attempt['phase']}")
+                for grant in attempt.get("grants", []):
+                    text += (f"\n    {grant['id']} {grant['target']} ({grant['entry']})"
+                             f" {grant['status']}")
+            if result.get("ok") is False:
+                text = ("Inventory incomplete: " + ", ".join(result.get("partial_reasons", []))
+                        + "\n" + text)
         elif verb == "revoke":
             target_id = getattr(args, "share_id", None)
             result = revoke_share(args.remote, target_id, **selector)
+            if result.get("ok") is False:
+                print(json.dumps(result, sort_keys=True) if as_json else result.get("message", "Share cleanup remains unconfirmed."))
+                raise SystemExit(1)
             text = (f"Revoked {result['revoked_links']} link(s), {result['revoked_sessions']} session(s) "
                     f"and {result['revoked_keys']} sign-in key(s)")
         else:
             raise ShareRefusal("share_options_conflict", "usage: sb host share create|list|revoke ID|all")
     except ShareRefusal as exc:
         if as_json:
-            print(json.dumps({"ok": False, "code": exc.code, "message": exc.message}, sort_keys=True))
+            print(json.dumps({"ok": False, "code": exc.code, "message": exc.message,
+                              **({"gaps": exc.gaps} if isinstance(exc, fanout.CoverageRefusal) else {})}, sort_keys=True))
         else:
             print(f"sb host share: {exc.code}: {exc.message}", file=sys.stderr)
         raise SystemExit(1) from None
     print(json.dumps(result, sort_keys=True) if as_json else text)
+    if result.get("ok") is False:
+        raise SystemExit(1)
 
 

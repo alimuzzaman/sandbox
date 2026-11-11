@@ -237,11 +237,6 @@ _SHARE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SHARE_KEYS = {"create": frozenset({"action", "remote", "stack"}),
                "list": frozenset({"action", "remote", "stack"}),
                "revoke": frozenset({"action", "remote", "stack", "id"})}
-_SHARE_CREATE_FIELDS = ("ok", "link", "link_id", "target", "entry", "kind", "scope", "expires_at",
-                        "expires_clamped", "uses", "hostname", "notes")
-_SHARE_LINK_FIELDS = ("id", "kind", "scope", "issued_at", "expires_at", "uses", "used")
-_SHARE_SESSION_FIELDS = ("id", "link", "created_at", "expires_at")
-_SHARE_REVOKE_FIELDS = ("ok", "target", "entry", "revoked_links", "revoked_sessions", "revoked_keys")
 
 
 def _share_request_allowed(peer, bound_host, headers, allowed_names: frozenset[str] = frozenset()) -> bool:
@@ -303,13 +298,175 @@ def _pick(source: dict, fields) -> dict:
     return {key: source[key] for key in fields if key in source}
 
 
-def _web_share(payload) -> tuple[int, dict]:
-    """Create, list or revoke a stack's share links in process, as the panel caller.
+# This is a public read model, never a shallow copy of a private gate/ledger body.
+_SHARE_PHASES = frozenset({"prepared", "minting", "active", "revoking", "cleanup_pending", "revoked", "expired"})
+_SHARE_GUIDANCE = {
+    "share_missing": "declare share with a served gate hostname and apply",
+    "basic_auth": "remove BasicAuth or provide supported access",
+    "private_wordpress": "private WordPress cannot be reached by a public stack grant",
+    "inbox_uncovered": "set share.inbox_sign_in to a listed inbox_gate entry and apply",
+    "host_invalid": "record an exact lowercase DNS hostname; wildcards are unsupported",
+    "host_suffix": "add this hostname to allowed_host_suffixes and apply",
+    "linked_access_unknown": "resolve linked-site access metadata before sharing",
+    "linked_access_unsupported": "declare supported gate access for the linked-site",
+    "gate_uncovered": "list a supported magic_link or inbox_gate action",
+    "private_route": "configure supported gate access for private routes",
+    "companion_overflow": "declare at most four direct uses",
+    "companion_duplicate": "remove duplicate direct uses",
+    "remote_mismatch": "use stacks on the same remote",
+    "companion_unavailable": "restore the recorded same-remote stack and manifest",
+    "agent_mint_not_enabled": "enable share.agent_mint and apply",
+    "share_protocol_unsupported": "restore the gate and install all four stack-page capabilities",
+    "share_page_unavailable": "resolve declared sign-in email and exact page bounds",
+}
+_SHARE_MESSAGES = {
+    "agent_mint_not_enabled": "set `share.agent_mint: true`",
+    "stack_share_not_declared": "declare stack share access and apply",
+    "share_runtime_unknown": "original runtime identity could not be confirmed",
+    "site_link_unknown": "no live share link or session has that id",
+    "share_target_changed": "target changed during share preparation; retry after checking its state",
+    "share_window_expired": "every stack needs at least 60 seconds remaining",
+    "share_protocol_unsupported": "the gate needs all four stack-page capabilities",
+    "share_mint_unknown": "grant creation could not be confirmed; inspect cleanup status",
+    "share_page_invalid": "the declared stack page is invalid or exceeds its bounds",
+    "login_service_expired": "the declared login service has expired",
+    "share_options_conflict": "share options conflict with the declared access policy",
+    "share_cleanup_pending": "Original grants require confirmed cleanup before another share.",
+    "stack_unknown": "the controller has no available record for this stack",
+    "stack_share_coverage_incomplete": "stack access coverage is incomplete",
+    "share_failed": "the share request failed; inspect it on the controller",
+}
+_SHARE_REASONS = frozenset({"cleanup_unconfirmed", "share_runtime_unknown", "share_cleanup_failed",
+    "current_parent_unavailable", "original_runtime_unproven", "parent_unavailable", "parent_missing", "parent_unreachable", "gate_unavailable",
+    "list_unavailable", "wordpress_cleanup_unknown", "gate_cleanup_unknown", "cleanup_pending", "projection_invalid", "share_failed"})
 
-    The share functions own validation, the agent opt-in and the audit. Only the
-    create result carries ``link``; nothing here prints, logs or keeps it.
-    """
-    import sandbox.core._remote as remote_core
+
+def _share_name(value, *, target=False, hostname=False):
+    if not isinstance(value, str) or len(value) > 253:
+        return None
+    parts = re.split(r"[./:]", value) if target or hostname else [value]
+    if (not parts or len(parts) > 16 or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", part)
+            or re.search(r"[0-9a-f]{12,}", part) or len(part) > 32 for part in parts)):
+        return None
+    if not (target or hostname) and len(parts) != 1:
+        return None
+    return value
+
+
+def _share_int(value):
+    return value if type(value) is int and 0 <= value <= 253402300799 else None
+
+
+def _share_id(value, *, attempt=False):
+    pattern = r"a-[0-9a-f]{32}" if attempt else _SHARE_ID_RE
+    return value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+
+
+def _share_scope(value):
+    if value in ("/", "/__sandbox/stack"):
+        return value
+    if not isinstance(value, str) or len(value) > 512 or not value.startswith("/"):
+        return None
+    parts = value.strip("/").split("/")
+    return value if len(parts) <= 16 and all(_share_name(part) for part in parts) else None
+
+
+def _share_grants(rows):
+    if not isinstance(rows, list):
+        return []
+    result = []
+    for row in rows[:500]:
+        if not isinstance(row, dict):
+            continue
+        safe = {"target": _share_name(row.get("target"), target=True), "entry": _share_name(row.get("entry")),
+                "id": _share_id(row.get("id")), "expires_at": _share_int(row.get("expires_at")),
+                "status": row.get("status") if row.get("status") in ("live", "unknown") else "unknown",
+                "reason_code": row.get("reason_code") if isinstance(row.get("reason_code"), str)
+                    and row["reason_code"] in _SHARE_REASONS else "cleanup_unconfirmed"}
+        if all(value is not None for value in safe.values()):
+            result.append(safe)
+    return result
+
+
+def _share_attempts(rows):
+    result = []
+    if not isinstance(rows, list):
+        return result
+    for row in rows[:500]:
+        if not isinstance(row, dict):
+            continue
+        safe = {"attempt_id": _share_id(row.get("attempt_id"), attempt=True),
+                "phase": row.get("phase") if isinstance(row.get("phase"), str) and row["phase"] in _SHARE_PHASES else None,
+                "link_id": _share_id(row.get("link_id")), "expires_at": _share_int(row.get("expires_at"))}
+        if all(value is not None for value in safe.values()):
+            if "still_live" in row:
+                safe["still_live"] = _share_grants(row["still_live"])
+            elif isinstance(row.get("grants"), list):
+                # Controller summaries expose dispositions, never their private cleanup descriptors.
+                safe["still_live"] = _share_grants([grant for grant in row["grants"]
+                    if isinstance(grant, dict) and grant.get("status") in ("live", "unknown")])
+            result.append(safe)
+    return result
+
+
+def _share_gaps(rows):
+    result = []
+    if not isinstance(rows, list):
+        return result
+    for row in rows[:500]:
+        if not isinstance(row, dict):
+            continue
+        code = row.get("code")
+        code = code if isinstance(code, str) and code in _SHARE_GUIDANCE else "coverage_unknown"
+        safe = {"stack": _share_name(row.get("stack")) or "unknown",
+                "target": _share_name(row.get("target"), target=True) or "unknown",
+                "piece": row.get("piece") if row.get("piece") in ("target", "access", "protocol", "page") else "target",
+                "code": code, "fix": _SHARE_GUIDANCE.get(code, "inspect stack access coverage on the controller")}
+        hostname = _share_name(row.get("hostname"), hostname=True)
+        if hostname:
+            safe["hostname"] = hostname
+        result.append(safe)
+    return result
+
+
+def _share_failure(source):
+    code = source.get("code")
+    code = code if isinstance(code, str) and code in _SHARE_MESSAGES else "share_failed"
+    result = {"ok": False, "code": code, "message": _SHARE_MESSAGES[code]}
+    if source.get("phase") == "cleanup_pending":
+        result.update(phase="cleanup_pending", still_live=_share_grants(source.get("still_live")))
+        attempt_id = _share_id(source.get("attempt_id"), attempt=True)
+        if attempt_id:
+            result["attempt_id"] = attempt_id
+        result["message"] = "Cleanup is pending. Grants may remain live; repeat revoke using the original parent link id."
+    if "gaps" in source:
+        result["gaps"] = _share_gaps(source["gaps"])
+    return result
+
+
+def _share_rows(rows, *, sessions=False):
+    result = []
+    if not isinstance(rows, list):
+        return result
+    for row in rows[:500]:
+        if not isinstance(row, dict):
+            continue
+        safe = {"id": _share_id(row.get("id")), "expires_at": _share_int(row.get("expires_at"))}
+        if sessions:
+            safe.update(link=_share_id(row.get("link")), created_at=_share_int(row.get("created_at")))
+        else:
+            scope = row.get("scope")
+            safe.update(kind=row.get("kind") if row.get("kind") in ("stack", "site") else None,
+                        scope=_share_scope(scope),
+                        issued_at=_share_int(row.get("issued_at")), used=_share_int(row.get("used")),
+                        uses=None if row.get("uses") is None else _share_int(row.get("uses")))
+        if all(value is not None for key, value in safe.items() if key != "uses"):
+            result.append(safe)
+    return result
+
+
+def _web_share(payload) -> tuple[int, dict]:
+    """Project only public share metadata; the create link is the one secret exception."""
     from sandbox.commands import host_share
     from sandbox.hosting.share import ShareRefusal
 
@@ -319,22 +476,72 @@ def _web_share(payload) -> tuple[int, dict]:
         return 400, {"ok": False, "code": "panel_request_invalid", "message": str(exc)}
     try:
         if action == "create":
-            return 200, _pick(host_share.create_share(remote_name, stack=stack, caller="panel"),
-                              _SHARE_CREATE_FIELDS)
+            source = host_share.create_share(remote_name, stack=stack, caller="panel")
+        elif action == "list":
+            source = host_share.list_shares(remote_name, stack=stack)
+        else:
+            source = host_share.revoke_share(remote_name, link_id, stack=stack)
+        if not isinstance(source, dict):
+            raise ValueError("invalid share response")
         if action == "list":
-            result = host_share.list_shares(remote_name, stack=stack)
-            return 200, {"ok": True, "target": result.get("target"), "entry": result.get("entry"),
-                         "links": [_pick(row, _SHARE_LINK_FIELDS) for row in result.get("links") or []
-                                   if isinstance(row, dict)],
-                         "sessions": [_pick(row, _SHARE_SESSION_FIELDS) for row in result.get("sessions") or []
-                                      if isinstance(row, dict)]}
-        return 200, _pick(host_share.revoke_share(remote_name, link_id, stack=stack), _SHARE_REVOKE_FIELDS)
+            # Keep durable attempts even when the parent gate cannot be reached.
+            result = {"ok": source.get("ok") is True,
+                      "links": _share_rows(source.get("links")),
+                      "sessions": _share_rows(source.get("sessions"), sessions=True),
+                      "attempts": _share_attempts(source.get("attempts"))}
+            for key in ("target", "entry"):
+                value = _share_name(source.get(key), target=key == "target")
+                if value:
+                    result[key] = value
+            invalid = any((source.get(key) is not None and not isinstance(source[key], list))
+                          or len(result[key]) != len(source[key] if isinstance(source.get(key), list) else [])
+                          for key in ("links", "sessions", "attempts"))
+            unfinished = any(row["phase"] not in ("active", "revoked", "expired") for row in result["attempts"])
+            if unfinished:
+                result["ok"] = False
+            reasons = source.get("partial_reasons")
+            if reasons or invalid:
+                result["ok"] = False
+                result["partial_reasons"] = [reason if isinstance(reason, str) and reason in _SHARE_REASONS
+                    else "projection_invalid" for reason in (reasons if isinstance(reasons, list) else [])[:500]]
+                if invalid:
+                    result["partial_reasons"].append("projection_invalid")
+            return (200 if result["ok"] else 409), result
+        if source.get("ok") is not True or source.get("phase") == "cleanup_pending" or source.get("still_live"):
+            return 409, _share_failure(source)
+        result = {"ok": True}
+        for key in ("target", "entry", "hostname"):
+            if key in source:
+                value = _share_name(source[key], target=key == "target", hostname=key == "hostname")
+                if value:
+                    result[key] = value
+        if action == "create":
+            # Only this one-shot response may carry a bearer URL. No child/private fields.
+            value = source.get("link")
+            if not isinstance(value, str) or len(value) > 4096:
+                raise ValueError("invalid parent link")
+            result.update(link=value, link_id=_share_id(source.get("link_id")),
+                kind=source.get("kind") if source.get("kind") in ("stack", "site") else "stack",
+                scope=_share_scope(source.get("scope")) or "/",
+                expires_at=_share_int(source.get("expires_at")), expires_clamped=source.get("expires_clamped") is True,
+                uses=_share_int(source.get("uses")))
+        else:
+            for key in ("revoked_links", "revoked_sessions", "revoked_keys"):
+                result[key] = _share_int(source.get(key)) or 0
+        attempt_id = _share_id(source.get("attempt_id"), attempt=True)
+        if attempt_id:
+            result["attempt_id"] = attempt_id
+        if isinstance(source.get("phase"), str) and source["phase"] in _SHARE_PHASES:
+            result["phase"] = source["phase"]
+        return 200, result
     except ShareRefusal as exc:
-        code = exc.code if isinstance(exc.code, str) and _SHARE_CODE_RE.fullmatch(exc.code) else "share_failed"
-        return 409, {"ok": False, "code": code, "message": remote_core.redact_text(str(exc.message))[:500]}
-    except (Exception, SystemExit):  # noqa: BLE001 -- the panel never shows an unexpected error's detail
-        return 500, {"ok": False, "code": "share_failed",
-                     "message": "the share request failed; run `sb host share` on the controller for details"}
+        # Never stringify exceptions or project arbitrary attributes/messages.
+        source = {"code": exc.code}
+        if hasattr(exc, "gaps"):
+            source["gaps"] = exc.gaps
+        return 409, _share_failure(source)
+    except (Exception, SystemExit):
+        return 500, _share_failure({})
 
 
 def _web_sign_in(payload) -> tuple[int, dict]:
@@ -450,6 +657,12 @@ def cmd_web(cfg, args) -> None:
         def log_message(self, *a):     # quiet — don't spam the console
             pass
 
+        def end_headers(self):
+            # Also cover BaseHTTPRequestHandler's unsupported-method errors.
+            if self.path.split("?", 1)[0] == _SHARE_PATH:
+                self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
         def _send(self, code, body, ctype="application/json", *, no_store=False):
             data = body.encode() if isinstance(body, str) else body
             self.send_response(code)
@@ -458,7 +671,7 @@ def cmd_web(cfg, args) -> None:
             # its mutating actions, such as "Share this stack".
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
-            if no_store:
+            if no_store and self.path.split("?", 1)[0] != _SHARE_PATH:
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()

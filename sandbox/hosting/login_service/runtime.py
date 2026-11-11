@@ -51,6 +51,12 @@ UPSTREAM_TIMEOUT_SECONDS = 10
 SITE_LINK_SCHEMA = "sandbox.share-link.v2"
 SITE_SESSION_SCHEMA = "sandbox.share-session.v2"
 STACK_SCHEMA = "sandbox.share-stack.v1"
+STACK_SCHEMA_V2 = "sandbox.share-stack.v2"
+MAX_STACK_PAGE_BYTES = 32768
+MAX_COMPANIONS = 4
+STACK_ACTION_PATH = "/__sandbox/stack/sign-in"
+WP_CLAIM_PATH = "/__sandbox/stack/wordpress-claim"
+COMPANION_STATUS_PATH = "/__sandbox/stack/companion-status"
 # One cookie per gate hostname; it holds up to SHARE_COOKIE_SESSIONS session secrets.
 SHARE_COOKIE = "__Host-sandbox_share"
 # Every gate answer carries it, so apply can tell the gate's 404 from a front
@@ -207,13 +213,16 @@ class SiteStore:
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     @staticmethod
-    def _load(path, schema):
+    def _load(path, schema, limit=MAX_RECORD_BYTES):
         try:
             with open(path, "rb") as handle:
-                raw = json.loads(handle.read(MAX_RECORD_BYTES + 1)[:MAX_RECORD_BYTES])
+                data = handle.read(limit + 1)
+                if len(data) > limit:
+                    return None
+                raw = json.loads(data)
         except (OSError, ValueError):
             return None
-        return raw if isinstance(raw, dict) and raw.get("schema") == schema else None
+        return raw if isinstance(raw, dict) and raw.get("schema") in ((schema,) if isinstance(schema, str) else schema) else None
 
     def _valid_link(self, raw, digest=None):
         if raw is None or raw.get("entry") != self.name or set(raw) != self._LINK_KEYS:
@@ -394,7 +403,7 @@ class SiteStore:
         """The stack page record of a stack link, or None."""
         if not _LINK_ID.fullmatch(link_id or ""):
             return None
-        return valid_stack(self._load(self.stacks / f"{link_id}.json", STACK_SCHEMA), self.name, link_id, config)
+        return valid_stack(self._load(self.stacks / f"{link_id}.json", (STACK_SCHEMA, STACK_SCHEMA_V2), MAX_STACK_PAGE_BYTES * 2), self.name, link_id, config)
 
     def mint(self, text, *, service_ends_at, config):
         """Store a link (and its stack page) sent by the operator's controller."""
@@ -411,9 +420,12 @@ class SiteStore:
         stack = None
         if record["kind"] == "stack":
             stack = valid_stack(raw["stack"], self.name, record["id"], config)
-            if stack is None or record["scope"] != STACK_PAGE_PATH:
+            if (stack is None or record["scope"] != STACK_PAGE_PATH
+                    or any(child["expires_at"] != record["expires_at"] for child in stack.get("companions", []))):
                 return {"ok": False, "code": "site_record_invalid"}
         elif raw["stack"] is not None:
+            return {"ok": False, "code": "site_record_invalid"}
+        if stack is not None and stack["schema"] == STACK_SCHEMA and len(json.dumps(stack).encode()) > MAX_RECORD_BYTES:
             return {"ok": False, "code": "site_record_invalid"}
         if self.clock() >= service_ends_at or record["expires_at"] > service_ends_at:
             return {"ok": False, "code": "login_service_expired"}
@@ -487,8 +499,151 @@ class SiteStore:
         return {"ok": True, "revoked_links": links, "revoked_sessions": sessions}
 
 
+def _validate_stack_email(value):
+    address = str(value or "").strip()
+    if len(address) > 254 or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+", address):
+        raise ValueError("invalid email")
+    return address
+
+
+def valid_stack_v2(record):
+    """Exact private gate wire contract; stdlib-only rules mirrored by runtime owner.
+
+    This validator must never be used to sanitize public list/audit output: the
+    record deliberately contains keys and companion bearer credentials.
+    """
+
+    def text(value, limit):
+        return (isinstance(value, str) and 0 < len(value) <= limit
+                and all(ord(c) >= 32 and ord(c) != 127 for c in value))
+
+    def host(value):
+        return isinstance(value, str) and len(value) <= 253 and bool(_HOSTNAME.fullmatch(value))
+
+    def origin(value):
+        return (isinstance(value, str) and value.startswith("https://")
+                and host(value[8:]))
+
+    def notes(value):
+        return isinstance(value, list) and len(value) <= 16 and all(text(v, 512) for v in value)
+
+    def rows(value, actions, wp):
+        if not isinstance(value, list) or len(value) > MAX_STACK_HOSTS:
+            return False
+        seen = set()
+        for row in value:
+            if not isinstance(row, dict) or set(row) != {"hostname", "role", "probe", "commit", "state", "access"}:
+                return False
+            if (not host(row["hostname"]) or row["hostname"] in seen
+                    or not text(row["role"], 32) or row["probe"] not in ("internal", "public")
+                    or row["state"] not in ("unknown", "serving", "redirecting", "applying", "failed", "instance_not_found")
+                    or (row["commit"] is not None and (not isinstance(row["commit"], str)
+                        or not re.fullmatch(r"[0-9a-f]{40}", row["commit"])))
+                    or not isinstance(row["access"], str)
+                    or row["access"] not in {"open", *actions, *(["$wordpress"] if wp else [])}):
+                return False
+            seen.add(row["hostname"])
+        return True
+
+    try:
+        if not isinstance(record, dict) or set(record) != {
+                "schema", "entry", "link", "title", "hosts", "notes", "wordpress", "sign_in", "inbox", "companions"}:
+            return False
+        if len(json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > MAX_STACK_PAGE_BYTES:
+            return False
+        if (record["schema"] != STACK_SCHEMA_V2 or not isinstance(record["entry"], str)
+                or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", record["entry"])
+                or not isinstance(record["link"], str) or not _LINK_ID.fullmatch(record["link"])
+                or not text(record["title"], 63) or not notes(record["notes"])):
+            return False
+        actions = set()
+        if not isinstance(record["sign_in"], list) or len(record["sign_in"]) > 16:
+            return False
+        for row in record["sign_in"]:
+            if not isinstance(row, dict) or set(row) not in ({"entry"}, {"entry", "email"}):
+                return False
+            name = row["entry"]
+            if (not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name)
+                    or name in actions or name == "share"):
+                return False
+            if "email" in row:
+                _validate_stack_email(row["email"])
+            actions.add(name)
+        wp = record["wordpress"]
+        if wp is not None:
+            if (not isinstance(wp, dict) or set(wp) != {"kid", "key", "url", "claim_origin"}
+                    or not isinstance(wp["kid"], str) or not re.fullmatch(r"[0-9a-f]{12}|[0-9a-f]{32}", wp["kid"])
+                    or wp["kid"] != record["link"][2:]
+                    or not isinstance(wp["key"], str) or not _HASH.fullmatch(wp["key"])
+                    or not origin(wp["claim_origin"]) or not isinstance(wp["url"], str)):
+                return False
+            parsed = urllib.parse.urlsplit(wp["url"])
+            if (not origin("https://" + parsed.netloc) or parsed.scheme != "https"
+                    or parsed.query or parsed.fragment or not re.fullmatch(r"/[A-Za-z0-9._~/-]*", parsed.path)
+                    or ".." in parsed.path.split("/")):
+                return False
+        if not rows(record["hosts"], actions, wp is not None):
+            return False
+        inbox = record["inbox"]
+        if inbox is not None and (not isinstance(inbox, dict) or set(inbox) != {"entry"}
+                                  or not isinstance(inbox["entry"], str) or inbox["entry"] not in actions
+                                  or any(row["entry"] == inbox["entry"] and "email" in row
+                                         for row in record["sign_in"])):
+            return False
+        companions = record["companions"]
+        if not isinstance(companions, list) or len(companions) > MAX_COMPANIONS:
+            return False
+        seen = set()
+        for row in companions:
+            if not isinstance(row, dict) or set(row) != {"slug", "target", "hostname", "link_id", "expires_at", "token", "title", "hosts", "notes"}:
+                return False
+            if (not isinstance(row["slug"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", row["slug"])
+                    or not isinstance(row["target"], str)
+                    or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,191}", row["target"])
+                    or any(p in ("", ".", "..") for p in row["target"].split("/"))
+                    or not host(row["hostname"]) or row["target"] in seen
+                    or not isinstance(row["token"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{22}", row["token"])
+                    or row["link_id"] != ("l-" + hashlib.sha256(row["token"].encode()).hexdigest()[:12])
+                    or type(row["expires_at"]) is not int or not 0 < row["expires_at"] < 10**12
+                    or not text(row["title"], 63) or not notes(row["notes"])):
+                return False
+            # Companion rows are display metadata. Their own page owns actions.
+            display_actions = {r.get("access") for r in row["hosts"] if isinstance(r, dict)
+                               and isinstance(r.get("access"), str)} if isinstance(row["hosts"], list) else set()
+            if (any(action not in ("open", "$wordpress") and not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", action)
+                    for action in display_actions) or not rows(row["hosts"], display_actions, True)):
+                return False
+            seen.add(row["target"])
+        return True
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return False
+
+
 def valid_stack(raw, entry, link_id, config):
     """A stack page record for ``link_id``, or None. Its fields come from the controller."""
+    if isinstance(raw, dict) and raw.get("schema") == STACK_SCHEMA_V2:
+        if not valid_stack_v2(raw) or raw["entry"] != entry or raw["link"] != link_id:
+            return None
+        own = config["entries"].get(entry, {})
+        wp = raw["wordpress"]
+        if wp and wp["claim_origin"] != "https://" + own.get("hostname", ""):
+            return None
+        suffixes = config.get("allowed_host_suffixes") or []
+        def covered(host):
+            return any(host == suffix or host.endswith("." + suffix) for suffix in suffixes)
+        if (any(not covered(row["hostname"]) for row in raw["hosts"] + raw["companions"])
+                or any(row["hostname"] == own.get("hostname") for row in raw["companions"])
+                or (wp and not covered(urllib.parse.urlsplit(wp["url"]).hostname))):
+            return None
+        for row in raw["sign_in"]:
+            declared = config["entries"].get(row["entry"], {})
+            if declared.get("mode") not in ("magic_link", "inbox_gate"):
+                return None
+            if (declared["mode"] == "magic_link") != ("email" in row):
+                return None
+            if "email" in row and row["email"].strip().casefold() in declared["magic_link"].get("denied_emails", []):
+                return None
+        return raw
     if not isinstance(raw, dict) or raw.get("schema") != STACK_SCHEMA or raw.get("entry") != entry \
             or raw.get("link") != link_id \
             or set(raw) != {"schema", "entry", "link", "title", "hosts", "wordpress", "sign_in"}:
@@ -571,6 +726,12 @@ class Gate:
                 self.sites[name].ensure()
         self._attempts = collections.defaultdict(collections.deque)
         self._attempts_lock = threading.Lock()
+        self._pool_lock = threading.RLock()
+        # Mailbox snapshots and polling are shared across all magic-link sources.
+        # Keep this separate so pending token issue/claim/eviction never waits on I/O.
+        self._capture_exchange_lock = threading.Lock()
+        self._pending = collections.defaultdict(collections.OrderedDict)
+        self._claim_nonces = {}
         self._health = {}
         self._health_lock = threading.Lock()
 
@@ -623,31 +784,99 @@ class Gate:
         return results
 
     def mint_sign_in(self, name, email, expires_at, via):
-        """Mint a one-time link for a declared magic_link or inbox_gate entry of this service.
-
-        Writes the same token record ``host login-url`` would, so the previous link of
-        that entry stops working. ``via`` is the (share entry, stack link id) of the page
-        that asked: the token works only while that link is unrevoked and unexpired, so a
-        revoke also ends sign-in links a view minted, even one still in flight. Returns
-        the link, or None when the entry cannot take one.
-        """
+        """Issue into the eight-record pool without replacing the direct CLI singleton."""
         entry = self.config["entries"].get(name)
-        if not isinstance(entry, dict) or entry.get("mode") not in ("magic_link", "inbox_gate"):
-            return None
         issued = int(self.clock())
-        if not MIN_LINK_SECONDS <= int(expires_at) - issued <= MAX_LINK_SECONDS:
+        if (not isinstance(entry, dict) or entry.get("mode") not in ("magic_link", "inbox_gate")
+                or not 0 < int(expires_at) - issued <= SIGN_IN_SECONDS):
+            return None
+        if entry["mode"] == "magic_link" and (not isinstance(email, str) or not _ADDRESS.fullmatch(email)
+                or email.casefold() in entry["magic_link"].get("denied_emails", [])):
             return None
         token = secrets.token_urlsafe(32)
         record = {"schema": RECORD_SCHEMA, "entry": name,
                   "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
                   "issued_at": issued, "expires_at": int(expires_at),
-                  "via": {"entry": via[0], "link": via[1]}}
-        if entry["mode"] == "magic_link":
-            if not isinstance(email, str) or not _ADDRESS.fullmatch(email):
-                return None
-            record["email"] = email
-        _write_private(self.state_dir / f"{name}.json", json.dumps(record, sort_keys=True))
+                  "via": {"entry": via[0], "link": via[1]}, "email": email}
+        if not self.register_pending(name, record):
+            return None
         return f"https://{entry['hostname']}{entry['path']}#sandbox_autologin={token}"
+
+    def _prune_pending(self):
+        for pool in self._pending.values():
+            for digest, record in list(pool.items()):
+                if self.clock() >= record["expires_at"] or not self.bound(record):
+                    del pool[digest]
+        self._claim_nonces = {key: expiry for key, expiry in self._claim_nonces.items()
+                              if self.clock() < expiry}
+
+    def register_pending(self, name, record):
+        with self._pool_lock:
+            self._prune_pending()
+            if not self.enabled() or not self.bound(record) or self.clock() >= record["expires_at"]:
+                return False
+            pool = self._pending[name]
+            pending = [digest for digest, row in pool.items() if not row.get("claimed")]
+            while len(pending) >= 8:
+                del pool[pending.pop(0)]
+            # Claimed records are needed only by in-flight exchanges, whose callers retain them.
+            for digest, row in list(pool.items()):
+                if row.get("claimed"):
+                    del pool[digest]
+            pool[record["token_sha256"]] = record
+            return True
+
+    def pooled_record(self, name, digest):
+        with self._pool_lock:
+            self._prune_pending()
+            return self._pending.get(name, {}).get(digest)
+
+    def claim_pending(self, name, record):
+        with self._pool_lock:
+            if self.pooled_record(name, record["token_sha256"]) is not record or record.get("claimed"):
+                return False
+            if not self.enabled() or not self.bound(record):
+                return False
+            record["claimed"] = True
+            return True
+
+    def csrf(self, session):
+        return hmac.new(self.session_key, ("stack:" + session["digest"]).encode(), hashlib.sha256).hexdigest()
+
+    def wordpress_claim(self, name, payload):
+        """Authenticate and atomically consume one registered WP hash; never accept stateless tokens."""
+        if not isinstance(payload, dict) or set(payload) != {"kid", "token_sha256", "nonce", "at", "mac"}:
+            return None
+        kid, digest, nonce, at, mac = (payload[k] for k in ("kid", "token_sha256", "nonce", "at", "mac"))
+        if (not isinstance(kid, str) or not re.fullmatch(r"[0-9a-f]{12}|[0-9a-f]{32}", kid)
+                or not isinstance(digest, str) or not _HASH.fullmatch(digest)
+                or not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce)
+                or type(at) is not int or abs(self.clock() - at) > 30
+                or not isinstance(mac, str) or not _HASH.fullmatch(mac)):
+            return None
+        with self._pool_lock:
+            record = self.pooled_record(name + ":wordpress", digest)
+            store = self.sites[name]
+            page = store.stack("l-" + kid, self.config)
+            wp = page.get("wordpress") if page else None
+            if (not record or not wp or record["via"] != {"entry": name, "link": "l-" + kid}
+                    or record.get("claimed") or not self.enabled() or not self.bound(record)):
+                return None
+            key = bytes.fromhex(wp["key"])
+            message = f"sandbox-share-wp-claim-request.v1|{kid}|{digest}|{nonce}|{at}"
+            if not hmac.compare_digest(mac, hmac.new(key, message.encode(), hashlib.sha256).hexdigest()):
+                return None
+            replay = (name, kid, nonce)
+            if replay in self._claim_nonces or not self.claim_pending(name + ":wordpress", record):
+                return None
+            self._claim_nonces[replay] = at + 31
+            now, expiry = int(self.clock()), record["expires_at"]
+            if not self.enabled() or not self.bound(record) or now >= expiry or abs(now - at) > 30:
+                return None
+            message = f"sandbox-share-wp-claim-response.v1|{kid}|{digest}|{nonce}|{now}|{expiry}"
+            return {"ok": True, "kid": kid, "token_sha256": digest, "nonce": nonce,
+                    "at": now, "expires_at": expiry,
+                    "mac": hmac.new(key, message.encode(), hashlib.sha256).hexdigest()}
 
     def enabled(self):
         return self.clock() < self.config["enabled_until_epoch"]
@@ -687,6 +916,10 @@ class Gate:
         Checked after the body arrives and right before a grant: a newer link for the
         entry, or a revoke of the stack link, beats a sign-in that was still being posted.
         """
+        if "via" in record and record.get("claimed"):
+            return self.enabled() and self.clock() < record["expires_at"] and self.bound(record)
+        if "via" in record:
+            return self.pooled_record(name, record["token_sha256"]) is record and self.bound(record)
         now = self.record(name)
         return (now is not None and hmac.compare_digest(now["token_sha256"], record["token_sha256"])
                 and self.bound(record))
@@ -695,6 +928,10 @@ class Gate:
         return self.state_dir / "used" / digest
 
     def is_live(self, name):
+        with self._pool_lock:
+            self._prune_pending()
+            if any(not r.get("claimed") for r in self._pending.get(name, {}).values()):
+                return True
         record = self.record(name)
         return (record is not None and self.clock() < record["expires_at"]
                 and not self._used_marker(record["token_sha256"]).exists())
@@ -818,24 +1055,35 @@ class Gate:
             raise SignInFailure("template_mismatch", 502)
         return link
 
-    def sign_in(self, settings, email):
-        """Ask the application to mail a sign-in link and return that link."""
-        existing = set(self._message_ids())
-        started = time.time()
-        self._request_mail(settings, email)
-        deadline = time.monotonic() + settings.get("poll_timeout_seconds", 10)
-        while True:
-            for identifier in self._message_ids():
-                if identifier in existing:
-                    continue
-                existing.add(identifier)
-                message = self._capture_json(f"/api/v1/message/{urllib.parse.quote(identifier, safe='')}")
-                if (isinstance(message, dict) and self._addressed_only_to(message, email)
-                        and self._arrived_since(message, started)):
-                    return self._accepted_link(message, settings)
-            if time.monotonic() >= deadline:
-                raise SignInFailure("mail_timeout", 504)
-            time.sleep(POLL_INTERVAL_SECONDS)
+    def sign_in(self, settings, email, *, source_is_current=None):
+        """Serialize the mailbox snapshot, application request, and capture poll."""
+        if not self._capture_exchange_lock.acquire(timeout=UPSTREAM_TIMEOUT_SECONDS):
+            raise SignInFailure("capture_busy", 503)
+        try:
+            if not self.enabled() or (source_is_current is not None and not source_is_current()):
+                raise SignInFailure("source_unavailable", 404)
+            existing = set(self._message_ids())
+            started = time.time()
+            # Snapshot I/O can itself take time; refuse if its source expires or is
+            # revoked before the application receives a request.
+            if not self.enabled() or (source_is_current is not None and not source_is_current()):
+                raise SignInFailure("source_unavailable", 404)
+            self._request_mail(settings, email)
+            deadline = time.monotonic() + settings.get("poll_timeout_seconds", 10)
+            while True:
+                for identifier in self._message_ids():
+                    if identifier in existing:
+                        continue
+                    existing.add(identifier)
+                    message = self._capture_json(f"/api/v1/message/{urllib.parse.quote(identifier, safe='')}")
+                    if (isinstance(message, dict) and self._addressed_only_to(message, email)
+                            and self._arrived_since(message, started)):
+                        return self._accepted_link(message, settings)
+                if time.monotonic() >= deadline:
+                    raise SignInFailure("mail_timeout", 504)
+                time.sleep(POLL_INTERVAL_SECONDS)
+        finally:
+            self._capture_exchange_lock.release()
 
 
 def capture_headers(capture, credential):
@@ -959,11 +1207,52 @@ def render_stack_page(record, health, links):
         '<meta name="robots" content="noindex, nofollow">'
         f"<title>Stack {title}</title><style>{_STACK_STYLE}</style></head><body><main>"
         f"<h1>Stack {title}</h1>"
-        f"<p>Sign-in links work once and expire {SIGN_IN_SECONDS // 60} minutes after this page "
-        "loaded. Reload the page for new ones.</p>"
+        f"<p>Each click creates a one-time sign-in lasting up to {SIGN_IN_SECONDS // 60} minutes.</p>"
         "<table><thead><tr><th>Server</th><th>Role</th><th>Health</th></tr></thead>"
         f"<tbody>{rows}</tbody></table><h2>Sign in</h2><ul>{sign_in}</ul></main></body></html>"
     ).encode()
+
+
+_STACK_ACTION_SCRIPT = (
+    "document.querySelectorAll('[data-action]').forEach(function(b){b.onclick=async function(){"
+    "var w=window.open('about:blank','_blank');if(!w)return;w.opener=null;"
+    "try{var r=await fetch('/__sandbox/stack/sign-in',{method:'POST',credentials:'same-origin',"
+    "headers:{'Content-Type':'application/json','X-Sandbox-Stack-Action':'1'},"
+    "body:JSON.stringify({action:b.dataset.action,csrf:document.querySelector('meta[name=stack-csrf]').content})});"
+    "if(!r.ok)throw Error();var v=await r.json();if(!v.url)throw Error();w.location.replace(v.url);"
+    "}catch(e){w.close();document.getElementById('action-result').textContent='Unavailable. Try a fresh click.';}};});"
+)
+_STACK_ACTION_HASH = base64.b64encode(hashlib.sha256(_STACK_ACTION_SCRIPT.encode()).digest()).decode()
+
+
+def _strict_json(data):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate field")
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=pairs)
+
+
+def companion_available(descriptor):
+    """Authenticated non-consuming child proof. No redirects, cookies, fallback or remint."""
+    body = {key: descriptor[key] for key in ("token", "link_id", "expires_at", "title", "hosts", "notes")}
+    connection = http.client.HTTPSConnection(descriptor["hostname"], timeout=5)
+    try:
+        connection.request("POST", COMPANION_STATUS_PATH, body=json.dumps(body, separators=(",", ":")),
+                           headers={"Content-Type": "application/json", "X-Sandbox-Companion-Probe": "1"})
+        response = connection.getresponse()
+        data = response.read(2049)
+        if response.status != 200 or len(data) > 2048:
+            return False
+        return _strict_json(data) == {"ok": True, "available": True,
+                                      "link_id": descriptor["link_id"], "expires_at": descriptor["expires_at"]}
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 class _PublicHandler(http.server.BaseHTTPRequestHandler):
@@ -980,7 +1269,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
 
     def _reply(self, status, body=b"", headers=()):
         self.send_response(status)
-        self.send_header("Referrer-Policy", "no-referrer")
+        if not any(name.lower() == "referrer-policy" for name, _ in headers):
+            self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Robots-Tag", ROBOTS_TAG)
         self.send_header(GATE_HEADER, "1")
@@ -1060,6 +1350,21 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if raw_path == "/robots.txt" and self.command in ("GET", "HEAD"):
             self._drain()
             return self._reply(200, ROBOTS_DENY_BODY, [("Content-Type", "text/plain; charset=utf-8")])
+        if raw_path == WP_CLAIM_PATH:
+            payload = self._json_body(1024)
+            if payload is None:
+                return self._answer_not_found()
+            if not self.gate.allow_attempt(name + ":wpclaim", 120):
+                return self._fail(429, "rate_limited")
+            receipt = self.gate.wordpress_claim(name, payload)
+            if receipt is None:
+                return self._answer_not_found()
+            self.gate.log(f"wordpress_claimed entry={name}")
+            return self._json_reply(receipt)
+        if raw_path == COMPANION_STATUS_PATH:
+            return self._companion_probe(name, store)
+        if raw_path == STACK_ACTION_PATH:
+            return self._stack_action(name, entry, store)
         if raw_path == SHARE_PREFIX:
             return self._share_open_short(name, entry, store)
         if raw_path.startswith(SHARE_PREFIX):
@@ -1161,8 +1466,105 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         landing = STACK_PAGE_PATH if record["kind"] == "stack" else record["scope"]
         return self._reply(303, b"", [("Location", landing), ("Set-Cookie", cookie)])
 
+    def _json_reply(self, payload):
+        return self._reply(200, json.dumps(payload, separators=(",", ":")).encode(),
+                           [("Content-Type", "application/json"), ("X-Content-Type-Options", "nosniff")])
+
+    def _json_body(self, maximum):
+        length = self._content_length()
+        if (self.command != "POST" or self.path not in (STACK_ACTION_PATH, WP_CLAIM_PATH, COMPANION_STATUS_PATH)
+                or self.headers.get_all("Transfer-Encoding")
+                or len(self.headers.get_all("Content-Length") or []) != 1
+                or len(self.headers.get_all("Content-Type") or []) != 1
+                or self.headers.get("Content-Type") != "application/json"
+                or length is None or not 0 < length <= maximum):
+            self.close_connection = True
+            return None
+        try:
+            data = self.rfile.read(length)
+            if len(data) != length:
+                return None
+            return _strict_json(data)
+        except (UnicodeError, ValueError, RecursionError):
+            return None
+
+    def _companion_probe(self, name, store):
+        payload = self._json_body(MAX_STACK_PAGE_BYTES)
+        gate = self.gate
+        if not gate.allow_attempt(name + ":probe", 120):
+            return self._fail(429, "rate_limited")
+        if (not isinstance(payload, dict) or set(payload) != {"token", "link_id", "expires_at", "title", "hosts", "notes"}
+                or self.headers.get("X-Sandbox-Companion-Probe") != "1"
+                or not isinstance(payload["token"], str) or not _SHORT_TOKEN.fullmatch(payload["token"])):
+            return self._answer_not_found()
+        record = store.find_short(hashlib.sha256(payload["token"].encode()).hexdigest())
+        page = store.stack(record["id"], gate.config) if record else None
+        if (not record or not page or page["schema"] != STACK_SCHEMA_V2 or record["kind"] != "stack"
+                or record["id"] != payload["link_id"] or record["expires_at"] != payload["expires_at"]
+                or any(page[key] != payload[key] for key in ("title", "hosts", "notes"))
+                or not gate.enabled() or not store.is_live(record) or not store.stack_link_alive(record["id"])):
+            return self._answer_not_found()
+        gate.log(f"companion_status entry={name}")
+        return self._json_reply({"ok": True, "available": True, "link_id": record["id"],
+                                 "expires_at": record["expires_at"]})
+
+    def _stack_action(self, name, entry, store):
+        gate = self.gate
+        payload = self._json_body(1024)
+        session = next((row for row in reversed(store.sessions_for(self._cookie(SHARE_COOKIE)))
+                        if row["kind"] == "stack"), None)
+        if (not session or not isinstance(payload, dict) or set(payload) != {"action", "csrf"}
+                or self.headers.get_all("Origin") != ["https://" + entry["hostname"]]
+                or self.headers.get_all("X-Sandbox-Stack-Action") != ["1"]
+                or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
+                or not isinstance(payload["csrf"], str) or not _HASH.fullmatch(payload["csrf"])
+                or not hmac.compare_digest(payload["csrf"], gate.csrf(session))):
+            return self._answer_not_found()
+        if not gate.allow_attempt(name + ":action"):
+            return self._fail(429, "rate_limited")
+        page = store.stack(session["link"], gate.config)
+        def alive():
+            return gate.enabled() and store.session_alive(session["digest"]) and store.stack_link_alive(session["link"])
+        if not page or not alive() or not isinstance(payload["action"], str):
+            return self._answer_not_found()
+        action = payload["action"]
+        ends = min(int(gate.clock()) + SIGN_IN_SECONDS, session["expires_at"], gate.config["enabled_until_epoch"])
+        url = None
+        if action == "$wordpress":
+            wp = page["wordpress"]
+            # Legacy stateless plugins cannot enforce pool eviction. Fail closed until reissued as v2.
+            if not wp or page["schema"] != STACK_SCHEMA_V2:
+                return self._answer_not_found()
+            url = wordpress_link(wp, ends)
+            digest = hashlib.sha256(url.partition("#")[2].encode()).hexdigest()
+            pending = {"token_sha256": digest, "issued_at": int(gate.clock()), "expires_at": ends,
+                       "via": {"entry": name, "link": session["link"]}}
+            if not gate.register_pending(name + ":wordpress", pending):
+                return self._answer_not_found()
+        elif action.startswith("companion:") or action.startswith("companion-status:"):
+            prefix, _, index = action.partition(":")
+            children = page.get("companions", [])
+            if not re.fullmatch(r"[0-3]", index) or int(index) >= len(children):
+                return self._answer_not_found()
+            child = children[int(index)]
+            if (gate.clock() >= child["expires_at"] or not companion_available(child) or not alive()):
+                return self._answer_not_found()
+            gate.log(f"companion_status entry={name}")
+            if prefix == "companion-status":
+                return self._json_reply({"ok": True, "available": True})
+            url = "https://" + child["hostname"] + SHARE_PREFIX + "#" + child["token"]
+        else:
+            row = next((row for row in page["sign_in"] if row["entry"] == action), None)
+            if row is None:
+                return self._answer_not_found()
+            url = gate.mint_sign_in(row["entry"], row.get("email"), ends, (name, session["link"]))
+        if not url or not alive():
+            return self._answer_not_found()
+        gate.log(f"stack_action entry={name}")
+        return self._json_reply({"ok": True, "url": url})
+
     def _stack_page(self, name, entry, store, session):
-        """The read-only stack page; every view mints fresh single-use sign-in links."""
+        """GET/HEAD expose metadata and action controls only, without issuing tokens."""
         gate = self.gate
         record = store.stack(session["link"], gate.config)
         if record is None:
@@ -1171,17 +1573,33 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             return self._fail(429, "rate_limited")
         upstream = urllib.parse.urlsplit(entry["upstream"])
         health = gate.health(record["hosts"], (upstream.hostname, upstream.port))
-        ends = min(int(gate.clock()) + SIGN_IN_SECONDS, session["expires_at"],
-                   gate.config["enabled_until_epoch"])
-        links = []
-        if record["wordpress"] is not None:
-            links.append(("WordPress admin", wordpress_link(record["wordpress"], ends)))
-        for item in record["sign_in"]:
-            minted = gate.mint_sign_in(item["entry"], item.get("email"), ends, (name, session["link"]))
-            if minted is not None:
-                links.append((f"Sign in: {item['entry']}", minted))
+        actions = [(row["entry"], "Sign in: " + row["entry"]) for row in record["sign_in"]]
+        if record["wordpress"] and record["schema"] == STACK_SCHEMA_V2:
+            actions.insert(0, ("$wordpress", "WordPress admin"))
+        for index, child in enumerate(record.get("companions", [])):
+            actions.append((f"companion:{index}", "Open shared stack: " + child["title"]))
+        controls = "".join('<li><button data-action="' + html.escape(action, quote=True) + '">'
+                           + html.escape(label) + '</button></li>' for action, label in actions)
+        body = render_stack_page(record, health, [])
+        body = body.replace(b"</head>", ('<meta name="stack-csrf" content="' + gate.csrf(session) + '"></head>').encode())
+        body = body.replace(b"<ul><li>This stack declares no sign-in links.</li></ul>",
+                            ('<ul>' + controls + '</ul><p id="action-result" role="status"></p>').encode())
+        details = "".join("<p>" + html.escape(note) + "</p>" for note in record.get("notes", []))
+        for host in record["hosts"]:
+            if "state" in host:
+                details += ("<p>" + html.escape(host["hostname"]) + ": " + html.escape(host["state"])
+                            + " / " + html.escape(host["commit"] or "revision unknown")
+                            + " / " + html.escape(host["access"]) + "</p>")
+        for child in record.get("companions", []):
+            details += "<h2>" + html.escape(child["title"]) + "</h2>"
+            details += "".join("<p>" + html.escape(row["hostname"]) + " / " + html.escape(row["role"]) + "</p>"
+                               for row in child["hosts"])
+            details += "".join("<p>" + html.escape(note) + "</p>" for note in child["notes"])
+        body = body.replace(b"</main>", (details + "</main>").encode())
+        body = body.replace(b"</body>", ('<script>' + _STACK_ACTION_SCRIPT + '</script></body>').encode())
+        if not gate.enabled() or not store.session_alive(session["digest"]):
+            return self._answer_not_found()
         gate.log(f"stack_viewed entry={name} link={session['link']}")
-        body = render_stack_page(record, health, links)
         return self._reply(200, body, self._stack_page_headers())
 
     @staticmethod
@@ -1195,8 +1613,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
     @staticmethod
     def _stack_page_headers():
         policy = (f"default-src 'none'; style-src 'sha256-{_STACK_STYLE_HASH}'; "
+                  f"script-src 'sha256-{_STACK_ACTION_HASH}'; connect-src 'self'; "
                   "form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
-        return [("Content-Type", "text/html; charset=utf-8"), ("Content-Security-Policy", policy),
+        return [("Referrer-Policy", "same-origin"), ("Content-Type", "text/html; charset=utf-8"), ("Content-Security-Policy", policy),
                 ("X-Content-Type-Options", "nosniff")]
 
     def _site_headers(self, entry):
@@ -1232,7 +1651,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if self.command != "POST":
             return self._fail(405, "method_not_allowed") if gate.is_live(name) else self._not_found()
         record = gate.record(name)
-        if record is None:
+        if record is None and not gate.is_live(name):
             return self._not_found()
         return self._consume(name, entry, record)
 
@@ -1271,6 +1690,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if not _TOKEN.fullmatch(token):
             return self._fail(403, "invalid_link")
         digest = hashlib.sha256(token.encode()).hexdigest()
+        record = gate.pooled_record(name, digest) or record
+        if record is None:
+            return self._answer_not_found()
         if not hmac.compare_digest(digest, record["token_sha256"]):
             return self._fail(403, "invalid_link")
         if gate.clock() >= record["expires_at"]:
@@ -1282,7 +1704,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         # that the record is still the entry's current one, and its stack link.
         if not gate.enabled() or not gate.current(name, record):
             return self._answer_not_found()
-        if not gate.claim(digest):
+        if not (gate.claim_pending(name, record) if "via" in record else gate.claim(digest)):
             return self._fail(410, "link_used")
         gate.log(f"consumed entry={name}")
         if entry["mode"] == "inbox_gate":
@@ -1300,12 +1722,16 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         self._reply(303, b"", [("Location", entry.get("landing_path") or "/"), ("Set-Cookie", cookie)])
 
     def _exchange_magic_link(self, name, entry, email, record):
+        if not self.gate.enabled() or not self.gate.current(name, record):
+            return self._answer_not_found()
         try:
-            link = self.gate.sign_in(entry["magic_link"], email)
+            link = self.gate.sign_in(
+                entry["magic_link"], email,
+                source_is_current=lambda: self.gate.enabled() and self.gate.current(name, record))
         except SignInFailure as failure:
             self.gate.log(f"signin_failed entry={name} code={failure.code}")
             return self._fail(failure.status, failure.code)
-        # The exchange waits on mail; a newer link or a stack revoke meanwhile still wins.
+        # The exchange waits on mail; source revocation or expiry still wins.
         if not self.gate.enabled() or not self.gate.current(name, record):
             return self._answer_not_found()
         self._reply(303, b"", [("Location", link)])
@@ -1558,10 +1984,14 @@ def manage(config, argv, state_dir, *, stdin, stdout, clock=time.time):
     entry = config["entries"].get(name)
     if not isinstance(entry, dict) or entry.get("mode") != "site_gate":
         return emit({"ok": False, "code": "site_entry_unknown"})
+    if verb == "capabilities" and not extra:
+        return emit({"ok": True, "capabilities": ["stack-page-v2", "stack-signin-pool-v1",
+                     "wordpress-claim-v1", "companion-status-v1"],
+                     "stack_schemas": [STACK_SCHEMA, STACK_SCHEMA_V2], "link_schemas": [SITE_LINK_SCHEMA]})
     store = SiteStore(state_dir, name, clock)
     store.ensure()
     if verb == "mint" and not extra:
-        return emit(store.mint(stdin.read(MAX_RECORD_BYTES), service_ends_at=config["enabled_until_epoch"],
+        return emit(store.mint(stdin.read(MAX_STACK_PAGE_BYTES * 2 + MAX_RECORD_BYTES), service_ends_at=config["enabled_until_epoch"],
                                config=config))
     if verb == "list" and not extra:
         return emit(store.listing())

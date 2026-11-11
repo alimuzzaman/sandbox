@@ -924,6 +924,11 @@ def _ssh_transport_options(tailnet, multiplex):
     return options
 
 
+def remote_ssh_transport_parts(remote_or_target) -> dict:
+    """Resolved SSH endpoint for operands paired with the shared transport."""
+    return _ssh_transport_parts(remote_or_target)[0]
+
+
 def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) -> list[str]:
     parts, tailnet = _ssh_transport_parts(remote_or_target)
     args = ["ssh", *_ssh_transport_options(tailnet, multiplex)]

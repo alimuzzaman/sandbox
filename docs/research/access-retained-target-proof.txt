@@ -1,0 +1,44 @@
+Original-job retained target observation contract, source only
+
+Observed failure supplied by root
+Actual immutable f6d18f5 accept->capture fixture admission failed before capture:
+15 capture errors at JobRepository._canonical_submission_snapshot's generic
+128-byte provenance value maximum. A full schema-1 target snapshot cannot fit
+that bound. Mocked exec admission tests did not cover this production boundary.
+
+Correction
+Generic execution-policy provenance values remain bounded to 128 bytes. Only
+three named server-cli observation fields use purpose-specific validation:
+server_cli.target_snapshot: exact schema-1 nonsecret metadata, maximum 32768 UTF-8
+bytes, including source/target/copy/native aliases/services. It must match the
+original submission source root and published commit, plus retained machine,
+marker, runtime, origin alias, selector digest, tuple and index-1 service.
+server_cli.target_metadata: maximum 512 bytes, closed origin IPv4/IPv6, front-door
+and control-port schema, with the same parser used by the runtime SDK.
+server_cli.exec_target: maximum 257 bytes and exactly the project/environment in
+the retained target snapshot. These fields refuse non-server-cli job kinds.
+
+The jobs layer owns the pure bounded serialization contract. The application
+target validator uses that same structural parser, then checks genuine current
+owner identity. No application import from the job registry, duplicated schema,
+schema-version bump, provider value, actor grant or dictionary execution proof.
+
+The complete canonical submission remains capped at 65536 bytes. Original
+provenance strings are retained exactly; canonical digest/replay behavior and
+request conflict detection are unchanged. Duplicate JSON keys, unknown fields,
+invalid schema, identity/source/selector mismatch, oversize typed fields and
+generic values above 128 bytes refuse admission. The existing per-effect genuine
+context and held selection checks remain mandatory.
+
+Unrun definitions
+tests.test_server_cli_capture_artifacts now explicitly asserts real SQLite
+accept->retained snapshot->idempotent receipt replay->private byte publication->
+terminal artifact read, and changed-proof request conflicts. Additional cases
+cover 128/129 generic values, full routing metadata, forbidden routing fields,
+wrong source/identity/service/schema/purpose, duplicate keys, specific 32768-byte
+limit, and unchanged 65536-byte total snapshot limit. Earlier capture tests still
+exercise the actual admission path rather than mocked accept or fake receipts.
+
+No tests/imports/apps/builds/helpers/review/host/credential/network operations
+executed here. Root owns the next short checks and independent release gate.
+This correction is source-only and does not prove runtime or full-CLI readiness.

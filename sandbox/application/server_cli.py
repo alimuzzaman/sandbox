@@ -264,25 +264,11 @@ class ServerCLIContext:
 
 def validate_target_metadata(value) -> dict:
     """Routing observations only; no key, token, ssh/config or role fields."""
-    if not isinstance(value, dict) or set(value) - {'origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port'}:
-        raise ServerCLIUnavailable('original target routing metadata is invalid')
-    result = dict(value)
-    for field, version in (('origin_ipv4', 4), ('origin_ipv6', 6)):
-        if field in result:
-            if not isinstance(result[field], str):
-                raise ServerCLIUnavailable('original target address metadata must be text')
-            try:
-                address = ipaddress.ip_address(result[field])
-            except (ValueError, TypeError):
-                raise ServerCLIUnavailable('original target address metadata is invalid') from None
-            if address.version != version:
-                raise ServerCLIUnavailable('original target address family changed')
-            result[field] = str(address)
-    if 'front_door' in result and result['front_door'] not in {'nginx', 'caddy'}:
-        raise ServerCLIUnavailable('original target front door is invalid')
-    if 'mcp_port' in result and (type(result['mcp_port']) is not int or not 1 <= result['mcp_port'] <= 65535):
-        raise ServerCLIUnavailable('original control port metadata is invalid')
-    return result
+    from sandbox.jobs.server_cli_retained import routing_metadata
+    try:
+        return routing_metadata(value)
+    except (ValueError, TypeError):
+        raise ServerCLIUnavailable('original target routing metadata is invalid') from None
 
 
 def server_cli_context_if_selected() -> ServerCLIContext | None:

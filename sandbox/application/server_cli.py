@@ -247,6 +247,7 @@ class ServerCLIContext:
     origin_remote_name: str
     target_metadata: object
     owner: ServerCliOwner
+    target_selector_digest: str | None = None
 
 
 def validate_target_metadata(value) -> dict:
@@ -367,10 +368,15 @@ def _read_server_cli_context() -> ServerCLIContext:
                 or not isinstance(origin_remote_name, str)
                 or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,63}', origin_remote_name)):
             raise ServerCLIUnavailable('original job target or installed service identity changed')
+        selector_digest = provenance.get('server_cli.target_selector_digest')
+        if selector_digest is not None and (not isinstance(selector_digest, str)
+                or re.fullmatch(r'sha256:[0-9a-f]{64}', selector_digest) is None):
+            raise ServerCLIUnavailable('retained original target selector is invalid')
         return ServerCLIContext(1, job_id, row['request_id'], row['project_root'],
             row['project_identity'], row['source_identity'], row.get('source_commit'),
             row.get('source_dirty_digest'), owner.target_identity, owner.runtime_revision,
-            deadline.isoformat(), argv[1:], origin_remote_name, MappingProxyType(target_metadata), owner)
+            deadline.isoformat(), argv[1:], origin_remote_name, MappingProxyType(target_metadata), owner,
+            target_selector_digest=selector_digest)
     finally:
         repository.close()
 

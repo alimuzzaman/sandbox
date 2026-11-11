@@ -1574,6 +1574,45 @@ def durable_job_dependencies():
     }
 
 
+def _close_job_dependencies(dependencies) -> None:
+    for name in ("job_service", "workspace_service"):
+        repository = getattr(dependencies.get(name), "repository", None)
+        close = getattr(repository, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+def drain_after_release(registry_path) -> bool:
+    """Start the oldest queued jobs after a supervisor freed its slot (spec 083).
+
+    Only for this host's own registry, so a supervisor of a temporary registry
+    (tests, tools) never touches host state. Building the services reconciles
+    and drains. Errors are swallowed: the job's result is already durable.
+    """
+    from sandbox.core._paths import RUNTIME_DIR
+    try:
+        if Path(registry_path).resolve() != (RUNTIME_DIR / "jobs" / "registry.sqlite3").resolve():
+            return False
+        dependencies = durable_job_dependencies()
+    except Exception:
+        return False
+    _close_job_dependencies(dependencies)
+    return True
+
+
+def run_admission_tick() -> None:
+    """One pass of the remote service's admission tick (spec 083).
+
+    Fresh services get their own registry connection, so the tick never shares
+    the request threads' connection. Building them runs startup reconciliation
+    (ending jobs whose owner is proved gone) and then the oldest-first drain.
+    """
+    _close_job_dependencies(durable_job_dependencies())
+
+
 def sync_service_dependencies():
     """Compose opt-in sync service without initializing runtime."""
     from sandbox.application.sync_service import build_sync_service

@@ -40,6 +40,22 @@ class _CiReleaseRegistry:
         raise AssertionError(self.mode)
 
 
+class _NoQueuedJobs:
+    """Drain API of a scheduler that reports no queued jobs (spec 083).
+
+    The status read then admits its own job through ``acquire`` as before.
+    """
+    last_refusal = None
+    def refresh_policy(self):
+        pass
+    def queued_in_order(self, *, after=None, limit=500):
+        return []
+    def free_slots(self):
+        return 1
+    def record_snapshot_reason(self, _snapshot):
+        pass
+
+
 class JobServiceTests(unittest.TestCase):
     def test_synchronized_submission_requires_authoritative_gateway_before_acceptance(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -366,7 +382,7 @@ class JobServiceTests(unittest.TestCase):
             projected = Path(temp) / "generation"
             admission_started = threading.Event()
             release_admission = threading.Event()
-            class Scheduler:
+            class Scheduler(_NoQueuedJobs):
                 def acquire(self, *_args, **_kwargs):
                     admission_started.set()
                     release_admission.wait(5)
@@ -432,7 +448,7 @@ class JobServiceTests(unittest.TestCase):
                 created_at="2026-08-26T00:00:02Z",
             )
             projected = Path(temp) / "generation"
-            class Scheduler:
+            class Scheduler(_NoQueuedJobs):
                 attempts = 0
                 def acquire(self, *_args, **_kwargs):
                     self.attempts += 1

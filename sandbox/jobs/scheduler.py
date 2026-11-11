@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
@@ -19,8 +20,20 @@ from sandbox.config.job_scheduler import (
 _SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
+# Why one admission was refused (spec 083). A drain continues past refusals
+# that concern only that job and stops at the host-wide ones.
+REFUSAL_KINDS = frozenset({"admitted", "workspace", "order", "capacity", "floor", "policy"})
+HOST_WIDE_REFUSALS = frozenset({"capacity", "floor", "policy"})
+
+
 class WorkspaceBusy(RuntimeError):
     queue_reason = "workspace_or_capacity_busy"
+
+    def __init__(self, message: str = "", *, kind: str = "workspace") -> None:
+        super().__init__(message)
+        if kind not in REFUSAL_KINDS:
+            raise ValueError(f"unknown admission refusal kind: {kind!r}")
+        self.kind = kind
 
 
 class SchedulerPolicyInvalid(WorkspaceBusy):
@@ -31,7 +44,7 @@ class SchedulerPolicyInvalid(WorkspaceBusy):
     """
 
     def __init__(self, error: JobSchedulerConfigError) -> None:
-        super().__init__(f"{error.code}: {error}")
+        super().__init__(f"{error.code}: {error}", kind="policy")
         self.queue_reason = error.code
 
 
@@ -112,6 +125,57 @@ def capacity_line(view: dict) -> str:
     return line
 
 
+_ACTIVE = ("accepted", "queued", "running", "cancelling")
+
+
+def workspace_compatible(connection, row, *, parallel_safe: bool) -> bool:
+    """The workspace-sharing rule of admission, shared with the order gate."""
+    row = dict(row)
+    active = connection.execute(
+        "SELECT l.* FROM workspace_leases l JOIN jobs j ON j.job_id=l.job_id "
+        "WHERE l.target_namespace=? AND l.project_identity=? AND l.workspace_label=? "
+        "AND j.lifecycle IN (?,?,?,?)",
+        (JobScheduler.namespace(row), row["project_identity"], row["workspace_label"], *_ACTIVE),
+    ).fetchall()
+    if not active:
+        return True
+    compatible = parallel_safe and all(bool(item["parallel_safe"]) for item in active)
+    requested_generation = row.get("sync_generation_id")
+    if requested_generation is not None:
+        compatible = compatible and all(
+            item["sync_generation_id"] == requested_generation
+            and item["source_access"] == "managed_read_only"
+            for item in active
+        )
+    return compatible
+
+
+_CANDIDATES = (
+    "SELECT j.* FROM jobs j WHERE j.lifecycle='queued' "
+    "AND j.queue_reason='workspace_or_capacity_busy' "
+    "AND (j.accepted_at < ? OR (j.accepted_at = ? AND j.job_id < ?)) "
+    "AND j.kind NOT IN ('matrix','plan') "
+    "AND NOT EXISTS (SELECT 1 FROM jobs c WHERE c.parent_job_id=j.job_id) "
+    "AND NOT EXISTS (SELECT 1 FROM workspace_leases l WHERE l.job_id=j.job_id) "
+    "AND NOT EXISTS (SELECT 1 FROM host_capacity_leases h WHERE h.job_id=j.job_id) "
+    "ORDER BY j.accepted_at, j.job_id"
+)
+
+
+def _older_candidates(connection, row):
+    """Older queued jobs that could take a free slot now (contracts/admission.md)."""
+    key = (row["accepted_at"], row["accepted_at"], row["job_id"])
+    for candidate in connection.execute(_CANDIDATES, key).fetchall():
+        own_parallel_safe = bool(candidate["parallel_safe"]) or candidate["workspace_mode"] == "isolated"
+        if workspace_compatible(connection, candidate, parallel_safe=own_parallel_safe):
+            yield candidate["job_id"]
+
+
+def older_candidate(connection, row) -> str | None:
+    """The oldest job that must be admitted before ``row``, or None."""
+    return next(_older_candidates(connection, row), None)
+
+
 class JobScheduler:
     def __init__(self, repository, *, max_parallel: int = DEFAULT_POLICY.max_parallel,
                  min_free_memory_mb: int = DEFAULT_POLICY.min_free_memory_mb,
@@ -125,6 +189,21 @@ class JobScheduler:
         # so a config change applies to the next admission without a restart.
         self.policy_loader = policy_loader
         self.policy_error: JobSchedulerConfigError | None = None
+        # Per thread: the remote service shares one scheduler across request
+        # threads, and a drain reads the refusal of the admission it just ran.
+        self._local = threading.local()
+
+    @property
+    def last_refusal(self) -> str | None:
+        return getattr(self._local, "refusal", None)
+
+    @last_refusal.setter
+    def last_refusal(self, kind: str | None) -> None:
+        self._local.refusal = kind
+
+    def _refuse(self, error: WorkspaceBusy) -> WorkspaceBusy:
+        self.last_refusal = error.kind
+        return error
 
     def _refresh_policy(self) -> None:
         if self.policy_loader is None:
@@ -173,39 +252,38 @@ class JobScheduler:
         namespace = self.namespace(row)
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=max(60, int(row["deadline_seconds"])))).isoformat()
+        self.last_refusal = None
         self._refresh_policy()
         if self.policy_error is not None:
-            raise SchedulerPolicyInvalid(self.policy_error)
+            raise self._refuse(SchedulerPolicyInvalid(self.policy_error))
         with self.repository.transaction(immediate=True) as connection:
             # Terminal jobs can finish without a later status read. Reap those
             # leases before admission so completed work cannot block a new job.
             self._reap_stale_locked(connection, now=now)
+            # A job another caller already admitted is left alone: re-admitting
+            # it would fail the unique slot row and the generic error path would
+            # then release the winner's leases (spec 083 FR-015).
+            current = connection.execute(
+                "SELECT lifecycle FROM jobs WHERE job_id=?", (row["job_id"],)).fetchone()
+            if (current is not None and current[0] not in _ACTIVE) or connection.execute(
+                    "SELECT 1 FROM workspace_leases WHERE job_id=? UNION ALL "
+                    "SELECT 1 FROM host_capacity_leases WHERE job_id=? LIMIT 1",
+                    (row["job_id"], row["job_id"])).fetchone() is not None:
+                raise self._refuse(WorkspaceBusy("job is already admitted", kind="admitted"))
             if not self._resource_floor_available():
-                raise WorkspaceBusy("host resource floor is not available")
-            active = connection.execute(
-                "SELECT l.* FROM workspace_leases l JOIN jobs j ON j.job_id=l.job_id "
-                "WHERE l.target_namespace=? AND l.project_identity=? AND l.workspace_label=? "
-                "AND j.lifecycle IN ('accepted','queued','running','cancelling')",
-                (namespace, row["project_identity"], row["workspace_label"]),
-            ).fetchall()
-            if active:
-                compatible = parallel_safe and all(bool(item["parallel_safe"]) for item in active)
-                requested_generation = row.get("sync_generation_id")
-                if requested_generation is not None:
-                    compatible = compatible and all(
-                        item["sync_generation_id"] == requested_generation
-                        and item["source_access"] == "managed_read_only"
-                        for item in active
-                    )
-                if not compatible:
-                    raise WorkspaceBusy(
-                        f"workspace {row['workspace_label']!r} is busy; use an isolated label or wait"
-                    )
+                raise self._refuse(WorkspaceBusy("host resource floor is not available", kind="floor"))
+            if not workspace_compatible(connection, row, parallel_safe=parallel_safe):
+                raise self._refuse(WorkspaceBusy(
+                    f"workspace {row['workspace_label']!r} is busy; use an isolated label or wait"))
+            if older_candidate(connection, row) is not None:
+                raise self._refuse(WorkspaceBusy(
+                    "an older queued job is waiting for this host", kind="order"))
             slots = {int(value[0]) for value in connection.execute("SELECT slot FROM host_capacity_leases").fetchall()}
             # Count held slots rather than probing 1..max: after the limit is
             # lowered, high-numbered slots still held must keep counting.
             if len(slots) >= self.max_parallel:
-                raise WorkspaceBusy("host capacity is busy; retry when a running job finishes")
+                raise self._refuse(WorkspaceBusy(
+                    "host capacity is busy; retry when a running job finishes", kind="capacity"))
             slot = next(candidate for candidate in itertools.count(1) if candidate not in slots)
             lease_id = secrets.token_hex(16)
             timestamp = now.isoformat()
@@ -219,18 +297,56 @@ class JobScheduler:
             connection.execute("INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) VALUES(?,?,?,?)",
                                (slot, row["job_id"], timestamp, timestamp))
 
+    def queued_in_order(self, *, after: tuple[str, str] | None = None,
+                        limit: int = 500) -> list[tuple[str, str]]:
+        """One page of ``(accepted_at, job_id)`` of queued jobs, oldest first."""
+        accepted_at, job_id = after or ("", "")
+        return [(str(item[0]), str(item[1])) for item in self.repository.connection.execute(
+            "SELECT accepted_at, job_id FROM jobs WHERE lifecycle='queued' "
+            "AND kind NOT IN ('matrix','plan') "
+            "AND (accepted_at > ? OR (accepted_at = ? AND job_id > ?)) "
+            "ORDER BY accepted_at, job_id LIMIT ?",
+            (accepted_at, accepted_at, job_id, int(limit))).fetchall()]
+
+    def free_slots(self) -> int:
+        """Slots free under the last loaded policy; a drain refreshes it first."""
+        held = self.repository.connection.execute(
+            "SELECT COUNT(*) FROM host_capacity_leases h JOIN jobs j ON j.job_id=h.job_id "
+            "WHERE j.lifecycle IN (?,?,?,?)", _ACTIVE).fetchone()[0]
+        return max(0, self.max_parallel - int(held))
+
+    def refresh_policy(self) -> None:
+        self._refresh_policy()
+
+    def record_queue_reason(self, job_id: str, reason: str) -> None:
+        """Record why a still-queued job waits; nothing else changes."""
+        with self.repository.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE jobs SET queue_reason=? WHERE job_id=? AND lifecycle='queued' "
+                "AND IFNULL(queue_reason,'') <> ?", (reason, job_id, reason))
+
+    def record_snapshot_reason(self, snapshot: dict) -> None:
+        """Record a status read's reason; sync launches own theirs (claim/reset)."""
+        if snapshot.get("sync_relationship_id") is None and snapshot.get("queue_reason"):
+            self.record_queue_reason(snapshot["job_id"], snapshot["queue_reason"])
+
+    def holds_slot(self, job_id: str) -> bool:
+        return self.repository.connection.execute(
+            "SELECT 1 FROM host_capacity_leases WHERE job_id=?", (job_id,)).fetchone() is not None
+
+    def is_queued(self, job_id: str) -> bool:
+        row = self.repository.connection.execute(
+            "SELECT lifecycle FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        return row is not None and row[0] == "queued"
+
     def queue_details(self, row: dict) -> dict:
         """Return bounded, advisory scheduler evidence for a queued job."""
         self._refresh_policy()
         namespace = self.namespace(row)
         lifecycle = ("accepted", "queued", "running", "cancelling")
-        queued_before = self.repository.connection.execute(
-            "SELECT COUNT(*) FROM jobs WHERE target_kind=? AND IFNULL(remote_name,'')=? "
-            "AND project_identity=? AND lifecycle='queued' "
-            "AND (accepted_at < ? OR (accepted_at = ? AND job_id < ?))",
-            (row["target_kind"], row.get("remote_name") or "", row["project_identity"],
-             row.get("accepted_at", ""), row.get("accepted_at", ""), row["job_id"]),
-        ).fetchone()[0]
+        # Host-wide: the number of older jobs that will be admitted first.
+        queued_before = sum(1 for _ in _older_candidates(self.repository.connection, {
+            "accepted_at": row.get("accepted_at", ""), "job_id": row["job_id"]}))
         workspace_rows = self.repository.connection.execute(
             "SELECT l.job_id, l.workspace_label FROM workspace_leases l "
             "JOIN jobs j ON j.job_id=l.job_id "

@@ -182,7 +182,8 @@ acceptance order across projects, and they start in that order.
   interval (default 20 seconds) as a backstop when no release event reaches it.
 - **FR-007**: Reading a queued job's status MUST NOT admit that job ahead of an older
   candidate. Outside a drain, a status read of a queued job runs the oldest-first drain
-  instead of admitting that job directly. Read commands may reconcile and drain.
+  before it reads its own job, and that job starts only when no older candidate waits.
+  Read commands may reconcile and drain.
 - **FR-008**: Admission MUST stay serialized so that no job starts twice and the
   number of held slots never exceeds the host's current `max_parallel`, under any
   interleaving of drains, status reads, submissions and cancellations, including from

@@ -637,6 +637,29 @@ def _parse_transport_args(argv):
 
 
 
+# Spec 083: the remote service starts queued jobs oldest-first on its own
+# schedule, as a backstop for releases no drain saw, and ends jobs whose owner is
+# proved gone through the existing startup reconciliation.
+ADMISSION_TICK_SECONDS = 20
+
+
+def _start_admission_tick(interval: float = ADMISSION_TICK_SECONDS):
+    import threading
+
+    def tick() -> None:
+        from sandbox.application.context import run_admission_tick
+        while True:
+            time.sleep(interval)
+            try:
+                run_admission_tick()
+            except Exception as exc:  # The next tick retries; never stop the service.
+                print(f"admission tick failed: {type(exc).__name__}", file=sys.stderr)
+
+    thread = threading.Thread(target=tick, name="sandbox-admission-tick", daemon=True)
+    thread.start()
+    return thread
+
+
 def _run_streamable_http(bind: str, port: int, token: str,
                          public_url: str | None = None) -> None:
     """Spec 014 remote hosting: co-located Model B -- this same server.py,
@@ -782,6 +805,8 @@ def _run_streamable_http(bind: str, port: int, token: str,
     app.routes.append(Route("/inventory", inventory, methods=["GET"]))
     app.routes.append(Route("/wp-cli", wp_cli_control, methods=["POST"]))
     app.add_middleware(_BearerAuthMiddleware)
+    if _job_dependencies:
+        _start_admission_tick()
     uvicorn.run(app, host=bind, port=port)
 
 

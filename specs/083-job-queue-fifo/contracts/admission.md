@@ -29,8 +29,8 @@ Inside one immediate transaction, in this order. Each refusal raises `WorkspaceB
 `last_refusal`:
 
 1. Reap terminal leases (unchanged).
-2. **New**: J already holds a lease, or J's lifecycle is not `accepted`/`queued`:
-   kind `admitted`. The caller leaves J alone (FR-015).
+2. **New**: J already holds a lease, or J has ended (lifecycle not `accepted`, `queued`,
+   `running` or `cancelling`): kind `admitted`. The caller leaves J alone (FR-015).
 3. Policy invalid: `SchedulerPolicyInvalid`, kind `policy`.
 4. Floor unavailable: kind `floor`.
 5. J's own workspace incompatible (`workspace_compatible`): kind `workspace`.
@@ -71,8 +71,10 @@ Updates `queue_reason` of a job that is still `queued`, nothing else; a no-op ot
 
 ## Status read of a queued job (`JobService.get`)
 
-Outside a drain, `get` of a queued job runs `drain_queue()` and then returns that job's
-fresh snapshot. It never calls `acquire` for that job directly.
+Outside a drain, `get` of a queued job first runs `drain_queue()`, then reads that job
+through the existing admission path with draining switched off for the thread. Its own
+`acquire` is still gated by step 6, so it can only start when no older candidate waits;
+it never starts ahead of one.
 
 ## Drain triggers
 

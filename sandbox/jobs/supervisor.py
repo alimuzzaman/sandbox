@@ -305,7 +305,16 @@ def run_descriptor(path: str | Path) -> int:
             # Terminal command truth is already durable. Cleanup failures are
             # recorded by the shared seam and must never rewrite that result.
             pass
+        registry_path = repository.path
         repository.close()
+        if release_authority:
+            # The freed slot goes to the oldest queued job now, not when some
+            # client next reads a status (spec 083). Never fails the job.
+            try:
+                from sandbox.application.context import drain_after_release
+                drain_after_release(registry_path)
+            except Exception:
+                pass
 
 
 def _drain_selector(selector: selectors.DefaultSelector, output: JobOutputStore, *, max_duration: float = 1.0) -> bool:

@@ -37,8 +37,8 @@
   re-entrancy flag are thread-local, because the remote service shares one
   `JobService` across request threads.
 - **Status reads**: outside a drain, a status read of a queued job runs the drain
-  instead of admitting that job directly, so stale reasons cannot let a poller jump
-  ahead (analyze I1).
+  first and only then reads its own job, whose `acquire` stays behind the order gate,
+  so stale reasons cannot let a poller jump ahead (analyze I1).
 - **Triggers**: end of `reconcile_startup` (every job command builds dependencies, so
   each `sb job-*` invocation drains); after `get()` releases a terminal job; after
   `cancel()`; after an order refusal in `get()` outside a drain; the supervisor after it

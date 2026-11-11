@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Queued durable jobs start oldest first across the host, whoever polls. A freed slot is offered to queued jobs when a job's supervisor finishes, on a status read or cancel, at the start of every job command, and every 20 seconds in the remote service. An older job blocked on its own workspace, a dependency or a sync generation does not hold up younger jobs, and `queue.position` counts only the jobs that start first. A status read never admits its own job ahead of an older one. The remote service also ends jobs whose supervisor is proved gone on that schedule.
 - `jobs.scheduler` in a host's machine config sets its durable-job slot limit (`max_parallel`, 1-32, default 2) and free memory and disk floors (at least 512 MB and 2048 MB, the defaults). `sb job-policy [--remote R]` shows it and, with `--confirm`, writes it; the next admission uses it without a restart. `job-list` and `remote service diagnostics` report the limit and slots in use. Control protocol 23: remotes must be migrated to serve this controller.
 - `healthcheck.deadline_seconds` (60-600, default 60) sets how long `sb host apply` waits for the health path.
 

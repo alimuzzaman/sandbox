@@ -160,15 +160,39 @@ def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
         return {}  # Missing/ambiguous routing evidence is not denied owner access.
 
 
+def _command_head(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Inspect documented global options without discarding their semantics."""
+    index = 0
+    while index < len(values) and values[index].startswith('-'):
+        option = values[index]
+        if option == '--strict-runtime':
+            index += 1
+        elif option in {'--instance', '--label'}:
+            if index + 1 >= len(values):
+                raise ServerCLIUnavailable('global CLI selector needs its value')
+            index += 2
+        elif option.startswith(('--instance=', '--label=')):
+            index += 1
+        elif option in {'--help', '-h', '--version'}:
+            return ()  # The CLI exits without executing a command.
+        else:
+            raise ServerCLIUnavailable('global CLI option is unavailable in retained commands')
+    return values[index:]
+
+
 def _command_argv(argv) -> tuple[str, ...]:
     values = validate_argv(tuple(argv))
     if values[0] in {'sb', 'sandbox'} or Path(values[0]).is_absolute():
         raise ServerCLIUnavailable('server CLI expects command argv without an executable')
     # Secret values and free-form secret-printing shells are not a job contract.
     # Provider-specific normal commands consume the server store themselves.
-    if values[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
+    selected = _command_head(values)
+    if (selected[:1] in {('secrets',), ('host',)} and len(selected) > 1
+            and selected[1].startswith('-')):
+        raise ServerCLIUnavailable('retained commands require the action before its options')
+    if selected[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
         raise ServerCLIUnavailable('secret value output is unavailable through server CLI jobs')
-    if (values[:2] == ('host', 'exec')
+    if (selected[:2] == ('host', 'exec')
             or any(flag in values for flag in ('--stdin', '--token-stdin', '--interactive'))):
         raise ServerCLIStdinUnavailable('retained server CLI stdin transport is unavailable; no job was accepted')
     from sandbox.services.redaction import require_safe_argv

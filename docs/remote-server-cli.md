@@ -37,6 +37,14 @@ revision. These derive from the current account and selected nonsecret service
 unit; the separate EnvironmentFile is never opened. This establishes current
 owner-layout execution, not immutable root-controlled release authority.
 
+`read_current_server_owner()` exposes only that installed receiver metadata for a
+fixed read-only target inspector. It does not authorize local commands: the
+execution ports still require the actual retained current job. The unit is the
+same `REMOTE_MCP_SERVICE` selected by lifecycle installation, not a parallel unit
+name. Joined lifecycle staging observes the real unit, machine, endpoint and
+private credential-file metadata before upload, and rechecks the observed unit
+revision under the install lock without reading or exporting credential values.
+
 Host adapters must consume the typed owner target instead of resolving a self
 alias. `validate_owner_current(owner)` rechecks the actual retained child before
 effects. `owner_process(owner, command, *, timeout=30, input_data=None)` runs an

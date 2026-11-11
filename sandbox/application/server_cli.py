@@ -56,9 +56,9 @@ class ServerCliOwner:
 def _current_owner() -> ServerCliOwner:
     """Read only the selected nonsecret unit metadata, never EnvironmentFile."""
     from sandbox.core._paths import ROOT, RUNTIME_DIR
-    from sandbox.core._remote import _remote_mcp_runtime_revision
+    from sandbox.core._remote import _remote_mcp_runtime_revision, REMOTE_MCP_SERVICE
     home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
-    unit = home / '.config/systemd/user/sandbox-remote-mcp.service'
+    unit = home / '.config/systemd/user' / REMOTE_MCP_SERVICE
     info = unit.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o022):
@@ -89,6 +89,16 @@ def _current_owner() -> ServerCliOwner:
         raise ServerCLIUnavailable('installed CLI and selected owner service identity do not agree')
     return ServerCliOwner(os.geteuid(), str(home), str(Path(RUNTIME_DIR).parent.resolve()),
         str(executable), machine_identity(), marker, revision)
+
+
+def read_current_server_owner() -> ServerCliOwner:
+    """Nonsecret installed receiver metadata only, never a job execution grant."""
+    try:
+        return _current_owner()
+    except ServerCLIUnavailable:
+        raise
+    except (OSError, ValueError, KeyError):
+        raise ServerCLIUnavailable('current installed owner binding is unavailable') from None
 
 
 def installed_cli() -> Path:

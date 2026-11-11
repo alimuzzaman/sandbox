@@ -5,7 +5,8 @@ from sandbox.resources.host_memory.models import HEX24
 from sandbox.resources.host_memory.remote import RemoteProtocolError, validate_response
 
 
-def discover_join_identity(name: str, record: dict, request, *, budget_seconds=15) -> dict:
+def discover_join_identity(name: str, record: dict, request, *, budget_seconds=15,
+                           allow_revision_cache: bool = False) -> dict:
     """Read the installed schema-1 status contract without SSH or owner tokens.
 
     First admission trusts the selected tailnet service. Subsequent adoption
@@ -39,6 +40,8 @@ def discover_join_identity(name: str, record: dict, request, *, budget_seconds=1
     for field, observed, code in (
             ("ownership_marker", marker, "remote_service_ownership_unknown"),
             ("runtime_revision", revision, "remote_runtime_revision_mismatch")):
+        if field == 'runtime_revision' and allow_revision_cache:
+            continue  # Only the compatible-revision adapter may publish this cache change.
         if field in pinned_service and pinned_service[field] != observed:
             raise RemoteProtocolError(code, "registered service identity changed; adoption refused")
     if pinned_identity and pinned_identity != {"schema_version": 1, "target_identity": identity}:

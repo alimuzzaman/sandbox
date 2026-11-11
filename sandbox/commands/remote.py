@@ -783,6 +783,8 @@ def _cmd_service(args, as_json: bool) -> None:
         die("--ssh diagnostics are no longer supported; use the authenticated remote service")
     if _arg_true(args, "processes") and operation != "diagnostics":
         die("--processes requires `remote service diagnostics <name>`")
+    if _arg_true(args, 'adopt_compatible_revision') and operation != 'refresh':
+        die('--adopt-compatible-revision requires remote service refresh')
     confirmed = _arg_true(args, "confirm")
     entry = {}
     try:
@@ -793,11 +795,18 @@ def _cmd_service(args, as_json: bool) -> None:
             if entry.get("joined") is not True or entry.get("control_access") != "tailnet":
                 raise ValueError("refresh requires an existing joined tailnet registration")
             from sandbox.remote_runtime.join_identity import discover_join_identity
-            evidence = discover_join_identity(name, entry, sr.remote_host_memory_request)
             requested_profile = _arg_str(args, 'front_door')
-            if requested_profile is not None:
-                evidence.update(_joined_profile_evidence(entry, evidence, requested_profile))
-            sr.put_remote(name, _expected=entry, **evidence)
+            if _arg_true(args, 'adopt_compatible_revision'):
+                if requested_profile is not None:
+                    raise ValueError('revision cache adoption does not replace a front-door profile')
+                from sandbox.remote_runtime.join_revision import adopt_compatible_join_revision
+                evidence = adopt_compatible_join_revision(name, entry, sr.remote_host_memory_request,
+                                                          sr._remote_mcp_service_status_via_ssh)
+            else:
+                evidence = discover_join_identity(name, entry, sr.remote_host_memory_request)
+                if requested_profile is not None:
+                    evidence.update(_joined_profile_evidence(entry, evidence, requested_profile))
+                sr.put_remote(name, _expected=entry, **evidence)
             payload = {"ok": True, "name": name, "status": "refreshed",
                        "data": evidence, "error": None}
         elif operation == "capability":
@@ -846,6 +855,11 @@ def _cmd_service(args, as_json: bool) -> None:
             # foreign during a routine migration.
             public_url = entry.get("control_url") if transport == "https" else None
             observed = sr.remote_mcp_service_status(entry)
+            owner_observation = None
+            if preserve_credentials:
+                from sandbox.remote_runtime.owner_service import probe_joined_owner_service
+                owner_observation = probe_joined_owner_service(entry, bind,
+                    int(entry.get('mcp_port') or sr.DEFAULT_MCP_PORT), sr.ssh_run)
             if confirmed and observed.get("probe_state", "complete") != "complete":
                 raise RuntimeError(
                     observed.get("probe_error") or "remote_service_probe_unavailable")
@@ -874,6 +888,8 @@ def _cmd_service(args, as_json: bool) -> None:
                 **({'preserve_credentials': True} if preserve_credentials else {}),
             )
             plan["observed"] = observed
+            if owner_observation is not None:
+                plan['preflight_owner_observation'] = owner_observation
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
             if not confirmed:
                 listing = _pin_listing(entry)
@@ -2293,6 +2309,9 @@ def _cmd_up(args, as_json: bool) -> None:
         if observed.get("probe_state", "complete") != "complete":
             raise RuntimeError(
                 observed.get("probe_error") or "remote_service_probe_unavailable")
+        if preserve_credentials:
+            from sandbox.remote_runtime.owner_service import probe_joined_owner_service
+            probe_joined_owner_service(entry, entry.get('tailscale_host'), int(port), sr.ssh_run)
         upload_timeout = _runtime_source_upload_timeout_arg(args)
         source_revision = _local_git_revision()
         _invalidate_readiness(name, before=True)

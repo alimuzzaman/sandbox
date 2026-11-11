@@ -225,6 +225,13 @@ def require_owner_target(target):
     return target.require_current()
 
 
+def withhold_owner_completion(target):
+    """Negative-only fence after an unprovable trusted child completion."""
+    if type(target) is not OwnerHostTarget or getattr(target, "_seal", None) is not _ISSUER:
+        raise OwnerTargetUnavailable("genuine original owner target is required")
+    _UNKNOWN_JOBS.add(target._context.job_id)
+
+
 def owner_effect_unknown(target):
     """Negative-only fence; it never establishes an actor or effect grant.
 

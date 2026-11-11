@@ -206,7 +206,19 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
     _require_compatible_runtime(remote, record, timeout_seconds=remaining())
     adapter = HostMemoryRemote(remote, record, lambda selected, payload:
         _remote.remote_host_memory_request(selected, payload, timeout_seconds=remaining()))
-    value = adapter.call("host_memory_status", budget_seconds=remaining())
+    try:
+        value = adapter.call("host_memory_status", budget_seconds=remaining())
+    except RemoteProtocolError as exc:
+        from sandbox.remote_runtime.join_adoption import joined
+        if exc.code != 'remote_runtime_revision_mismatch' or not joined(record):
+            raise
+        # This is a fresh read, before any operation binding or effect. Keep
+        # previously constructed adapters and persisted plans revision-bound.
+        from sandbox.remote_runtime.join_revision import reconnect_join_record
+        record = reconnect_join_record(remote, record, budget_seconds=remaining())
+        adapter = HostMemoryRemote(remote, record, lambda selected, payload:
+            _remote.remote_host_memory_request(selected, payload, timeout_seconds=remaining()))
+        value = adapter.call("host_memory_status", budget_seconds=remaining())
     identity = value.get("target_identity")
     if (value.get("evidence_state") not in {"known", "partial", "unmanaged"}
             or not isinstance(identity, str)

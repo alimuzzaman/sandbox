@@ -5115,6 +5115,11 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
         "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; env_tmp=''; "
         "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; legacy_stopped=1; fi; "
+        # Initialize genuine owner-layout identity under the same supported
+        # lifecycle transaction; discovery itself must never create authority.
+        f'"$runtime/sb" installation initialize --home "$HOME/sandbox" '
+        f'--layout owner --ownership-marker {shlex.quote(record["ownership_marker"])} '
+        '--confirm --json >/dev/null; '
         "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\"; then "
         "exit 1; fi; "
         # A first install has no loaded unit to reset.  Keep reset narrowly

@@ -738,6 +738,12 @@ def _run_streamable_http(bind: str, port: int, token: str,
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse(result)
 
+    async def installation_discovery(request):
+        from sandbox.installation.http import installation_response
+        status, payload = await installation_response(request,
+            home=os.environ.get('SANDBOX_HOME', str(Path.home() / 'sandbox')))
+        return JSONResponse(payload, status_code=status)
+
     async def inventory(request):
         query = list(request.query_params.multi_items())
         if query and query != [("deep", "1")]:
@@ -779,6 +785,10 @@ def _run_streamable_http(bind: str, port: int, token: str,
             peer = request.client.host if request.client else None
             if await gate.admit(request.headers.get("authorization"), peer) is None:
                 return PlainTextResponse("Unauthorized", status_code=401)
+            from sandbox.installation.admission import allowed_request
+            if not await asyncio.to_thread(allowed_request, request.method, request.url.path,
+                    home=home, managed=os.environ.get('SANDBOX_MANAGED') == '1'):
+                return PlainTextResponse('Installation maintenance admission is closed', status_code=409)
             if attribution is not None:
                 return await attribution.observe(request, call_next)
             return await call_next(request)
@@ -803,6 +813,7 @@ def _run_streamable_http(bind: str, port: int, token: str,
     app.routes.append(Route("/diagnostics", diagnostics, methods=["GET"]))
     app.routes.append(Route("/resources", resources, methods=["POST"]))
     app.routes.append(Route("/inventory", inventory, methods=["GET"]))
+    app.routes.append(Route("/hosting/installation", installation_discovery, methods=["GET"]))
     app.routes.append(Route("/wp-cli", wp_cli_control, methods=["POST"]))
     app.add_middleware(_BearerAuthMiddleware)
     if _job_dependencies:

@@ -19,6 +19,9 @@ from sandbox.hosting.server_cli_target import host_target, is_owner_target, can_
 # v1 means retained selector consumption plus the native/physical held scope
 # below. It describes the existing redacted UTF-8 capture, not binary transport.
 SERVER_CLI_EXEC_BINDING_VERSION = 1
+# Requires the committed private-artifact custody API, metadata-only emitter,
+# actual EOF capture and byte-aware client renderer shipped in this increment.
+SERVER_CLI_EXEC_CAPTURE_VERSION = 1
 
 
 def _refuse(code: str, message: str, *, as_json: bool, exit_code: int) -> None:
@@ -212,6 +215,11 @@ def cmd_host_exec(args) -> None:
         if not artifact_capture:
             raise
         _refuse("host_exec_capture_unavailable", "installed original capture facility is unavailable",
+                as_json=as_json, exit_code=host_exec.EXIT_REFUSAL)
+    except RuntimeError as error:
+        if not artifact_capture or getattr(error, "code", None) != "server_cli_capture_unavailable":
+            raise
+        _refuse("host_exec_capture_unavailable", "original capture preparation is unavailable before effects",
                 as_json=as_json, exit_code=host_exec.EXIT_REFUSAL)
     finally:
         if not setup_complete and custody is not None:

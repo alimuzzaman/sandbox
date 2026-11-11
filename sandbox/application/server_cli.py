@@ -264,25 +264,11 @@ class ServerCLIContext:
 
 def validate_target_metadata(value) -> dict:
     """Routing observations only; no key, token, ssh/config or role fields."""
-    if not isinstance(value, dict) or set(value) - {'origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port'}:
-        raise ServerCLIUnavailable('original target routing metadata is invalid')
-    result = dict(value)
-    for field, version in (('origin_ipv4', 4), ('origin_ipv6', 6)):
-        if field in result:
-            if not isinstance(result[field], str):
-                raise ServerCLIUnavailable('original target address metadata must be text')
-            try:
-                address = ipaddress.ip_address(result[field])
-            except (ValueError, TypeError):
-                raise ServerCLIUnavailable('original target address metadata is invalid') from None
-            if address.version != version:
-                raise ServerCLIUnavailable('original target address family changed')
-            result[field] = str(address)
-    if 'front_door' in result and result['front_door'] not in {'nginx', 'caddy'}:
-        raise ServerCLIUnavailable('original target front door is invalid')
-    if 'mcp_port' in result and (type(result['mcp_port']) is not int or not 1 <= result['mcp_port'] <= 65535):
-        raise ServerCLIUnavailable('original control port metadata is invalid')
-    return result
+    from sandbox.jobs.server_cli_retained import routing_metadata
+    try:
+        return routing_metadata(value)
+    except (ValueError, TypeError):
+        raise ServerCLIUnavailable('original target routing metadata is invalid') from None
 
 
 def server_cli_context_if_selected() -> ServerCLIContext | None:
@@ -369,13 +355,13 @@ def _read_server_cli_context() -> ServerCLIContext:
             from sandbox.application.server_cli_exec import remaining_deadline
             remaining_deadline(provenance['server_cli.absolute_deadline_at'])
             deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.absolute_deadline_at'].replace('Z', '+00:00')))
-        if row.get('parent_job_id'):
-            ancestor = repository.get(row['parent_job_id'])
-            if ancestor.get('kind') != KIND or ancestor.get('lifecycle') not in {'running', 'succeeded'}:
-                raise ServerCLIUnavailable('original parent job no longer permits execution')
-            deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.parent_deadline_at']))
-            if datetime.now(timezone.utc) >= deadline:
-                raise ServerCLIUnavailable('original parent job deadline expired')
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        try:
+            inherited = check_server_cli_lineage(repository.server_cli_ancestry(job_id))
+        except ServerCliLineageError:
+            raise ServerCLIUnavailable('original ancestor cancellation or deadline refuses execution') from None
+        if inherited is not None:
+            deadline = min(deadline, inherited)
         origin_remote_name = provenance.get('server_cli.remote_name')
         target_metadata = validate_target_metadata(json.loads(provenance.get('server_cli.target_metadata', '{}')))
         if (provenance.get('server_cli.target_identity') != owner.target_identity
@@ -455,6 +441,11 @@ def validate_nested_parent(parent_job_id: str, *, target_identity: str,
     repository = JobRepository(Path(RUNTIME_DIR) / 'jobs/registry.sqlite3')
     try:
         row = repository.snapshot(parent_job_id)
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        try:
+            inherited = check_server_cli_lineage(repository.server_cli_ancestry(parent_job_id))
+        except ServerCliLineageError:
+            raise ServerCLIUnavailable('original ancestor cancellation or deadline refuses nested admission') from None
     finally:
         repository.close()
     process = row.get('process') or {}
@@ -482,6 +473,8 @@ def validate_nested_parent(parent_job_id: str, *, target_identity: str,
     deadline = datetime.fromisoformat(row['started_at'].replace('Z', '+00:00')) + timedelta(seconds=row['deadline_seconds'])
     if proof.get('server_cli.parent_deadline_at'):
         deadline = min(deadline, datetime.fromisoformat(proof['server_cli.parent_deadline_at']))
+    if inherited is not None:
+        deadline = min(deadline, inherited)
     remaining = math.floor((deadline - datetime.now(timezone.utc)).total_seconds())
     if remaining <= 0:
         raise ServerCLIUnavailable('nested CLI exceeds original remaining deadline')

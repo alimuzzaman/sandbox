@@ -183,6 +183,8 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                         returncode=0, argv=('/bin/sh', '-c', 'single-effect'), stdout='', stderr='',
                         stdout_truncated=False, stderr_truncated=False, termination_reason=None)) as run:
                 repository.return_value.snapshot.return_value = row
+                repository.return_value.server_cli_ancestry.return_value = [{
+                    **row, 'job_id': 'd' * 32, 'parent_job_id': None, 'server_cli_cancel_requested': False}]
                 try:
                     context = cli.current_server_cli_context()
                     if dispatch:

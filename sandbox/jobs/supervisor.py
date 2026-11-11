@@ -24,16 +24,31 @@ from sandbox.services.redaction import redact_structure, redact_text
 
 def _server_cli_parent_reason(descriptor, repository):
     parent = descriptor.get('server_cli_parent')
-    if parent is None:
+    context = descriptor.get('authoritative_context') or {}
+    if not isinstance(context, dict):
+        return 'parent_context_unavailable'
+    selected = context.get('execution_kind') == 'server-cli'
+    if parent is None and not selected:
         return None
     from datetime import datetime, timezone
     try:
-        deadline = datetime.fromisoformat(parent['deadline_at'])
-        if datetime.now(timezone.utc) >= deadline:
-            return 'parent_deadline_exceeded'
-        row = repository.get(parent['job_id'])
-        if row.get('kind') != 'server-cli' or row.get('lifecycle') not in {'running', 'succeeded'}:
-            return 'parent_cancelled_or_unavailable'
+        from .server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        if parent is not None:
+            deadline = datetime.fromisoformat(parent['deadline_at'])
+            if datetime.now(timezone.utc) >= deadline:
+                return 'parent_deadline_exceeded'
+        # Old descriptors retain their immediate link; the repository follows
+        # that actual chain rather than trusting a caller-supplied root ID.
+        current_job = descriptor.get('job_id')
+        job_id = current_job if current_job is not None else parent['job_id']
+        rows = repository.server_cli_ancestry(job_id)
+        if (not isinstance(rows, list) or not rows or rows[0].get('kind') != 'server-cli'
+                or (current_job is not None and rows[0].get('job_id') != current_job)
+                or (current_job is not None and parent is not None and rows[0].get('parent_job_id') != parent['job_id'])):
+            return 'parent_context_unavailable'
+        check_server_cli_lineage(rows, pending_self=current_job is not None)
+    except ServerCliLineageError as exc:
+        return exc.reason
     except Exception:
         return 'parent_context_unavailable'
     return None

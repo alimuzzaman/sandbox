@@ -227,6 +227,7 @@ def _instance_route_file_names() -> list[str]:
 # Origin equal to Host, a JSON body and a panel-only header. A cross-site form can
 # send neither; a cross-site fetch that tries triggers a preflight nothing answers.
 _SHARE_PATH = "/api/hosting/share"
+_SIGN_IN_PATH = "/api/hosting/sign-in"
 _SHARE_HEADER = "X-Sandbox-Panel"
 _SHARE_BODY_MAX = 4096
 _SHARE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -335,6 +336,41 @@ def _web_share(payload) -> tuple[int, dict]:
                      "message": "the share request failed; run `sb host share` on the controller for details"}
 
 
+def _web_sign_in(payload) -> tuple[int, dict]:
+    from sandbox.hosting import panel_access
+    from sandbox.hosting.share import append_audit, audit_record
+
+    if not isinstance(payload, dict) or set(payload) != {'remote', 'stack'}:
+        return 400, {'ok': False, 'code': 'panel_request_invalid',
+                     'message': 'sign-in takes exactly remote and stack'}
+    try:
+        _, remote_name, stack, _ = _share_request({'action': 'create', **payload})
+    except ValueError as exc:
+        return 400, {'ok': False, 'code': 'panel_request_invalid', 'message': str(exc)}
+    def audit(outcome):
+        append_audit(audit_record('sign_in', remote=remote_name, target=stack,
+                                 entry=None, outcome=outcome, controller='panel', owner='panel'))
+    try:
+        # Record intent before the effect. Audit failure must not silently mint.
+        audit('requested')
+        result = panel_access.sign_in(remote_name, stack)
+        audit('succeeded')
+        return 200, {'ok': True, **_pick(result, ('url', 'expires_at', 'one_time', 'user'))}
+    except panel_access.SignInUnavailable as exc:
+        try:
+            audit('refused')
+        except Exception:
+            pass
+        return 409, {'ok': False, 'code': exc.code, 'message': exc.message}
+    except (Exception, SystemExit):
+        try:
+            audit('failed')
+        except Exception:
+            pass
+        return 409, {'ok': False, 'code': 'sign_in_unavailable',
+                     'message': 'Sign-in unavailable. Check the recorded WordPress autologin declaration and remote.'}
+
+
 def _hosting_view() -> tuple[int, dict]:
     """The read-only stacks and hosted sites view: this server's records, then the controller's."""
     import sandbox.core._hosting as hosting_core
@@ -375,6 +411,8 @@ def _hosting_view() -> tuple[int, dict]:
             lifetimes.update(_hosting_lifetimes().snapshot(remotes, now))
         view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
                                      lifetimes=lifetimes)
+        from sandbox.hosting import panel_access
+        panel_access.enrich(view, stack_data, host_state)
         view["partial_reasons"] = partial + view["partial_reasons"]
         return 200, remote_core.redact_structure(view)
     except Exception:
@@ -461,7 +499,7 @@ def cmd_web(cfg, args) -> None:
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             except (ValueError, RecursionError):  # deep nesting fits in 4 KiB
                 payload = None
-            code, result = _web_share(payload)
+            code, result = (_web_sign_in(payload) if self.path == _SIGN_IN_PATH else _web_share(payload))
             return self._send(code, json.dumps(result), no_store=True)
 
         def do_DELETE(self):
@@ -549,7 +587,7 @@ def cmd_web(cfg, args) -> None:
                 except ValueError:
                     return self._send(400, json.dumps({"ok": False, "error": "bad JSON"}))
                 return self._bridge("POST", body)
-            if self.path == _SHARE_PATH:
+            if self.path in {_SHARE_PATH, _SIGN_IN_PATH}:
                 # _share_request_allowed applies the _local() gate first, then its own checks,
                 # so every share response (refusals included) is answered no-store.
                 return self._share()

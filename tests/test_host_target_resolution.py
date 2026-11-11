@@ -227,6 +227,17 @@ class ReadOnlyCommandTests(unittest.TestCase):
         self.assertEqual(Path(directory), self.fx.runtime / "stacks" / "demo")
         self.assertEqual(environment, "sandbox")
 
+    def test_named_login_refuses_changed_manifest_identity_before_any_effect(self):
+        self.validated['project'] = 'another-project'
+        with patch.object(hosting_cmd.hosting, 'validate_manifest', return_value=self.validated), \
+                patch.object(hosting_cmd, '_issue_host_autologin') as mint, \
+                patch.object(hosting_cmd, '_cmd_host_login_link') as gate, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                hosting_cmd.cmd_host({}, _args('login-url', name='demo', confirm=True))
+        mint.assert_not_called()
+        gate.assert_not_called()
+
     def test_logs_with_name_reads_stack_manifest(self):
         with patch.object(hosting_cmd, "_read_host_logs", return_value="ok\n"):
             payload, validate = self._run(_args("logs", name="demo"))

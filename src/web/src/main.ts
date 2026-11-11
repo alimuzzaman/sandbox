@@ -4,7 +4,7 @@
 import { $ } from "./dom";
 import { store, thisServer } from "./state";
 import { fetchData, fetchRemotes, fetchUsage, fetchRemote, fetchHosting } from "./api";
-import { navigate, initRouter, onRoute, currentRoute, hostContext, instancePath, remotePath } from "./router";
+import { navigate, initRouter, onRoute, currentRoute, isHostingRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
@@ -20,6 +20,7 @@ import {
 import { doCreate, submitCreate, initCreateView } from "./pages/create";
 import { hostingStillChecking } from "./pages/hosting";
 import { shareLinks, shareStack } from "./pages/share";
+import { signInStack } from "./pages/stack";
 import type { SbApi } from "./types";
 
 // ---- data refresh scheduler ----
@@ -72,7 +73,7 @@ function loadHosting(): Promise<void> {
       scrollToHostingAnchor();
     }
     window.clearTimeout(hostingTimer);
-    if (currentRoute().page === "hosting" && hostingStillChecking() && hostingFollowUps < 3) {
+    if (isHostingRoute() && hostingStillChecking() && hostingFollowUps < 3) {
       hostingFollowUps++;
       hostingTimer = window.setTimeout(() => { void loadHosting(); }, 5000);
     }
@@ -100,7 +101,7 @@ async function performRefresh(): Promise<void> {
   renderDetail(false);
   // The hosting view reads local files only; never hold it behind the slower
   // instance inventory.
-  if (currentRoute().page === "hosting") void loadHosting();
+  if (isHostingRoute()) void loadHosting();
   try {
     // Remote summaries are registry-local and cheap; local instance rows may
     // require one Compose probe per registered project. Fetch them separately
@@ -228,6 +229,7 @@ const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
   copyText,
   shareStack: (button: HTMLElement) => { void shareStack(button); },
   shareLinks,
+  signInStack: (button: HTMLButtonElement) => { void signInStack(button); },
 };
 window.sb = sb;
 
@@ -267,7 +269,7 @@ function boot(): void {
   onRoute((route) => {
     render();
     if (route.page === "create") initCreateView();
-    if (route.page === "hosting") refreshHosting();
+    if (isHostingRoute(route)) refreshHosting();
     if (route.page === "remote" || route.page === "remote-instance" || route.page === "home" || route.page === "local-host") {
       void refresh();
     }
@@ -282,7 +284,7 @@ function boot(): void {
   // Initial paint from current URL, then start polling.
   render();
   if (currentRoute().page === "create") initCreateView();
-  if (currentRoute().page === "hosting") refreshHosting();
+  if (isHostingRoute()) refreshHosting();
   const r0 = currentRoute();
   if (r0.page === "instance" && r0.console) openTerminal(r0.name);
   startPolling();

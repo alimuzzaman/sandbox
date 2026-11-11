@@ -95,6 +95,14 @@ export interface LifetimeRow extends LifetimeView {
   project: string; environment: string; compose_project: string;
   name: string; card: boolean;
 }
+export type RevisionEvidence = "verified" | "unverified" | "not_delivered";
+export interface StackPageAccess {
+  uses: string[];
+  inbox: { url: string; hostname: string } | null;
+  inbox_reason: string | null;
+  revision_status: RevisionEvidence;
+  sign_in: { available: boolean; code: string; message: string };
+}
 export interface HostingStack {
   key: string; remote: string; source: "this-server" | "controller";
   slug: string; project: string; environment: string;
@@ -103,6 +111,7 @@ export interface HostingStack {
   created_at: number | null; ttl_expires_at: number | null;
   last_apply: HostingApply;
   compose_project: string; lifetime: LifetimeView;
+  page_access?: StackPageAccess;
   servers: HostingServer[];
 }
 export interface HostingTarget {
@@ -216,6 +225,7 @@ export interface SbApi {
   copyText(t: string, btn: HTMLElement): void;
   shareStack(button: HTMLElement): void;
   shareLinks(button: HTMLElement): void;
+  signInStack(button: HTMLButtonElement): void;
 }
 
 export interface SandboxDesktopApi {

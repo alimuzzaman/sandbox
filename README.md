@@ -1498,3 +1498,8 @@ finite snapshot timestamp. V1 receipts with no configured floor skip measurement
 and report `floor_applied: false`, matching push. V2 retains its default floor.
 The inspection minimum uses the push's existing `MAX_RECEIPT_BYTES` constant;
 the actual push policy is unchanged.
+
+Stack templates can declare direct shared stacks with `stack.uses: [dev]` (spec 085).
+The referenced stacks must already be recorded by the controller on the same remote.
+This records a relationship and does not create access grants. See
+[stack templates](docs/remote-hosting.md#stack-templates-sb-host-stack-spec-071).

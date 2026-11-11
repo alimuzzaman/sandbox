@@ -57,6 +57,14 @@ Compose to render configuration or read the runtime environment file just to
 discover service names. The original SSH/Compose path stays intact for existing
 controller-local execution.
 
+Owner runtime environment writes use the SDK's anonymous stdin channel. Neither
+the original text nor a reversible base64 encoding enters the helper argv or
+durable command record. The existing intended-recipient file stays at its
+normal server runtime location with mode 0600. The writer rejects a symlink,
+foreign-owned file or multiply linked file before truncation, sets its mode
+before writing and synchronizes completion. This is the existing recipient
+facility, not a new laptop credential copy or arbitrary staging facility.
+
 `hosting.server_target_selection.inspect_server_exec_target` is a metadata-only
 receiver composition port. It uses the SDK's current installed owner reader,
 fixed bounded Git/Docker metadata commands and a complete current-source

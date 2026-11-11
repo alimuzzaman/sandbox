@@ -187,6 +187,20 @@ class OwnerTargetTests(unittest.TestCase):
         with self.assertRaises(sdk.ServerCLIEffectUnknown):
             targets.selected_owner_target("box")
 
+    def test_intended_recipient_environment_uses_anonymous_stdin_not_encoded_argv(self):
+        from sandbox.commands.hosting import _write_remote_text
+        import base64
+        marker = "synthetic-recipient-credential-canary"
+        text = "APPLICATION_KEY=" + marker + "\n"
+        with patch.object(sdk, "owner_process", return_value=subprocess.CompletedProcess(
+                [], 0, stdout="", stderr="")) as process:
+            _write_remote_text(self.entry, str(self.home / "runtime/hosts/project/dev/environment.env"), text)
+        command = process.call_args.args[1]
+        self.assertNotIn(marker, command)
+        self.assertNotIn(base64.b64encode(text.encode()).decode(), command)
+        self.assertEqual(process.call_args.kwargs["input_data"], text.encode())
+        self.assertNotIn(marker, repr(self.entry))
+
 
 class ServerSelectionTests(OwnerTargetTests):
     def setUp(self):

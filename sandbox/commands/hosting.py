@@ -1021,6 +1021,27 @@ def _remote_basic_auth_hash(entry: dict, password: str) -> str:
 
 
 def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") -> None:
+    if is_owner_target(entry):
+        if re.fullmatch(r"0?[0-7]{3}", mode) is None:
+            raise hosting.HostingError("owner runtime file mode is invalid")
+        # Text may be the provider/generated environment for the intended
+        # runtime recipient. Never encode those bytes into a command argument.
+        program = "\n".join((
+            "import os,pathlib,shutil,stat,sys",
+            "p=pathlib.Path(sys.argv[1]); mode=int(sys.argv[2],8); os.umask(0o077)",
+            "p.parent.mkdir(parents=True,exist_ok=True)",
+            "fd=os.open(p,os.O_WRONLY|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),mode)",
+            "info=os.fstat(fd)",
+            "if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1:os.close(fd);sys.exit(1)",
+            "os.fchmod(fd,mode); os.ftruncate(fd,0)",
+            "with os.fdopen(fd,'wb') as out:",
+            " shutil.copyfileobj(sys.stdin.buffer,out); out.flush(); os.fsync(out.fileno())",
+        ))
+        result = entry.process(shlex.join(["python3", "-c", program, path, mode]),
+            timeout=30, input_data=text.encode())
+        if result.returncode:
+            raise hosting.HostingError("owner runtime file write failed")
+        return
     payload = base64.b64encode(text.encode()).decode()
     parent = str(__import__("posixpath").dirname(path))
     command = (

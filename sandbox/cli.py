@@ -876,6 +876,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Service actions:\n"
             "  ./sb remote service status NAME [--json]\n"
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
+            "  ./sb remote service refresh NAME [--json]  # adopt joined service identity locally\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
             "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]\n"

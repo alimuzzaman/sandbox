@@ -75,6 +75,16 @@ class OwnerHostTarget(Mapping):
         self.require_current()
         return result
 
+    def process_bounded(self, command, *, timeout=30, input_data=None,
+                        max_output=65536, terminate_on_output_limit=True):
+        from sandbox.application.server_cli import owner_process_bounded
+        current = self.require_current()
+        result = owner_process_bounded(current.owner, command, timeout=timeout,
+            input_data=input_data, max_output=max_output,
+            terminate_on_output_limit=terminate_on_output_limit)
+        self.require_current()
+        return result
+
     def stream(self, command, *, timeout=30, on_line=None):
         """One captured local invocation; never an SSH retry or second launch.
 

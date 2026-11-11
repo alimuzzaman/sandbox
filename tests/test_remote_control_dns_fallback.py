@@ -264,6 +264,7 @@ class ControlDnsFallbackWire(unittest.TestCase):
                         self.assertEqual(response.status, 200)
                     self.assertEqual(len(self.requests), 1)
                     self.assertEqual(self.requests[0][3], b'primary-body')
+                    self.assertEqual(self.requests[0][2].get_all('Host'), [f'control.example.test:{self.port}'])
                     self.assertEqual(self.requests[0][2].get_all('Authorization'), ['Bearer synthetic-token'])
                     self.assertEqual(attempted, [('control.example.test', self.port)])
                     self.requests.clear()

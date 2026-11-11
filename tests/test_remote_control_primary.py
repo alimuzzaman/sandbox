@@ -88,19 +88,33 @@ class PrimaryControlEndpointTests(unittest.TestCase):
                     self.assertEqual(self.connections, [(self.host, self.selected_port)])
 
     def test_explicit_proxy_request_is_refused_before_connection(self):
-        request = urllib.request.Request(self.entry['control_url'] + '/resources')
-        request.set_proxy(f'127.0.0.1:{self.other_port}', 'http')
-        with self.assertRaisesRegex(urllib.error.URLError, 'proxy'):
-            _remote._control_urlopen(self.entry, request, 2)
-        self.assertEqual(self.connections, [])
+        for proxy in (f'127.0.0.1:{self.other_port}', f'{self.host}:{self.selected_port}'):
+            for direct in (False, True):
+                with self.subTest(proxy=proxy, direct=direct):
+                    request = urllib.request.Request(self.entry['control_url'] + '/resources', data=b'fixture')
+                    request.set_proxy(proxy, 'http')
+                    with patch.object(_remote, '_control_primary_open') as primary:
+                        with self.assertRaisesRegex(urllib.error.URLError, 'proxy'):
+                            _remote._control_urlopen(self.entry, request, 2, direct=direct)
+                    primary.assert_not_called()
+                    self.assertEqual(self.connections, [])
 
     def test_joined_dns_failure_never_uses_recorded_public_origin(self):
         entry = {**self.entry, 'control_url': 'https://node.example.test', 'tailscale_host': 'node.example.test'}
         request = urllib.request.Request(entry['control_url'] + '/resources')
-        with patch.object(_remote, '_control_primary_open', create=True,
-                          side_effect=urllib.error.URLError(socket.gaierror('synthetic DNS refusal'))), \
-                patch.object(_remote, '_OriginHTTPSHandler') as origin:
-            with self.assertRaises(urllib.error.URLError):
-                _remote._control_urlopen(entry, request, 2)
-        origin.assert_not_called()
-        self.assertEqual(self.connections, [])
+        for fields in ({}, {'control_transport': 'https'}, {'joined': False}):
+            with self.subTest(fields=fields), patch.object(_remote, '_control_primary_open',
+                              side_effect=urllib.error.URLError(socket.gaierror('synthetic DNS refusal'))), \
+                    patch.object(_remote, '_OriginHTTPSHandler') as origin:
+                with self.assertRaises(urllib.error.URLError):
+                    _remote._control_urlopen({**entry, **fields}, request, 2)
+                origin.assert_not_called()
+                self.assertEqual(self.connections, [])
+
+    def test_primary_401_retains_unauthenticated_status_without_other_endpoint(self):
+        self.status = 401
+        result = _remote.verify_remote(self.entry)
+        self.assertFalse(result['authenticated'])
+        self.assertEqual(result['status'], 401)
+        self.assertEqual(len(self.requests['selected']), 1)
+        self.assertEqual(self.requests['other'], [])

@@ -3024,7 +3024,7 @@ def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     argument remains accepted; joined/Tailscale requests never retry an origin.
     """
     parsed = urlsplit(request.full_url)
-    if request.host != parsed.netloc or getattr(request, '_tunnel_host', None):
+    if request.has_proxy() or request.host != parsed.netloc or getattr(request, '_tunnel_host', None):
         raise urllib.error.URLError('proxy host routing is not permitted for control requests')
     try:
         return _control_primary_open(request, timeout)

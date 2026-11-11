@@ -120,6 +120,19 @@ export interface HostingView {
   partial_reasons: string[];
 }
 
+// POST /api/hosting/share (spec 081 follow-up). A `ShareCreated.link` is a
+// login-bypass secret: it lives only in the dialog that shows it, never in `store`.
+export interface ShareCreated {
+  ok: true; link: string; link_id: string; target: string; entry: string; kind: string;
+  scope: string; expires_at: number; expires_clamped: boolean; uses: number | null;
+  hostname: string; notes?: string[];
+}
+export interface ShareLinkRow { id: string; kind: string; scope: string; issued_at: number; expires_at: number; uses: number | null; used: number }
+export interface ShareSessionRow { id: string; link: string; created_at: number; expires_at: number }
+export interface ShareList { ok: true; target: string; entry: string; links: ShareLinkRow[]; sessions: ShareSessionRow[] }
+export interface ShareRevoked { ok: true; target: string; entry: string; revoked_links: number; revoked_sessions: number; revoked_keys: number }
+export interface ShareRefused { ok: false; code: string; message: string }
+
 export interface ActionResult {
   ok?: boolean;
   output?: string;
@@ -201,6 +214,8 @@ export interface SbApi {
   rowMenuClose(): void;
   consoleClose(): void;
   copyText(t: string, btn: HTMLElement): void;
+  shareStack(button: HTMLElement): void;
+  shareLinks(button: HTMLElement): void;
 }
 
 export interface SandboxDesktopApi {

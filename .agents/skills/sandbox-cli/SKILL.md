@@ -530,6 +530,7 @@ before protected effects.
 - Make a link: `sb host share create --remote R --project-dir . [--path /folder/|/page.html] [--ttl 7d] [--uses N] --json`. With `agent_mint: true` the result's `link` is the only copy: give it to the person, never write it to a file, note, log or commit. Without it the link goes to the owner's terminal only (`terminal_required` for agents); ask the owner to run it.
 - `--stack <slug>` makes a stack-page link (hostnames, health, fresh WordPress and QA sign-in links). The stack target's manifest needs the `share` block.
 - `sb host share list|revoke ID|all ...` (MCP: `host_share_create`, `host_share_list`, `host_share_revoke`). Never run `create` inside `sb job-start`: it refuses (`job_output_refused`).
+- The `sb web` Hosting page has "Share this stack" and "Live links" on each controller stack card: the same `create`/`list`/`revoke` as an agent (needs `agent_mint: true`), with the link shown once in the browser. Do not script the panel's share route; use the CLI or MCP.
 - The owner views a private site through its loopback port (`sb host status`), with `tailscale serve` or `ssh -L`.
 - `sb host login-url --service <site entry> --confirm` still mints a terminal-only whole-site link.
 - Hosted targets are not indexed: `X-Robots-Tag: noindex, nofollow, noarchive` on every response and `robots: deny`, unless `indexing: public`.

@@ -1,11 +1,12 @@
 // Stacks and hosted sites (spec 076): every server a stack created, with its
-// state, health and ref, plus plain hosted targets. Read-only: nothing here
-// posts an action.
+// state, health and ref, plus plain hosted targets. Read-only, except the
+// "Share this stack" buttons on stack cards (spec 081 follow-up, pages/share.ts).
 
 import { esc } from "../dom";
 import { store } from "../state";
 import { theme } from "../theme";
 import { hostingAnchor, hostingTargetPath } from "../router";
+import { shareButtons } from "./share";
 import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget, LifetimeRow, LifetimeView } from "../types";
 import {
   applyLabel, compareLifetimes, expiryTone, lifetimeLabel, reapLabel, timeLeft, CPU_LABEL, CPU_TITLE, type Tone,
@@ -219,7 +220,7 @@ function stackCard(stack: HostingStack): string {
       <div class="min-w-0"><div class="${theme.label}">Stack</div>
         <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold">${esc(stack.slug)}</h2>
         <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(stack.project)} · ${esc(stack.environment)} · ${esc(sourceNote(stack.source, stack.remote))}</p></div>
-      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}</div>
+      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}${shareButtons(stack.remote, stack.slug)}</div>
     </header>
     <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.")}</div>
     <dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">
@@ -248,7 +249,7 @@ function targetRow(target: HostingTarget): string {
 export function hostingView(): string {
   const data = store.hosting;
   const status = store.hostingError ? store.hostingError
-    : data ? `Read-only · updated ${new Date(data.generated_at * 1000).toLocaleTimeString()}` : "Loading…";
+    : data ? `Updated ${new Date(data.generated_at * 1000).toLocaleTimeString()}` : "Loading…";
   const header = `<header class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div><div class="${theme.label}">Hosting</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">Stacks and hosted sites</h1>
       <p class="mt-1 text-[13px] ${theme.muted}">Every server created for each stack, with its state, health and the ref it was built from.</p></div>

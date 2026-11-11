@@ -18,7 +18,8 @@ class WebPollerTests(unittest.TestCase):
         if not match or int(match.group(1)) < 24:
             self.skipTest("node 24 or newer runs TypeScript tests directly")
         result = subprocess.run(
-            [node, "--test", "src/web/tests/poller.test.ts", "src/web/tests/hostlabels.test.ts"],
+            [node, "--test", "src/web/tests/poller.test.ts", "src/web/tests/hostlabels.test.ts",
+             "src/web/tests/sharelabels.test.ts"],
             cwd=ROOT, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout[-4000:] + result.stderr[-1000:])

@@ -19,6 +19,7 @@ import {
 } from "./actions";
 import { doCreate, submitCreate, initCreateView } from "./pages/create";
 import { hostingStillChecking } from "./pages/hosting";
+import { shareLinks, shareStack } from "./pages/share";
 import type { SbApi } from "./types";
 
 // ---- data refresh scheduler ----
@@ -225,6 +226,8 @@ const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
   rowMenuToggle, rowMenuClose,
   consoleClose,
   copyText,
+  shareStack: (button: HTMLElement) => { void shareStack(button); },
+  shareLinks,
 };
 window.sb = sb;
 

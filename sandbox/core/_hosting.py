@@ -79,6 +79,14 @@ _ROBOTS_DENY_BLOCK = (
     f"        respond \"{ROBOTS_DENY_BODY}\" 200\n"
     "    }\n"
 )
+# Spec 081: every hosted response says "do not index". `defer` applies it after
+# the handler, so it replaces any value the application sent.
+_NOINDEX_HEADER_BLOCK = (
+    "    header {\n"
+    "        defer\n"
+    "        X-Robots-Tag \"noindex, nofollow, noarchive\"\n"
+    "    }\n"
+)
 _PORT_START = 18000
 _PORT_COUNT = 1000
 # Spec 071: named stack ports (Mailpit and friends) own this slice of the web
@@ -718,19 +726,30 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     except EdgeCacheError as exc:
         raise HostingError(f"cloudflare.cache_purge is invalid ({exc.code})") from None
     cf = {**cf, "cache_purge": cache_purge}
-    # `robots: deny` makes Caddy answer /robots.txt with `Disallow: /` for every
-    # served hostname of this environment — for a staging environment that is
-    # publicly resolvable but must never be indexed. Default `allow` leaves the
-    # application's own robots.txt in charge.
-    robots = env.get("robots", "allow")
+    # Spec 081: nothing hosted is indexed unless the environment says
+    # `indexing: public`. Under the default, both front doors add
+    # `X-Robots-Tag: noindex, nofollow, noarchive` to every response and `robots`
+    # defaults to `deny`, which answers /robots.txt with `Disallow: /`. Under
+    # `public`, `robots` defaults to `allow` (the application's own robots.txt).
+    indexing = env.get("indexing", "noindex")
+    if indexing not in {"noindex", "public"}:
+        raise HostingError("indexing must be noindex or public")
+    robots = env.get("robots", "allow" if indexing == "public" else "deny")
     if robots not in {"allow", "deny"}:
         raise HostingError("robots must be allow or deny")
+    if robots == "allow" and indexing != "public":
+        raise HostingError("robots: allow lets crawlers in; it needs `indexing: public` on the "
+                           "environment (hosted targets are not indexed by default)")
     from sandbox.hosting import login_service
     try:
         login_declaration = login_service.parse_declaration(
-            env.get("autologin"), routes=routes, compose=compose, secrets=secrets)
+            env.get("autologin"), routes=routes, compose=compose, secrets=secrets,
+            share=env.get("share"))
     except login_service.LoginServiceError as exc:
         raise HostingError(str(exc)) from None
+    if basic_auth and login_service.is_private(login_declaration):
+        raise HostingError("login_service_invalid: share.private answers every non-gate hostname "
+                           "with 404, so basic_auth has nothing to protect; remove one of them")
     if basic_auth and login_service.has_site_gate(login_declaration):
         # Caddy's basic_auth covers every served hostname, the gate's included.
         raise HostingError("login_service_invalid: basic_auth would put a password in front of the "
@@ -757,7 +776,8 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             "basic_auth": basic_auth,
             "stack": ({key: value for key, value in stack.items() if key != "source_root"}
                       if stack is not None else None),
-            "robots": robots, "warnings": _fingerprint_warnings(deploy, secrets)}
+            "robots": robots, "indexing": indexing,
+            "warnings": _fingerprint_warnings(deploy, secrets)}
 
 
 def state_key(remote_name: str, validated: dict) -> str:
@@ -864,7 +884,10 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     if not declaration:
         return rendered
     from sandbox.hosting import login_service
-    return rendered + login_service.render_service(declaration)
+    # Spec 081: the gate publishes its own managed loopback port, and the front
+    # door sends every gate hostname there; the application keeps its port.
+    return rendered + login_service.render_service(
+        declaration, gate_port=login_service.gate_loopback_port(loopback_port))
 
 
 def resolve_environment(validated: dict, source_values: dict[str, str],
@@ -1039,92 +1062,116 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
               *, redact_basic_auth: bool = False) -> str:
     """Render the served + redirect site blocks.
 
-    `robots: "deny"` in the host config prepends a `/robots.txt` handler that
-    answers `Disallow: /` for every served hostname, ahead of the proxy. It is
-    opt-in here because permanent hosting fronts real production sites that
-    want to be indexed; ephemeral preview routes deny by default instead (see
-    `_remote._caddy_proxy_command`)."""
+    `robots: "deny"` prepends a `/robots.txt` handler that answers `Disallow: /`
+    for every served hostname, ahead of the proxy. Spec 081 makes it the default
+    unless `indexing: public`, and adds a deferred `X-Robots-Tag` to every site
+    block, so no response of a hosted target is indexed (ephemeral preview routes
+    deny robots too; see `_remote._caddy_proxy_command`).
+
+    Gate hostnames (every login-service entry, `share.hostname` included) go to the
+    gate's own loopback port. With `share.private`, every other served hostname
+    answers 404 here and never reaches the application.
+    """
+    from sandbox.hosting import login_service
+    declaration = validated.get("login_service")
+    gate = login_service.gate_hostnames(declaration)
+    private = login_service.is_private(declaration)
     served = [r["hostname"] for r in validated["routes"] if r["mode"] == "serve"]
+    app_hosts = [host for host in served if host not in gate]
+    gate_hosts = [host for host in served if host in gate]
     robots = _ROBOTS_DENY_BLOCK if validated.get("robots") == "deny" else ""
+    noindex = _NOINDEX_HEADER_BLOCK if validated.get("indexing", "noindex") != "public" else ""
     tls = f"    tls {cert_path} {key_path}\n" if cert_path and key_path else ""
-    basic = ""
     auth = validated.get("basic_auth")
-    if auth:
-        if basic_auth_hash is None:
-            if not redact_basic_auth:
-                raise HostingError("basic_auth requires a generated Caddy password hash")
-        elif not basic_auth_hash.startswith("$"):
-            raise HostingError("basic_auth_hash must be a Caddy password hash")
-        else:
-            # The gate's credential is for Caddy alone; forwarding it makes an
-            # upstream app that reads Authorization reject every request.
-            auth_block = ("        basicauth {\n"
-                          f"            {auth['username']} {basic_auth_hash}\n"
-                          "        }\n"
-                          "        request_header -Authorization\n")
-            bypass_handlers = ""
-            if auth.get("bypass_paths"):
-                public_paths = " ".join(auth["bypass_paths"])
-                bypass_handlers += ("    @basic_auth_public_paths {\n"
-                                    "        method GET\n"
-                                    f"        path {public_paths}\n"
-                                    "    }\n"
-                                    "    handle @basic_auth_public_paths {\n"
-                                    f"        reverse_proxy 127.0.0.1:{int(port)}\n"
-                                    "    }\n")
-            for index, route in enumerate(auth.get("bypass_routes", [])):
-                matcher_name = f"basic_auth_public_route_{index}"
-                methods = " ".join(route["methods"])
-                if "path" in route:
-                    path_matcher = f"        path {route['path']}\n"
-                else:
-                    pattern = _basic_auth_route_pattern(route["path_template"])
-                    path_matcher = f"        path_regexp {matcher_name} {pattern}\n"
-                bypass_handlers += (f"    @{matcher_name} {{\n"
-                                    f"        method {methods}\n"
-                                    f"{path_matcher}"
-                                    "    }\n"
-                                    f"    handle @{matcher_name} {{\n"
-                                    f"        reverse_proxy 127.0.0.1:{int(port)}\n"
-                                    "    }\n")
-            for index, bypass_ip in enumerate(auth.get("bypass_ips", [])):
-                trusted_proxies = " ".join(_CLOUDFLARE_PROXY_CIDRS)
-                bypass_handlers += (f"    @basic_auth_bypass_{index} {{\n"
-                                    f"        remote_ip {trusted_proxies}\n"
-                                    f"        header CF-Connecting-IP {bypass_ip}\n"
-                                    "    }\n"
-                                    f"    handle @basic_auth_bypass_{index} {{\n"
-                                    f"        reverse_proxy 127.0.0.1:{int(port)}\n"
-                                    "    }\n")
-            if bypass_handlers:
-                basic = (bypass_handlers + "    handle {\n"
-                         f"{auth_block}"
-                         f"        reverse_proxy 127.0.0.1:{int(port)}\n"
-                         "    }\n")
+    if auth and basic_auth_hash is None and not redact_basic_auth:
+        raise HostingError("basic_auth requires a generated Caddy password hash")
+    if auth and basic_auth_hash is not None and not basic_auth_hash.startswith("$"):
+        raise HostingError("basic_auth_hash must be a Caddy password hash")
+
+    def basic_for(upstream: int) -> str:
+        if not auth or basic_auth_hash is None:
+            return ""
+        # The gate's credential is for Caddy alone; forwarding it makes an
+        # upstream app that reads Authorization reject every request.
+        auth_block = ("        basicauth {\n"
+                      f"            {auth['username']} {basic_auth_hash}\n"
+                      "        }\n"
+                      "        request_header -Authorization\n")
+        bypass_handlers = ""
+        if auth.get("bypass_paths"):
+            public_paths = " ".join(auth["bypass_paths"])
+            bypass_handlers += ("    @basic_auth_public_paths {\n"
+                                "        method GET\n"
+                                f"        path {public_paths}\n"
+                                "    }\n"
+                                "    handle @basic_auth_public_paths {\n"
+                                f"        reverse_proxy 127.0.0.1:{int(upstream)}\n"
+                                "    }\n")
+        for index, route in enumerate(auth.get("bypass_routes", [])):
+            matcher_name = f"basic_auth_public_route_{index}"
+            methods = " ".join(route["methods"])
+            if "path" in route:
+                path_matcher = f"        path {route['path']}\n"
             else:
-                basic = ("    basicauth {\n"
-                         f"        {auth['username']} {basic_auth_hash}\n"
-                         "    }\n"
-                         "    request_header -Authorization\n")
-    proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
+                pattern = _basic_auth_route_pattern(route["path_template"])
+                path_matcher = f"        path_regexp {matcher_name} {pattern}\n"
+            bypass_handlers += (f"    @{matcher_name} {{\n"
+                                f"        method {methods}\n"
+                                f"{path_matcher}"
+                                "    }\n"
+                                f"    handle @{matcher_name} {{\n"
+                                f"        reverse_proxy 127.0.0.1:{int(upstream)}\n"
+                                "    }\n")
+        for index, bypass_ip in enumerate(auth.get("bypass_ips", [])):
+            trusted_proxies = " ".join(_CLOUDFLARE_PROXY_CIDRS)
+            bypass_handlers += (f"    @basic_auth_bypass_{index} {{\n"
+                                f"        remote_ip {trusted_proxies}\n"
+                                f"        header CF-Connecting-IP {bypass_ip}\n"
+                                "    }\n"
+                                f"    handle @basic_auth_bypass_{index} {{\n"
+                                f"        reverse_proxy 127.0.0.1:{int(upstream)}\n"
+                                "    }\n")
+        if bypass_handlers:
+            return (bypass_handlers + "    handle {\n"
+                    f"{auth_block}"
+                    f"        reverse_proxy 127.0.0.1:{int(upstream)}\n"
+                    "    }\n")
+        return ("    basicauth {\n"
+                f"        {auth['username']} {basic_auth_hash}\n"
+                "    }\n"
+                "    request_header -Authorization\n")
+
     # Cloudflare supplies this header only when it is the immediate peer.
     # Direct-origin callers can set it themselves, so remove it before every
     # served route (including Basic Auth bypass routes) reaches the app.
     untrusted_peer = ("    @sandbox_untrusted_cloudflare_peer not remote_ip "
                       + " ".join(_CLOUDFLARE_PROXY_CIDRS) + "\n"
                       "    request_header @sandbox_untrusted_cloudflare_peer -CF-Connecting-IP\n")
-    if robots:
-        # Everything but the site-level `tls` moves inside a catch-all handle,
-        # so the robots handler and the rest are mutually exclusive routes
-        # rather than two candidates for the same request.
-        body = "".join(f"    {line}\n" if line else "\n"
-                       for line in (basic + proxy).splitlines())
-        blocks = [f"{', '.join(served)} {{\n{tls}{untrusted_peer}{robots}    handle {{\n{body}    }}\n}}\n"]
-    else:
-        blocks = [f"{', '.join(served)} {{\n{untrusted_peer}{basic}{tls}{proxy}}}\n"]
+
+    def site(hosts: list[str], basic: str, upstream: int | None) -> str:
+        proxy = (f"    reverse_proxy 127.0.0.1:{int(upstream)}\n" if upstream is not None
+                 else "    respond 404\n")
+        if robots:
+            # Everything but the site-level `tls` moves inside a catch-all handle,
+            # so the robots handler and the rest are mutually exclusive routes
+            # rather than two candidates for the same request.
+            body = "".join(f"    {line}\n" if line else "\n"
+                           for line in (basic + proxy).splitlines())
+            return (f"{', '.join(hosts)} {{\n{tls}{noindex}{untrusted_peer}{robots}"
+                    f"    handle {{\n{body}    }}\n}}\n")
+        return f"{', '.join(hosts)} {{\n{untrusted_peer}{noindex}{basic}{tls}{proxy}}}\n"
+
+    blocks = []
+    if app_hosts:
+        blocks.append(site(app_hosts, "", None) if private else site(app_hosts, basic_for(port), port))
+    if gate_hosts:
+        gate_port = login_service.gate_loopback_port(port)
+        blocks.append(site(gate_hosts, basic_for(gate_port), gate_port))
     for route in validated["routes"]:
         if route["mode"] == "redirect":
-            blocks.append(f"{route['hostname']} {{\n    redir {route['target']}{{uri}} 308\n}}\n")
+            # share.private: a redirect alias would announce the primary, so it answers 404 too.
+            answer = "respond 404" if private else f"redir {route['target']}{{uri}} 308"
+            blocks.append(f"{route['hostname']} {{\n{noindex}    {answer}\n}}\n")
     return "\n".join(blocks)
 
 

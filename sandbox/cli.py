@@ -1048,11 +1048,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), or publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`)")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`), or make share links (`host share create|list|revoke`)")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits"],
-        help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, or `host tailnet-name add|list|renew|remove`; `host image recover` is distinct from failed-apply `host recover`")
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke"],
+        help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, `host tailnet-name add|list|renew|remove`, or `host share create|list|revoke ID|all`; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("tailnet_hostname", nargs="?", default=None, metavar="FQDN",
         help="host tailnet-name add|renew|remove: the full hostname (refused for other host actions)")
     host_p.add_argument("--upstream", default=None, metavar="HOST:PORT",
@@ -1081,7 +1081,14 @@ Per-project (each plugin carries its own sandbox.config.json):
              "hosted (the one canonical dev-branch stack, never reaped) or permanent (never reaped)")
     host_p.add_argument("--ttl", default=None, metavar="36h|14d|2w",
         help="host stack up/ttl, host classify: a temporary stack's time limit (default 14d); "
-             "`stack ttl` sets its expiry to now plus this")
+             "`stack ttl` sets its expiry to now plus this. host share create: the link's "
+             "lifetime (default 7d, at most 30d)")
+    host_p.add_argument("--stack", dest="stack", default=None, metavar="SLUG",
+        help="host share create|list|revoke: the stack page of this recorded stack")
+    host_p.add_argument("--path", dest="share_path", default=None, metavar="/PREFIX/",
+        help="host share create: share one folder (ending in /) or one page instead of the whole site")
+    host_p.add_argument("--entry", dest="entry", default=None, metavar="NAME",
+        help="host share: the site_gate entry (default: the share block's, or the only one)")
     host_p.add_argument("--owner", default=None, metavar="LABEL",
         help="host stack: the owner label recorded on the remote (default: git user.email)")
     host_p.add_argument("--copy", default=None, metavar="COPY_ID",
@@ -1148,7 +1155,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--save-email", action="store_true",
         help="host login-url: also make --email this target's saved default")
     host_p.add_argument("--uses", type=int, default=None, metavar="N",
-        help="host login-url (site_gate): sessions one share link may start (1-20, default 1)")
+        help="host login-url (site_gate): sessions one share link may start (1-20, default 1); "
+             "host share create: browsers that may open the link (1-20, default no limit)")
     host_p.add_argument("--list", dest="list_links", action="store_true",
         help="host login-url (site_gate): list live share links and sessions (ids only)")
     host_p.add_argument("--revoke", default=None, metavar="ID|all",
@@ -1560,6 +1568,9 @@ Per-project (each plugin carries its own sandbox.config.json):
             args.exec_argv = host_exec_argv
         else:
             args = p.parse_args(raw_argv)
+    if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "share":
+        # `host share revoke ID|all` reuses the optional positional slot.
+        args.share_id, args.tailnet_hostname = args.tailnet_hostname, None
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) != "tailnet-name":
         # Spec 078 added an optional FQDN positional and three sub-actions;
         # every other host action keeps refusing them as argparse did.
@@ -1568,6 +1579,8 @@ Per-project (each plugin carries its own sandbox.config.json):
                          "(a hostname argument is only accepted by `host tailnet-name`)")
         if getattr(args, "image_action", None) in {"add", "renew", "remove"}:
             host_p.error(f"{args.image_action} is only available with `host tailnet-name`")
+        if getattr(args, "image_action", None) in {"create", "revoke"} and args.action != "share":
+            host_p.error(f"{args.image_action} is only available with `host share`")
     if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:
         args.mode = None
     pre_command_label = _global_label_before_subcommand(raw_argv)

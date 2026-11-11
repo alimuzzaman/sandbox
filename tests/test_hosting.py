@@ -637,8 +637,10 @@ class TestHostingManifest(unittest.TestCase):
     def test_served_routes_remove_cloudflare_client_header_from_untrusted_peers(self):
         for robots in ("allow", "deny"):
             with self.subTest(robots=robots):
+                # Spec 081: robots: allow needs indexing: public.
+                extra = "    indexing: public\n" if robots == "allow" else ""
                 manifest = _manifest().replace(
-                    "    cloudflare:\n", f"    robots: {robots}\n    cloudflare:\n")
+                    "    cloudflare:\n", f"    robots: {robots}\n{extra}    cloudflare:\n")
                 with self._write(manifest) as directory:
                     result = hosting.validate_manifest(directory)
                 rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem")
@@ -679,11 +681,19 @@ class TestHostingManifest(unittest.TestCase):
             with self.assertRaisesRegex(hosting.HostingError, "path, query, or fragment"):
                 hosting.validate_manifest(directory)
 
-    def test_robots_defaults_to_allow_and_leaves_the_render_untouched(self):
+    def test_robots_defaults_to_deny_unless_indexing_is_public(self):
+        # Spec 081: nothing hosted is indexed unless the environment says so.
         with self._write(_manifest()) as directory:
             result = hosting.validate_manifest(directory)
+        self.assertEqual((result["robots"], result["indexing"]), ("deny", "noindex"))
+        self.assertIn("handle /robots.txt", hosting.caddyfile(result, 18001, "/c.pem", "/k.pem"))
+        public = _manifest().replace("    cloudflare:\n", "    indexing: public\n    cloudflare:\n")
+        with self._write(public) as directory:
+            result = hosting.validate_manifest(directory)
         self.assertEqual(result["robots"], "allow")
-        self.assertNotIn("robots.txt", hosting.caddyfile(result, 18001, "/c.pem", "/k.pem"))
+        rendered = hosting.caddyfile(result, 18001, "/c.pem", "/k.pem")
+        self.assertNotIn("robots.txt", rendered)
+        self.assertNotIn("X-Robots-Tag", rendered)
 
     def test_robots_deny_answers_robots_txt_ahead_of_the_proxy(self):
         manifest = _manifest().replace("    cloudflare:\n", "    robots: deny\n    cloudflare:\n")
@@ -3467,9 +3477,9 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(fixture.delivery()["operation"]["requested_outcome"]["application"]["commit"], fixture.commit)
         self.assertNotIn("environment", result)
 
-    def test_only_a_proven_delivery_reaches_the_stack_record(self):
+    def test_only_a_completed_apply_reaches_the_stack_record(self):
         """Feedback 20153592: a job bound to a checkout subfolder is admitted, and
-        only a succeeded delivery moves the `sb host stack` record's commit."""
+        only an apply that completes hands its delivery to the stack record."""
         manifest = _public_acme_manifest().replace("      require_clean: true\n",
             "      require_clean: true\n      derived_environment:\n"
             "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")

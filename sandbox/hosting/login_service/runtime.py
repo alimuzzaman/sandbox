@@ -27,6 +27,7 @@ import re
 import secrets
 import select
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -45,9 +46,23 @@ TUNNEL_IDLE_SECONDS = 3600
 POLL_INTERVAL_SECONDS = 0.25
 MAIL_CLOCK_TOLERANCE_SECONDS = 2
 UPSTREAM_TIMEOUT_SECONDS = 10
-SITE_LINK_SCHEMA = "sandbox.site-link.v1"
-SITE_SESSION_SCHEMA = "sandbox.site-session.v1"
-SITE_COOKIE_PREFIX = "__Host-sandbox_site_"
+SITE_LINK_SCHEMA = "sandbox.share-link.v2"
+SITE_SESSION_SCHEMA = "sandbox.share-session.v2"
+STACK_SCHEMA = "sandbox.share-stack.v1"
+# One cookie per gate hostname; it holds up to SHARE_COOKIE_SESSIONS session secrets.
+SHARE_COOKIE = "__Host-sandbox_share"
+SHARE_COOKIE_SESSIONS = 8
+SHARE_PREFIX = "/s/"
+STACK_PAGE_PATH = "/__sandbox/stack"
+ROBOTS_TAG = "noindex, nofollow, noarchive"
+ROBOTS_DENY_BODY = b"User-agent: *\nDisallow: /\n"
+# A share link lives up to 30 days; a session ends sooner (session_ttl_seconds).
+MAX_SHARE_SECONDS = 30 * 86400
+SIGN_IN_SECONDS = 600
+STACK_VIEWS = 60
+MAX_STACK_HOSTS = 16
+HEALTH_TIMEOUT_SECONDS = 3
+HEALTH_CACHE_SECONDS = 30
 SITE_MAX_USES = 20
 SITE_MAX_LINKS = 32
 SITE_MAX_SESSIONS = 512
@@ -55,14 +70,20 @@ SITE_ATTEMPTS = 30
 SITE_ATTEMPT_WINDOW_SECONDS = 60
 # How often an open tunnel re-reads its session, so a revoke ends it.
 SITE_RECHECK_SECONDS = 30
-MAX_RECORD_BYTES = 4096
+MAX_RECORD_BYTES = 16384
 
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 _ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _SESSION_EXPIRY = re.compile(r"[0-9]{1,12}")
-_LINK_ID = re.compile(r"l-[0-9a-f]{12}")
-_SITE_SESSION_ID = re.compile(r"s-[0-9a-f]{12}")
+_LINK_ID = re.compile(r"l-[0-9a-f]{32}")
+_SITE_SESSION_ID = re.compile(r"s-[0-9a-f]{32}")
+_SCOPE_CHARS = re.compile(r"/[A-Za-z0-9._~!$&'()*+,=:@%/-]*")
+_UNSAFE_RAW = ("%2f", "%5c", "%2e", "%00", "%25", "\\", ";", "//", "#")
+_STACK_TITLE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+_HOSTNAME = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+_ROLE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+_WORDPRESS_URL = re.compile(r"https://[a-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._~/-]*")
 _SITE_SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _AUTHORITY = re.compile(r"([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::[0-9]{1,5})?")
 _MAIL_TIME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})")
@@ -79,6 +100,7 @@ _CONFIRM_SCRIPT = (
 _CONFIRM_PAGE = (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    '<meta name="robots" content="noindex, nofollow">'
     "<title>Confirm sign-in</title></head><body><main><h1>Confirm sign-in</h1>"
     "<p>Continue uses this one-time link. It cannot be used again.</p>"
     '<form method="post"><input type="hidden" name="token">'
@@ -87,9 +109,10 @@ _CONFIRM_PAGE = (
     f"<script>{_CONFIRM_SCRIPT}</script></main></body></html>"
 ).encode()
 _SCRIPT_HASH = base64.b64encode(hashlib.sha256(_CONFIRM_SCRIPT.encode()).digest()).decode()
-# A share link submits itself: link previews never run it, and the token stays in the fragment.
+# A share link (/s/<id>#<token>) submits itself: link previews never run it, and the
+# token stays in the fragment, so no request line or access log ever holds it.
 _SITE_SCRIPT = (
-    "(function(){var m=location.hash.match(/^#sandbox_autologin=([A-Za-z0-9_-]+)$/);"
+    "(function(){var m=location.hash.match(/^#([A-Za-z0-9_-]{43})$/);"
     "var f=document.forms[0];history.replaceState(null,'',location.pathname);"
     "if(m){f.elements.token.value=m[1];f.submit();}else{f.hidden=true;"
     "document.getElementById('incomplete').hidden=false;}})();"
@@ -97,6 +120,7 @@ _SITE_SCRIPT = (
 _SITE_PAGE = (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    '<meta name="robots" content="noindex, nofollow">'
     "<title>Opening shared site</title></head><body><main><h1>Opening shared site</h1>"
     '<form method="post"><input type="hidden" name="token">'
     "<button>Continue</button></form>"
@@ -141,20 +165,26 @@ def _unlink(path):
 
 
 class SiteStore:
-    """Share links and sessions of one site_gate entry, as files on the tmpfs.
+    """Share links, sessions and stack pages of one site_gate entry, as files on the tmpfs.
 
-    Files are named by the SHA-256 of their secret, so nothing here stores a token
-    or a session secret. Every record also carries a public id for list and revoke.
+    Links and sessions are named by the SHA-256 of their secret, so nothing here stores
+    a token or a session secret. Every record also carries a public id for list and
+    revoke. A stack page record holds a WordPress verification key (spec 081): it can
+    mint sign-ins only while its link lives, and goes with the link.
     """
+
+    _LINK_KEYS = {"schema", "entry", "id", "token_sha256", "issued_at", "expires_at", "uses",
+                  "scope", "kind"}
 
     def __init__(self, root, name, clock):
         self.name = name
         self.clock = clock
         base = Path(root) / "sites" / name
         self.links, self.used, self.sessions = base / "links", base / "used", base / "sessions"
+        self.stacks = base / "stacks"
 
     def ensure(self):
-        for directory in (self.links, self.used, self.sessions):
+        for directory in (self.links, self.used, self.sessions, self.stacks):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     @staticmethod
@@ -167,7 +197,7 @@ class SiteStore:
         return raw if isinstance(raw, dict) and raw.get("schema") == schema else None
 
     def _valid_link(self, raw, digest=None):
-        if raw is None or raw.get("entry") != self.name:
+        if raw is None or raw.get("entry") != self.name or set(raw) != self._LINK_KEYS:
             return None
         found, link_id = raw.get("token_sha256"), raw.get("id")
         issued, expires, uses = raw.get("issued_at"), raw.get("expires_at"), raw.get("uses")
@@ -175,9 +205,14 @@ class SiteStore:
             return None
         if not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id):
             return None
-        if type(issued) is not int or type(expires) is not int or type(uses) is not int:
+        if type(issued) is not int or type(expires) is not int:
             return None
-        if not MIN_LINK_SECONDS <= expires - issued <= MAX_LINK_SECONDS or not 1 <= uses <= SITE_MAX_USES:
+        if uses is not None and (type(uses) is not int or not 1 <= uses <= SITE_MAX_USES):
+            return None
+        if not MIN_LINK_SECONDS <= expires - issued <= MAX_SHARE_SECONDS:
+            return None
+        scope = raw.get("scope")
+        if not isinstance(scope, str) or not valid_scope(scope) or raw.get("kind") not in ("site", "stack"):
             return None
         return raw
 
@@ -193,18 +228,31 @@ class SiteStore:
             if record is not None:
                 yield path, record
 
+    def live_id(self, link_id):
+        """Whether a live link has this public id (the opener page answers only then)."""
+        return any(record["id"] == link_id and self.is_live(record) for _, record in self._links())
+
+    def stack_link_alive(self, link_id):
+        """Whether a stack link is unrevoked and unexpired: its sign-in links live only that long."""
+        if not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id):
+            return False
+        return (self.stacks / f"{link_id}.json").exists() and any(
+            record["id"] == link_id and self.clock() < record["expires_at"] for _, record in self._links())
+
     def spent(self, record):
+        if record["uses"] is None:
+            return 0
         return sum(1 for slot in range(record["uses"])
                    if (self.used / f"{record['token_sha256']}.{slot}").exists())
 
     def is_live(self, record):
-        return self.clock() < record["expires_at"] and self.spent(record) < record["uses"]
-
-    def any_live(self):
-        return any(self.is_live(record) for _, record in self._links())
+        return self.clock() < record["expires_at"] and (
+            record["uses"] is None or self.spent(record) < record["uses"])
 
     def claim(self, record):
         """Spend one use; of any number of concurrent callers, one gets each slot."""
+        if record["uses"] is None:
+            return True
         for slot in range(record["uses"]):
             marker = self.used / f"{record['token_sha256']}.{slot}"
             try:
@@ -214,14 +262,21 @@ class SiteStore:
             return True
         return False
 
+    def _link_alive(self, digest):
+        record = self.link(digest)
+        return record is not None and self.clock() < record["expires_at"]
+
     def _valid_session(self, raw):
         if raw is None or raw.get("entry") != self.name:
             return None
-        session_id, link_id = raw.get("id"), raw.get("link")
-        created, expires = raw.get("created_at"), raw.get("expires_at")
+        session_id, link_id, link_digest = raw.get("id"), raw.get("link"), raw.get("link_sha256")
+        created, expires, scope = raw.get("created_at"), raw.get("expires_at"), raw.get("scope")
         if (not isinstance(session_id, str) or not _SITE_SESSION_ID.fullmatch(session_id)
                 or not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id)
-                or type(created) is not int or type(expires) is not int):
+                or not isinstance(link_digest, str) or not _HASH.fullmatch(link_digest)
+                or type(created) is not int or type(expires) is not int
+                or not isinstance(scope, str) or not valid_scope(scope)
+                or raw.get("kind") not in ("site", "stack")):
             return None
         return raw
 
@@ -238,11 +293,14 @@ class SiteStore:
             return None
         secret = secrets.token_urlsafe(32)
         now = int(self.clock())
-        expires = min(now + session_seconds, service_ends_at)
+        expires = min(now + session_seconds, service_ends_at, record["expires_at"])
+        if expires <= now:
+            return None
         path = self.sessions / f"{hashlib.sha256(secret.encode()).hexdigest()}.json"
         _write_private(path, json.dumps({
-            "schema": SITE_SESSION_SCHEMA, "entry": self.name, "id": f"s-{secrets.token_hex(6)}",
-            "link": record["id"], "created_at": now, "expires_at": expires}, sort_keys=True))
+            "schema": SITE_SESSION_SCHEMA, "entry": self.name, "id": f"s-{secrets.token_hex(16)}",
+            "link": record["id"], "link_sha256": record["token_sha256"], "created_at": now,
+            "expires_at": expires, "scope": record["scope"], "kind": record["kind"]}, sort_keys=True))
         # A revoke deletes the link before its sessions, so whichever order the two
         # take, a session from a revoked link never survives.
         if not (self.links / f"{record['token_sha256']}.json").exists():
@@ -251,46 +309,76 @@ class SiteStore:
         return secret, expires
 
     def session(self, secret):
-        """The live session record for a cookie value, or None."""
+        """The live session for one cookie secret, or None.
+
+        Live means unexpired and with its link still on disk: a revoke ends access at
+        the next request even if removing the session file lost a race.
+        """
         if not isinstance(secret, str) or not _SITE_SECRET.fullmatch(secret):
             return None
         digest = hashlib.sha256(secret.encode()).hexdigest()
         record = self._valid_session(self._load(self.sessions / f"{digest}.json", SITE_SESSION_SCHEMA))
-        if record is None or self.clock() >= record["expires_at"]:
+        if record is None or self.clock() >= record["expires_at"] or not self._link_alive(record["link_sha256"]):
             return None
-        return dict(record, digest=digest)
+        return dict(record, digest=digest, secret=secret)
+
+    def sessions_for(self, cookie):
+        """Every live session a share cookie holds, newest last."""
+        found = []
+        for secret in (cookie or "").split(".")[:SHARE_COOKIE_SESSIONS]:
+            session = self.session(secret)
+            if session is not None:
+                found.append(session)
+        return found
 
     def session_alive(self, digest):
         record = self._valid_session(self._load(self.sessions / f"{digest}.json", SITE_SESSION_SCHEMA))
-        return record is not None and self.clock() < record["expires_at"]
+        return (record is not None and self.clock() < record["expires_at"]
+                and self._link_alive(record["link_sha256"]))
 
     def prune(self):
-        """Drop expired links, their spent markers, and expired sessions."""
+        """Drop expired links with their markers and stack records, and dead sessions."""
         now = self.clock()
         for path, record in list(self._links()):
             if now >= record["expires_at"]:
                 self._drop_link(path, record)
         for path, record in list(self._sessions()):
-            if now >= record["expires_at"]:
+            if now >= record["expires_at"] or not (self.links / f"{record['link_sha256']}.json").exists():
                 _unlink(path)
 
     def _drop_link(self, path, record):
         removed = _unlink(path)
-        for slot in range(record["uses"]):
+        for slot in range(record["uses"] or 0):
             _unlink(self.used / f"{record['token_sha256']}.{slot}")
+        _unlink(self.stacks / f"{record['id']}.json")
         return removed
 
-    def mint(self, text, *, service_ends_at):
-        """Store a link record sent by the operator's controller."""
+    def stack(self, link_id, config):
+        """The stack page record of a stack link, or None."""
+        if not _LINK_ID.fullmatch(link_id or ""):
+            return None
+        return valid_stack(self._load(self.stacks / f"{link_id}.json", STACK_SCHEMA), self.name, link_id, config)
+
+    def mint(self, text, *, service_ends_at, config):
+        """Store a link (and its stack page) sent by the operator's controller."""
         try:
             raw = json.loads(text)
         except ValueError:
             return {"ok": False, "code": "site_record_invalid"}
-        record = self._valid_link(raw if isinstance(raw, dict) and raw.get("schema") == SITE_LINK_SCHEMA else None)
-        if record is None or set(record) != {"schema", "entry", "id", "token_sha256", "issued_at",
-                                              "expires_at", "uses"}:
+        if not isinstance(raw, dict) or set(raw) != {"link", "stack"}:
             return {"ok": False, "code": "site_record_invalid"}
-        if self.clock() >= service_ends_at:
+        link = raw["link"]
+        record = self._valid_link(link if isinstance(link, dict) and link.get("schema") == SITE_LINK_SCHEMA else None)
+        if record is None:
+            return {"ok": False, "code": "site_record_invalid"}
+        stack = None
+        if record["kind"] == "stack":
+            stack = valid_stack(raw["stack"], self.name, record["id"], config)
+            if stack is None or record["scope"] != STACK_PAGE_PATH:
+                return {"ok": False, "code": "site_record_invalid"}
+        elif raw["stack"] is not None:
+            return {"ok": False, "code": "site_record_invalid"}
+        if self.clock() >= service_ends_at or record["expires_at"] > service_ends_at:
             return {"ok": False, "code": "login_service_expired"}
         self.prune()
         if sum(1 for _, item in self._links() if self.is_live(item)) >= SITE_MAX_LINKS:
@@ -298,13 +386,17 @@ class SiteStore:
         target = self.links / f"{record['token_sha256']}.json"
         if target.exists() or any(item["id"] == record["id"] for _, item in self._links()):
             return {"ok": False, "code": "site_record_invalid"}
+        if stack is not None:
+            # Before the link: a live stack link always finds its page.
+            _write_private(self.stacks / f"{record['id']}.json", json.dumps(stack, sort_keys=True))
         _write_private(target, json.dumps(record, sort_keys=True))
         return {"ok": True, "id": record["id"], "expires_at": record["expires_at"], "uses": record["uses"]}
 
     def listing(self):
-        """Ids, times and counts only: never a token, a secret, or a hash."""
+        """Ids, times, scopes and counts only: never a token, a secret, a key or a hash."""
         self.prune()
-        links = [{"id": record["id"], "issued_at": record["issued_at"], "expires_at": record["expires_at"],
+        links = [{"id": record["id"], "kind": record["kind"], "scope": record["scope"],
+                  "issued_at": record["issued_at"], "expires_at": record["expires_at"],
                   "uses": record["uses"], "used": self.spent(record)}
                  for _, record in self._links() if self.is_live(record)]
         sessions = [{"id": record["id"], "link": record["link"], "created_at": record["created_at"],
@@ -314,7 +406,7 @@ class SiteStore:
                 "sessions": sorted(sessions, key=lambda item: item["created_at"])}
 
     def revoke(self, target):
-        """Revoke one link (and its sessions), one session, or everything."""
+        """Revoke one link (with its sessions and stack page), one session, or everything."""
         links = sessions = 0
         if target == "all" or _LINK_ID.fullmatch(target or ""):
             for path, record in list(self._links()):
@@ -323,6 +415,9 @@ class SiteStore:
             for path, record in list(self._sessions()):
                 if target == "all" or record["link"] == target:
                     sessions += _unlink(path)
+            if target == "all":
+                for path in self.stacks.glob("*.json"):
+                    _unlink(path)
         elif _SITE_SESSION_ID.fullmatch(target or ""):
             for path, record in list(self._sessions()):
                 if record["id"] == target:
@@ -330,6 +425,71 @@ class SiteStore:
         if target != "all" and not links and not sessions:
             return {"ok": False, "code": "site_link_unknown"}
         return {"ok": True, "revoked_links": links, "revoked_sessions": sessions}
+
+
+def valid_stack(raw, entry, link_id, config):
+    """A stack page record for ``link_id``, or None. Its fields come from the controller."""
+    if not isinstance(raw, dict) or raw.get("schema") != STACK_SCHEMA or raw.get("entry") != entry \
+            or raw.get("link") != link_id \
+            or set(raw) != {"schema", "entry", "link", "title", "hosts", "wordpress", "sign_in"}:
+        return None
+    if not isinstance(raw["title"], str) or not _STACK_TITLE.fullmatch(raw["title"]):
+        return None
+    hosts = raw["hosts"]
+    if not isinstance(hosts, list) or len(hosts) > MAX_STACK_HOSTS:
+        return None
+    for item in hosts:
+        if (not isinstance(item, dict) or set(item) != {"hostname", "role", "probe"}
+                or not isinstance(item["hostname"], str) or not _HOSTNAME.fullmatch(item["hostname"])
+                or not isinstance(item["role"], str) or not _ROLE.fullmatch(item["role"])
+                or item["probe"] not in ("internal", "public")):
+            return None
+    wordpress = raw["wordpress"]
+    if wordpress is not None:
+        if (not isinstance(wordpress, dict) or set(wordpress) != {"kid", "key", "url"}
+                or wordpress["kid"] != link_id[2:] or not isinstance(wordpress["key"], str)
+                or not _HASH.fullmatch(wordpress["key"]) or not isinstance(wordpress["url"], str)
+                or not _WORDPRESS_URL.fullmatch(wordpress["url"])):
+            return None
+    sign_in = raw["sign_in"]
+    if not isinstance(sign_in, list) or len(sign_in) > 8:
+        return None
+    for item in sign_in:
+        declared = config["entries"].get(item.get("entry")) if isinstance(item, dict) else None
+        if not isinstance(declared, dict) or declared.get("mode") not in ("magic_link", "inbox_gate"):
+            return None
+        email = item.get("email")
+        if set(item) - {"entry", "email"} or (declared["mode"] == "magic_link") != isinstance(email, str) \
+                or (email is not None and not _ADDRESS.fullmatch(email)):
+            return None
+    return raw
+
+
+def unsafe_path(raw):
+    """True for any path an upstream could resolve to somewhere a scope check did not see.
+
+    Kept identical to sandbox.hosting.share.unsafe_path; a test compares the two.
+    """
+    lowered = raw.lower()
+    if not raw.startswith("/") or any(marker in lowered for marker in _UNSAFE_RAW):
+        return True
+    decoded = urllib.parse.unquote(raw)
+    if any(ord(char) < 32 or ord(char) == 127 for char in decoded) or "\\" in decoded:
+        return True
+    return any(segment in (".", "..") for segment in decoded.split("/"))
+
+
+def valid_scope(scope):
+    return bool(_SCOPE_CHARS.fullmatch(scope)) and len(scope) <= 512 and not unsafe_path(scope)
+
+
+def scope_covers(scope, raw_path):
+    """Kept identical to sandbox.hosting.share.scope_covers."""
+    if scope == "/":
+        return True
+    wanted, path = urllib.parse.unquote(scope), urllib.parse.unquote(raw_path)
+    return path.startswith(wanted) if wanted.endswith("/") else path == wanted
+
 
 
 class Gate:
@@ -351,6 +511,8 @@ class Gate:
                 self.sites[name].ensure()
         self._attempts = collections.defaultdict(collections.deque)
         self._attempts_lock = threading.Lock()
+        self._health = {}
+        self._health_lock = threading.Lock()
 
     def site_for_host(self, host):
         for name, entry in self.config["entries"].items():
@@ -358,18 +520,74 @@ class Gate:
                 return name, entry
         return None
 
-    def allow_attempt(self, name):
-        """A sliding window per entry. Every request arrives from the project's edge,
-        so a per-address limit could only key on a header the client controls."""
+    def allow_attempt(self, name, limit=SITE_ATTEMPTS):
+        """A sliding window per entry. A per-address limit could only key on a header
+        the client controls, so the window is per entry (and per stack-page bucket)."""
         with self._attempts_lock:
             now = self.clock()
             window = self._attempts[name]
             while window and window[0] <= now - SITE_ATTEMPT_WINDOW_SECONDS:
                 window.popleft()
-            if len(window) >= SITE_ATTEMPTS:
+            if len(window) >= limit:
                 return False
             window.append(now)
             return True
+
+    def health(self, hosts, upstream):
+        """Health per hostname, probed in parallel and cached for HEALTH_CACHE_SECONDS."""
+        now, results, pending = time.monotonic(), {}, []
+        with self._health_lock:
+            for item in hosts:
+                cached = self._health.get(item["hostname"])
+                if cached and now - cached[0] < HEALTH_CACHE_SECONDS:
+                    results[item["hostname"]] = cached[1]
+                else:
+                    pending.append(item)
+        suffixes = self.config.get("allowed_host_suffixes") or []
+
+        def run(item):
+            status = _probe(item["hostname"], item["probe"], upstream, suffixes)
+            with self._health_lock:
+                self._health[item["hostname"]] = (time.monotonic(), status)
+
+        threads = [threading.Thread(target=run, args=(item,), daemon=True) for item in pending]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS + 1
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        with self._health_lock:
+            for item in pending:
+                cached = self._health.get(item["hostname"])
+                results[item["hostname"]] = cached[1] if cached else "unreachable"
+        return results
+
+    def mint_sign_in(self, name, email, expires_at, via):
+        """Mint a one-time link for a declared magic_link or inbox_gate entry of this service.
+
+        Writes the same token record ``host login-url`` would, so the previous link of
+        that entry stops working. ``via`` is the (share entry, stack link id) of the page
+        that asked: the token works only while that link is unrevoked and unexpired, so a
+        revoke also ends sign-in links a view minted, even one still in flight. Returns
+        the link, or None when the entry cannot take one.
+        """
+        entry = self.config["entries"].get(name)
+        if not isinstance(entry, dict) or entry.get("mode") not in ("magic_link", "inbox_gate"):
+            return None
+        issued = int(self.clock())
+        if not MIN_LINK_SECONDS <= int(expires_at) - issued <= MAX_LINK_SECONDS:
+            return None
+        token = secrets.token_urlsafe(32)
+        record = {"schema": RECORD_SCHEMA, "entry": name,
+                  "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+                  "issued_at": issued, "expires_at": int(expires_at),
+                  "via": {"entry": via[0], "link": via[1]}}
+        if entry["mode"] == "magic_link":
+            if not isinstance(email, str) or not _ADDRESS.fullmatch(email):
+                return None
+            record["email"] = email
+        _write_private(self.state_dir / f"{name}.json", json.dumps(record, sort_keys=True))
+        return f"https://{entry['hostname']}{entry['path']}#sandbox_autologin={token}"
 
     def enabled(self):
         return self.clock() < self.config["enabled_until_epoch"]
@@ -389,7 +607,29 @@ class Gate:
             return None
         if not MIN_LINK_SECONDS <= expires - issued <= MAX_LINK_SECONDS:
             return None
-        return raw
+        return raw if self.bound(raw) else None
+
+    def bound(self, record):
+        """Whether a token record's stack link (if a stack page minted it) is still alive.
+
+        A sign-in from a stack page dies with that stack link. Callers check again after
+        the body arrives and right before granting, so a revoke during a slow sign-in wins.
+        """
+        if "via" not in record:
+            return True
+        via = record["via"]
+        store = self.sites.get(via.get("entry")) if isinstance(via, dict) else None
+        return store is not None and store.stack_link_alive(via.get("link"))
+
+    def current(self, name, record):
+        """Whether ``record`` is still this entry's token and its stack link is alive.
+
+        Checked after the body arrives and right before a grant: a newer link for the
+        entry, or a revoke of the stack link, beats a sign-in that was still being posted.
+        """
+        now = self.record(name)
+        return (now is not None and hmac.compare_digest(now["token_sha256"], record["token_sha256"])
+                and self.bound(record))
 
     def _used_marker(self, digest):
         return self.state_dir / "used" / digest
@@ -546,6 +786,126 @@ def capture_headers(capture, credential):
     return {"Authorization": f"Basic {secret}"}
 
 
+def wordpress_link(wordpress, expires_at):
+    """A one-time WordPress admin link that the target's share-key mu-plugin verifies.
+
+    The token rides in the fragment; the mu-plugin's page posts it, so no request line
+    or access log ever holds it. The key never leaves this service.
+    """
+    nonce = secrets.token_urlsafe(16)
+    message = f"sandbox-share-login.v1|{wordpress['kid']}|{int(expires_at)}|{nonce}"
+    mac = hmac.new(bytes.fromhex(wordpress["key"]), message.encode(), hashlib.sha256).hexdigest()
+    return f"{wordpress['url']}?sandbox_share_login={wordpress['kid']}#{int(expires_at)}.{nonce}.{mac}"
+
+
+def classify(status):
+    if status is None:
+        return "unreachable"
+    if 200 <= status < 300:
+        return "up"
+    if 300 <= status < 400:
+        return "redirect"
+    if status in (401, 403):
+        return "up_login"
+    return "client_error" if status < 500 else "server_error"
+
+
+MAX_UPGRADE_HEAD = 16384
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
+def _read_upgrade_head(upstream):
+    """The upstream's answer to an upgrade: (status, headers, bytes after the head).
+
+    Anything unreadable comes back as status 0, which the caller refuses.
+    """
+    data = b""
+    while b"\r\n\r\n" not in data:
+        if len(data) > MAX_UPGRADE_HEAD:
+            return 0, [], b""
+        chunk = upstream.recv(4096)
+        if not chunk:
+            return 0, [], b""
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2 or parts[0] not in ("HTTP/1.0", "HTTP/1.1") or not re.fullmatch(r"[0-9]{3}", parts[1]):
+        return 0, [], b""
+    headers = []
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if not separator or not _HEADER_NAME.fullmatch(name) or "\r" in value or "\n" in value:
+            return 0, [], b""
+        headers.append((name, value.strip()))
+    return int(parts[1]), headers, rest
+
+
+def _probe(hostname, probe, upstream, suffixes):
+    """One GET /, no redirects followed. Internal probes go through the project's network."""
+    if probe == "public" and not any(hostname == suffix or hostname.endswith(f".{suffix}")
+                                     for suffix in suffixes):
+        return "not_checked"
+    connection = None
+    try:
+        if probe == "internal":
+            connection = http.client.HTTPConnection(*upstream, timeout=HEALTH_TIMEOUT_SECONDS)
+        else:
+            connection = http.client.HTTPSConnection(
+                hostname, 443, timeout=HEALTH_TIMEOUT_SECONDS, context=ssl.create_default_context())
+        connection.request("GET", "/", headers={"Host": hostname, "User-Agent": "sandbox-share-health"})
+        response = connection.getresponse()
+        response.read(65536)
+        return classify(response.status)
+    except (OSError, http.client.HTTPException, ValueError):
+        return "unreachable"
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+_STACK_STYLE = (
+    "body{font:15px/1.5 system-ui,sans-serif;margin:0;padding:24px 16px;color:#1d2433;background:#f7f8fa}"
+    "main{max-width:760px;margin:0 auto}h1{font-size:22px;margin:0 0 4px}"
+    "p{color:#4a5468;margin:0 0 16px}table{width:100%;border-collapse:collapse;background:#fff}"
+    "th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #e3e6ec;word-break:break-all}"
+    "th{font-size:13px;color:#4a5468}.up{color:#137333}.up_login{color:#137333}"
+    ".redirect{color:#8a5a00}.client_error,.server_error,.unreachable{color:#b3261e}"
+    "ul{padding-left:20px}li{margin:6px 0}a{color:#1a56c4}"
+    "@media (prefers-color-scheme:dark){body{background:#14171c;color:#e6e9ef}"
+    "table{background:#1c2027}th,p{color:#a7afbe}td,th{border-color:#2c313a}a{color:#8ab4f8}}"
+)
+_STACK_STYLE_HASH = base64.b64encode(hashlib.sha256(_STACK_STYLE.encode()).digest()).decode()
+_HEALTH_LABELS = {"up": "up", "up_login": "up (sign-in required)", "redirect": "redirects",
+                  "client_error": "client error", "server_error": "server error",
+                  "unreachable": "unreachable", "not_checked": "not checked"}
+
+
+def render_stack_page(record, health, links):
+    """Plain HTML, every value escaped; the links are this view's alone."""
+    rows = "".join(
+        f'<tr><td><a href="https://{html.escape(item["hostname"])}/" rel="noreferrer noopener" '
+        f'target="_blank">{html.escape(item["hostname"])}</a></td><td>{html.escape(item["role"])}</td>'
+        f'<td class="{html.escape(health.get(item["hostname"], "not_checked"))}">'
+        f'{html.escape(_HEALTH_LABELS.get(health.get(item["hostname"], "not_checked"), "unknown"))}</td></tr>'
+        for item in record["hosts"])
+    sign_in = "".join(
+        f'<li><a href="{html.escape(url)}" rel="noreferrer noopener" target="_blank">{html.escape(label)}</a></li>'
+        for label, url in links) or "<li>This stack declares no sign-in links.</li>"
+    title = html.escape(record["title"])
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="robots" content="noindex, nofollow">'
+        f"<title>Stack {title}</title><style>{_STACK_STYLE}</style></head><body><main>"
+        f"<h1>Stack {title}</h1>"
+        f"<p>Sign-in links work once and expire {SIGN_IN_SECONDS // 60} minutes after this page "
+        "loaded. Reload the page for new ones.</p>"
+        "<table><thead><tr><th>Server</th><th>Role</th><th>Health</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table><h2>Sign in</h2><ul>{sign_in}</ul></main></body></html>"
+    ).encode()
+
+
 class _PublicHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "sandbox-login"
@@ -562,6 +922,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Robots-Tag", ROBOTS_TAG)
         for name, value in headers:
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
@@ -625,25 +986,45 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
     do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _dispatch
 
     def _site(self, name, entry):
-        """A site_gate hostname: the link path, or the upstream behind a session."""
+        """A site_gate hostname: robots, a link opener, the stack page, or the upstream."""
         # One Host header, so the upstream cannot pick a different one than was checked.
         if len(self.headers.get_all("Host") or []) != 1:
             return self._not_found()
         store = self.gate.sites[name]
-        if urllib.parse.urlsplit(self.path).path == entry["path"]:
-            return self._site_link(name, entry, store)
-        session = store.session(self._cookie(f"{SITE_COOKIE_PREFIX}{name}"))
+        # Split at "?" only: urlsplit would also drop a "#..." that a request line can
+        # carry, and the upstream would then resolve a path the scope never saw.
+        raw_path = self.path.split("?", 1)[0]
+        if raw_path == "/robots.txt" and self.command in ("GET", "HEAD"):
+            self._drain()
+            return self._reply(200, ROBOTS_DENY_BODY, [("Content-Type", "text/plain; charset=utf-8")])
+        if raw_path.startswith(SHARE_PREFIX):
+            return self._share_open(name, entry, store, raw_path[len(SHARE_PREFIX):])
+        if unsafe_path(raw_path):
+            return self._not_found()
+        sessions = store.sessions_for(self._cookie(SHARE_COOKIE))
+        if raw_path == STACK_PAGE_PATH:
+            stack = next((item for item in reversed(sessions) if item["kind"] == "stack"), None)
+            if stack is None or self.command not in ("GET", "HEAD"):
+                return self._not_found()
+            self._drain()
+            return self._stack_page(name, entry, store, stack)
+        session = next((item for item in reversed(sessions)
+                        if item["kind"] == "site" and scope_covers(item["scope"], raw_path)), None)
         if session is None:
             return self._not_found()
         upstream = urllib.parse.urlsplit(entry["upstream"])
         return self._forward((upstream.hostname, upstream.port), self._site_headers(entry),
                              session["expires_at"], lambda: store.session_alive(session["digest"]))
 
-    def _site_link(self, name, entry, store):
+    def _share_open(self, name, entry, store, link_id):
+        """``/s/<id>``: a page that posts the fragment's token, then the token-for-cookie swap."""
         gate = self.gate
+        if not _LINK_ID.fullmatch(link_id):
+            return self._not_found()
         if self.command in ("GET", "HEAD"):
-            if not store.any_live():
-                return self._not_found()
+            self._drain()
+            if not store.live_id(link_id):
+                return self._answer_not_found()
             return self._reply(200, _SITE_PAGE, self._site_page_headers())
         if self.command != "POST":
             return self._not_found()
@@ -655,29 +1036,66 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if token is None or not _TOKEN.fullmatch(token):
             return self._answer_not_found()
         # Under Referrer-Policy: no-referrer a browser sends "Origin: null" on its own
-        # form POST. A cross-site post still needs the token, and would only spend it.
+        # form POST. A cross-site post still needs the token, and would only spend a use.
         origin = self.headers.get("Origin")
         if origin not in (None, "null", f"https://{entry['hostname']}"):
             return self._answer_not_found()
         record = store.link(hashlib.sha256(token.encode()).hexdigest())
-        if record is None or not store.is_live(record) or not gate.enabled() or not store.claim(record):
+        if (record is None or record["id"] != link_id or not store.is_live(record)
+                or not gate.enabled() or not store.claim(record)):
             return self._answer_not_found()
         started = store.start_session(record, gate.config["session_ttl_seconds"],
                                       gate.config["enabled_until_epoch"])
         if started is None:
-            gate.log(f"site_session_refused entry={name}")
+            gate.log(f"share_session_refused entry={name}")
             return self._answer_not_found()
         secret, expires = started
-        gate.log(f"site_link_used entry={name} link={record['id']}")
-        cookie = (f"{SITE_COOKIE_PREFIX}{name}={secret}; Path=/; "
-                  f"Max-Age={max(1, expires - int(gate.clock()))}; Secure; HttpOnly; SameSite=Lax")
-        return self._reply(303, b"", [("Location", entry["landing_path"]), ("Set-Cookie", cookie)])
+        gate.log(f"share_opened entry={name} link={record['id']}")
+        # Keep the other shares this browser already holds on this gate, newest last.
+        kept = [item for item in store.sessions_for(self._cookie(SHARE_COOKIE)) if item["secret"] != secret]
+        kept = kept[-(SHARE_COOKIE_SESSIONS - 1):]
+        latest = max([expires, *(item["expires_at"] for item in kept)])
+        value = ".".join([*(item["secret"] for item in kept), secret])
+        cookie = (f"{SHARE_COOKIE}={value}; Path=/; Max-Age={max(1, latest - int(gate.clock()))}; "
+                  "Secure; HttpOnly; SameSite=Lax")
+        landing = STACK_PAGE_PATH if record["kind"] == "stack" else record["scope"]
+        return self._reply(303, b"", [("Location", landing), ("Set-Cookie", cookie)])
+
+    def _stack_page(self, name, entry, store, session):
+        """The read-only stack page; every view mints fresh single-use sign-in links."""
+        gate = self.gate
+        record = store.stack(session["link"], gate.config)
+        if record is None:
+            return self._answer_not_found()
+        if not gate.allow_attempt(f"{name}:view", STACK_VIEWS):
+            return self._fail(429, "rate_limited")
+        upstream = urllib.parse.urlsplit(entry["upstream"])
+        health = gate.health(record["hosts"], (upstream.hostname, upstream.port))
+        ends = min(int(gate.clock()) + SIGN_IN_SECONDS, session["expires_at"],
+                   gate.config["enabled_until_epoch"])
+        links = []
+        if record["wordpress"] is not None:
+            links.append(("WordPress admin", wordpress_link(record["wordpress"], ends)))
+        for item in record["sign_in"]:
+            minted = gate.mint_sign_in(item["entry"], item.get("email"), ends, (name, session["link"]))
+            if minted is not None:
+                links.append((f"Sign in: {item['entry']}", minted))
+        gate.log(f"stack_viewed entry={name} link={session['link']}")
+        body = render_stack_page(record, health, links)
+        return self._reply(200, body, self._stack_page_headers())
 
     @staticmethod
     def _site_page_headers():
         policy = ("default-src 'none'; "
                   f"script-src 'sha256-{_SITE_SCRIPT_HASH}'; "
                   "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+        return [("Content-Type", "text/html; charset=utf-8"), ("Content-Security-Policy", policy),
+                ("X-Content-Type-Options", "nosniff")]
+
+    @staticmethod
+    def _stack_page_headers():
+        policy = (f"default-src 'none'; style-src 'sha256-{_STACK_STYLE_HASH}'; "
+                  "form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
         return [("Content-Type", "text/html; charset=utf-8"), ("Content-Security-Policy", policy),
                 ("X-Content-Type-Options", "nosniff")]
 
@@ -691,7 +1109,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             if lowered == "cookie":
                 kept = [part.strip() for part in value.split(";")
                         if part.strip() and not part.strip().startswith(
-                            (SITE_COOKIE_PREFIX, "__Host-sandbox_login_"))]
+                            (SHARE_COOKIE, "__Host-sandbox_login_"))]
                 if kept:
                     headers.append((name, "; ".join(kept)))
                 continue
@@ -745,8 +1163,10 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         token = self._read_token()
         if token is None:
             return self._fail(413, "too_large")
+        # The confirmation page sends Referrer-Policy: no-referrer, under which a browser
+        # posts "Origin: null"; the token still has to match.
         origin = self.headers.get("Origin")
-        if origin is not None and origin != f"https://{entry['hostname']}":
+        if origin not in (None, "null", f"https://{entry['hostname']}"):
             return self._fail(403, "invalid_link")
         if not _TOKEN.fullmatch(token):
             return self._fail(403, "invalid_link")
@@ -758,15 +1178,18 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         email = record.get("email")
         if entry["mode"] == "magic_link" and not (isinstance(email, str) and _ADDRESS.fullmatch(email)):
             return self._fail(403, "invalid_link")
-        # The body can arrive long after dispatch checked the cutoff.
-        if not gate.enabled():
+        # The body can arrive long after dispatch loaded the record: recheck the cutoff,
+        # that the record is still the entry's current one, and its stack link.
+        if not gate.enabled() or not gate.current(name, record):
             return self._answer_not_found()
         if not gate.claim(digest):
             return self._fail(410, "link_used")
         gate.log(f"consumed entry={name}")
         if entry["mode"] == "inbox_gate":
+            if not gate.current(name, record):
+                return self._answer_not_found()
             return self._start_session(name, entry)
-        return self._exchange_magic_link(name, entry, email)
+        return self._exchange_magic_link(name, entry, email, record)
 
     def _start_session(self, name, entry):
         # No Max-Age or Expires: the cookie ends with the browser session. The
@@ -776,13 +1199,14 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
                   "Secure; HttpOnly; SameSite=Strict")
         self._reply(303, b"", [("Location", entry.get("landing_path") or "/"), ("Set-Cookie", cookie)])
 
-    def _exchange_magic_link(self, name, entry, email):
+    def _exchange_magic_link(self, name, entry, email, record):
         try:
             link = self.gate.sign_in(entry["magic_link"], email)
         except SignInFailure as failure:
             self.gate.log(f"signin_failed entry={name} code={failure.code}")
             return self._fail(failure.status, failure.code)
-        if not self.gate.enabled():
+        # The exchange waits on mail; a newer link or a stack revoke meanwhile still wins.
+        if not self.gate.enabled() or not self.gate.current(name, record):
             return self._answer_not_found()
         self._reply(303, b"", [("Location", link)])
 
@@ -813,8 +1237,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
 
     def _forward(self, address, headers, session_expires, still_allowed=None):
         """Send this request to a fixed address; nothing in it chooses where."""
-        if self.headers.get("Upgrade", "").lower() == "websocket":
-            return self._tunnel(address, headers, session_expires, still_allowed)
+        # Framing first, for both modes: a request the gate cannot frame never goes on.
         length = self._content_length()
         if length is None or "Transfer-Encoding" in self.headers:
             self.close_connection = True
@@ -822,6 +1245,11 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if length > MAX_PROXY_BODY:
             self.close_connection = True
             return self._fail(413, "too_large")
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            if self.command != "GET" or length:
+                self.close_connection = True
+                return self._fail(400, "bad_upgrade")
+            return self._tunnel(address, headers, session_expires, still_allowed)
         connection = http.client.HTTPConnection(*address, timeout=30)
         try:
             body = self.rfile.read(length) if length else None
@@ -843,9 +1271,10 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
     def _relay(self, response):
         self.send_response(response.status)
         for name, value in response.getheaders():
-            if name.lower() not in _HOP_BY_HOP and name.lower() != "referrer-policy":
+            if name.lower() not in _HOP_BY_HOP and name.lower() not in ("referrer-policy", "x-robots-tag"):
                 self.send_header(name, value)
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", ROBOTS_TAG)
         length = response.getheader("Content-Length")
         if length is not None:
             self.send_header("Content-Length", length)
@@ -873,25 +1302,51 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(len(pending)) if pending else b""
 
     def _tunnel(self, address, headers, session_expires, still_allowed=None):
+        """A websocket. Raw bytes flow only after the upstream accepts the upgrade.
+
+        Until the upstream answers 101 with ``Upgrade: websocket``, nothing the client sent
+        after its request goes upstream. An upstream that declines and keeps the
+        connection open therefore never sees later requests that skipped the gate's checks.
+        """
+        self.close_connection = True
+        pending = self._buffered_client_bytes()
         try:
             upstream = socket.create_connection(address, timeout=10)
         except OSError:
-            self.close_connection = True
             return self._fail(502, "upstream_unavailable")
-        self.close_connection = True
         try:
             lines = [f"{self.command} {self.path} HTTP/1.1"]
             lines += [f"{name}: {value}" for name, value in headers]
             lines += ["Upgrade: websocket", "Connection: Upgrade", "", ""]
             upstream.sendall("\r\n".join(lines).encode("latin-1", "replace"))
-            upstream.sendall(self._buffered_client_bytes())
+            status, response_headers, rest = _read_upgrade_head(upstream)
+            if status != 101 or not any(name.lower() == "upgrade" and value.lower() == "websocket"
+                                        for name, value in response_headers):
+                return self._fail(502, "upgrade_refused")
+            self.send_response(101)
+            for name, value in response_headers:
+                if name.lower() not in ("x-robots-tag", "referrer-policy", "server", "date"):
+                    self.send_header(name, value)
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Robots-Tag", ROBOTS_TAG)
+            self.end_headers()
             self.wfile.flush()
+            if rest:
+                self.connection.sendall(rest)
+            if pending:
+                upstream.sendall(pending)
             self._pump(self.connection, upstream, session_expires, still_allowed)
         except OSError:
             pass
         finally:
             upstream.close()
         return None
+
+    def send_error(self, code, message=None, explain=None):
+        """Errors http.server raises itself (an unknown method, a bad request line) carry the gate's headers too."""
+        self.close_connection = True
+        self._reply(code, f"{int(code)}\n".encode(),
+                    [("Content-Type", "text/plain; charset=utf-8"), ("Connection", "close")])
 
     def _pump(self, client, upstream, session_expires, still_allowed=None):
         """Copy bytes both ways until a side closes, the link idles out, or access ends.
@@ -1002,7 +1457,8 @@ def manage(config, argv, state_dir, *, stdin, stdout, clock=time.time):
     store = SiteStore(state_dir, name, clock)
     store.ensure()
     if verb == "mint" and not extra:
-        return emit(store.mint(stdin.read(MAX_RECORD_BYTES), service_ends_at=config["enabled_until_epoch"]))
+        return emit(store.mint(stdin.read(MAX_RECORD_BYTES), service_ends_at=config["enabled_until_epoch"],
+                               config=config))
     if verb == "list" and not extra:
         return emit(store.listing())
     if verb == "revoke" and len(extra) == 1:

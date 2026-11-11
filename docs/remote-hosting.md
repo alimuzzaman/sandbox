@@ -1179,22 +1179,34 @@ Limits:
 route only. `sb deploy --expose`, instance aliases and `sb preview` refuse before any side
 effect with `front_door_capability_unavailable`. Use a Caddy remote for those.
 
-## Keeping a public route out of search results
+## Keeping hosted routes out of search results
 
-An environment may declare `robots: deny` beside `cloudflare:`:
+Hosted targets are not indexed by default (spec 081). Under the default
+`indexing: noindex`:
+
+- Both front doors add `X-Robots-Tag: noindex, nofollow, noarchive` to every response of
+  every hostname of the environment: served, redirected, gated, refused, auth challenges
+  and `robots.txt`. Caddy applies it with `header { defer ... }`, so it replaces any
+  value the application sends. nginx hides the application's value and adds its own
+  with `always` on every server, location and if-block.
+- Tailnet-only names (`sb host tailnet-name`, spec 078) carry the same header on both of
+  their server blocks, always, and hide the application's own value.
+- `robots` defaults to `deny`: the front door answers `/robots.txt` with
+  `User-agent: * / Disallow: /` ahead of the proxy (the proxy moves inside its own
+  `handle` so the two are mutually exclusive routes).
+
+To let a site be indexed, say so explicitly:
 
 ```yaml
-robots: deny   # default: allow
+indexing: public   # no X-Robots-Tag; robots defaults to allow
+robots: allow      # refused unless indexing is public
 ```
 
-Caddy then answers `/robots.txt` with `User-agent: * / Disallow: /` for every served
-hostname of that environment, ahead of the proxy (the proxy moves inside its own
-`handle` so the two are mutually exclusive routes). The default `allow` leaves the
-application's own `robots.txt` in charge — permanent hosting fronts real production
-sites that want to be indexed.
+`tests/test_hosted_noindex.py` renders every route kind on both front doors and fails
+if any can answer without the header.
 
-Ephemeral routes are the other way round: `sb preview create` and the remote control
-proxy deny by default (`_remote._caddy_proxy_command`), because a preview hostname is a
+Ephemeral routes deny too: `sb preview create` and the remote control proxy deny
+`robots.txt` and send the same header by default (`_remote._caddy_proxy_command`), because a preview hostname is a
 real public DNS record usually handed out with an autologin token in the URL. Fresh WP
 instances also install with `blog_public=0`, which emits `noindex,nofollow` on every
 page — the part that actually prevents indexing, since a `robots.txt` disallow alone
@@ -1495,15 +1507,26 @@ the record, releasing the ports. A destroy failure keeps all of them
 (`stack_destroy_failed`). `list` shows slug, project, ref and commit, hostnames,
 ports, and the last apply's status and time from the durable job.
 
-The stack record's `commit` is the commit the server is proven to run. `up` records
-the commit it asks for as `last_apply.commit` and keeps `commit` at the previously
-delivered one (null before the first delivery, shown as `not delivered`). `sb host
-apply` moves `commit` to `last_apply.commit` only once its delivery has succeeded,
-and only for the apply the record is waiting for (same `last_apply.request_id`). A
+The stack record's `commit` is the commit requested by the last apply that
+completed, which the host records as its `recorded_revision`. `up` records the commit it asks for as
+`last_apply.commit` and keeps `commit` at the previously delivered one (null before
+the first delivery, shown as `not delivered`). `sb host apply` moves `commit` to
+`last_apply.commit` when it completes, the same point that makes its durable job, and
+so `last_apply.status`, succeed: the runtime was observed ready and, when the manifest
+declares a `pushed_commit_sha` derived variable, reported that revision (a mismatch
+fails the apply). Without such a variable the runtime revision is not observed, so
+the delivery-outcome summary reads `incomplete` (`required_evidence_missing`); that
+still moves `commit`, and only a `failed` or `unknown` summary keeps it back. It moves only for the apply the record is waiting for (same
+`last_apply.request_id`). `list` and the next `up` also treat a succeeded
+`last_apply` as delivered, so a missed write does not leave the record behind: an
+apply job exits 0 only when it completes or when the same request id already holds a
+succeeded delivery. A
 failed, refused or cancelled apply leaves `commit` where it was, so `list` never runs
-ahead of the server. For this controller's own copies `list` reports that `commit`;
-the remote lifetime record keeps the commit its claim was made for, which `list`
-shows for other controllers' copies.
+ahead of the server. A record written before `last_apply.commit` existed keeps its
+`commit`, which may name a commit that was never delivered, until its next apply
+completes. For this controller's own copies `list` reports that `commit`; the remote
+lifetime record keeps the commit its claim was made for, which `list` shows for other
+controllers' copies.
 
 **Hostname ownership.** Every apply, a stack's or an ordinary one, refuses before any
 effect a hostname that a different project already holds on the same remote, with

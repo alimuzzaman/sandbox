@@ -57,6 +57,8 @@ TRANSACTION_TIMEOUT_SECONDS = 180
 # 14 days remain.
 RENEWAL_OVERDUE_DAYS = 25
 ROBOTS_DENY_BODY = "User-agent: *\\nDisallow: /\\n"
+# Spec 081: the value both front doors and the gate send on every hosted response.
+ROBOTS_TAG = "noindex, nofollow, noarchive"
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,150}")
 
 # Mirrors sandbox.core._hosting._CLOUDFLARE_PROXY_CIDRS; imported lazily to keep
@@ -194,6 +196,18 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
     all_hosts = [r["hostname"] for r in routes]
     auth = validated.get("basic_auth") if verifier is not None else None
     robots = validated.get("robots") == "deny"
+    from sandbox.hosting import login_service
+    declaration = validated.get("login_service")
+    gate = login_service.gate_hostnames(declaration)
+    private = login_service.is_private(declaration)
+    app_served = [host for host in served if host not in gate]
+    gate_served = [host for host in served if host in gate]
+    # Spec 081: nginx does not inherit add_header into a level that declares its
+    # own, so the header goes on the server and on every location and if-block.
+    noindex = validated.get("indexing", "noindex") != "public"
+    tag = f'add_header X-Robots-Tag "{ROBOTS_TAG}" always;'
+    ni_server = [f"    {tag}"] if noindex else []
+    ni_loc = [f"        {tag}"] if noindex else []
     out: list[str] = [
         f"# Managed by Sandbox (front door: nginx). Owner: {name}.",
         "# Do not edit: re-run the Sandbox command that owns this route.",
@@ -246,6 +260,7 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
     marker_location = [
         f"    location = {MARKER_PATH} {{",
         "        default_type text/plain;",
+        *ni_loc,
         f'        return 200 "{marker}\\n";',
         "    }",
     ]
@@ -263,11 +278,12 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
                 head[2] = "    listen [::]:443 ssl http2;"
         head += [f"    server_name {' '.join(names)};",
                  f"    ssl_certificate {cert_path};",
-                 f"    ssl_certificate_key {key_path};"]
+                 f"    ssl_certificate_key {key_path};",
+                 *ni_server]
         return head
 
-    if cert_path and served:
-        block = tls_head(served) + [
+    def served_block(names: list[str], upstream: int | None, with_auth: bool) -> list[str]:
+        block = tls_head(names) + [
             "    client_max_body_size 0;",
             "    client_body_timeout 3600s;",
             "    send_timeout 3600s;",
@@ -277,16 +293,22 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
         if robots:
             block += ["    location = /robots.txt {",
                       '        default_type "text/plain; charset=utf-8";',
+                      *ni_loc,
                       f'        return 200 "{ROBOTS_DENY_BODY}";',
                       "    }"]
         block.append("    location / {")
-        if auth:
+        block += ni_loc
+        if upstream is None:
+            # share.private: nothing but the gate hostname reaches the application.
+            return block + ["        return 404;", "    }", "}"]
+        if with_auth:
             block += [f"        if (${p}_deny) {{",
                       "            add_header WWW-Authenticate 'Basic realm=\"restricted\"' always;",
+                      *(f"    {line}" for line in ni_loc),
                       "            return 401;",
                       "        }"]
         block += [
-            f"        proxy_pass http://127.0.0.1:{int(port)};",
+            f"        proxy_pass http://127.0.0.1:{int(upstream)};",
             "        proxy_http_version 1.1;",
             "        proxy_set_header Host $http_host;",
             f"        proxy_set_header X-Forwarded-For {peer};",
@@ -296,30 +318,41 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
             f"        proxy_set_header Connection ${p}_connection;",
             f"        proxy_set_header CF-Connecting-IP ${p}_cf_connecting_ip;",
         ]
-        if auth:
+        if noindex:
+            block.append("        proxy_hide_header X-Robots-Tag;")
+        if with_auth:
             block.append(f"        proxy_set_header Authorization ${p}_authorization;")
         if streaming:
             block += ["        proxy_buffering off;", "        proxy_request_buffering off;"]
         block += ["        proxy_read_timeout 3600s;", "        proxy_send_timeout 3600s;",
                   "        proxy_redirect off;", "    }", "}"]
-        out += [""] + block
+        return block
+
+    if cert_path and app_served:
+        out += [""] + served_block(app_served, None if private else port, bool(auth))
+    if cert_path and gate_served:
+        out += [""] + served_block(gate_served, login_service.gate_loopback_port(port), bool(auth))
     if cert_path:
         for route in redirects:
             out += [""] + tls_head([route["hostname"]]) + [
                 *guard, *marker_location,
                 "    location / {",
-                f"        return 308 {route['target']}$request_uri;",
+                *ni_loc,
+                # share.private: a redirect alias would announce the primary, so it answers 404 too.
+                "        return 404;" if private else f"        return 308 {route['target']}$request_uri;",
                 "    }", "}"]
     plain = ["", "server {", "    listen 80;"]
     if ipv6:
         plain.append("    listen [::]:80;")
-    plain += [f"    server_name {' '.join(all_hosts)};", *guard, *marker_location,
+    plain += [f"    server_name {' '.join(all_hosts)};", *ni_server, *guard, *marker_location,
               "    location ^~ /.well-known/acme-challenge/ {",
               f"        root {ACME_ROOT};",
               "        default_type text/plain;",
+              *ni_loc,
               "        try_files $uri =404;",
               "    }",
               "    location / {",
+              *ni_loc,
               "        return 308 https://$host$request_uri;",
               "    }", "}"]
     out += plain

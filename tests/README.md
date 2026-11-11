@@ -63,6 +63,14 @@ captured call is allowed only with `synthetic_environment`; fixed uncaptured
 setup commands may remain direct when they do not inspect or serialize their
 environment.
 
+A test must never end or replace the runner process. Importing the `tests`
+package (any `tests.*` import does it) installs `tests/runner_guard.py`, which
+makes `os._exit`, `os.execv` and `os.execve` raise `RunnerExitError` in the
+runner process, so the test fails instead of stopping discovery partway with
+exit 0. Forked children keep the real calls. Program sources that exit, such as
+the remote bootstrap strings in `sandbox/transports/`, run in a child through
+`run_test_process`, never through in-process `exec`.
+
 `sb test` is a different command. Its `auto` plugin mode resolves to `unit` or
 `integration`; `integration` provisions and runs the external WordPress/PHPUnit
 harness, while `unit` runs plugin unit PHPUnit with the runner tools. Declared Compose modes and `matrix` are separate

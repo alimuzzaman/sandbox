@@ -414,9 +414,11 @@ class OverrideTests(unittest.TestCase):
         self.validated = _valid()
         self.override = hosting.compose_override(self.validated, 18000)
 
-    def test_only_the_routed_service_publishes_a_port(self):
-        self.assertEqual(self.override.count("ports:"), 1)
+    def test_only_the_routed_service_and_the_gate_publish_ports(self):
+        # Spec 081: the gate takes its own loopback port, the target's plus 3000.
+        self.assertEqual(self.override.count("ports:"), 2)
         self.assertIn("127.0.0.1:18000:8080", self.override)
+        self.assertIn('ports: ["127.0.0.1:21000:8080"]', self.override)
 
     def test_service_is_rendered_hardened_and_unpublished(self):
         for expected in (login.SERVICE_NAME + ":", "read_only: true", "cap_drop", "no-new-privileges",
@@ -993,6 +995,9 @@ class SitePreflightTests(unittest.TestCase):
         self.assertIn('["site"]', checked.call_args.args[1])
 
 
+LINK_ID = "l-" + "0" * 31 + "1"
+
+
 class _Terminal(io.StringIO):
     """A fake controlling terminal that keeps what was written after close."""
 
@@ -1019,11 +1024,11 @@ class SiteCommandTests(unittest.TestCase):
         if verb in self.replies:
             return self.replies[verb]
         if verb == "mint":
-            record = json.loads(kwargs["input_data"])
+            record = json.loads(kwargs["input_data"])["link"]
             return json.dumps({"ok": True, "id": record["id"], "expires_at": record["expires_at"],
                                "uses": record["uses"]})
         if verb == "list":
-            return json.dumps({"ok": True, "links": [{"id": "l-000000000001", "issued_at": 1,
+            return json.dumps({"ok": True, "links": [{"id": LINK_ID, "issued_at": 1,
                                                        "expires_at": 2, "uses": 1, "used": 0}],
                                "sessions": []})
         return json.dumps({"ok": True, "revoked_links": 1, "revoked_sessions": 2})
@@ -1069,13 +1074,18 @@ class SiteCommandTests(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self._assert_no_leak(out, err)
         self.assertEqual(self.terminal.final.count(CANARY), 1)
-        self.assertEqual(self.terminal.final.strip(),
-                         f"https://{SITE_HOST}/__sandbox/share/mockup#sandbox_autologin={CANARY}")
+        self.assertRegex(self.terminal.final.strip(),
+                         rf"^https://{re.escape(SITE_HOST)}/s/l-[0-9a-f]{{32}}#{re.escape(CANARY)}$")
         reply = json.loads(out)
         self.assertNotIn("url", reply)
         self.assertEqual((reply["ok"], reply["uses"], reply["link_shown_on"]), (True, 3, "terminal"))
-        self.assertRegex(reply["link_id"], r"^l-[0-9a-f]{12}$")
-        record = json.loads(self.inputs[0])
+        self.assertRegex(reply["link_id"], r"^l-[0-9a-f]{32}$")
+        self.assertIn(reply["link_id"], self.terminal.final)
+        payload = json.loads(self.inputs[0])
+        self.assertIsNone(payload["stack"])
+        record = payload["link"]
+        self.assertEqual((record["schema"], record["scope"], record["kind"]),
+                         ("sandbox.share-link.v2", "/", "site"))
         self.assertEqual(record["token_sha256"], hashlib.sha256(CANARY.encode()).hexdigest())
         self.assertEqual((record["uses"], record["expires_at"] - record["issued_at"]), (3, 900))
 
@@ -1116,15 +1126,18 @@ class SiteCommandTests(unittest.TestCase):
     def test_list_reports_ids_and_counts(self):
         code, out, _ = self._run(list_links=True)
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["links"][0]["id"], "l-000000000001")
+        self.assertEqual(json.loads(out)["links"][0]["id"], LINK_ID)
         self.assertIn("site list mockup", self.commands[0])
         self.assertEqual(self.inputs, [None])
 
     def test_revoke_runs_under_the_writer_lock(self):
-        code, out, _ = self._run(revoke="l-000000000001")
+        code, out, _ = self._run(revoke=LINK_ID)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["revoked_sessions"], 2)
-        self.assertIn("site revoke mockup l-000000000001", self.commands[0])
+        self.assertIn(f"site revoke mockup {LINK_ID}", self.commands[0])
+        # A 075-length id is no longer a valid target.
+        code, out, _ = self._run(revoke="l-000000000001")
+        self.assertEqual((code, json.loads(out)["code"]), (1, "site_link_unknown"))
 
     def test_revoke_target_is_checked_before_the_remote(self):
         code, out, _ = self._run(revoke="x; rm -rf /")

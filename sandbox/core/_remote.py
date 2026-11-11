@@ -5133,7 +5133,8 @@ def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float =
 
 
 def remote_mcp_service_plan(remote: dict, bind: str, port: int,
-                            public_url: str | None = None, *, observed: dict | None = None) -> dict:
+                            public_url: str | None = None, *, observed: dict | None = None,
+                            preserve_credentials: bool = False) -> dict:
     """Build a no-write migration plan with no secret-bearing fields."""
     public_url = _validate_remote_mcp_public_url(public_url)
     record = remote_mcp_service_record(bind, port, public_url)
@@ -5143,7 +5144,8 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
         "steps": [
             "prepare the staged Sandbox CLI and MCP virtual environments",
             "refresh and verify the owner-scoped measured image staging helper",
-            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            ("preserve existing owner-only remote credential file" if preserve_credentials else
+             "write owner-only remote credential file"), "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
         "legacy_pidfile_detected": bool((observed or {}).get("legacy_pidfile") == "present"),
@@ -5173,7 +5175,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     if not confirm:
         return remote_mcp_service_plan(
             remote, bind, port, public_url,
-            observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
+            observed={"legacy_pidfile": "present"} if legacy_pidfile else None,
+            preserve_credentials=preserve_credentials)
     if not preserve_credentials and (not isinstance(token, str) or not token):
         raise ValueError("remote MCP token is required")
     if not preserve_credentials and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):

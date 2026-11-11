@@ -7,6 +7,16 @@ from sandbox.remote_runtime.join_identity import discover_join_identity
 from sandbox.remote_runtime.verdict import COMPATIBLE, strict_requested
 
 
+def reconnect_join_record(name, record, *, budget_seconds=15):
+    """Refresh a new observation's revision cache, never an existing operation."""
+    from sandbox.core import _remote
+    result = adopt_compatible_join_revision(name, record,
+        _remote.remote_host_memory_request, _remote._remote_mcp_service_status_via_ssh,
+        budget_seconds=budget_seconds)
+    return {**record, 'mcp_service': result['mcp_service'],
+            'control_identity': result['control_identity']}
+
+
 def adopt_compatible_join_revision(name, record, request, observe, *, budget_seconds=15):
     from sandbox.core._remote import put_remote
     from sandbox.resources.host_memory.remote import validate_request

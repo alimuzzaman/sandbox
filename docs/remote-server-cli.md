@@ -68,6 +68,24 @@ Cancelling a process-owning server CLI parent still cancels its original
 process when a listed child finishes concurrently. Only a fresh observation
 of that exact child's terminal state permits continuing after `already_terminal`;
 live-process identity failures and unknown outcomes remain errors.
+Cancellation first commits an idempotent `server_cli_cancel_requested` event
+in the existing job ledger. It then follows active descendants through completed
+intermediate jobs without signalling those completed processes. New acceptance
+checks the actual full parent chain and cancellation events in the same SQLite
+write transaction as insertion. A child validated earlier cannot be admitted
+after the original fence. Existing receipts remain readable; refusal of this
+attempt does not establish that no earlier receipt exists.
+
+Supervisors check the complete chain before launch and while running, including
+the original minimum deadline. The owner process/context ports do the same
+before effects. Actual parent links, not environment hints, caller JSON root IDs
+or a cached immediate-parent phase, define this authority. A succeeded parent
+still permits its legitimate detached child while the unfenced ancestor chain
+and original deadline remain valid. Cancelling a terminal root also fences late
+admission. The fence makes no claim that signals succeeded or work stopped;
+original process-identity refusals still propagate. Ordinary jobs without a
+server-CLI ancestor retain their existing lifecycle rules. No schema version or
+controller authorization list is introduced.
 
 `owner_command_args(owner, command)` and `owner_environment(owner)` support a
 bounded host-exec caller retaining its original stdin FD. The caller revalidates
@@ -257,6 +275,11 @@ small manifest descriptor and outcome metadata enter ordinary logs. Their
 existing redaction remains enabled. Byte artifacts intentionally preserve the
 authorized container output; the capture contract does not read host broker
 files, inherit provider values or provide an arbitrary host-file reader.
+Publication rechecks the original row and full ancestor fence on its held SQLite
+connection. Full kernel/unit proof runs before and after commit; opening a second
+migrating repository while holding the write lock is avoided. Cancellation or
+post-commit proof uncertainty withholds the acknowledgement and preserves private
+custody for observation/cleanup, without replay.
 
 Each stream is bounded to 1 MiB, with existing truncation flags retained. The
 manifest is at most16KiB; all three artifacts expire for reads within seven days

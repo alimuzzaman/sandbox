@@ -1430,6 +1430,27 @@ class TestPushCommits(unittest.TestCase):
 
 
 class TestCaptureAndApplyUncommitted(unittest.TestCase):
+    def setUp(self):
+        # These older cases isolate reset/archive semantics. Protocol receipt
+        # and disconnect behavior is covered without this stub in
+        # test_remote_materialization_completion, including real Linux children.
+        from sandbox.core.remote_materialization import RemoteMaterializationLease
+        def mutation_fixture(lease, action, *, command=None, input_data=None, timeout=10):
+            if action == "run":
+                wire = command
+                lease.step += 1
+            else:
+                verb = "mkdir" if action == "acquire" else "rmdir"
+                wire = f"{verb} -- {lease.parent}/{lease.name}"
+            result = lease.transport(lease.remote, wire, timeout=timeout,
+                                     **({"input_data": input_data} if input_data is not None else {}))
+            return dict(schema_version=1, operation_id=lease.operation_id,
+                        state={"acquire": "idle", "run": "complete", "release": "released"}[action],
+                        step=lease.step, exit_code=result.returncode)
+        stub = patch.object(RemoteMaterializationLease, "_call", mutation_fixture)
+        stub.start()
+        self.addCleanup(stub.stop)
+
     def test_dirty_overlay_identity_changes_with_untracked_file_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "new.txt")
@@ -1843,7 +1864,9 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             "/local/proj", "diff --git a/gone.php b/gone.php\n", [],
         )
         self.assertEqual(applied, 1)
-        rm_cmd = mock_ssh_run_batch.call_args[0][1][0]
+        mock_ssh_run_batch.assert_not_called()
+        rm_cmd = next(call.args[1] for call in mock_ssh_run.call_args_list
+                      if "rm -f --" in call.args[1])
         self.assertIn("rm -f --", rm_cmd)
         self.assertIn("gone.php", rm_cmd)
 

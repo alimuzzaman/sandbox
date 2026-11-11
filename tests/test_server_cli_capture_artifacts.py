@@ -1,6 +1,7 @@
 """Exact private byte artifacts; ordinary logs retain only bound metadata."""
 import base64
 import copy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -19,7 +20,7 @@ from sandbox.hosting.host_exec import ExecOutcome, OK, FAILED, WATCHDOG_EXPIRED
 from sandbox.jobs.artifacts import ArtifactError, PRIVATE_CAPTURE_KIND, PRIVATE_CAPTURE_MAX_BYTES, read_private_capture
 from sandbox.jobs.models import JobSubmission, SourceIdentity, OutputQuery
 from sandbox.jobs.output import JobOutputStore
-from sandbox.jobs.registry import JobRepository
+from sandbox.jobs.registry import JobRepository, RequestIdConflict
 from sandbox.jobs.storage import JobStorage, StoragePressureError
 from sandbox.services.redaction import StreamingRedactor
 
@@ -41,6 +42,7 @@ class CaptureArtifactsTests(unittest.TestCase):
         self.proof = {'server_cli.target_identity': owner.target_identity,
             'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
             'server_cli.remote_name': 'box', 'server_cli.exec_service': 'wordpress', 'server_cli.exec_target': 'fixture/dev',
+            'server_cli.target_metadata': '{"front_door":"nginx"}',
             'server_cli.target_selector_digest': 'sha256:' + 'd' * 64, 'server_cli.output_contract': capture.OUTPUT_CONTRACT,
             'server_cli.absolute_deadline_at': self.deadline,
             'server_cli.target_snapshot': json.dumps({'schema_version': 1, 'origin_remote_name': 'box',
@@ -55,6 +57,7 @@ class CaptureArtifactsTests(unittest.TestCase):
             (owner.executable, 'host', 'exec', '--remote', 'box', '--exec-capture-artifacts'),
             60, SourceIdentity(source_identity, '1' * 40), request_id='capture-fixture',
             execution_policy_provenance=self.proof)
+        self.submission = submission
         row, _ = self.repository.accept(submission)
         self.job_id = row['job_id']
         self.storage.job_dir(self.job_id, create=True)
@@ -69,6 +72,7 @@ class CaptureArtifactsTests(unittest.TestCase):
             'source': {'identity': source_identity, 'commit': '1' * 40},
             'execution_policy': {'provenance': self.proof}}
         self.real_open_existing = JobStorage.open_existing
+        self.real_current_context = server_cli.current_server_cli_context
         for patch in (mock.patch.object(_paths, 'RUNTIME_DIR', self.runtime),
                 mock.patch.object(server_cli, 'current_server_cli_context', return_value=self.context),
                 mock.patch.object(JobStorage, 'open_existing', return_value=self.storage)):
@@ -129,6 +133,74 @@ class CaptureArtifactsTests(unittest.TestCase):
             created = datetime.fromisoformat(row['created_at'].replace('Z', '+00:00'))
             expiry = datetime.fromisoformat(row['expires_at'])
             self.assertLessEqual((expiry - created).total_seconds(), capture.RETENTION_SECONDS)
+
+    def test_actual_admission_retains_full_target_proof_and_replays_original_digest(self):
+        self.assertGreater(len(self.proof['server_cli.target_snapshot'].encode()), 128)
+        retained = self.repository.submission_snapshot(self.job_id)
+        self.assertEqual(retained['execution_policy_provenance'], self.proof)
+        row, replay = self.repository.accept(self.submission)
+        self.assertTrue(replay)
+        self.assertEqual(row['job_id'], self.job_id)
+        self.assertEqual(json.loads(row['execution_policy_provenance_json']), self.proof)
+        envelope = self.publish(b'\xff\x00retained-proof', b'\x00stderr')
+        self.repository.transition(self.job_id, 'succeeded', exit_code=0)
+        self.assertEqual(self.decode(envelope)['stdout_bytes'], b'\xff\x00retained-proof')
+        changed = json.loads(self.proof['server_cli.target_snapshot'])
+        changed['copy_id'] = 'deadbeef'
+        proof = {**self.proof, 'server_cli.target_snapshot': json.dumps(changed)}
+        with self.assertRaises(RequestIdConflict):
+            self.repository.accept(replace(self.submission, execution_policy_provenance=proof))
+
+    def test_generic_provenance_limit_stays_128_and_routing_contract_is_closed(self):
+        for count in (128, 129):
+            proof = {**self.proof, 'ordinary-policy': 'x' * count}
+            item = replace(self.submission, request_id='ordinary-' + str(count),
+                           execution_policy_provenance=proof)
+            if count == 128:
+                self.repository.accept(item)
+            else:
+                with self.assertRaisesRegex(ValueError, 'provenance value'):
+                    self.repository.accept(item)
+        routing = {'origin_ipv4': '192.0.2.1', 'origin_ipv6': '2001:0db8:0000:0000:0000:0000:0000:0001',
+                   'front_door': 'nginx', 'mcp_port': 65535}
+        wire = json.dumps(routing)
+        self.assertGreater(len(wire.encode()), 128)
+        row, _ = self.repository.accept(replace(self.submission, request_id='full-routing',
+            execution_policy_provenance={**self.proof, 'server_cli.target_metadata': wire}))
+        self.assertEqual(json.loads(row['execution_policy_provenance_json'])['server_cli.target_metadata'], wire)
+        for routing in ({'bearer_token': 'fixture'}, {'front_door': 'invented'}, {'mcp_port': True}):
+            with self.subTest(routing=routing), self.assertRaises(ValueError):
+                self.repository.accept(replace(self.submission, request_id='bad-routing',
+                    execution_policy_provenance={**self.proof, 'server_cli.target_metadata': json.dumps(routing)}))
+
+    def test_target_contract_refuses_wrong_job_binding_schema_and_purpose(self):
+        base = json.loads(self.proof['server_cli.target_snapshot'])
+        for field, value in (('source_dir', '/different-source'), ('source_commit', '3' * 40),
+                ('target_identity', '9' * 24), ('origin_remote_name', 'elsewhere'),
+                ('selector_digest', 'sha256:' + '9' * 64), ('schema_version', 2),
+                ('services', [{'name': 'other', 'index': 1, 'container_id': 'a' * 64}]),
+                ('unexpected', 'fixture')):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.repository.accept(replace(self.submission, request_id='wrong-target',
+                    execution_policy_provenance={**self.proof, 'server_cli.target_snapshot': json.dumps({**base, field: value})}))
+        with self.assertRaises(ValueError):
+            self.repository.accept(replace(self.submission, kind='exec', request_id='wrong-purpose'))
+        duplicate = self.proof['server_cli.target_snapshot'].replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1')
+        with self.assertRaises(ValueError):
+            self.repository.accept(replace(self.submission, request_id='duplicate-key',
+                execution_policy_provenance={**self.proof, 'server_cli.target_snapshot': duplicate}))
+
+    def test_specific_contract_and_total_original_snapshot_limits_both_remain_bounded(self):
+        base = json.loads(self.proof['server_cli.target_snapshot'])
+        oversized = {**base, 'native_keys': [('x' * 600) + str(index) for index in range(64)]}
+        with self.assertRaises(ValueError):
+            self.repository.accept(replace(self.submission, request_id='oversized-target',
+                execution_policy_provenance={**self.proof, 'server_cli.target_snapshot': json.dumps(oversized)}))
+        bounded = {**base, 'native_keys': [('x' * 350) + str(index) for index in range(64)]}
+        with self.assertRaisesRegex(ValueError, '65536'):
+            self.repository.accept(replace(self.submission, request_id='oversized-original',
+                argv=self.submission.argv + ('x' * 45000,),
+                execution_policy_provenance={**self.proof, 'server_cli.target_snapshot': json.dumps(bounded)}))
 
     def test_zero_bytes_failed_exit255_and_two_chunk_stream_are_exact(self):
         payload = bytes(range(256)) * (PRIVATE_CAPTURE_MAX_BYTES // 256)
@@ -268,6 +340,26 @@ class CaptureArtifactsTests(unittest.TestCase):
         self.assertEqual(len(self.service.list_artifacts(self.job_id)), 3)
         with self.assertRaises(capture.CaptureUnavailable):
             self.publish(b'different')
+
+    def test_real_current_context_reader_can_publish_without_a_second_writer_under_its_own_lock(self):
+        self.repository.put_process_identity(self.job_id, host_boot_id='fixture-boot',
+            supervisor_pid=1001, supervisor_start_identity='supervisor-start',
+            supervisor_nonce_hash='a' * 64, child_pid=1000, child_pgid=1000,
+            child_start_identity='child-start')
+        from types import SimpleNamespace
+        def identity(pid):
+            return SimpleNamespace(host_boot_id='fixture-boot',
+                start_identity='child-start' if pid == 1000 else 'supervisor-start')
+        with mock.patch.object(server_cli, 'current_server_cli_context', self.real_current_context), \
+                mock.patch.object(server_cli.os, 'environ', {'SANDBOX_DURABLE_JOB_ID': self.job_id}), \
+                mock.patch.object(server_cli.os, 'getpid', return_value=1000), \
+                mock.patch.object(server_cli.os, 'getppid', return_value=1001), \
+                mock.patch.object(server_cli, '_current_owner', return_value=self.context.owner), \
+                mock.patch.object(server_cli, 'installed_cli', return_value=Path(self.context.owner.executable)), \
+                mock.patch('sandbox.jobs.process.capture_process_identity', side_effect=identity):
+            envelope = self.publish(b'exact bytes')
+        self.assertEqual(envelope['capture']['contract'], capture.CONTRACT)
+        self.assertEqual(len(self.service.list_artifacts(self.job_id)), 3)
 
     def test_same_anchor_lookup_rejects_replaced_directory(self):
         custody = capture.prepare_server_cli_capture()

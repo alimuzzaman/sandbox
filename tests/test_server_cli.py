@@ -95,7 +95,7 @@ class ServerCLIDispatchTest(unittest.TestCase):
             'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
         observed = {'schema_version': 1, 'ok': True, 'target_identity': 'c' * 24,
             'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24,
-            'capabilities': [cli.CONTRACT]}
+            'capabilities': [cli.CONTRACT, 'job.acceptance-receipt.v1']}
         if capability:
             observed.update(capability)
         with mock.patch.object(_remote, 'get_remote', return_value=record), \
@@ -131,7 +131,10 @@ class ServerCLIDispatchTest(unittest.TestCase):
         transport.submit_server_cli.assert_not_called()
 
     def test_missing_contract_or_real_target_pin_change_cannot_submit(self):
-        for fields in ({'capabilities': []}, {'target_identity': 'e' * 24},
+        for fields in ({'capabilities': []}, {'capabilities': [cli.CONTRACT]},
+                       {'capabilities': [{}]}, {'capabilities': [[]]},
+                       {'capabilities': [cli.CONTRACT, 'job.acceptance-receipt.v1', {}]},
+                       {'target_identity': 'e' * 24},
                        {'ownership_marker': 'f' * 24}, {'runtime_revision': 'e' * 24},
                        {'schema_version': True}):
             with self.subTest(fields=fields):
@@ -147,7 +150,7 @@ class ServerCLIDispatchTest(unittest.TestCase):
 
 
 class RetainedServerCLIContextTest(unittest.TestCase):
-    def observe(self, *, row_fields=None, process_fields=None, dispatch=False):
+    def observe(self, *, row_fields=None, process_fields=None, provenance_fields=None, dispatch=False):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
             registry = runtime / 'jobs/registry.sqlite3'
@@ -165,7 +168,7 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                     'server_cli.target_identity': OWNER.target_identity,
                     'server_cli.runtime_revision': OWNER.runtime_revision,
                     'server_cli.ownership_marker': OWNER.ownership_marker,
-                    'server_cli.remote_name': 'origin-box'}), 'process': process}
+                    'server_cli.remote_name': 'origin-box', **(provenance_fields or {})}), 'process': process}
             row.update(row_fields or {})
             def captured(pid):
                 return SimpleNamespace(host_boot_id='boot',
@@ -183,6 +186,8 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                         returncode=0, argv=('/bin/sh', '-c', 'single-effect'), stdout='', stderr='',
                         stdout_truncated=False, stderr_truncated=False, termination_reason=None)) as run:
                 repository.return_value.snapshot.return_value = row
+                repository.return_value.server_cli_ancestry.return_value = [{
+                    **row, 'job_id': 'd' * 32, 'parent_job_id': None, 'server_cli_cancel_requested': False}]
                 try:
                     context = cli.current_server_cli_context()
                     if dispatch:
@@ -201,6 +206,18 @@ class RetainedServerCLIContextTest(unittest.TestCase):
         self.assertNotIn('SSH_AUTH_SOCK', run.call_args.kwargs['env'])
         self.assertEqual(run.call_args.kwargs['env']['HOME'], OWNER.home)
         self.assertEqual(run.call_count, 1)
+
+    def test_selector_digest_is_read_only_after_original_retained_process_proof(self):
+        digest = 'sha256:' + 'a' * 64
+        context, _run = self.observe(provenance_fields={'server_cli.target_selector_digest': digest})
+        self.assertEqual(context.target_selector_digest, digest)
+        invalid, run = self.observe(provenance_fields={'server_cli.target_selector_digest': 'caller-claim'}, dispatch=True)
+        self.assertIsInstance(invalid, cli.ServerCLIUnavailable)
+        run.assert_not_called()
+        foreign, run = self.observe(provenance_fields={'server_cli.target_selector_digest': digest},
+                                   process_fields={'child_pid': 4321}, dispatch=True)
+        self.assertIsInstance(foreign, cli.ServerCLIUnavailable)
+        run.assert_not_called()
 
     def test_client_environment_key_cannot_replace_original_process_source_or_target(self):
         for rows, processes in (({'kind': 'exec'}, {}),

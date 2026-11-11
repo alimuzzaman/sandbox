@@ -2342,31 +2342,36 @@ def push_commits(
 
 @contextmanager
 def _remote_materialization_lock(remote: dict, target_path: str):
-    """Serialize exact source mutation with workspace materialization."""
-    from sandbox.workspaces.checkout import materialization_lock_name
+    """Retain physical exclusion whenever remote cessation is unproven."""
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
 
-    parent = posixpath.dirname(target_path.rstrip("/"))
-    lock_path = posixpath.join(parent, materialization_lock_name(target_path))
-    acquired = ssh_run(
-        remote, f"mkdir -- {shlex.quote(lock_path)}", timeout=10,
-    )
-    if acquired.returncode != 0:
-        raise RuntimeError("remote source materialization lock is busy")
-    failed = False
+    lease = RemoteMaterializationLease(remote, target_path, ssh_run).acquire()
     try:
-        yield
-    except BaseException:
-        failed = True
-        raise
+        yield lease
     finally:
-        released = ssh_run(
-            remote, f"rmdir -- {shlex.quote(lock_path)}", timeout=10,
-        )
-        if released.returncode != 0 and not failed:
-            raise RuntimeError("remote source materialization lock release failed")
+        # Local exceptions before dispatch and positively completed remote
+        # failures can release. Transport loss never sends an unlock command.
+        if not lease.unknown:
+            lease.release()
 
 
-def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
+def inspect_remote_materialization(remote, target_path: str, operation_id: str):
+    """Read one original lease receipt without replay or source mutation."""
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
+    return RemoteMaterializationLease(
+        remote, target_path, ssh_run, operation_id=operation_id,
+    ).inspect()
+
+
+def reconcile_remote_materialization(remote, target_path: str, operation_id: str):
+    """Explicitly release a positively completed original operation only."""
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
+    return RemoteMaterializationLease(
+        remote, target_path, ssh_run, operation_id=operation_id,
+    ).reconcile()
+
+
+def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str, *, lease) -> None:
     """Reset the VPS working tree to the just-pushed commit BEFORE applying
     the uncommitted layer -- this is what makes each deploy REPLACE rather
     than stack (spec FR-007): any diff a previous deploy applied is wiped
@@ -2385,20 +2390,14 @@ def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
         f"git reset --hard {shlex.quote(sha)} && git clean -fd"
     )
     # Bound the stateful reset on the VPS as well as in the local SSH client.
-    # If the client disconnects, the remote supervisor still terminates the
-    # reset instead of leaving an unbounded git process behind.  The client
-    # budget includes the remote kill grace period and connection overhead.
+    # The coordinator separately waits for all descendants. GNU timeout alone
+    # is not cessation proof; a lost client retains the original exclusion.
     cmd = (
         "exec timeout --signal=TERM "
         f"--kill-after={REMOTE_RESET_KILL_GRACE_SECONDS}s "
         f"{REMOTE_RESET_TIMEOUT_SECONDS}s sh -c {shlex.quote(reset)}"
     )
-    try:
-        res = ssh_run(remote, cmd, timeout=REMOTE_RESET_CLIENT_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"remote reset timed out after {REMOTE_RESET_TIMEOUT_SECONDS}s"
-        ) from exc
+    res = lease.run(cmd, timeout=REMOTE_RESET_CLIENT_TIMEOUT_SECONDS)
     if res.returncode == 124:
         raise RuntimeError(
             f"remote reset timed out after {REMOTE_RESET_TIMEOUT_SECONDS}s"
@@ -2411,8 +2410,8 @@ def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
 
 
 def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
-    with _remote_materialization_lock(remote, target_path):
-        _reset_target_to_unlocked(remote, target_path, sha)
+    with _remote_materialization_lock(remote, target_path) as lease:
+        _reset_target_to_unlocked(remote, target_path, sha, lease=lease)
 
 
 def capture_uncommitted(project_root) -> tuple[str, list[str]]:
@@ -2560,13 +2559,8 @@ def snapshot_dirty_overlay(project_root, diff_text: str, untracked: list[str],
             archive.addfile(info, io.BytesIO(content))
             files += 1
     archive_bytes = archive_buffer.getvalue() if files else b""
-    digest = hashlib.sha256(b"sandbox-dirty-overlay-v2\0")
-    for relative in sorted(deleted):
-        encoded = relative.encode("utf-8", "surrogateescape")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    digest.update(hashlib.sha256(archive_bytes).digest())
-    value = digest.hexdigest()
+    from sandbox.services.source_fingerprint import dirty_overlay_fingerprint
+    value = dirty_overlay_fingerprint(deleted, archive_bytes)
     return {"identity": f"sha256:{value}", "digest": value,
             "archive": archive_bytes, "deleted": sorted(deleted), "files": files}
 
@@ -2688,7 +2682,7 @@ def validate_deploy_include_paths(project_root, paths) -> list[str]:
 def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str],
                        include_paths: list[str] | None = None,
-                       overlay_snapshot: dict | None = None) -> int:
+                       overlay_snapshot: dict | None = None, *, lease) -> int:
     """Apply one immutable overlay artifact, never rereading source bytes."""
     snapshot = overlay_snapshot or snapshot_dirty_overlay(
         project_root, diff_text, untracked, include_paths,
@@ -2700,7 +2694,7 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
             f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
             for relpath in deleted
         ]
-        rm_res = ssh_run_batch(remote, commands, timeout=30)
+        rm_res = lease.run(" && ".join(commands), timeout=30)
         if rm_res.returncode != 0:
             raise RuntimeError(
                 "could not remove deleted files on remote: "
@@ -2713,8 +2707,8 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
             f"mkdir -p -- {shlex.quote(target_path)} && "
             f"tar -xf - -C {shlex.quote(target_path)}"
         )
-        copy_res = ssh_run(remote, extract, timeout=120,
-                           input_data=archive)
+        extract = "exec timeout --signal=TERM --kill-after=15s 90s sh -c " + shlex.quote(extract)
+        copy_res = lease.run(extract, timeout=120, input_data=archive)
         if copy_res.returncode != 0:
             raise RuntimeError(
                 "could not transfer dirty files: "
@@ -2728,10 +2722,10 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
                       diff_text: str, untracked: list[str],
                       include_paths: list[str] | None = None,
                       overlay_snapshot: dict | None = None) -> int:
-    with _remote_materialization_lock(remote, target_path):
+    with _remote_materialization_lock(remote, target_path) as lease:
         return _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text, untracked,
-            include_paths, overlay_snapshot,
+            include_paths, overlay_snapshot, lease=lease,
         )
 
 
@@ -2741,13 +2735,13 @@ def update_target_to(remote: dict, target_path: str, sha: str, *,
                      include_paths: list[str] | None = None,
                      overlay_snapshot: dict | None = None) -> int:
     """Reset and publish one dirty overlay under one source lock."""
-    with _remote_materialization_lock(remote, target_path):
-        _reset_target_to_unlocked(remote, target_path, sha)
+    with _remote_materialization_lock(remote, target_path) as lease:
+        _reset_target_to_unlocked(remote, target_path, sha, lease=lease)
         if project_root is None:
             return 0
         return _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text,
-            list(untracked or ()), include_paths, overlay_snapshot,
+            list(untracked or ()), include_paths, overlay_snapshot, lease=lease,
         )
 
 

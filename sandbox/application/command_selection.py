@@ -53,10 +53,21 @@ def selected_invocation(argv):
                 for child in action.choices.values():
                     quiet(child)
     quiet(parser)
+    values = normalize(list(argv))
     try:
-        args = parser.parse_args(normalize(list(argv)))
-    except (argparse.ArgumentError, SystemExit):
-        raise CommandSelectionUnavailable('retained CLI command does not match the installed grammar') from None
+        args = parser.parse_args(values)
+    except (argparse.ArgumentError, SystemExit, CommandSelectionUnavailable):
+        # The host parser deliberately has no REMAINDER: main assigns the
+        # original tail to exec after parsing its head. Only that actual
+        # command may use this path, including argparse global abbreviations.
+        try:
+            if '--' not in values:
+                raise CommandSelectionUnavailable('retained CLI command does not match the installed grammar')
+            args = parser.parse_args(values[:values.index('--')])
+            if (getattr(args, 'cmd', None), getattr(args, 'action', None)) != ('host', 'exec'):
+                raise CommandSelectionUnavailable('retained CLI command does not match the installed grammar')
+        except (argparse.ArgumentError, SystemExit):
+            raise CommandSelectionUnavailable('retained CLI command does not match the installed grammar') from None
     # Use the installed parser's resolved destinations. Argparse accepts legal
     # abbreviations, so the original token spelling is not an input-mode fact.
     stdin_requested = any(value is True and (name == 'stdin' or name.endswith('_stdin')

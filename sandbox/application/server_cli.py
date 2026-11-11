@@ -138,12 +138,17 @@ def capabilities() -> dict:
         inspection = [INSPECTION_CONTRACT]
     except ServerCLIUnavailable:
         inspection = []
+    from sandbox.application.server_cli_exec import exec_contract_available, capture_contract_available, CONTRACT as EXEC_CONTRACT
+    from sandbox.application.server_cli_capture import CONTRACT as CAPTURE_CONTRACT
+    from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
             'target_metadata': _receiver_routing_metadata(owner),
             'inspection_capabilities': inspection,
-            'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT]}
+            'server_exec_capabilities': [EXEC_CONTRACT] if exec_contract_available() else [],
+            'server_exec_capture_capabilities': [CAPTURE_CONTRACT] if capture_contract_available() else [],
+            'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT]}
 
 
 def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
@@ -255,29 +260,16 @@ class ServerCLIContext:
     origin_remote_name: str
     target_metadata: object
     owner: ServerCliOwner
+    target_selector_digest: str | None = None
 
 
 def validate_target_metadata(value) -> dict:
     """Routing observations only; no key, token, ssh/config or role fields."""
-    if not isinstance(value, dict) or set(value) - {'origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port'}:
-        raise ServerCLIUnavailable('original target routing metadata is invalid')
-    result = dict(value)
-    for field, version in (('origin_ipv4', 4), ('origin_ipv6', 6)):
-        if field in result:
-            if not isinstance(result[field], str):
-                raise ServerCLIUnavailable('original target address metadata must be text')
-            try:
-                address = ipaddress.ip_address(result[field])
-            except (ValueError, TypeError):
-                raise ServerCLIUnavailable('original target address metadata is invalid') from None
-            if address.version != version:
-                raise ServerCLIUnavailable('original target address family changed')
-            result[field] = str(address)
-    if 'front_door' in result and result['front_door'] not in {'nginx', 'caddy'}:
-        raise ServerCLIUnavailable('original target front door is invalid')
-    if 'mcp_port' in result and (type(result['mcp_port']) is not int or not 1 <= result['mcp_port'] <= 65535):
-        raise ServerCLIUnavailable('original control port metadata is invalid')
-    return result
+    from sandbox.jobs.server_cli_retained import routing_metadata
+    try:
+        return routing_metadata(value)
+    except (ValueError, TypeError):
+        raise ServerCLIUnavailable('original target routing metadata is invalid') from None
 
 
 def server_cli_context_if_selected() -> ServerCLIContext | None:
@@ -360,13 +352,17 @@ def _read_server_cli_context() -> ServerCLIContext:
             raise ServerCLIUnavailable('retained server CLI job deadline expired')
         owner = _current_owner()
         provenance = json.loads(row.get('execution_policy_provenance_json') or '{}')
-        if row.get('parent_job_id'):
-            ancestor = repository.get(row['parent_job_id'])
-            if ancestor.get('kind') != KIND or ancestor.get('lifecycle') not in {'running', 'succeeded'}:
-                raise ServerCLIUnavailable('original parent job no longer permits execution')
-            deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.parent_deadline_at']))
-            if datetime.now(timezone.utc) >= deadline:
-                raise ServerCLIUnavailable('original parent job deadline expired')
+        if 'server_cli.absolute_deadline_at' in provenance:
+            from sandbox.application.server_cli_exec import remaining_deadline
+            remaining_deadline(provenance['server_cli.absolute_deadline_at'])
+            deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.absolute_deadline_at'].replace('Z', '+00:00')))
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        try:
+            inherited = check_server_cli_lineage(repository.server_cli_ancestry(job_id))
+        except ServerCliLineageError:
+            raise ServerCLIUnavailable('original ancestor cancellation or deadline refuses execution') from None
+        if inherited is not None:
+            deadline = min(deadline, inherited)
         origin_remote_name = provenance.get('server_cli.remote_name')
         target_metadata = validate_target_metadata(json.loads(provenance.get('server_cli.target_metadata', '{}')))
         if (provenance.get('server_cli.target_identity') != owner.target_identity
@@ -375,10 +371,15 @@ def _read_server_cli_context() -> ServerCLIContext:
                 or not isinstance(origin_remote_name, str)
                 or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,63}', origin_remote_name)):
             raise ServerCLIUnavailable('original job target or installed service identity changed')
+        selector_digest = provenance.get('server_cli.target_selector_digest')
+        if selector_digest is not None and (not isinstance(selector_digest, str)
+                or re.fullmatch(r'sha256:[0-9a-f]{64}', selector_digest) is None):
+            raise ServerCLIUnavailable('retained original target selector is invalid')
         return ServerCLIContext(1, job_id, row['request_id'], row['project_root'],
             row['project_identity'], row['source_identity'], row.get('source_commit'),
             row.get('source_dirty_digest'), owner.target_identity, owner.runtime_revision,
-            deadline.isoformat(), argv[1:], origin_remote_name, MappingProxyType(target_metadata), owner)
+            deadline.isoformat(), argv[1:], origin_remote_name, MappingProxyType(target_metadata), owner,
+            target_selector_digest=selector_digest)
     finally:
         repository.close()
 
@@ -441,6 +442,11 @@ def validate_nested_parent(parent_job_id: str, *, target_identity: str,
     repository = JobRepository(Path(RUNTIME_DIR) / 'jobs/registry.sqlite3')
     try:
         row = repository.snapshot(parent_job_id)
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        try:
+            inherited = check_server_cli_lineage(repository.server_cli_ancestry(parent_job_id))
+        except ServerCliLineageError:
+            raise ServerCLIUnavailable('original ancestor cancellation or deadline refuses nested admission') from None
     finally:
         repository.close()
     process = row.get('process') or {}
@@ -468,6 +474,8 @@ def validate_nested_parent(parent_job_id: str, *, target_identity: str,
     deadline = datetime.fromisoformat(row['started_at'].replace('Z', '+00:00')) + timedelta(seconds=row['deadline_seconds'])
     if proof.get('server_cli.parent_deadline_at'):
         deadline = min(deadline, datetime.fromisoformat(proof['server_cli.parent_deadline_at']))
+    if inherited is not None:
+        deadline = min(deadline, inherited)
     remaining = math.floor((deadline - datetime.now(timezone.utc)).total_seconds())
     if remaining <= 0:
         raise ServerCLIUnavailable('nested CLI exceeds original remaining deadline')
@@ -614,12 +622,14 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
         # source/job submission below has not been invoked, even if its reply
         # is unavailable. Do not strand a request as unknown acceptance.
         raise ServerCLIUnavailable('installed server CLI capability could not be observed') from None
+    from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
             or observed.get('target_identity') != identity['target_identity']
             or observed.get('runtime_revision') != (entry.get('mcp_service') or {}).get('runtime_revision')
             or observed.get('ownership_marker') != (entry.get('mcp_service') or {}).get('ownership_marker')
             or not isinstance(observed.get('capabilities'), list)
-            or CONTRACT not in observed['capabilities']):
+            or any(not isinstance(value, str) for value in observed['capabilities'])
+            or not {CONTRACT, ACCEPTANCE_CONTRACT}.issubset(observed['capabilities'])):
         raise ServerCLIUnavailable('installed server CLI contract is unavailable or changed')
     routing = validate_target_metadata(observed.get('target_metadata', {}))
     selected = dict(entry)

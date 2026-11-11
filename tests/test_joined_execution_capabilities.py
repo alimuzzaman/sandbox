@@ -1,4 +1,5 @@
 import copy
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -14,7 +15,7 @@ class JoinedExecutionCapabilityTest(unittest.TestCase):
             'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
         self.observed = {'ok': True, 'schema_version': 1, 'target_identity': 'c' * 24,
             'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24,
-            'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.server-cli.v1']}
+            'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.acceptance-receipt.v1', 'job.server-cli.v1']}
 
     def test_actual_installed_contract_is_adopted_by_cas_without_bearer_or_role(self):
         request = mock.Mock(return_value=self.observed)
@@ -50,6 +51,16 @@ class JoinedExecutionCapabilityTest(unittest.TestCase):
         self.assertIs(adopt_execution_capabilities('owner', owner, request), owner)
         request.assert_not_called()
 
+    def test_current_discovery_removes_stale_known_contract_but_preserves_unrelated_capability(self):
+        record = {**self.record, 'capabilities': ['status', 'job.exec', 'job.execution-policy.v1',
+                                                   'job.acceptance-receipt.v1']}
+        observed = {**self.observed, 'capabilities': ['job.exec', 'job.execution-policy.v1']}
+        with mock.patch('sandbox.core._remote.put_remote', side_effect=lambda name, **fields:
+                {**record, 'capabilities': fields['capabilities']}) as writer:
+            result = adopt_execution_capabilities('box', record, lambda argv: observed)
+        self.assertEqual(result['capabilities'], ['job.exec', 'job.execution-policy.v1', 'status'])
+        writer.assert_called_once()
+
     def service(self, discover):
         return TargetService(config_loader=lambda root: {'root': '/synthetic/project', 'runtime': {'default': 'local'}},
             remote_lookup=lambda name: copy.deepcopy(self.record), capability_discovery=discover)
@@ -70,3 +81,51 @@ class JoinedExecutionCapabilityTest(unittest.TestCase):
         discover = mock.Mock(side_effect=AssertionError('not an execution'))
         self.assertEqual(self.service(discover).resolve(TargetRequest('/synthetic/project', remote='box')).remote_name, 'box')
         discover.assert_not_called()
+
+    def composed_selection(self, response=None, error=None):
+        """Use the real application->remote->transport->validator composition."""
+        from sandbox.application.context import target_service
+        from sandbox.core import _remote
+        record = {**copy.deepcopy(self.record), 'control_access': 'tailnet', 'front_door': 'nginx'}
+        config = SimpleNamespace(load_project_config=lambda root: {
+            'root': '/synthetic/project', 'runtime': {'default': 'local'}})
+        with mock.patch.dict('sys.modules', {'sandbox_core': config}), \
+                mock.patch.object(_remote, '_remote_block', return_value={'box': record}), \
+                mock.patch.object(_remote, 'put_remote', side_effect=lambda name, **fields:
+                    {**record, 'capabilities': fields['capabilities']}) as writer, \
+                mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.control',
+                    return_value=response if response is not None else self.observed,
+                    side_effect=error) as control, \
+                mock.patch.object(_remote, 'deploy_exact_working_tree', side_effect=AssertionError('no staging')) as deploy, \
+                mock.patch('sandbox.jobs.registry.JobRepository', side_effect=AssertionError('no ledger/job acceptance')):
+            self.writer, self.control, self.deploy = writer, control, deploy
+            return target_service().resolve(TargetRequest('/synthetic/project', remote='box',
+                required_capability='job.exec'))
+
+    def test_actual_application_selection_discovers_contract_before_any_staging_or_acceptance(self):
+        target = self.composed_selection()
+        self.assertEqual(target.remote_name, 'box')
+        self.control.assert_called_once_with('box', ['job-capabilities'], timeout=15)
+        self.writer.assert_called_once()
+        written = self.writer.call_args.kwargs
+        self.assertEqual(written['_expected']['control_identity'], self.record['control_identity'])
+        self.assertEqual(written['_expected']['mcp_service'], self.record['mcp_service'])
+        self.assertEqual(set(written['capabilities']), set(self.observed['capabilities']))
+        self.assertNotIn('bearer_token', written)
+        self.assertNotIn('role', written)
+        self.deploy.assert_not_called()
+
+    def test_actual_application_missing_installed_contract_never_becomes_owner_denial(self):
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+        with self.assertRaises(TargetResolutionError) as failure:
+            self.composed_selection(error=RemoteJobTransportError('installed CLI lacks discovery'))
+        self.assertEqual(failure.exception.code, 'remote_execution_capability_unavailable')
+        self.writer.assert_not_called()
+        self.deploy.assert_not_called()
+
+    def test_actual_application_rejects_changed_machine_before_capability_publication(self):
+        with self.assertRaises(TargetResolutionError) as failure:
+            self.composed_selection(response={**self.observed, 'target_identity': 'f' * 24})
+        self.assertEqual(failure.exception.code, 'remote_execution_capability_unavailable')
+        self.writer.assert_not_called()
+        self.deploy.assert_not_called()

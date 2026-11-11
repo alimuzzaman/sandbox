@@ -2161,7 +2161,7 @@ def _cmd_provision(args, as_json: bool) -> None:
             sr.put_remote(name, control_transport="tailscale",
                           control_url=control_url, tailscale_host=tailscale_ip,
                           mcp_port=port, bearer_token=token, provisioned=True,
-                          capabilities=["job.exec", "job.execution-policy.v1"],
+                          capabilities=["job.exec", "job.execution-policy.v1", "job.acceptance-receipt.v1"],
                           mcp_service=applied["service"])
             _invalidate_readiness(name)
         else:
@@ -2174,7 +2174,7 @@ def _cmd_provision(args, as_json: bool) -> None:
             sr.put_remote(name, control_transport="https",
                           control_host=public_host, control_url=control_url,
                           mcp_port=port, bearer_token=token, provisioned=True,
-                          capabilities=["job.exec", "job.execution-policy.v1"],
+                          capabilities=["job.exec", "job.execution-policy.v1", "job.acceptance-receipt.v1"],
                           mcp_service=applied["service"])
             _invalidate_readiness(name)
             tailscale_ip = None

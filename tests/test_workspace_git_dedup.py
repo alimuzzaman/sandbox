@@ -274,16 +274,19 @@ class WorkspaceGitDedupTests(unittest.TestCase):
 
     def test_remote_reset_and_overlay_apply_use_the_materializer_lock(self):
         from sandbox.core import _remote
+        from tests.test_remote_materialization_completion import ReceiptTransport
 
         calls = []
+        transport = ReceiptTransport()
         def run(_remote_record, command, **_kwargs):
             calls.append(command)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return transport(_remote_record, command, **_kwargs)
         with tempfile.TemporaryDirectory() as temp, patch.object(_remote, "ssh_run", side_effect=run):
             target = "/srv/source"
             _remote.reset_target_to({}, target, "a" * 40)
             _remote.apply_uncommitted({}, target, Path(temp), "", [])
-        lock_commands = [command for command in calls if ".sandbox-materialize-" in command]
+        lock_commands = [command for command in calls
+                         if shlex.split(command)[3] in ("acquire", "release")]
         self.assertEqual(len(lock_commands), 4)
         names = {command.split(".sandbox-materialize-", 1)[1].split(".lock", 1)[0]
                  for command in lock_commands}
@@ -291,16 +294,18 @@ class WorkspaceGitDedupTests(unittest.TestCase):
 
     def test_combined_remote_update_holds_one_lock_through_reset_and_publish(self):
         from sandbox.core import _remote
+        from tests.test_remote_materialization_completion import ReceiptTransport
 
         events = []
+        transport = ReceiptTransport()
         def run(_remote_record, command, **_kwargs):
-            events.append(command)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            events.append(shlex.split(command)[3])
+            return transport(_remote_record, command, **_kwargs)
         with patch.object(_remote, "ssh_run", side_effect=run), \
                 patch.object(_remote, "_reset_target_to_unlocked",
-                             side_effect=lambda *_args: events.append("reset")), \
+                             side_effect=lambda *_args, **_kwargs: events.append("reset")), \
                 patch.object(_remote, "_apply_uncommitted_unlocked",
-                             side_effect=lambda *_args: events.append("publish") or 2):
+                             side_effect=lambda *_args, **_kwargs: events.append("publish") or 2):
             applied = _remote.update_target_to(
                 {}, "/srv/source", "a" * 40,
                 project_root=Path("/local/source"), diff_text="diff",
@@ -308,9 +313,9 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             )
         self.assertEqual(applied, 2)
         self.assertEqual(len(events), 4)
-        self.assertIn("mkdir --", events[0])
+        self.assertEqual(events[0], "acquire")
         self.assertEqual(events[1:3], ["reset", "publish"])
-        self.assertIn("rmdir --", events[3])
+        self.assertEqual(events[3], "release")
 
     def test_real_git_objects_share_only_immutable_inodes_and_source_stays_clean(self):
         with tempfile.TemporaryDirectory() as temp:

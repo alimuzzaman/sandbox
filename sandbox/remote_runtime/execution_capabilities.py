@@ -28,7 +28,8 @@ def adopt_execution_capabilities(name, record, request):
         if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{24}', expected) or value != expected:
             raise ExecutionCapabilityUnavailable('installed job service identity changed or is unavailable')
     values = observed.get('capabilities')
-    known = {'job.exec', 'job.execution-policy.v1', 'job.server-cli.v1'}
+    from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
+    known = {'job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, 'job.server-cli.v1'}
     if (observed.get('ok') is not True or not isinstance(values, list)
             or any(not isinstance(value, str) or value not in known for value in values)
             or len(set(values)) != len(values)
@@ -37,7 +38,9 @@ def adopt_execution_capabilities(name, record, request):
     old = record.get('capabilities', [])
     if not isinstance(old, list) or any(not isinstance(value, str) for value in old):
         raise ExecutionCapabilityUnavailable('registered job capability metadata is malformed')
-    capabilities = sorted(set(old) | set(values))
+    # Current discovery replaces known component claims. A prior installation
+    # must not lend an absent contract to a downgraded/replaced service.
+    capabilities = sorted((set(old) - known) | set(values))
     if capabilities == old:
         return record
     from sandbox.core._remote import put_remote

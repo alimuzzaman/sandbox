@@ -24,16 +24,31 @@ from sandbox.services.redaction import redact_structure, redact_text
 
 def _server_cli_parent_reason(descriptor, repository):
     parent = descriptor.get('server_cli_parent')
-    if parent is None:
+    context = descriptor.get('authoritative_context') or {}
+    if not isinstance(context, dict):
+        return 'parent_context_unavailable'
+    selected = context.get('execution_kind') == 'server-cli'
+    if parent is None and not selected:
         return None
     from datetime import datetime, timezone
     try:
-        deadline = datetime.fromisoformat(parent['deadline_at'])
-        if datetime.now(timezone.utc) >= deadline:
-            return 'parent_deadline_exceeded'
-        row = repository.get(parent['job_id'])
-        if row.get('kind') != 'server-cli' or row.get('lifecycle') not in {'running', 'succeeded'}:
-            return 'parent_cancelled_or_unavailable'
+        from .server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        if parent is not None:
+            deadline = datetime.fromisoformat(parent['deadline_at'])
+            if datetime.now(timezone.utc) >= deadline:
+                return 'parent_deadline_exceeded'
+        # Old descriptors retain their immediate link; the repository follows
+        # that actual chain rather than trusting a caller-supplied root ID.
+        current_job = descriptor.get('job_id')
+        job_id = current_job if current_job is not None else parent['job_id']
+        rows = repository.server_cli_ancestry(job_id)
+        if (not isinstance(rows, list) or not rows or rows[0].get('kind') != 'server-cli'
+                or (current_job is not None and rows[0].get('job_id') != current_job)
+                or (current_job is not None and parent is not None and rows[0].get('parent_job_id') != parent['job_id'])):
+            return 'parent_context_unavailable'
+        check_server_cli_lineage(rows, pending_self=current_job is not None)
+    except ServerCliLineageError as exc:
+        return exc.reason
     except Exception:
         return 'parent_context_unavailable'
     return None
@@ -106,6 +121,35 @@ def _linux_cgroup_path(pid: int) -> str | None:
     return None
 
 
+def _inherited_server_cli_stdin(descriptor, current, *, fd=0):
+    binding = descriptor.get('anonymous_input')
+    if binding is None:
+        return subprocess.DEVNULL
+    from .anonymous_input import validate_inherited_input
+    if current.get('kind') != 'server-cli':
+        raise RuntimeError('anonymous input requires the fixed server CLI contract')
+    proof = json.loads(current.get('execution_policy_provenance_json') or '{}')
+    if (not isinstance(binding, dict) or proof.get('server_cli.stdin_sha256') != binding.get('sha256')
+            or proof.get('server_cli.stdin_size') != str(binding.get('size'))):
+        raise RuntimeError('retained anonymous input binding changed')
+    stdin = validate_inherited_input(fd, binding)
+    os.lseek(stdin, 0, os.SEEK_SET)
+    return stdin
+
+
+def _server_cli_deadline_remaining(descriptor, current):
+    value = descriptor.get('server_cli_deadline_at')
+    if value is None:
+        return None
+    if current.get('kind') != 'server-cli':
+        raise RuntimeError('absolute owner deadline requires the fixed CLI job')
+    proof = json.loads(current.get('execution_policy_provenance_json') or '{}')
+    if proof.get('server_cli.absolute_deadline_at') != value:
+        raise RuntimeError('retained original deadline changed')
+    from sandbox.application.server_cli_exec import remaining_deadline
+    return remaining_deadline(value)
+
+
 def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
@@ -139,11 +183,15 @@ def run_descriptor(path: str | Path) -> int:
                 termination_reason=parent_reason)
             return 124 if parent_reason == 'parent_deadline_exceeded' else 130
         if _managed_native_job(descriptor):
+            if descriptor.get('anonymous_input') is not None:
+                raise RuntimeError('anonymous input is unavailable for managed project execution')
             return _run_managed_native(descriptor, repository, output)
+        stdin = _inherited_server_cli_stdin(descriptor, current)
+        original_remaining = _server_cli_deadline_remaining(descriptor, current)
         with _child_identity_context(descriptor.get("authoritative_context"), descriptor.get('environment')) as environment:
             command = subprocess.Popen(
                 descriptor["argv"], cwd=descriptor["cwd"],
-                env=environment, stdin=subprocess.DEVNULL,
+                env=environment, stdin=stdin,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, close_fds=True)
         release_authority = False
@@ -171,6 +219,8 @@ def run_descriptor(path: str | Path) -> int:
         selector.register(command.stdout, selectors.EVENT_READ, "stdout")
         selector.register(command.stderr, selectors.EVENT_READ, "stderr")
         deadline = time.monotonic() + int(descriptor["deadline_seconds"])
+        if original_remaining is not None:
+            deadline = min(deadline, time.monotonic() + _server_cli_deadline_remaining(descriptor, current))
         next_metric = time.monotonic()
         timed_out = False
         stall_cancelled = False

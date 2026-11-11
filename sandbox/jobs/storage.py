@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,19 @@ class JobStorage:
         except OSError:
             pass
         self.free_disk_reserve = int(free_disk_reserve)
+
+    @classmethod
+    def open_existing(cls, runtime_dir: str | Path, *, free_disk_reserve: int = 2_147_483_648):
+        """Open an already-owned ledger layout without creating/chmodding it."""
+        root = Path(runtime_dir).expanduser().resolve() / 'jobs'
+        info = root.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError('existing job storage is not private owner state')
+        value = cls.__new__(cls)
+        value.root = root
+        value.free_disk_reserve = int(free_disk_reserve)
+        return value
 
     def job_dir(self, job_id: str, *, create: bool = False) -> Path:
         path = self.root / validate_job_id(job_id)

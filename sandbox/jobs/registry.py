@@ -318,6 +318,14 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
     if len(differences) > MAX_SUBMISSION_ITEMS:
         raise ValueError("compatibility differences exceed the durable snapshot limit")
     source = raw["source"]
+    from .server_cli_retained import retained_provenance_value
+    raw_provenance = dict(raw.get("execution_policy_provenance") or {})
+    provenance = {}
+    for key, value in raw_provenance.items():
+        key = _bounded_text(key, "execution policy provenance key", maximum=64)
+        retained = retained_provenance_value(key, value, submission=raw, provenance=raw_provenance)
+        provenance[key] = (retained if retained is not None else
+                           _bounded_text(value, "execution policy provenance value", maximum=128))
     snapshot = {
         "version": 1,
         "kind": _bounded_text(raw["kind"], "job kind", maximum=64),
@@ -343,11 +351,7 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "cancel_grace_seconds": int(raw["cancel_grace_seconds"]),
         "cancel_on_stall": bool(raw["cancel_on_stall"]),
         "cleanup_policy": raw["cleanup_policy"],
-        "execution_policy_provenance": {
-            _bounded_text(key, "execution policy provenance key", maximum=64):
-            _bounded_text(value, "execution policy provenance value", maximum=128)
-            for key, value in dict(raw.get("execution_policy_provenance") or {}).items()
-        },
+        "execution_policy_provenance": provenance,
         "request_id": _bounded_text(raw.get("request_id"), "request id", maximum=64, allow_none=True),
         "parent_job_id": raw.get("parent_job_id"),
         "retry_of_job_id": raw.get("retry_of_job_id"),
@@ -731,6 +735,14 @@ class JobRepository:
                         raise JobRepositoryError(
                             "request workspace authority changed")
                     return dict(existing), True
+            # Returning an existing receipt is not new admission. Fence only
+            # new rows, atomically with the insertion and cancellation intent.
+            if submission.parent_job_id:
+                from .server_cli_lineage import check_server_cli_lineage, MAX_ANCESTORS, ServerCliLineageError
+                ancestors = self._server_cli_ancestry(connection, submission.parent_job_id)
+                check_server_cli_lineage(ancestors)
+                if len(ancestors) >= MAX_ANCESTORS:
+                    raise ServerCliLineageError('parent_context_unavailable')
             submission_json = _canonical_submission_snapshot(submission)
             job_id = new_job_id()
             values = (
@@ -781,6 +793,45 @@ class JobRepository:
         if row is None:
             raise JobNotFound(f"job {job_id!r} was not found")
         return dict(row)
+
+    @staticmethod
+    def _server_cli_ancestry(connection, job_id):
+        from .server_cli_lineage import CANCEL_EVENT, MAX_ANCESTORS, ServerCliLineageError
+        rows, seen = [], set()
+        while job_id is not None:
+            if job_id in seen or len(rows) >= MAX_ANCESTORS:
+                raise ServerCliLineageError('parent_context_unavailable')
+            seen.add(job_id)
+            row = connection.execute('SELECT * FROM jobs WHERE job_id=?', (validate_job_id(job_id),)).fetchone()
+            if row is None:
+                raise ServerCliLineageError('parent_context_unavailable')
+            value = dict(row)
+            value['server_cli_cancel_requested'] = connection.execute(
+                'SELECT 1 FROM job_events WHERE job_id=? AND kind=? LIMIT 1', (job_id, CANCEL_EVENT)).fetchone() is not None
+            rows.append(value)
+            job_id = value['parent_job_id']
+        return rows
+
+    def server_cli_ancestry(self, job_id):
+        """Read the complete actual chain and cancellation ledger consistently."""
+        with self._lock:
+            if self.connection.in_transaction:
+                return self._server_cli_ancestry(self.connection, job_id)
+            with self.transaction() as connection:
+                return self._server_cli_ancestry(connection, job_id)
+
+    def request_server_cli_cancellation(self, job_id):
+        """Durable admission fence, committed before traversing descendants."""
+        from .server_cli_lineage import CANCEL_EVENT
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute('SELECT kind FROM jobs WHERE job_id=?', (validate_job_id(job_id),)).fetchone()
+            if row is None or row['kind'] != 'server-cli':
+                raise JobRepositoryError('server_cli_cancellation_identity_unavailable')
+            if connection.execute('SELECT 1 FROM job_events WHERE job_id=? AND kind=? LIMIT 1', (job_id, CANCEL_EVENT)).fetchone():
+                return
+            sequence = connection.execute('SELECT COALESCE(MAX(sequence), -1)+1 FROM job_events WHERE job_id=?', (job_id,)).fetchone()[0]
+            connection.execute('INSERT INTO job_events(job_id,sequence,kind,occurred_at,payload_json) VALUES(?,?,?,?,?)',
+                (job_id, sequence, CANCEL_EVENT, _now(), '{}'))
 
     def bind_sync_projection(self, job_id: str, submission: JobSubmission, *,
                              workspace_id: str | None = None,

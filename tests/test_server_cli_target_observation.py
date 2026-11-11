@@ -16,7 +16,7 @@ def snapshot():
     return {'schema_version': 1, 'target_identity': OWNER.target_identity,
         'ownership_marker': OWNER.ownership_marker, 'runtime_revision': OWNER.runtime_revision,
         'origin_remote_name': 'box', 'project': 'fixture', 'environment': 'dev',
-        'name': 'fixture', 'copy_id': 'copyfixture', 'source_commit': '1' * 40,
+        'name': 'fixture', 'copy_id': '1234abcd', 'source_commit': '1' * 40,
         'source_origin_commit': '2' * 40, 'source_dir': '/home/fixture/sandbox/runtime/stacks/fixture',
         'compose_files': ['/home/fixture/sandbox/runtime/stacks/fixture/compose.yml'],
         'native_keys': ['box/fixture/dev'],
@@ -48,6 +48,8 @@ class TargetObservationTests(unittest.TestCase):
                 {'ownership_marker': 'f' * 24}, {'schema_version': True}, {'extra': 'field'},
                 {'compose_files': []}, {'native_keys': ['same', 'same']},
                 {'source_dir': '/root/../fixture'}, {'selector_digest': 'fixture'},
+                {'source_commit': '1' * 41}, {'source_origin_commit': '2' * 63},
+                {'name': 'folder/name'}, {'copy_id': 'not-copy'},
                 {'services': [{'name': 'wordpress', 'index': True, 'container_id': '3' * 64}]}):
             with self.subTest(change=change), self.assertRaises(server_cli.ServerCLIUnavailable):
                 targets.validate_target_snapshot({**snapshot(), **change}, owner=OWNER, origin_remote_name='box')

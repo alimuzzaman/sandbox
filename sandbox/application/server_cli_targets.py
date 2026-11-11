@@ -3,14 +3,10 @@ from __future__ import annotations
 
 import re
 import time
-from pathlib import PurePosixPath
 
 from sandbox.application.server_cli import ServerCLIUnavailable
 
 CONTRACT = 'host.target-inspect.v1'
-_FIELDS = frozenset({'schema_version', 'target_identity', 'ownership_marker', 'runtime_revision',
-    'origin_remote_name', 'project', 'environment', 'name', 'copy_id', 'source_commit',
-    'source_origin_commit', 'source_dir', 'compose_files', 'native_keys', 'services', 'selector_digest'})
 
 
 def installed_inspector():
@@ -38,45 +34,15 @@ def validate_selector_request(origin_remote_name, *, target=None, name=None, env
 
 
 def validate_target_snapshot(value, *, owner, origin_remote_name):
-    if (not isinstance(value, dict) or set(value) != _FIELDS
-            or type(value.get('schema_version')) is not int or value['schema_version'] != 1
-            or value.get('origin_remote_name') != origin_remote_name
-            or any(not isinstance(value.get(field), str) or re.fullmatch(r'[0-9a-f]{24}', value[field]) is None
-                   for field in ('target_identity', 'ownership_marker', 'runtime_revision'))
+    from sandbox.jobs.server_cli_retained import target_snapshot
+    try:
+        target_snapshot(value)
+    except (ValueError, TypeError):
+        raise ServerCLIUnavailable('owner target metadata schema is invalid') from None
+    if (value.get('origin_remote_name') != origin_remote_name
             or any(value.get(field) != getattr(owner, field) for field in
                    ('target_identity', 'ownership_marker', 'runtime_revision'))):
         raise ServerCLIUnavailable('owner target metadata identity changed or is unavailable')
-    for field in ('source_commit', 'source_origin_commit'):
-        if not isinstance(value[field], str) or re.fullmatch(r'[0-9a-f]{40,64}', value[field]) is None:
-            raise ServerCLIUnavailable('owner target source evidence is unavailable')
-    for field in ('project', 'environment'):
-        if not _text(value[field], 128):
-            raise ServerCLIUnavailable('owner target tuple is invalid')
-    for field in ('name', 'copy_id'):
-        if value[field] is not None and not _text(value[field], 128):
-            raise ServerCLIUnavailable('owner target lifetime is invalid')
-    for path in [value['source_dir'], *(value['compose_files'] if isinstance(value['compose_files'], list) else [])]:
-        if not _text(path) or not PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts:
-            raise ServerCLIUnavailable('owner target measured paths are invalid')
-    for field in ('compose_files', 'native_keys'):
-        items = value[field]
-        if (not isinstance(items, list) or not 1 <= len(items) <= 64
-                or any(not _text(item) for item in items) or len(set(items)) != len(items)):
-            raise ServerCLIUnavailable('owner target aliases or paths are invalid')
-    services = value['services']
-    if not isinstance(services, list) or not 1 <= len(services) <= 64:
-        raise ServerCLIUnavailable('owner target services are unavailable')
-    seen = set()
-    for item in services:
-        if (not isinstance(item, dict) or set(item) != {'name', 'index', 'container_id'}
-                or not isinstance(item['name'], str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', item['name']) is None
-                or type(item['index']) is not int or not 1 <= item['index'] <= 9999
-                or not isinstance(item['container_id'], str) or re.fullmatch(r'[0-9a-f]{12,64}', item['container_id']) is None
-                or (item['name'], item['index']) in seen):
-            raise ServerCLIUnavailable('owner target service metadata is invalid')
-        seen.add((item['name'], item['index']))
-    if not isinstance(value['selector_digest'], str) or re.fullmatch(r'sha256:[0-9a-f]{64}', value['selector_digest']) is None:
-        raise ServerCLIUnavailable('owner target selector digest is unavailable')
     return value
 
 

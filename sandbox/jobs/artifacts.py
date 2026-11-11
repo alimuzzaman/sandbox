@@ -6,6 +6,7 @@ import hashlib
 import os
 import stat
 import tarfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -13,10 +14,79 @@ MAX_ARTIFACTS = 50
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
+PRIVATE_CAPTURE_KIND = 'server-exec-capture-v1'
+PRIVATE_CAPTURE_MAX_BYTES = 1 << 20
+PRIVATE_CAPTURE_RETENTION_SECONDS = 7 * 24 * 3600
 
 
 class ArtifactError(RuntimeError):
     pass
+
+
+def read_private_capture(storage, job_id, metadata, *, offset, max_bytes):
+    """Validate the complete small immutable artifact before returning bytes.
+
+    It is not a host-file reader: all opened names are fixed ledger-relative
+    artifact IDs, with no links and owner-only directories/files.
+    """
+    import re
+    from .models import validate_job_id
+    identifier = metadata.get('artifact_id')
+    if (metadata.get('kind') != PRIVATE_CAPTURE_KIND or metadata.get('job_id') != job_id or not isinstance(identifier, str)
+            or re.fullmatch(r'[0-9a-f]{24}', identifier) is None
+            or metadata.get('stored_relative_path') != str(Path('artifacts') / identifier)
+            or type(metadata.get('size_bytes')) is not int or not 0 <= metadata['size_bytes'] <= PRIVATE_CAPTURE_MAX_BYTES
+            or not isinstance(metadata.get('sha256'), str) or re.fullmatch(r'[0-9a-f]{64}', metadata['sha256']) is None
+            or metadata.get('status', 'available') != 'available'
+            or type(offset) is not int or offset < 0 or type(max_bytes) is not int or not 1 <= max_bytes <= PRIVATE_CAPTURE_MAX_BYTES):
+        raise ArtifactError('private capture metadata is invalid or unavailable')
+    try:
+        expiry = datetime.fromisoformat(metadata['expires_at'].replace('Z', '+00:00'))
+        created = datetime.fromisoformat(metadata['created_at'].replace('Z', '+00:00'))
+        if (expiry.utcoffset() is None or created.utcoffset() is None
+                or expiry <= datetime.now(timezone.utc) or expiry <= created
+                or (expiry - created).total_seconds() > PRIVATE_CAPTURE_RETENTION_SECONDS):
+            raise ValueError()
+    except (KeyError, AttributeError, TypeError, ValueError):
+        raise ArtifactError('private capture retention expired or is unavailable') from None
+    descriptors = []
+    try:
+        root = os.open(storage.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(root)
+        for name in (validate_job_id(job_id), 'artifacts'):
+            info = os.fstat(descriptors[-1])
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700):
+                raise ArtifactError('private capture directory identity changed')
+            descriptors.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1]))
+        info = os.fstat(descriptors[-1])
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ArtifactError('private capture directory is not owner-only')
+        fd = os.open(identifier, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
+        descriptors.append(fd)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size != metadata['size_bytes']):
+            raise ArtifactError('private capture file identity changed')
+        chunks, remaining = [], before.st_size
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                raise ArtifactError('private capture ended before its bound size')
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b''.join(chunks)
+        after = os.fstat(fd)
+        if (os.read(fd, 1) or not _same_file_observation(before, after)
+                or after.st_uid != before.st_uid or after.st_mode != before.st_mode or after.st_nlink != 1
+                or hashlib.sha256(data).hexdigest() != metadata['sha256']):
+            raise ArtifactError('private capture bytes changed')
+        return data[offset:offset + max_bytes]
+    except OSError:
+        raise ArtifactError('private capture file is missing or unavailable') from None
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
 
 
 def _digest(path: Path) -> str:

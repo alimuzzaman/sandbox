@@ -453,9 +453,6 @@ def _selection_argv(argv):
         if not passthrough and value == '--strict-runtime':
             continue
         result.append(value)
-    if 'host' in result and '--' in result:
-        from sandbox.hosting.host_exec import split_passthrough
-        result, _command = split_passthrough(result)
     return result
 
 
@@ -1272,6 +1269,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--json", action="store_true", help="print JSON")
     host_p.add_argument("--credential-scope", choices=("personal-local",), default=None,
         help="explicitly use this controller's existing credential workflow")
+    host_p.add_argument('--exec-capture-artifacts', action='store_true', help=argparse.SUPPRESS)
 
 
     preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")

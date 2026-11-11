@@ -183,7 +183,7 @@ def cmd_host_exec(args) -> None:
                 outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source(),
                                         **process_options)
                 if request.owner_selection is not None and outcome.code in {
-                        host_exec.WATCHDOG_EXPIRED, host_exec.INTERRUPTED}:
+                        host_exec.WATCHDOG_EXPIRED, host_exec.INTERRUPTED, host_exec.TIMED_OUT}:
                     # Preserve the physical fence when descendant completion
                     # cannot be established. Never replay the command here.
                     raise RuntimeError("host_exec_effects_unknown")

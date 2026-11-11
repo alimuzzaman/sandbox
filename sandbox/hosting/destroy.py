@@ -438,7 +438,9 @@ def _target_lease(entry: dict, project: str, environment: str):
     try:
         yield lease
     finally:
-        target_lease.release(run, lease)
+        from sandbox.hosting.server_cli_target import owner_effect_unknown
+        if not owner_effect_unknown(entry):
+            target_lease.release(run, lease)
 
 
 def execute(entry: dict, remote_name: str, project: str, environment: str, *,

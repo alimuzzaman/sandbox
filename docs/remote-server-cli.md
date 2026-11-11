@@ -177,6 +177,11 @@ that original deadline; admission time cannot reset it. The fixed installed
 child runs `host exec --json` under genuine owner-job context. Existing retained
 job status/output ports provide bounded synchronous-result observation to the
 client adapter. This contract does not grant a role or use a self remote alias.
+The server ledger retains the original request ID even if the controller loses
+its receipt. `job-list --remote NAME --kind server-cli --workspace server-exec
+--json` returns those request IDs; follow its normal cursor pagination. Inspect
+the matching retained job with `job-status` and bounded `job-output` before any
+replay. Unknown acceptance does not authorize a second request identity.
 
 The dedicated intake is bounded to 1 MiB stdin, 256 argv entries / 64 KiB argv,
 30 seconds stdin intake and an original request deadline of at most 3600 seconds.

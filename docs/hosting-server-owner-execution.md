@@ -16,7 +16,7 @@ original job and returns its validated capture and underlying exit code.
 `--target PROJECT/ENVIRONMENT` is also supported. Non-joined targets and explicit
 personal-local execution keep their existing paths.
 
-This batch contract transfers original non-TTY stdin once through the SDK's
+The UTF-8 v1 batch contract transfers original non-TTY stdin once through the SDK's
 hash-bound anonymous input facility, bounded to 1 MiB and a 30-second intake
 deadline. TTY input remains empty as in existing host exec. No named payload
 file or source upload is created. Running-job observations return no child
@@ -126,9 +126,22 @@ the corresponding plain-output byte streams. User JSON keeps the default UTF-8
 replacement projection. It never puts raw/base64 artifact bytes back into job
 logs. The SDK owns byte artifact storage, immutable registry/manifest bindings,
 retention, authenticated chunk retrieval and a separate capture capability.
-`SERVER_CLI_EXEC_CAPTURE_VERSION` remains absent until the actual SDK custody
-port and this emitter/renderer are assembled together; source groundwork does
-not advertise binary availability.
+The actual committed custody/result API is SDK
+`f09bc57b464a1fb58c5ed2b1fbcdf4313d9ca555`. This composition exports
+`SERVER_CLI_EXEC_CAPTURE_VERSION = 1` with the emitter, EOF checks and byte-aware
+renderer. The normal client explicitly selects `output_mode='artifact'`; a
+server lacking the separate capture capability refuses before stdin intake or
+submission. There is no automatic downgrade to the older lossy log capture.
+The SDK's explicit `output_mode='utf8'` remains the old profile. An export and
+source agreement are not test, review, installed or binary-runtime acceptance.
+
+Artifact capture is bounded to 1 MiB per stream and seven days of exposure,
+subject to the existing job cleanup lifecycle. It holds intended command-output
+bytes in private server job artifacts rather than in ordinary lexical logs.
+The publisher and reader bind the original job/request, source, installed owner,
+target selector, service, deadline and exact hashes. Missing, changed, expired
+or cancelled custody cannot become success or authorize a replay. Live TTY,
+unbounded input/output and streaming parity remain outside this contract.
 
 ## Minimal installed-e467 composition
 

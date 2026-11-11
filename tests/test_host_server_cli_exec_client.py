@@ -33,7 +33,8 @@ class ExecClientTests(unittest.TestCase):
         self.submit = self.enterContext(patch.object(execute, "submit_server_cli_exec", return_value=self.receipt))
         self.outcome = {"ok": True, "code": "ok", "exit_code": 0,
             "remote": "box", "target": "project/dev", "service": "web", "duration_ms": 1,
-            "stdout": "hello\n", "stderr": "", "stdout_truncated": False, "stderr_truncated": False}
+            "stdout_bytes": b"hello\n", "stderr_bytes": b"", "output_encoding": "artifact-bytes",
+            "stdout_truncated": False, "stderr_truncated": False}
         self.read = self.enterContext(patch.object(execute, "read_server_cli_exec_result",
             return_value={"status": "succeeded", "result": self.outcome}))
         self.enterContext(patch("sandbox.hosting.host_exec.stdin_source", return_value=-3))
@@ -55,6 +56,7 @@ class ExecClientTests(unittest.TestCase):
         kwargs = self.submit.call_args.kwargs
         self.assertEqual(kwargs["argv"], ["printf", "--", "hello"])
         self.assertEqual(kwargs["request_id"], "original-exec")
+        self.assertEqual(kwargs["output_mode"], "artifact")
         self.assertEqual(result["stdout"], "hello\n")
         self.assertEqual(result["job_id"], "a" * 32)
         self.assertEqual(result["request_id"], "original-exec")
@@ -103,19 +105,21 @@ class ExecClientTests(unittest.TestCase):
 
     def test_plain_capture_and_underlying_nonzero_exit_are_preserved(self):
         self.args.json = False
-        self.outcome.update(ok=False, code="host_exec_failed", exit_code=7, stderr="notice\n")
-        stdout, stderr = io.StringIO(), io.StringIO()
+        self.outcome.update(ok=False, code="host_exec_failed", exit_code=7, stderr_bytes=b"notice\n")
+        stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        stderr = io.TextIOWrapper(stderr_bytes, encoding="utf-8")
         with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as failure:
             dispatch.dispatch_host_if_selected(self.args)
         self.assertEqual(failure.exception.code, 7)
-        self.assertEqual(stdout.getvalue(), "hello\n")
-        self.assertEqual(stderr.getvalue(), "notice\n")
+        self.assertEqual(stdout_bytes.getvalue(), b"hello\n")
+        self.assertEqual(stderr_bytes.getvalue(), b"notice\n")
         self.submit.assert_called_once()
 
     def test_verified_artifact_bytes_are_written_exactly_to_plain_output(self):
         self.args.json = False
         content = b"\x00\xff\xfe" + b"AIza" + b"A" * 40
-        self.outcome.update(stdout_bytes=content, stderr_bytes=b"\x80\x00", exit_code=7,
+        self.outcome.update(stdout_bytes=content, stderr_bytes=b"\x80\x00", output_encoding="artifact-bytes", exit_code=7,
                             ok=False, code="host_exec_failed")
         stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
         stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
@@ -128,7 +132,7 @@ class ExecClientTests(unittest.TestCase):
         self.submit.assert_called_once()
 
     def test_user_json_default_keeps_utf8_projection_of_verified_artifact_bytes(self):
-        self.outcome.update(stdout_bytes=b"\x00\xff", stderr_bytes=b"\x80")
+        self.outcome.update(stdout_bytes=b"\x00\xff", stderr_bytes=b"\x80", output_encoding="artifact-bytes")
         result = self.invoke()
         self.assertEqual(result["stdout"], "\x00\ufffd")
         self.assertEqual(result["stderr"], "\ufffd")
@@ -136,13 +140,46 @@ class ExecClientTests(unittest.TestCase):
         self.assertEqual(result["job_id"], "a" * 32)
 
     def test_missing_byte_stream_refuses_with_original_handle(self):
-        self.outcome.update(stdout_bytes=b"synthetic")
+        self.outcome.update(stdout_bytes=b"synthetic", output_encoding="artifact-bytes")
+        self.outcome.pop("stderr_bytes")
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(SystemExit):
             dispatch.dispatch_host_if_selected(self.args)
         result = json.loads(output.getvalue())
         self.assertEqual(result["code"], "server_cli_exec_observation_unavailable")
         self.assertEqual(result["job_id"], "a" * 32)
+
+    def test_byte_fields_without_the_verified_artifact_contract_are_not_rendered(self):
+        self.outcome.update(stdout_bytes=b"synthetic", stderr_bytes=b"")
+        self.outcome.pop("output_encoding")
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            dispatch.dispatch_host_if_selected(self.args)
+        self.assertEqual(json.loads(output.getvalue())["code"], "server_cli_exec_observation_unavailable")
+        self.assertNotIn("synthetic", output.getvalue())
+
+    def test_artifact_request_does_not_downgrade_to_utf8_log_output(self):
+        for key in ("stdout_bytes", "stderr_bytes", "output_encoding"):
+            self.outcome.pop(key)
+        self.outcome.update(stdout="unverified UTF8 fallback", stderr="")
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            dispatch.dispatch_host_if_selected(self.args)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["code"], "server_cli_exec_observation_unavailable")
+        self.assertEqual(result["job_id"], "a" * 32)
+        self.assertNotIn("unverified UTF8", output.getvalue())
+
+    def test_retained_pre_effect_refusal_requires_no_byte_artifacts(self):
+        self.read.return_value = {"status": "failed", "result": {"ok": False,
+            "code": "anonymous_stdin_capacity_unavailable", "exit_code": 1,
+            "error": "no job effect was dispatched because the server slot was occupied"}}
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            dispatch.dispatch_host_if_selected(self.args)
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue())["code"], "anonymous_stdin_capacity_unavailable")
+        self.submit.assert_called_once()
 
     def test_lost_acceptance_preserves_request_and_never_observes_or_replays(self):
         self.submit.side_effect = execute.ServerCLIExecAcceptanceUnknown("original-exec")

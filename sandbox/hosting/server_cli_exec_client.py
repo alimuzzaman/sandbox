@@ -64,13 +64,19 @@ def _render(args, result, receipt, request_id):
         "ok", "code", "exit_code", "remote", "target", "service", "duration_ms",
         "stdout", "stderr", "stdout_truncated", "stderr_truncated", "error", "audit") if key in result}
     byte_capture = "stdout_bytes" in result or "stderr_bytes" in result
-    if byte_capture:
-        if any(type(result.get(key)) is not bytes for key in ("stdout_bytes", "stderr_bytes")):
+    if byte_capture or result.get("output_encoding") == "artifact-bytes":
+        if (result.get("output_encoding") != "artifact-bytes" or
+                any(type(result.get(key)) is not bytes for key in ("stdout_bytes", "stderr_bytes"))):
             raise ValueError("original capture bytes are incomplete")
+        byte_capture = True
         # JSON's public default stays the original UTF-8 replacement projection.
         # Exact bytes are a local SDK result, never another JSON/log encoding.
         payload["stdout"] = result["stdout_bytes"].decode("utf-8", errors="replace")
         payload["stderr"] = result["stderr_bytes"].decode("utf-8", errors="replace")
+    elif result.get("ok") or "stdout" in result or "stderr" in result:
+        # This caller requested artifact mode. A known terminal pre-effect
+        # refusal may have no capture, but UTF-8 log output is not a substitute.
+        raise ValueError("original artifact capture is unavailable")
     if getattr(args, "json", False):
         print(json.dumps({**payload, **_handle(receipt, request_id)}, sort_keys=True))
     else:
@@ -154,7 +160,8 @@ def dispatch_exec_if_selected(args) -> bool:
     try:
         with _original_stdin() as descriptor:
             receipt = submit_server_cli_exec(args.remote, snapshot=snapshot, service=service,
-                argv=command, stdin_fd=descriptor, request_id=request_id, timeout_seconds=timeout)
+                argv=command, stdin_fd=descriptor, request_id=request_id, timeout_seconds=timeout,
+                output_mode="artifact")
     except (ServerCLIUnavailable, AnonymousInputUnavailable):
         _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
     except ServerCLIExecAcceptanceUnknown:

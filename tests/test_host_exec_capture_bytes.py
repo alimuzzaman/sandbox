@@ -65,3 +65,15 @@ class CaptureCompletionTests(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 255)
         self.assertEqual(outcome.code, host_exec.FAILED)
         self.assertEqual(outcome.stdout, b"synthetic output")
+
+
+class CaptureAssemblyTests(unittest.TestCase):
+    def test_committed_parser_custody_and_actual_handler_contract_assemble(self):
+        from sandbox.application.server_cli_exec import capture_contract_available
+        self.assertTrue(capture_contract_available())
+
+    def test_absent_handler_contract_never_advertises_capture(self):
+        from sandbox.application.server_cli_exec import capture_contract_available
+        from sandbox.commands import host_exec as command
+        with patch.object(command, "SERVER_CLI_EXEC_CAPTURE_VERSION", None):
+            self.assertFalse(capture_contract_available())

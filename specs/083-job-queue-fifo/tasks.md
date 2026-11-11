@@ -57,8 +57,8 @@ before implementation in every story. Each story's commit carries its docs chang
 - [x] T019 Edge-case tests in tests/test_job_queue_fifo.py: a candidate already started or terminal is skipped; a launch failure in a drain fails that job and the drain continues; floor below minimum admits nothing; lowering `max_parallel` below slots in use admits nothing; an invalid policy keeps its code as the reason (FR-014); existing reason values unchanged (FR-014)
 - [x] T020 Concurrency test: 200 seeded interleavings of drains, status reads, submissions and cancellations, run as two OS processes on one registry file; assert no double start and held slots never above the limit (SC-003, FR-008), in tests/test_job_queue_fifo.py
 - [x] T021 Run `python -m sandbox.remote_runtime.shapes --write`; bump `CONTROL_PROTOCOL_SPOKEN` to 24 only if the fingerprint changed, in sandbox/remote_runtime/
-- [ ] T022 Pre-merge live evidence: run the quickstart module list locally and once on xspeed-dev through controller-44bcdba with `--cancel-on-stall` (Haiku helpers). Post-migrate live check (orchestrator, after merge and `sb remote service migrate`): quickstart "Live check after migrate", recording release and start timestamps
-- [ ] T023 Luna review, then a fresh Sol high concurrency review that must say "safe"; fix or answer every finding
+- [x] T022 Pre-merge live evidence: run the quickstart module list locally and once on xspeed-dev through controller-44bcdba with `--cancel-on-stall` (Haiku helpers). Post-migrate live check (orchestrator, after merge and `sb remote service migrate`): quickstart "Live check after migrate", recording release and start timestamps
+- [x] T023 Luna review, then a fresh Sol high concurrency review that must say "safe"; fix or answer every finding
 
 ## Dependencies
 

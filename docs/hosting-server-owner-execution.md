@@ -31,8 +31,10 @@ stack registry or hosting history. The server selector cross-checks the lifetime
 copy and tuple, successful server apply summary, deployed Git revision and three
 specific Compose labels. It never reads container environments or the runtime
 environment file. It requires known committed Compose source files and retains
-the actual runtime override. Incomplete historical evidence, dirty source files,
-subtree revisions without an exact source binding, uncertain applies and the
+the actual runtime override. For a subtree publication, the successful summary
+must bind the original stack/lifetime commit to the published Git revision;
+those two revisions are retained separately. Incomplete historical evidence,
+dirty source files, uncertain applies and the
 preserved GS attempt remain unavailable, rather than being silently adopted.
 
 Exec holds the server's existing native alias mutation keys and physical target
@@ -48,6 +50,15 @@ retained job, including a reissued same-server target. Apply withholds provider
 and runtime rollback while the original child may still write, and keeps its
 physical lease. A timeout of the exec client does not prove container-side
 descendants stopped, so owner exec keeps that lease as well.
+
+`hosting.server_target_selection.inspect_server_exec_target` is a metadata-only
+receiver composition port. It uses the SDK's current installed owner reader,
+fixed bounded Git/Docker metadata commands and a complete current-source
+snapshot. Its result is ordinary data, never a held writer or retained job
+receipt. Missing installed owner-reader support refuses explicitly. The SDK
+still owns authenticated transport registration, no-source job admission and
+controller stdin delivery. A consuming job must reread the selector under its
+actual process proof and compare the exact selector digest before effects.
 
 This source increment requires the assembled `job.server-cli.v1` adapter from
 the access transport feature. Old installations must report capability

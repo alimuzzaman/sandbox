@@ -3477,9 +3477,9 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(fixture.delivery()["operation"]["requested_outcome"]["application"]["commit"], fixture.commit)
         self.assertNotIn("environment", result)
 
-    def test_only_a_proven_delivery_reaches_the_stack_record(self):
+    def test_only_a_completed_apply_reaches_the_stack_record(self):
         """Feedback 20153592: a job bound to a checkout subfolder is admitted, and
-        only a succeeded delivery moves the `sb host stack` record's commit."""
+        only an apply that completes hands its delivery to the stack record."""
         manifest = _public_acme_manifest().replace("      require_clean: true\n",
             "      require_clean: true\n      derived_environment:\n"
             "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")

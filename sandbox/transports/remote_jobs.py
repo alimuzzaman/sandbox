@@ -617,6 +617,12 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("remote is not provisioned")
         capabilities = remote.get("capabilities")
         required = {"job.exec", "job.execution-policy.v1"}
+        if (remote.get('joined') is True
+                and (not isinstance(capabilities, (list, tuple, set)) or not required.issubset(capabilities))):
+            from sandbox.remote_runtime.execution_capabilities import adopt_execution_capabilities
+            remote = adopt_execution_capabilities(name, remote,
+                lambda argv: self.control(name, argv, timeout=15))
+            capabilities = remote.get('capabilities')
         if not isinstance(capabilities, (list, tuple, set)) or not required.issubset(capabilities):
             raise RemoteJobTransportError(
                 "remote does not support job.execution-policy.v1; reprovision or update the remote before submitting jobs")
@@ -745,7 +751,7 @@ class RemoteJobTransport:
     def submit_server_cli(self, submission, remote: dict, capability: dict) -> dict:
         """Use the installed fixed CLI contract, without project instance ensure."""
         from dataclasses import replace
-        from sandbox.application.server_cli import KIND, CONTRACT
+        from sandbox.application.server_cli import KIND, CONTRACT, validate_target_metadata
         if (submission.kind != KIND or submission.target_kind != 'remote'
                 or remote.get('joined') is not True or remote.get('control_transport') != 'tailscale'
                 or CONTRACT not in capability.get('capabilities', ())):
@@ -754,7 +760,11 @@ class RemoteJobTransport:
         provenance = dict(submission.execution_policy_provenance or {})
         provenance.update({'server_cli.target_identity': capability['target_identity'],
                            'server_cli.runtime_revision': capability['runtime_revision'],
-                           'server_cli.ownership_marker': capability['ownership_marker']})
+                           'server_cli.ownership_marker': capability['ownership_marker'],
+                           'server_cli.remote_name': submission.remote_name})
+        routing = validate_target_metadata({key: remote[key] for key in
+            ('origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port') if key in remote and remote[key] is not None})
+        provenance['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
         submission = replace(submission, execution_policy_provenance=provenance)
         deployed = self._deploy(remote, submission.project_root,
                                 deployment_timeout=submission.deadline_seconds)
@@ -930,6 +940,12 @@ class RemoteJobTransport:
             "cleanup_policy": submission.cleanup_policy,
             "provenance": dict(submission.execution_policy_provenance or {}),
         }
+        if submission.kind == 'server-cli':
+            # Version1 execution policy has a closed six-key provenance shape.
+            # Target/alias binding travels through explicit validated server
+            # flags and is added to the canonical retained submission there.
+            policy['provenance'] = {key: value for key, value in policy['provenance'].items()
+                                    if not key.startswith('server_cli.')}
         encoded_policy = base64.b64encode(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).decode()
         args += ["--execution-policy-json", encoded_policy]
         # The deployed checkout is the source of truth for detached execution.
@@ -946,7 +962,9 @@ class RemoteJobTransport:
             provenance = submission.execution_policy_provenance or {}
             args += ['--server-cli', '--server-cli-target', provenance['server_cli.target_identity'],
                      '--server-cli-revision', provenance['server_cli.runtime_revision'],
-                     '--server-cli-marker', provenance['server_cli.ownership_marker']]
+                     '--server-cli-marker', provenance['server_cli.ownership_marker'],
+                     '--server-cli-origin', provenance['server_cli.remote_name'],
+                     '--server-cli-target-metadata', provenance['server_cli.target_metadata']]
         elif submission.kind == "runtime-exec":
             # Generic Compose commands belong in the selected remote project
             # instance, not in the VPS host environment.  The outer durable

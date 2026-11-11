@@ -23,6 +23,14 @@ An environment job ID is a lookup key, never authority. The bounded wait covers
 the supervisor committing its child identity. Cancellation, expiry and replacement
 refuse the context.
 
+`server_cli_context_if_selected()` returns None for ordinary execution only. A
+selected invalid, missing or revoked server-CLI context raises; consumers cannot
+catch it as permission to fall back to another host. `context.origin_remote_name`
+retains the originating alias. A host adapter selects this local target only for
+that exact alias; aliases are routing context, not authorization. The immutable
+`context.target_metadata` carries only validated origin IPv4/IPv6, front door and
+control port. Bearer, SSH and credential configuration are excluded.
+
 `context.owner` is a frozen `ServerCliOwner` containing the actual Linux UID,
 account home, Sandbox home, fixed executable, machine identity, marker and runtime
 revision. These derive from the current account and selected nonsecret service
@@ -36,6 +44,24 @@ existing trusted host command locally with that proof and original deadline. It
 does not skip target/native/lifetime locks or turn a dictionary flag into local
 authority. Host/CI selection and credential-consuming recipe integration must be
 assembled and tested before claiming a complete stack workflow.
+
+`owner_command_args(owner, command)` and `owner_environment(owner)` support a
+bounded host-exec caller retaining its original stdin FD. The caller revalidates
+the issued host target before and after effects and enforces the retained
+deadline. The captured process channel uses bounded output, anonymous input,
+explicit environment and the original durable process group. Timeout or incomplete
+output is `server_cli_effect_unknown`, never proof that every effect stopped or
+permission to release a reservation or retry.
+
+`local_server_cli_submission_argv(owner, argv, *, project_dir, request_id,
+source_commit, timeout_seconds, parent_job_id)` derives a fixed nested job from
+the current original job. It retains the parent handle and target metadata, caps
+the original deadline and uses a deterministic child request key. The installed
+server verifies actual ancestry and the retained parent before acceptance.
+Child supervisors watch the original parent deadline/cancellation; a CLI parent
+retains its own process lifecycle and exposes child receipts instead of being
+silently reclassified as a processless matrix. An uncertain nested receipt remains
+unknown; the deterministic identity must not be replaced to replay the operation.
 
 The fixed CLI job receives explicit HOME, SANDBOX_HOME, account, PATH, locale and
 user-runtime/DBus coordinates, plus fixed supervisor audit keys. No parent

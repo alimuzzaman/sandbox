@@ -1493,9 +1493,9 @@ def target_service():
     import sandbox_core as sc
 
     from sandbox.application.target_service import TargetService
-    from sandbox.core._remote import get_remote, list_remotes
+    from sandbox.core._remote import get_remote, list_remotes, get_execution_remote
     return TargetService(config_loader=sc.load_project_config, remote_lookup=get_remote,
-                         remote_list=list_remotes)
+                         remote_list=list_remotes, capability_discovery=get_execution_remote)
 
 
 def durable_job_dependencies():

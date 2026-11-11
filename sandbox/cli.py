@@ -1569,6 +1569,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             args.exec_argv = host_exec_argv
         else:
             args = p.parse_args(raw_argv)
+    args._server_cli_argv = tuple(raw_argv)
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "share":
         # `host share revoke ID|all` reuses the optional positional slot.
         args.share_id, args.tailnet_hostname = args.tailnet_hostname, None

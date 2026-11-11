@@ -1333,6 +1333,18 @@ and can usually diagnose itself.
 
 ## Roadmap
 
+Opt-in managed installation identity and lifecycle work is tracked in Spec 089.
+See [managed installation authority](docs/managed-installation.md) for genuine
+owner/managed discovery, current-policy validation, capability truth and the
+separate root-approved cutover gates. Personal mode stays unchanged.
+
+Joined tailnet controllers now discover and pin authenticated service and machine
+identity. Existing joins missing that metadata can use
+`./sb remote service refresh NAME --json` without reprovisioning the server or
+receiving its owner's bearer token. See
+[remote transport status](docs/remote-transport-status.md) for pin preservation,
+runtime compatibility and remaining SSH boundaries.
+
 - **Shipped** — Docker WP stack; the single `sandbox` MCP server routing by
   `project_dir`; per-project `sandbox.config.*` + on-disk registry;
   externally-provisioned phpunit harness (`sandbox test` / `run_tests`);

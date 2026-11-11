@@ -107,10 +107,23 @@ class HostMemoryRemote:
         self.marker=service.get("ownership_marker",""); self.revision=service.get("runtime_revision","")
         if not HEX24.fullmatch(self.marker): raise RemoteProtocolError("remote_service_ownership_unknown","remote service ownership is unavailable")
         if not HEX24.fullmatch(self.revision): raise RemoteProtocolError("remote_runtime_revision_mismatch","remote runtime revision is unavailable")
+        self.target_identity = None
+        if "control_identity" in remote_record:
+            pin = remote_record["control_identity"]
+            if (not isinstance(pin, dict) or set(pin) != {"schema_version", "target_identity"}
+                    or type(pin.get("schema_version")) is not int or pin["schema_version"] != 1
+                    or not isinstance(pin.get("target_identity"), str)
+                    or not HEX24.fullmatch(pin["target_identity"])):
+                raise RemoteProtocolError("remote_target_identity_mismatch", "registered machine identity is invalid")
+            self.target_identity = pin["target_identity"]
 
     def call(self, action, **fields):
         payload=validate_request({"action":action,"remote_name":self.name,**fields})
         try: response=self.request(self.record,payload)
         except Exception as exc: raise RemoteProtocolError("remote_unreachable","remote control endpoint is unreachable") from exc
-        return validate_response(response,marker=self.marker,revision=self.revision,
-                                 action=action)
+        result = validate_response(response,marker=self.marker,revision=self.revision,
+                                   action=action)
+        if (action == "host_memory_status" and self.target_identity is not None
+                and result.get("target_identity") != self.target_identity):
+            raise RemoteProtocolError("remote_target_identity_mismatch", "registered machine identity changed")
+        return result

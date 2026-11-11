@@ -774,11 +774,11 @@ def _cmd_service(args, as_json: bool) -> None:
     # Mutating and diagnostic operations still require their explicit verb so
     # an incomplete command cannot silently change remote state.
     if name is None and operation not in {
-            None, "status", "diagnostics", "migrate", "cleanup-broker", "stop", "capability"}:
+            None, "status", "diagnostics", "refresh", "migrate", "cleanup-broker", "stop", "capability"}:
         name = operation
         operation = "status"
-    if operation not in {"status", "diagnostics", "migrate", "cleanup-broker", "stop", "capability"} or not name:
-        die("usage: ./sb remote service <status|diagnostics|migrate|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
+    if operation not in {"status", "diagnostics", "refresh", "migrate", "cleanup-broker", "stop", "capability"} or not name:
+        die("usage: ./sb remote service <status|diagnostics|refresh|migrate|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
     if operation == "diagnostics" and _arg_true(args, "ssh"):
         die("--ssh diagnostics are no longer supported; use the authenticated remote service")
     if _arg_true(args, "processes") and operation != "diagnostics":
@@ -788,7 +788,18 @@ def _cmd_service(args, as_json: bool) -> None:
         die(f"no remote named '{name}'")
     confirmed = _arg_true(args, "confirm")
     try:
-        if operation == "capability":
+        if operation == "refresh":
+            if entry.get("joined") is not True or entry.get("control_access") != "tailnet":
+                raise ValueError("refresh requires an existing joined tailnet registration")
+            from sandbox.remote_runtime.join_identity import discover_join_identity
+            evidence = discover_join_identity(name, entry, sr.remote_host_memory_request)
+            requested_profile = _arg_str(args, 'front_door')
+            if requested_profile is not None:
+                evidence.update(_joined_profile_evidence(entry, evidence, requested_profile))
+            sr.put_remote(name, _expected=entry, **evidence)
+            payload = {"ok": True, "name": name, "status": "refreshed",
+                       "data": evidence, "error": None}
+        elif operation == "capability":
             from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
             lifecycle_service = build_authority_lifecycle_service()
             cap = lifecycle_service.evaluate_capability(remote_identity=name)
@@ -955,7 +966,9 @@ def _cmd_service(args, as_json: bool) -> None:
                 sr.stop_remote_mcp_server(entry)
                 payload = {"ok": True, "name": name, "status": "stopped", "data": {}, "error": None}
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-        if isinstance(exc, (RemoteRuntimeSourceTimeout, RemoteRuntimeSourceIndeterminate)):
+        if operation == "refresh" and isinstance(getattr(exc, "code", None), str):
+            code = exc.code
+        elif isinstance(exc, (RemoteRuntimeSourceTimeout, RemoteRuntimeSourceIndeterminate)):
             code = exc.code
         elif str(exc).startswith("remote_runtime_pins_unacknowledged:"):
             code = "remote_runtime_pins_unacknowledged"
@@ -974,7 +987,7 @@ def _cmd_service(args, as_json: bool) -> None:
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
         print(json.dumps(payload))
-        if operation in ("status", "capability") and not payload["ok"]:
+        if operation in ("status", "capability", "refresh") and not payload["ok"]:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")
@@ -1501,6 +1514,20 @@ def _first_ssh_login(target: str, port) -> str:
     return "denied" if any(text in refusal for text in _TAILSCALE_SSH_REFUSALS) else "unknown"
 
 
+def _joined_profile_evidence(entry, evidence, requested):
+    from sandbox.remote_runtime.join_profile import MACHINE_PROGRAM, adopt_join_profile
+    from sandbox.hosting.front_door import nginx
+
+    def machine_probe(record):
+        result = sr.ssh_run(record, 'python3 -c ' + shlex.quote(MACHINE_PROGRAM), timeout=15)
+        if result.returncode != 0:
+            raise RuntimeError('joined_profile_identity_unavailable')
+        return (result.stdout or '').strip()
+
+    return adopt_join_profile(entry, evidence, requested,
+                              machine_probe=machine_probe, nginx_probe=nginx.probe)
+
+
 def _cmd_join(args, as_json: bool) -> None:
     """`sb remote join <name> <user>@<tailnet address or name>`: use a server someone else provisioned.
 
@@ -1534,14 +1561,27 @@ def _cmd_join(args, as_json: bool) -> None:
             f"Its owner may have run `./sb remote tailnet-access disable`, or the service predates tailnet access.")
     if inventory.get("inventory_schema") != 1:
         die(f"join_refused: {address} did not answer as a Sandbox control service")
+    from sandbox.remote_runtime.join_identity import discover_join_identity
+    try:
+        entry.update(discover_join_identity(name, entry, sr.remote_host_memory_request))
+    except (RuntimeError, ValueError) as exc:
+        die(f"join_refused: authenticated service identity is unavailable ({exc})")
     ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))
-    sr.put_remote(name, **entry)
+    requested_profile = _arg_str(args, 'front_door')
+    if requested_profile is not None:
+        if ssh_login != 'ok':
+            die('join_refused: explicit profile adoption requires an admitted SSH metadata probe')
+        try:
+            entry.update(_joined_profile_evidence(entry, entry, requested_profile))
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            die(f'join_refused: front-door profile is unproven ({exc})')
+    sr.put_remote(name, _expected=None, **entry)
     result = {"ok": True, "name": name, "status": "joined", "ssh": ssh,
               "control_url": entry["control_url"], "ssh_login": ssh_login, "error": None}
     if as_json:
         print(json.dumps(result))
         return
-    ok(f"joined '{name}' at {address}; jobs and status work now")
+    ok(f"joined '{name}' at {address}; authenticated control identity recorded")
     if ssh_login != "ok":
         info("deploys also need SSH: ask the owner to enable Tailscale SSH and add a tailnet "
              f"rule that lets you log in as {user} ({'refused' if ssh_login == 'denied' else 'no answer'})")

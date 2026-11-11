@@ -11,7 +11,8 @@ const source = readFileSync(new URL("../src/pages/share.ts", import.meta.url), "
 const esc = (s: string): string => String(s).replace(/[&<>"']/g, c => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[c] || c));
-const panel = runInNewContext(stripTypeScriptTypes(source, { mode: "transform" }) +
+// The panel uses erasable annotations/assertions only; no TypeScript transforms.
+const panel = runInNewContext(stripTypeScriptTypes(source, { mode: "strip" }) +
   "\n({shareCreationBlocked, linksTable, refusal})", {
     esc, theme: {}, refusalHelp: () => null, revocableId: () => true,
   });

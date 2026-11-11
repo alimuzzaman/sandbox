@@ -1038,7 +1038,7 @@ def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_pa
 
 
 def _caddy_transaction_command(path: str, temporary: str | None, digest: str,
-                               *, operation: str, remove: bool) -> str:
+                               *, operation: str, remove: bool, force: bool = False) -> str:
     """Build one locked Caddy transaction with bounded observable phases.
 
     One remote shell owns the host-global flock for the entire fragment
@@ -1047,13 +1047,18 @@ def _caddy_transaction_command(path: str, temporary: str | None, digest: str,
     interleaving between validation and reload while each external command is
     still independently bounded by ``timeout``.
     """
+    # force (spec 081 private closure): validate and reload even when the file already
+    # matches, so a fragment a failed earlier reload left loaded is unloaded too.
+    # Without it the script is byte-identical to the one every other caller runs.
+    force_arg = "force_reload=${6:-0}\n" if force else ""
+    noop_guard = ' && [ "$force_reload" != 1 ]' if force else ""
     script = f"""set -eu
 path=$1
 temporary=$2
 desired_digest=$3
 operation=$4
 remove_fragment=$5
-phase() {{
+{force_arg}phase() {{
   printf '[Sandbox] caddy phase=%s state=%s digest=%s\\n' "$1" "$2" "$desired_digest"
 }}
 finish() {{
@@ -1088,7 +1093,7 @@ if [ "$current_digest" = "$desired_state" ]; then
 else
   phase digest changed
 fi
-if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ]; then
+if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ]{noop_guard}; then
   if [ "$temporary" != - ]; then rm -f "$temporary"; fi
   if [ "$operation" = apply ]; then
     phase noop unchanged
@@ -1139,6 +1144,7 @@ fi
         f"sh -c {shlex.quote(script)} sandbox-caddy "
         f"{shlex.quote(path)} {shlex.quote(temporary_value)} {shlex.quote(digest)} "
         f"{shlex.quote(operation)} {'1' if remove else '0'}"
+        + (" 1" if force else "")
     )
 
 
@@ -1185,6 +1191,37 @@ def _restore_host_caddy(entry: dict, name: str, previous: str | None, *,
     except Exception as exc:
         raise hosting.HostingError(f"rollback_incomplete: Caddy restore failed: {exc}") from exc
     return {"state": "rollback_complete", "digest": digest}
+
+
+def _read_remote_strict(entry: dict, path: str) -> str | None:
+    """A remote file's text, or None only when it is confirmed absent; else raises."""
+    script = 'if [ -f "$1" ]; then cat "$1"; elif [ -e "$1" ] || [ -L "$1" ]; then exit 44; else exit 43; fi'
+    result = remote.ssh_run(entry, f"sh -c {shlex.quote(script)} sandbox-read {shlex.quote(path)}",
+                            timeout=30)
+    if result.returncode == 0:
+        return result.stdout
+    if result.returncode == 43:
+        return None
+    raise hosting.HostingError(f"route state unknown: {path} could not be read (exit {result.returncode})")
+
+
+def _reconcile_host_caddy(entry: dict, name: str, keep: str, *,
+                          log_path: str | None = None) -> dict:
+    """Install ``keep`` with a forced validate and reload (Caddy's reload is synchronous
+    and fails when the new configuration does not load)."""
+    path = f"/etc/caddy/conf.d/{name}.caddy"
+    digest = hashlib.sha256(keep.encode()).hexdigest()
+    temporary = f"/tmp/{name}.close.{digest}.caddy"
+    _write_remote_text(entry, temporary, keep, "0644")
+    _remote_checked(
+        entry,
+        _caddy_transaction_command(path, temporary, digest, operation="apply",
+                                   remove=False, force=True),
+        timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
+        log_path=log_path,
+        log_phase="edge_caddy_private_closure",
+    )
+    return {"state": "reconciled", "digest": digest}
 
 
 def _read_remote_optional(entry: dict, path: str) -> str | None:
@@ -1241,6 +1278,16 @@ class _CaddyHostEdge:
     def read_previous(self, name: str) -> str | None:
         return _read_remote_optional(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
 
+    def read_strict(self, name: str) -> str | None:
+        return _read_remote_strict(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
+
+    def deny_route(self, validated: dict, runtime: dict, name: str, current: str | None) -> str:
+        # Caddy keeps serving TLS for its site addresses itself (managed certificates).
+        return hosting.caddyfile({**validated, "route_deny": True}, runtime["loopback_port"])
+
+    def reconcile(self, name: str, keep: str, *, log_path: str | None = None) -> dict:
+        return _reconcile_host_caddy(self.entry, name, keep, log_path=log_path)
+
     def certificate(self, proxied: bool, validated: dict, runtime: dict,
                     state_entry: dict, client, home: str, name: str):
         if proxied:
@@ -1291,6 +1338,37 @@ class _NginxHostEdge:
     def read_previous(self, name: str) -> str | None:
         return self.nginx.read_route(self.entry, self.route_name(name))
 
+    def read_strict(self, name: str) -> str | None:
+        return self.nginx.read_route_strict(self.entry, self.route_name(name))
+
+    def deny_route(self, validated: dict, runtime: dict, name: str, current: str | None) -> str:
+        """Every name 404, on HTTPS too with whatever certificate the route has.
+
+        A certificate that does not cover a new hostname still keeps the HTTPS listener
+        (that name fails TLS rather than reach another server). With no certificate at
+        all, a current route that listens on 443 is refused: closing it would hand
+        HTTPS for its names to whatever default server the host has.
+        """
+        route = self.route_name(name)
+        paths = self.nginx.existing_certificate(self.entry, route)
+        # Conservative: any sign of TLS in an existing route (any listen form, a
+        # certificate anywhere, QUIC or HTTP/2) counts as HTTPS to keep closed.
+        if paths is None and current is not None and re.search(
+                r"443|\bssl\b|ssl_certificate|\bquic\b|\bhttp2\b", current):
+            raise hosting.HostingError(
+                "private_closure_https_unavailable: the current route may serve HTTPS and "
+                "this route has no certificate, so a deny route cannot keep HTTPS closed")
+        cert_path, key_path = paths if paths else (None, None)
+        return self.nginx.render_host_conf(
+            {**validated, "route_deny": True}, runtime["loopback_port"], name=route,
+            cert_path=cert_path, key_path=key_path, ipv6=bool(self.entry.get("origin_ipv6")),
+            **(self.features or {}))
+
+    def reconcile(self, name: str, keep: str, *, log_path: str | None = None) -> dict:
+        return self.nginx.reconcile_route(
+            self.entry, self.route_name(name), keep,
+            log=lambda output: self._log(log_path, output))
+
     def certificate(self, proxied: bool, validated: dict, runtime: dict,
                     state_entry: dict, client, home: str, name: str):
         hostnames = list(runtime["certificate_hostnames"])
@@ -1308,6 +1386,14 @@ class _NginxHostEdge:
             cert_path, key_path = self.nginx.public_paths(route)
             return cert_path, key_path, {"id": None, "hostnames": sorted(hostnames),
                                          "issuer": "public"}
+        from sandbox.hosting import login_service as login
+        if login.is_private(validated.get("login_service")):
+            # Spec 081: a private route keeps HTTPS closed with the certificate it has
+            # while after_dns issues one covering the new names; never HTTP only.
+            existing = self.nginx.existing_certificate(self.entry, route)
+            if existing is not None:
+                return existing[0], existing[1], {"id": None, "hostnames": [],
+                                                  "issuer": "pending", "pending": True}
         # DNS-only and not issued yet: serve the ACME challenge first, issue
         # after the DNS step points the hostname here (after_dns).
         return None, None, None
@@ -1342,7 +1428,7 @@ class _NginxHostEdge:
 
     def after_dns(self, validated: dict, port: int, secret_values: dict, cert_path,
                   certificate, name: str, *, log_path: str | None = None):
-        if cert_path is not None:
+        if cert_path is not None and not (certificate or {}).get("pending"):
             return certificate
         hostnames = [route["hostname"] for route in validated["routes"]]
         cert_path, key_path, certificate = self.nginx.ensure_public_certificate(
@@ -2540,8 +2626,13 @@ def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = F
 
 @contextmanager
 def _registered_recovery_authority(validated: dict, remote_name: str, operation: dict,
-                                   authority: dict):
-    """Hold supported registration stable from validation through commit."""
+                                   authority: dict, *, lease: bool = False):
+    """Hold supported registration stable from validation through commit.
+
+    With ``lease`` (edge continuation), also hold the remote target lease (spec 081
+    rollout). It is taken here, inside recovery's target serialization and before any
+    effect is recorded, so another controller's lease is a refusal with no effect.
+    """
     with remote.registered_remote_lock(remote.registration_lock_name(remote_name)):
         current = remote.get_remote(remote_name)
         if not isinstance(current, dict) or not current.get("provisioned"):
@@ -2566,6 +2657,12 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
                 expected.get("edge_intent_digest") or
                 current_edge_intent != expected_edge_intent):
             raise RecoveryAuthorityError("registered edge intent changed")
+        held = None
+        if lease:
+            try:
+                held = _acquire_host_apply_lease(current, validated)
+            except hosting.HostingError as exc:
+                raise RecoveryAuthorityError(str(exc)) from None
         authority["entry"] = current
         authority["machine_identity"] = machine_identity
         authority["edge_intent"] = current_edge_intent
@@ -2573,6 +2670,7 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
             yield
         finally:
             authority.clear()
+            _release_host_apply_lease(current, held)
 
 
 def _nonsecret_host_intent(validated: dict) -> str:
@@ -3599,13 +3697,15 @@ def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> N
         observer=lambda recovery_request, operation: _recovery_observer(
             validated, authority["entry"], remote_name, recovery_request, operation,
             authority["machine_identity"], authority["edge_intent"]),
-        edge_adapter=lambda recovery_request, operation: _continue_host_edge_only(
+        # The authority guard holds the target lease for edge continuation.
+        edge_adapter=lambda recovery_request, operation: _continue_host_edge_only_unleased(
             validated, authority["entry"], remote_name, recovery_request, operation),
         governance_check=lambda _request: _recovery_governance_authorized(
             validated, remote_name),
         broker_guard=lambda _request: personal_secrets.hosting_binding_broker_lock(),
         authority_guard=lambda _request, operation: _registered_recovery_authority(
-            validated, remote_name, operation, authority),
+            validated, remote_name, operation, authority,
+            lease=_request.action is RecoveryAction.CONTINUE_EDGE),
     )
     result = service.recover(request)
     try:
@@ -3719,6 +3819,15 @@ def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
 def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                              _request: RecoveryRequest, operation: dict) -> dict:
     """Continue only the declared Caddy/Cloudflare edge for a proven runtime."""
+    lease = _acquire_host_apply_lease(entry, validated)
+    try:
+        return _continue_host_edge_only_unleased(validated, entry, remote_name, _request, operation)
+    finally:
+        _release_host_apply_lease(entry, lease)
+
+
+def _continue_host_edge_only_unleased(validated: dict, entry: dict, remote_name: str,
+                                      _request: RecoveryRequest, operation: dict) -> dict:
     secret_values, missing = _secret_status(validated)
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
@@ -3758,23 +3867,30 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             except Exception as exc:
                 failures.append(f"DNS restore: {exc}")
         try:
-            edge.restore(caddy_name, previous_caddy, log_path=apply_log)
+            _restore_edge_fail_closed(
+                edge, caddy_name, previous_caddy, validated=validated,
+                new_edge_live=edge_live["new"], log_path=apply_log)
         except Exception as exc:
             failures.append(f"{'Caddy' if edge.mode == 'caddy' else 'nginx'} restore: {exc}")
         if failures:
             raise hosting.HostingError("; ".join(failures))
 
     result: dict = {}
+    edge_live = {"new": False}
 
     def apply() -> None:
         proxied = edge_intent["proxied"]
         cert_path = key_path = certificate = None
         runtime = {"loopback_port": port, "records": edge_intent["records"],
                    "certificate_hostnames": edge_intent["certificate_hostnames"]}
+        _refuse_proxied_records_for_private(client, validated, runtime)
         cert_path, key_path, certificate = edge.certificate(
             proxied, validated, runtime, recorded, client, home, caddy_name)
-        content = edge.render(validated, port, cert_path, key_path, secret_values)
+        route_tag = _route_tag(validated)
+        render_validated = {**validated, "route_tag": route_tag} if route_tag else validated
+        content = edge.render(render_validated, port, cert_path, key_path, secret_values)
         edge.configure(caddy_name, content, previous_caddy, log_path=apply_log)
+        edge_live["new"] = True
         zones: dict[str, dict] = {}
         drift_rule = bool((edge_intent.get("dns_coverage") or {}).get("drift_rule"))
         for wanted in edge_intent["records"]:
@@ -3784,6 +3900,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                 raise RuntimeError("edge recovery requires an already-strict zone policy")
             kind = "AAAA" if ":" in wanted["address"] else "A"
             records = client.records(zone["id"], hostname)
+            _refuse_proxied_now(validated, hostname, records)
             cname = next((item for item in records if item.get("type") == "CNAME"), None)
             if cname:
                 raise RuntimeError(
@@ -3806,14 +3923,17 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                             "created_id": created.get("id"),
                             "applied": _applied_record(created)})
         certificate = edge.after_dns(
-            validated, port, secret_values, cert_path, certificate, caddy_name,
+            render_validated, port, secret_values, cert_path, certificate, caddy_name,
             log_path=apply_log)
         credentials = None
         if validated.get("basic_auth"):
             auth = validated["basic_auth"]
             credentials = (auth["username"], secret_values[auth["password_secret"]])
         kwargs = {"healthcheck_path": edge_intent["healthcheck_path"],
-                  "basic_auth_enabled": edge_intent["basic_auth"]["enabled"]}
+                  "basic_auth_enabled": edge_intent["basic_auth"]["enabled"],
+                  **_privacy_verify_kwargs(validated)}
+        if route_tag:
+            kwargs["route_tag"] = route_tag
         if credentials is not None:
             kwargs["basic_auth_credentials"] = credentials
         evidence = None
@@ -4288,8 +4408,20 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
 
 
 
+class _EdgeAnswerMismatch(Exception):
+    """A route answered, but not the way its privacy requires (spec 081)."""
+
+
+# The gate marks every answer with this header; a front door's own 404 never carries it.
+_GATE_HEADER = "X-Sandbox-Gate"
+# A path no gate serves without a session: the gate answers it 404.
+_GATE_CHECK_PATH = "/__sandbox/gate-check"
+
+
 def _edge_failure_detail(error: BaseException) -> str:
     """Name the edge failure class without stringifying the exception."""
+    if isinstance(error, _EdgeAnswerMismatch):
+        return str(error)
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {getattr(error, 'code', 'error')}"
     reason = getattr(error, "reason", error)
@@ -4322,7 +4454,19 @@ def _verify_edge(
     basic_auth_credentials: tuple[str, str] | None = None,
     fresh_hostnames: frozenset[str] = frozenset(),
     handlers: tuple = (),
+    gate_hostnames: frozenset[str] = frozenset(),
+    private_hostnames: frozenset[str] = frozenset(),
+    route_tag: str | None = None,
 ) -> None:
+    """Prove each route answers as declared.
+
+    A public route answers 2xx/3xx (or 401 behind Basic Auth). A gate hostname
+    (spec 081) answers a session-less request with the gate's own 404, marked by
+    ``X-Sandbox-Gate``. A hostname of a ``share.private`` target other than the
+    gate answers 404, so a route that serves the application fails verification.
+    With ``route_tag``, those 404s must also carry the tag this apply rendered into
+    its front-door route, so a stale route or a cached copy cannot pass for it.
+    """
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
 
@@ -4338,6 +4482,14 @@ def _verify_edge(
         time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
     for route in routes:
         if route["hostname"].startswith("*."):
+            continue
+        if route["hostname"] in gate_hostnames:
+            _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True,
+                                   route_tag=route_tag, basic_auth_enabled=basic_auth_enabled,
+                                   basic_auth_credentials=basic_auth_credentials)
+            continue
+        if route["hostname"] in private_hostnames:
+            _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag)
             continue
         path = healthcheck_path if route.get("mode") == "serve" else "/"
         endpoint = f"https://{route['hostname']}{path}"
@@ -4399,6 +4551,193 @@ def _verify_edge(
                 raise RuntimeError(
                     f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
                 )
+
+
+def _header_values(headers, name: str) -> list[str]:
+    if headers is None:
+        return []
+    get_all = getattr(headers, "get_all", None)
+    if get_all is not None:
+        return list(get_all(name) or [])
+    value = headers.get(name)
+    return [] if value is None else [value]
+
+
+def _verify_private_answer(opener, hostname: str, path: str, *, gate: bool,
+                           route_tag: str | None = None, basic_auth_enabled: bool = False,
+                           basic_auth_credentials: tuple[str, str] | None = None) -> None:
+    """Wait for ``hostname`` to answer ``path`` with 404 (from the gate when ``gate``).
+
+    Any 2xx or 3xx answer means the application (or a redirect to it) is reachable
+    where it must not be, so it never counts as reachable here. Each try asks a new
+    URL (a random query) so no cache can answer for the route. The gate reserves
+    ``_GATE_CHECK_PATH`` before any entry or upstream, so it answers it 404 itself.
+    A gate behind the target's Basic Auth (a public target only: ``share.private``
+    refuses Basic Auth) gets the credentials, or counts a tagged 401 without them.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)",
+               "Cache-Control": "no-cache"}
+    if gate and basic_auth_credentials:
+        username, password = basic_auth_credentials
+        headers["Authorization"] = "Basic " + base64.b64encode(
+            f"{username}:{password}".encode()).decode("ascii")
+    last_error: BaseException | None = None
+    for _ in range(30):
+        request = urllib.request.Request(
+            f"https://{hostname}{path}?sandbox-verify={secrets.token_hex(8)}",
+            method="GET", headers=headers)
+        try:
+            with opener.open(request, timeout=15) as response:
+                last_error = _EdgeAnswerMismatch(
+                    f"HTTP {response.status} without a session; a private route must answer 404")
+        except urllib.error.HTTPError as exc:
+            tagged = route_tag is None or route_tag in _header_values(
+                exc.headers, hosting.ROUTE_TAG_HEADER)
+            from_gate = _header_values(exc.headers, _GATE_HEADER) == ["1"]
+            if exc.code in (401, 404) and not tagged:
+                last_error = _EdgeAnswerMismatch(
+                    f"HTTP {exc.code} without this apply's route tag; an older route or a "
+                    "cache answered")
+            elif exc.code == 404 and (from_gate or not gate):
+                return
+            elif (exc.code == 401 and gate and basic_auth_enabled
+                    and not basic_auth_credentials):
+                return
+            elif exc.code == 404:
+                last_error = _EdgeAnswerMismatch("HTTP 404, but not from the gate")
+            elif 300 <= exc.code < 400:
+                last_error = _EdgeAnswerMismatch(
+                    f"HTTP {exc.code} redirect; a private route must answer 404")
+            else:
+                last_error = exc
+        except Exception as exc:  # Edge propagation is external and transient.
+            last_error = exc
+        time.sleep(10)
+    raise RuntimeError(
+        f"edge verification failed for {hostname}: {_edge_failure_detail(last_error)}")
+
+
+def _privacy_verify_kwargs(validated: dict) -> dict:
+    """The `_verify_edge` arguments that follow the manifest's gate and privacy."""
+    from sandbox.hosting import login_service as login
+    declaration = validated.get("login_service")
+    gates = frozenset(login.gate_hostnames(declaration))
+    kwargs: dict = {}
+    if gates:
+        kwargs["gate_hostnames"] = gates
+    if login.is_private(declaration):
+        kwargs["private_hostnames"] = frozenset(
+            route["hostname"] for route in validated["routes"] if route["hostname"] not in gates)
+    return kwargs
+
+
+def _restore_edge_fail_closed(edge, name: str, previous: str | None, *, validated: dict,
+                              new_edge_live: bool, log_path: str) -> str:
+    """Roll the front door back without leaving a privacy-weaker pair live (spec 081).
+
+    Compose has already recreated the containers from the new commit, and the
+    rollback does not undo that. For a public manifest the previous route goes back,
+    as before. For a ``share.private`` manifest the previous route could put the
+    public name in front of that new runtime, so: a private route this apply already
+    installed stays; otherwise the previous route goes back only when it is a route
+    Sandbox rendered private, unmodified (``hosting.is_marked_private_route``), and
+    anything else is removed. Returns ``restored``, ``kept_private`` or ``removed``.
+    """
+    from sandbox.hosting import login_service as login
+    if not login.is_private(validated.get("login_service")):
+        edge.restore(name, previous, log_path=log_path)
+        return "restored"
+    if new_edge_live:
+        return "kept_private"
+    if hosting.is_marked_private_route(previous):
+        edge.restore(name, previous, log_path=log_path)
+        return "restored"
+    edge.restore(name, None, log_path=log_path)
+    return "removed"
+
+
+def _close_route_for_private_apply(edge, name: str, *, validated: dict, runtime: dict,
+                                   log_path: str | None = None) -> dict | None:
+    """Put a deny route in front of a ``share.private`` target before anything changes.
+
+    Runs before the deployed checkout is updated: a public route left in place would
+    put the public names in front of the changing application. The deny route (every
+    name, gate included, answers 404) is installed with a forced validate and reload
+    and, on nginx, proven loaded by its own marker; it owns the hostnames, so no
+    default or catch-all server can answer for them. The current route is read
+    strictly first (a failed read is not "no route"). Returns ``{"baseline": route}``,
+    the route a failed apply may put back: the current route when it is a marked
+    private route, otherwise the deny route. Returns None for a public manifest.
+    Raises, before any change but the deny route, when the closure is not confirmed.
+    """
+    from sandbox.hosting import login_service as login
+    if not login.is_private(validated.get("login_service")):
+        return None
+    try:
+        current = edge.read_strict(name)
+        deny = edge.deny_route(validated, runtime, name, current)
+        edge.reconcile(name, deny, log_path=log_path)
+        installed = edge.read_strict(name)
+    except Exception as exc:
+        raise hosting.HostingError(
+            f"private_route_closure_failed: the deny route could not be confirmed before "
+            f"the private apply; the deployment was not changed: {exc}") from exc
+    if installed != deny:
+        raise hosting.HostingError(
+            "private_route_closure_failed: the front door route changed during closure; "
+            "the deployment was not changed")
+    return {"baseline": current if hosting.is_marked_private_route(current) else deny}
+
+
+def _refuse_proxied_records_for_private(client, validated: dict, runtime: dict) -> None:
+    """A private target's names must not be proxied by Cloudflare (spec 081).
+
+    Checked before any effect, so a public, proxied deployment cannot become private
+    while Cloudflare still caches its pages, and DNS rollback never puts proxying back.
+    """
+    from sandbox.hosting import login_service as login
+    if not login.is_private(validated.get("login_service")):
+        return
+    names = {route["hostname"] for route in validated["routes"]}
+    names.update(record["hostname"] for record in runtime.get("records") or [])
+    coverage = validated.get("dns_coverage") or {}
+    if coverage.get("mode") == "shared" and coverage.get("zone"):
+        names.add(f"*.{coverage['zone']}")
+    zones: dict[str, dict] = {}
+    for hostname in sorted(names):
+        lookup = hostname[2:] if hostname.startswith("*.") else hostname
+        zone = zones.get(lookup) or _zone_for_hostname(client, lookup)
+        zones[lookup] = zone
+        for record in client.records(zone["id"], hostname):
+            if record.get("proxied"):
+                raise hosting.HostingError(
+                    f"private_proxied_record: {hostname} is proxied by Cloudflare, which can keep "
+                    "serving cached pages; make it DNS-only and purge the Cloudflare cache "
+                    "before applying share.private")
+
+
+def _refuse_proxied_now(validated: dict, hostname: str, records: list[dict]) -> None:
+    """Re-check just before a DNS change, so rollback never restores a proxied record."""
+    from sandbox.hosting import login_service as login
+    if login.is_private(validated.get("login_service")) and any(
+            record.get("proxied") for record in records):
+        raise hosting.HostingError(
+            f"private_proxied_record: {hostname} became proxied by Cloudflare during the apply")
+
+
+def _route_serves_https(text: str | None) -> bool:
+    """An nginx route with a TLS listener (Caddy routes serve HTTPS implicitly)."""
+    if not text:
+        return False
+    if "server {" not in text:
+        return True  # Caddy: site addresses serve HTTPS themselves.
+    return re.search(r"^\s*listen\s+\S*443\b[^;]*\bssl\b", text, re.M) is not None
+
+
+def _route_tag(validated: dict) -> str | None:
+    """A fresh tag for this apply's front-door route when the target has a gate."""
+    from sandbox.hosting import login_service as login
+    return secrets.token_hex(16) if login.gate_hostnames(validated.get("login_service")) else None
 
 
 def _validate_apply_source(validated: dict) -> str:
@@ -4683,7 +5022,41 @@ def _local_image_apply_lease(validated: dict, remote_name: str,
         yield lease
 
 
-def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
+def _controller_lease_owner() -> str:
+    from sandbox.hosting import target_lease
+    return target_lease.controller_owner(RUNTIME_DIR)
+
+
+def _acquire_host_apply_lease(entry: dict, validated: dict) -> dict | None:
+    """Spec 081 rollout: the remote target lease (sandbox/hosting/target_lease.py)."""
+    from sandbox.hosting import target_lease
+    if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
+        return None
+    path = target_lease.lease_path(remote.resolve_sandbox_home(entry),
+                                   validated["project"], validated["environment"])
+    try:
+        return target_lease.acquire(lambda command: remote.ssh_run(entry, command, timeout=60),
+                                    path, _controller_lease_owner())
+    except target_lease.LeaseHeld as exc:
+        raise hosting.HostingError(f"host_apply_lease_held: {exc}; see docs/remote-hosting.md") from None
+    except target_lease.LeaseUnavailable as exc:
+        raise hosting.HostingError(f"host_apply_lease_unavailable: {exc}") from None
+
+
+def _release_host_apply_lease(entry: dict, lease: dict | None) -> None:
+    from sandbox.hosting import target_lease
+    target_lease.release(lambda command: remote.ssh_run(entry, command, timeout=60), lease)
+
+
+def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *args, **kwargs) -> dict:
+    lease = _acquire_host_apply_lease(entry, validated)
+    try:
+        return _apply_host_unleased(validated, entry, remote_name, runtime, *args, **kwargs)
+    finally:
+        _release_host_apply_lease(entry, lease)
+
+
+def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
                 progress=None, recovery_repository=None,
                 purge_edge_cache: bool = False, delivery_holder=None,
@@ -4788,6 +5161,20 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             raise hosting.HostingError("recovery_receipt_unavailable") from exc
     if before_effects is not None:
         before_effects()
+    client = cloudflare.Client()
+    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    edge = _host_edge(entry)
+    edge.preflight(validated, caddy_name)
+    # Spec 081: before any source reaches the remote (a push to the checked-out branch
+    # updates the working tree), a private target's names are DNS-only and answer 404
+    # behind a confirmed deny route.
+    _refuse_proxied_records_for_private(client, validated, runtime)
+    from sandbox.hosting import login_service as _login
+    if _login.is_private(validated.get("login_service")):
+        # The closure changes the front door: record that before it runs.
+        attempt.checkpoint('source', 'edge_apply')
+    private_closure = _close_route_for_private_apply(
+        edge, caddy_name, validated=validated, runtime=runtime)
     attempt.checkpoint('source', 'source_publish')
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -4844,7 +5231,6 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "revision/config; "
             "refusing before target reset, observation, Compose, or initializer mutation"
         )
-    client = cloudflare.Client()
     remote.update_target_to(
         entry, target, sha,
         project_root=None if require_clean else validated["project_root"],
@@ -4879,13 +5265,13 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 if secret:
                     safe = safe.replace(secret, "[REDACTED]")
             progress(safe)
-    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
-    edge = _host_edge(entry)
-    edge.preflight(validated, caddy_name)
-    previous_caddy = edge.read_previous(caddy_name)
+    previous_caddy = (private_closure["baseline"] if private_closure is not None
+                      else edge.read_previous(caddy_name))
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
     edge_cache_receipt = None
+    # Set once this apply's own route is live, so a private rollback can keep it.
+    edge_live = {"new": False}
 
     def rollback() -> None:
         nonlocal reservation
@@ -4907,7 +5293,11 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             except Exception as exc:
                 failures.append(f"SSL mode restore for {zone_id}: {exc}")
         try:
-            edge.restore(caddy_name, previous_caddy, log_path=apply_log)
+            outcome = _restore_edge_fail_closed(
+                edge, caddy_name, previous_caddy, validated=validated,
+                new_edge_live=edge_live["new"], log_path=apply_log)
+            if outcome != "restored" and stream_progress is not None:
+                stream_progress(f"rollback kept the target private: front door route {outcome}")
         except Exception as exc:
             failures.append(f"{'Caddy' if edge.mode == 'caddy' else 'nginx'} restore: {exc}")
         if failures:
@@ -5054,11 +5444,19 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         proxied = validated["cloudflare"]["proxied"]
         cert_path, key_path, certificate = edge.certificate(
             proxied, validated, runtime, previous_entry, client, home, caddy_name)
+        route_tag = _route_tag(validated)
+        render_validated = {**validated, "route_tag": route_tag} if route_tag else validated
         rendered = edge.render(
-            validated, runtime["loopback_port"], cert_path, key_path, secret_values)
+            render_validated, runtime["loopback_port"], cert_path, key_path, secret_values)
+        if (private_closure is not None and _route_serves_https(previous_caddy)
+                and not _route_serves_https(rendered)):
+            # Spec 081: never trade the closure's HTTPS denial for an HTTP-only route.
+            raise hosting.HostingError(
+                "private_route_https_lost: the new private route would not listen on HTTPS")
         if edge.mode == "caddy":
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
+        edge_live["new"] = True
         zones: dict[str, dict] = {}
         fresh_hostnames: set[str] = set()
         drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule"))
@@ -5077,6 +5475,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     client.ssl_mode(zone["id"], "strict")
             kind = "AAAA" if ":" in wanted["address"] else "A"
             all_records = client.records(zone["id"], hostname)
+            _refuse_proxied_now(validated, hostname, all_records)
             cname = next((record for record in all_records if record.get("type") == "CNAME"), None)
             if cname and not proxied:
                 raise RuntimeError(
@@ -5125,7 +5524,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id"),
                             "applied": _applied_record(created)})
         certificate = edge.after_dns(
-            validated, runtime["loopback_port"], secret_values, cert_path, certificate,
+            render_validated, runtime["loopback_port"], secret_values, cert_path, certificate,
             caddy_name, log_path=apply_log)
         basic_credentials = None
         if validated.get("basic_auth"):
@@ -5134,7 +5533,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         verify_kwargs = {
             "healthcheck_path": runtime["healthcheck"]["path"],
             "basic_auth_enabled": bool(validated.get("basic_auth")),
+            **_privacy_verify_kwargs(validated),
         }
+        if route_tag:
+            verify_kwargs["route_tag"] = route_tag
         if fresh_hostnames:
             verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
         if basic_credentials is not None:
@@ -5630,7 +6032,8 @@ class _HostImageEdgeAdapter:
         if not bootstrap:
             _verify_edge(self.validated["routes"],
                          healthcheck_path=self.validated["healthcheck"]["path"],
-                         basic_auth_enabled=bool(self.validated.get("basic_auth")))
+                         basic_auth_enabled=bool(self.validated.get("basic_auth")),
+                         **_privacy_verify_kwargs(self.validated))
         return self._route_plan()
 
     def _route_plan(self):

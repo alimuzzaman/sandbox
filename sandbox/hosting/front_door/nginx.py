@@ -170,9 +170,14 @@ def render_host_conf(validated: dict, port: int, *, name: str,
         else:
             verifier = "Basic " + base64.b64encode(
                 f"{auth['username']}:{basic_auth_password}".encode()).decode()
-    return _render(validated, port, name=name, cert_path=cert_path, key_path=key_path,
-                   verifier=verifier, marker=marker, ipv6=ipv6,
-                   http2_directive=http2_directive, realip=realip, streaming=streaming)
+    rendered = _render(validated, port, name=name, cert_path=cert_path, key_path=key_path,
+                       verifier=verifier, marker=marker, ipv6=ipv6,
+                       http2_directive=http2_directive, realip=realip, streaming=streaming)
+    from sandbox.core._hosting import mark_private_route
+    from sandbox.hosting import login_service
+    if login_service.is_private(validated.get("login_service")):
+        rendered = mark_private_route(rendered)
+    return rendered
 
 
 def route_marker(content: str) -> str | None:
@@ -208,6 +213,12 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
     tag = f'add_header X-Robots-Tag "{ROBOTS_TAG}" always;'
     ni_server = [f"    {tag}"] if noindex else []
     ni_loc = [f"        {tag}"] if noindex else []
+    from sandbox.core._hosting import ROUTE_TAG_HEADER, route_tag_lines
+    route_tag = route_tag_lines(validated)
+    if route_tag:
+        # Spec 081 rollout: on the same levels as X-Robots-Tag, so it is never dropped.
+        ni_server.append(f'    add_header {ROUTE_TAG_HEADER} "{route_tag}" always;')
+        ni_loc.append(f'        add_header {ROUTE_TAG_HEADER} "{route_tag}" always;')
     out: list[str] = [
         f"# Managed by Sandbox (front door: nginx). Owner: {name}.",
         "# Do not edit: re-run the Sandbox command that owns this route.",
@@ -331,7 +342,12 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
     if cert_path and app_served:
         out += [""] + served_block(app_served, None if private else port, bool(auth))
     if cert_path and gate_served:
-        out += [""] + served_block(gate_served, login_service.gate_loopback_port(port), bool(auth))
+        # Spec 081 private closure: a deny route answers 404 on the gate hostnames too.
+        deny = bool(validated.get("route_deny"))
+        if deny and not private:
+            raise ValueError("route_deny renders only for a share.private target")
+        out += [""] + served_block(gate_served, None if deny else login_service.gate_loopback_port(port),
+                                   bool(auth))
     if cert_path:
         for route in redirects:
             out += [""] + tls_head([route["hostname"]]) + [
@@ -679,8 +695,13 @@ def _ensure_edge_dirs_command() -> str:
             f"$SUDO install -d -o root -g root -m 0755 /var/lib/sandbox-edge {ACME_ROOT}")
 
 
-def transaction_script() -> str:
+def transaction_script(force: bool = False) -> str:
+    """The locked nginx transaction. ``force`` (spec 081 private closure) validates,
+    reloads and probes the marker even when the file already matches; without it the
+    script is byte-identical to the one every other caller has always run."""
     t = PHASE_TIMEOUT_SECONDS
+    noop_guard = ' && [ "$force" != 1 ]' if force else ""
+    force_arg = "force=${8:-0}\n" if force else ""
     return f"""set -eu
 path=$1
 staged=$2
@@ -689,7 +710,7 @@ operation=$4
 remove_route=$5
 probe_host=$6
 marker=$7
-phase() {{
+{force_arg}phase() {{
   printf '[Sandbox] nginx phase=%s state=%s digest=%s\\n' "$1" "$2" "$desired"
 }}
 backup=$(mktemp {STAGING_DIR}/rollback.XXXXXX)
@@ -704,7 +725,7 @@ restore_local() {{
   if [ "$had_previous" = 1 ]; then install -o root -g root -m 0600 "$backup" "$path"; else rm -f "$path"; fi
 }}
 if [ "$remove_route" = 1 ]; then want=absent; else want=$desired; fi
-if [ "$current" = "$want" ]; then
+if [ "$current" = "$want" ]{noop_guard}; then
   rm -f "$backup"
   if [ "$staged" != - ]; then rm -f "$staged"; fi
   phase digest unchanged
@@ -763,15 +784,16 @@ if [ "$operation" = apply ]; then phase complete changed; else phase rollback ro
 
 def transaction_command(path: str, staged: str | None, digest: str, *, operation: str,
                         remove: bool, probe_host: str | None = None,
-                        marker: str | None = None) -> str:
+                        marker: str | None = None, force: bool = False) -> str:
     return (
         "set -eu; " + _SUDO +
         "$SUDO install -d -m 0755 /run/lock; "
         f"$SUDO flock -w {LOCK_WAIT_SECONDS} {shlex.quote(LOCK_PATH)} "
-        f"sh -c {shlex.quote(transaction_script())} sandbox-nginx "
+        f"sh -c {shlex.quote(transaction_script(force))} sandbox-nginx "
         f"{shlex.quote(path)} {shlex.quote(staged or '-')} {shlex.quote(digest)} "
         f"{shlex.quote(operation)} {'1' if remove else '0'} "
         f"{shlex.quote(probe_host or '-')} {shlex.quote(marker or '-')}"
+        + (" 1" if force else "")
     )
 
 
@@ -787,6 +809,53 @@ def _stage(entry: dict, name: str, content: str, digest: str) -> str:
         raise FrontDoorError("front_door_stage_failed",
                              "could not stage the nginx route: " + _diagnostic(entry, result))
     return staged
+
+
+def read_route_strict(entry: dict, name: str) -> str | None:
+    """The route's text, or None only when the file is confirmed absent.
+
+    Any other outcome (SSH failure, sudo refusal, an unreadable or odd file) raises,
+    so an unknown route state is never mistaken for no route.
+    """
+    path = route_file(name)
+    script = 'if [ -f "$1" ]; then cat "$1"; elif [ -e "$1" ] || [ -L "$1" ]; then exit 44; else exit 43; fi'
+    result = _ssh(entry, _SUDO + f"$SUDO sh -c {shlex.quote(script)} sandbox-read {shlex.quote(path)}",
+                  timeout=30)
+    if result.returncode == 0:
+        return result.stdout
+    if result.returncode == 43:
+        return None
+    raise FrontDoorError("front_door_read_failed",
+                         f"nginx route {name} could not be read (exit {result.returncode})")
+
+
+def reconcile_route(entry: dict, name: str, keep: str, *,
+                    log: Callable[[str], None] | None = None) -> dict:
+    """Install ``keep`` with a forced validate, reload and marker probe.
+
+    Spec 081 private closure, before a private runtime changes: the route's own
+    marker answering proves this configuration (not an older one, and not a
+    default server) now serves its hostnames.
+    """
+    path = route_file(name)
+    marker = route_marker(keep)
+    probe_host = _probe_host(keep)
+    if not marker or not probe_host:
+        raise FrontDoorError("front_door_route_invalid",
+                             f"nginx route {name} has no marker to prove it is loaded")
+    digest = hashlib.sha256(keep.encode()).hexdigest()
+    staged = _stage(entry, name, keep, digest)
+    command = transaction_command(path, staged, digest, operation="apply", remove=False,
+                                  force=True, probe_host=probe_host, marker=marker)
+    result = _ssh(entry, command, timeout=TRANSACTION_TIMEOUT_SECONDS)
+    if log:
+        log(result.stdout or "")
+    if result.returncode != 0:
+        phase = _EXIT_REASONS.get(result.returncode, "transaction")
+        raise FrontDoorError(f"front_door_{phase}_failed",
+                             f"nginx route {name} {phase} failed (exit {result.returncode}): "
+                             + _diagnostic(entry, result))
+    return {"state": "reconciled", "digest": digest, "file": path}
 
 
 def read_route(entry: dict, name: str) -> str | None:
@@ -900,6 +969,25 @@ def ensure_origin_certificate(entry: dict, name: str, hostnames: list[str], clie
 def public_paths(name: str) -> tuple[str, str]:
     return (f"/etc/letsencrypt/live/sandbox-{name}/fullchain.pem",
             f"/etc/letsencrypt/live/sandbox-{name}/privkey.pem")
+
+
+def existing_certificate(entry: dict, name: str) -> tuple[str, str] | None:
+    """Any certificate this route already has (public first, then origin), or None.
+
+    Spec 081 private closure: a deny route keeps an HTTPS listener with whatever
+    certificate exists, even one that does not cover every new hostname. A failed
+    check raises, so an unknown answer is never read as "no certificate".
+    """
+    public, origin = public_paths(name), origin_paths(name)
+    script = ('if [ -s "$1" ] && [ -s "$2" ]; then echo public; '
+              'elif [ -s "$3" ] && [ -s "$4" ]; then echo origin; else echo none; fi')
+    args = " ".join(shlex.quote(path) for path in (*public, *origin))
+    result = _ssh(entry, _SUDO + f"$SUDO sh -c {shlex.quote(script)} sandbox-cert {args}", timeout=30)
+    answer = (result.stdout or "").strip()
+    if result.returncode != 0 or answer not in {"public", "origin", "none"}:
+        raise FrontDoorError("front_door_read_failed",
+                             f"nginx route {name} certificate check failed (exit {result.returncode})")
+    return {"public": public, "origin": origin, "none": None}[answer]
 
 
 def public_certificate_present(entry: dict, name: str, hostnames: list[str]) -> bool:

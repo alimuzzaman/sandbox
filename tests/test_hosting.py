@@ -140,6 +140,9 @@ class _HostingOwnerFixture:
         self.patch.object(hosting_cmd, "_secret_status", return_value=({}, []))
         self.prepare = self.patch.object(hosting_cmd, "_prepare_host_apply", return_value=None)
         self.patch.object(hosting_cmd, "_release_host_apply_reservation", return_value=None)
+        # The remote target lease (spec 081 rollout) has its own tests in test_share_private_rollout.
+        self.lease = self.patch.object(hosting_cmd, "_acquire_host_apply_lease", return_value=None)
+        self.patch.object(hosting_cmd, "_release_host_apply_lease")
         self.source = self.patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source")
         self.push = self.patch.object(hosting_cmd.remote, "push_commits", return_value=self.deployed_commit)
         self.update = self.patch.object(hosting_cmd.remote, "update_target_to")

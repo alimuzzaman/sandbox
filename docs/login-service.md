@@ -211,6 +211,47 @@ the route marker that apply checks.
 
 - Pick a gate hostname that says nothing, such as a few random characters. It is the
   only public way in.
+- **Apply verification follows privacy.** Every gate hostname must answer
+  `/__sandbox/gate-check` with the gate's own 404, marked `X-Sandbox-Gate: 1`; the gate
+  reserves that path ahead of every link, session and upstream. With `private: true`,
+  the primary, serve aliases and redirect aliases must answer 404: an answer of 2xx or
+  3xx fails the apply. Each apply renders a fresh random `X-Sandbox-Route` tag into the
+  front-door route of a target with a gate, and those 404s must carry it, so an older
+  route or a cached page cannot pass. Every probe asks a new URL (a random
+  `sandbox-verify` query). A gate behind a public target's Basic Auth gets its
+  credentials. The application's own health is still checked on its loopback port.
+  Image activation does not re-render the route, so it checks privacy without the tag.
+- **No Cloudflare proxying.** `private: true` refuses `cloudflare.proxied: true`, and the
+  apply refuses, before any effect, when Cloudflare still proxies any of the target's
+  names (or the shared coverage wildcard). Make them DNS-only and purge the Cloudflare
+  cache first, so no cached page outlives the switch and a DNS rollback never turns
+  proxying back on.
+- **A private apply closes the public name first.** Before any source reaches the
+  remote (a push to the deployed branch updates its working tree), an apply of a private manifest reads the front-door route (a failed read
+  stops the apply) and installs a deny route: every name, the gate's included, answers
+  404. The deny route is installed with a forced validate and reload and, on nginx,
+  proven loaded by its own marker. It owns the hostnames, so no default or catch-all
+  server answers for them. On nginx it keeps an HTTPS listener with whatever
+  certificate the route already has; if the current route serves HTTPS and no
+  certificate is left, the apply refuses. If any of that cannot be confirmed, the apply
+  stops before the source changes. Routes Sandbox renders for a private manifest end with
+  `# sandbox-private-route v1 <sha256 of the text above>`. The gate is therefore down
+  from the closure until the new route is live, and an apply that is refused or fails
+  before its route is installed leaves the deny route, or the previous route when it
+  carries that mark.
+- **A failed apply fails closed.** The apply recreates the containers before it installs
+  the new route, and a failure does not roll them back. For a private manifest a private
+  route the apply already installed stays, a marked previous route goes back, and
+  otherwise the deny route stays. Run the apply again once the cause is fixed.
+- Limits: on nginx, the deny route covers HTTPS only once the target's public
+  certificate exists; on the very first apply HTTPS for those names is whatever the
+  server answered before. Image activation checks privacy without the route tag.
+  Applies and destroys of one target hold a remote lease (see `host_apply_lease_held` in
+  [remote hosting](remote-hosting.md)); controllers older than this fix and the on-host
+  stack reaper do not take it.
+- A destroy removes the route before it stops the containers. If the teardown then fails,
+  the names are unrouted while the runtime still runs: only a server-wide catch-all that
+  proxies to the target's own loopback port could reach it.
 - With an `autologin.login_service` block, `share` carries only `hostname`, `private`,
   `agent_mint` and `stack_sign_in`, and uses that block's fields. `share` is then a
   reserved entry name.

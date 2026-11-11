@@ -89,6 +89,17 @@ refuses ambiguous sensitive syntax. Original argv, including explicit strict
 runtime intent, remains intact for the fixed child; command selection does not
 copy environment values or dispatch a command.
 
+After a supported service update, a new authenticated identity read or ordinary
+service status can refresh a joined registration's observed revision cache.
+The same machine and ownership marker, complete authenticated response and
+actual compatible unit protocol must agree within the original deadline. The
+local write uses compare-and-swap. Strict runtime mode refuses drift. Existing
+operation adapters, plans, reservations and server runtime pins are not rebound.
+Compatibility observation alone makes no cache write. Older controllers lacking
+this behavior need a supported controller update; this is not a global
+registration migration. Explicit `remote service refresh NAME
+--adopt-compatible-revision --json` remains available for the same bounded proof.
+
 Installed discovery can fill a missing origin from a unique actual public network
 interface address. It never queries an Internet address service, guesses a
 hostname, or overwrites explicit routing metadata. Ambiguous or private-only

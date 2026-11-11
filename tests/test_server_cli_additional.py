@@ -185,7 +185,8 @@ class ReceiverRoutingObservationTest(unittest.TestCase):
 class BoundedOwnerChannelTest(unittest.TestCase):
     def test_stdin_bearing_cli_refuses_before_lookup_or_acceptance(self):
         from sandbox.core import _remote
-        for argv in (('host', 'exec', '--', 'cat'), ('hermes', 'repo', 'auth', '--token-stdin')):
+        for argv in (('host', 'exec', '--', 'cat'),
+                     ('hermes', 'repo', 'auth', 'github', '--remote', 'box', '--token-stdin')):
             with self.subTest(argv=argv), mock.patch.object(_remote, 'get_remote') as lookup:
                 with self.assertRaises(cli.ServerCLIStdinUnavailable):
                     cli.dispatch_server_cli('box', argv, project_dir='/synthetic/project', request_id='original')

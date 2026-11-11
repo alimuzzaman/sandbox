@@ -40,6 +40,21 @@ concurrent registration change. It does not upgrade the remote, repair SSH, chan
 stack reservations, or bypass runtime compatibility admission. If the service
 revision changed, use the separately reviewed lifecycle path; refresh cannot
 replace a pin. A successful join does not imply every SSH operation is available.
+After an authorized service update, a controller containing the compatible-cache
+adoption option can reconnect the existing registration with:
+
+```sh
+./sb remote service refresh NAME --adopt-compatible-revision --json
+```
+
+This explicit version transition validates the full authenticated response, the
+same saved machine/ownership marker and the actual selected unit's compatible
+protocol/revision verdict before CAS-changing only the observed revision cache.
+It never changes PinStore bindings, strict-mode pins, old operation adapters,
+plans, stack reservations or delivery evidence. Strict or unproven compatibility
+refuses. Older controllers must receive the reviewed client update to gain this
+option; removing/rejoining is unnecessary. Normal refresh and operation-bound
+revision checks remain strict, so old plans are not revived by this command.
 Ordinary host-memory status and authenticated target-identity lookup also enforce
 the saved machine pin; a changed machine or malformed pin refuses without refresh.
 Legacy owner registrations with no machine pin keep their existing behavior.

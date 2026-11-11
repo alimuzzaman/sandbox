@@ -5137,7 +5137,8 @@ def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float =
 
 
 def remote_mcp_service_plan(remote: dict, bind: str, port: int,
-                            public_url: str | None = None, *, observed: dict | None = None) -> dict:
+                            public_url: str | None = None, *, observed: dict | None = None,
+                            preserve_credentials: bool = False) -> dict:
     """Build a no-write migration plan with no secret-bearing fields."""
     public_url = _validate_remote_mcp_public_url(public_url)
     record = remote_mcp_service_record(bind, port, public_url)
@@ -5147,7 +5148,8 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
         "steps": [
             "prepare the staged Sandbox CLI and MCP virtual environments",
             "refresh and verify the owner-scoped measured image staging helper",
-            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            ("preserve existing owner-only remote credential file" if preserve_credentials else
+             "write owner-only remote credential file"), "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
         "legacy_pidfile_detected": bool((observed or {}).get("legacy_pidfile") == "present"),
@@ -5177,7 +5179,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     if not confirm:
         return remote_mcp_service_plan(
             remote, bind, port, public_url,
-            observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
+            observed={"legacy_pidfile": "present"} if legacy_pidfile else None,
+            preserve_credentials=preserve_credentials)
     if not preserve_credentials and (not isinstance(token, str) or not token):
         raise ValueError("remote MCP token is required")
     if not preserve_credentials and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
@@ -5204,6 +5207,10 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     record = remote_mcp_service_record(bind, port, public_url)
     if preserve_credentials and (remote.get('mcp_service') or {}).get('ownership_marker') != record['ownership_marker']:
         raise RuntimeError('remote_service_ownership_unknown: existing service marker cannot be replaced')
+    observed_revision = (remote.get('mcp_service') or {}).get('runtime_revision')
+    if preserve_credentials and (not isinstance(observed_revision, str)
+                                or _REMOTE_MCP_REVISION_RE.fullmatch(observed_revision) is None):
+        raise RuntimeError('owner_service_identity_unavailable: existing unit revision is unavailable')
     if record["runtime_revision"] != staged_source["runtime_revision"]:
         raise ValueError("staged Sandbox runtime record revision does not match exact source")
     plan = {
@@ -5264,6 +5271,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     normalize_program = _REMOTE_HOME_NORMALIZE_PROGRAM
     stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
     credential_preflight = (
+        'grep -Fqx ' + shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + observed_revision)
+        + ' "$unit_path"; '
         'test -f "$env_path" && test ! -L "$env_path" && '
         'test "$(stat -c \'%u:%a\' "$env_path")" = "$(id -u):600"; '
     ) if preserve_credentials else ''

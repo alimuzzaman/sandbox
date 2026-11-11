@@ -153,3 +153,48 @@ config/sandbox-web.js, config/sandbox-web.css   # rebuilt
 tests/test_web_share.py, src/web/tests/sharelabels.test.ts
 docs/login-service.md, skills/sandbox-cli/SKILL.md, .agents/skills/sandbox-cli/SKILL.md
 ```
+
+## Short links follow-up (2026-11-11)
+
+Spec: User Story 7, FR-035 to FR-041, SC-009 to SC-011 (FR-014 and FR-015 amended).
+Research: R13 to R16. Contracts: [gate-http.md](contracts/gate-http.md),
+[cli.md](contracts/cli.md), [panel-http.md](contracts/panel-http.md).
+
+**Summary**: A new link is `https://<gate>/s/#<token>` with one 128-bit token. The gate
+stores only its SHA-256 and finds the link by scanning the entry's records with a
+constant-time compare. The public id is `l-` + the first 12 hex of the hash. `GET /s/`
+always serves the opener page; every bad `POST /s/` gets the same 404. Old
+`/s/l-<32 hex>#<43>` links keep working until they expire, and their path is listed for
+removal. The panel, docs and skill show the new form, and the docs name a short gate
+hostname (`s.<zone>`), which is not a secret.
+
+**Technical Context (delta)**: No new dependency. The gate runtime stays one stdlib
+file. The opener script's fragment pattern and its CSP hash change. Tests:
+`tests/test_share_gate_runtime.py`, `tests/test_host_share.py`,
+`tests/test_login_service_runtime.py`, `tests/test_host_login_service.py`,
+`tests/test_web_share.py`, `src/web/tests/sharelabels.test.ts`, on xspeed-dev through
+`sb job-start --remote xspeed-dev --profile unit`, compared with an `origin/latest`
+baseline.
+
+**Constitution Check (delta)**: II: no registry access changes. III: the change stays in
+the existing share modules and the gate runtime; no new consumers. IV: the gate is
+proven over real sockets in process; the live mint on the mockups gate is the
+orchestrator's step after the merge. V: mint stays retry-safe (an id collision is a
+named refusal); docs, CLAUDE.md, and the sandbox-cli skill with its `.agents` mirror
+land with the code. VI: the old link path stays, with a removal task. Gate result:
+PASS. This is an authentication change: human sign-off is needed before release.
+
+**Source (delta)**:
+
+```text
+sandbox/hosting/share/__init__.py           # new_token (128-bit), short_link_id, share_url(host, token), id rules
+sandbox/hosting/share/stack_page.py         # kid of 12 or 32 hex
+sandbox/hosting/login_service/runtime.py    # POST /s/ by hash scan, constant opener, both id forms, script hash
+sandbox/commands/host_share.py              # share_url call, revoke id rule
+sandbox/commands/hosting.py                 # 075 site link on the new form
+sandbox/commands/ui_dash.py                 # panel revoke id rule
+src/web/src/ui/sharelabels.ts               # revocableId accepts both id forms; config/sandbox-web.js rebuilt
+docs/login-service.md, CLAUDE.md, skills/sandbox-cli/SKILL.md, .agents/skills/sandbox-cli/SKILL.md
+tests/test_share_gate_runtime.py, tests/test_host_share.py, tests/test_login_service_runtime.py,
+tests/test_host_login_service.py, tests/test_web_share.py, src/web/tests/sharelabels.test.ts
+```

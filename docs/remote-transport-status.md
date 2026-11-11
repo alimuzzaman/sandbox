@@ -11,6 +11,7 @@ SSH.
 | `remote resources` observe/reclaim/lease/revalidate/remove | authenticated service | migrated |
 | `./sb web` remote inventory and bounded deep refresh | local loopback BFF → authenticated service | migrated |
 | `remote ssh` | explicit operator CLI command | escape hatch only; never internal/MCP |
+| `remote join`, `remote service refresh` | authenticated service identity discovery | local registration only; no service changes |
 | provision, service install/migrate/stop/status, recovery | SSH lifecycle | retained recovery/bootstrap exception |
 | source upload, plugin mirror, bulk staging | tar/rsync/SSH | retained staging exception |
 | jobs, workspace control, ensure/status/logs | SSH controller today | next migration slice |
@@ -20,6 +21,80 @@ SSH.
 “Migrated” means the normal code path is typed, authenticated, bounded, and service
 backed. It does not mean that SSH has been removed from lifecycle or source-transfer
 recovery paths. The operator command is deliberately explicit:
+
+Joining records the admitted service's ownership marker, runtime revision and
+canonical machine identity from the existing schema-1 host-memory status contract.
+Ordinary access automatically repairs missing metadata on an existing joined
+controller through the authenticated service, within the caller's budget. No
+per-controller permission or credential approval is required. An optional explicit
+metadata refresh remains available:
+
+```sh
+./sb remote service refresh NAME --json
+```
+
+This writes only the local registration. It uses tailnet admission without an
+owner bearer token or SSH, validates the complete response, preserves existing
+pins and unrelated registration fields, and refuses identity/revision drift or a
+concurrent registration change. It does not upgrade the remote, repair SSH, change
+stack reservations, or bypass runtime compatibility admission. If the service
+revision changed, use the separately reviewed lifecycle path; refresh cannot
+replace a pin. A successful join does not imply every SSH operation is available.
+Ordinary host-memory status and authenticated target-identity lookup also enforce
+the saved machine pin; a changed machine or malformed pin refuses without refresh.
+Legacy owner registrations with no machine pin keep their existing behavior.
+Pinned history and apply first validate the live machine with the existing status
+contract, using the same total operation budget. A foreign apply-plan target
+refuses before any request. Exhausted or unavailable identity evidence never
+dispatches the requested history or mutation. Refresh also refuses a malformed
+existing pin instead of silently normalizing it.
+
+Service status reports live HTTP admission as `control_admission` and uses that
+evidence for `authenticated`: true when admitted, false for an observed HTTP
+401/403, and null when unavailable. `ssh_access` separately reports the selected
+Linux account's SSH path. Missing unit metadata can leave ownership, bind, port,
+and service name unknown; it does not establish denied Tailnet access.
+Runtime compatibility is independently derived from the
+actual selected SSH user's service-unit revision and protocol declaration.
+Compatible protocol evidence can admit a differing controller hash; missing,
+malformed or incompatible unit evidence cannot. A separate Linux user's empty
+home is still a different SSH execution context. This does not repair that home
+or establish that every Linux user sees the owner's state.
+
+Joined registrations historically omitted the host front-door profile and therefore
+defaulted to Caddy. Ordinary access now adopts a missing profile only after
+read-only SSH proves the same machine and uniquely observed nginx or Sandbox
+Caddy listener ownership. Unavailable evidence leaves the profile unavailable;
+routing refuses instead of assuming Caddy. Explicit nginx adoption is also
+available with `remote join NAME USER@HOST --front-door nginx` or
+`remote service refresh NAME --front-door nginx --json` for an existing join.
+This optional profile step uses bounded read-only SSH probes, checks the same
+canonical machine identity as the authenticated control service, and requires
+active valid nginx with its conf.d include and no active Caddy. It changes no
+host configuration and cannot replace an explicit different profile. Plain
+refresh continues to use HTTP only. Existing failed/reserved stack manifests and
+delivery requests are not rewritten or retried by adoption. Do not use `remote add`
+to repair a join: it changes provisioning metadata.
+
+For joined Tailnet registrations, SSH, SCP and Git use the recorded private Tailnet
+address and selected Linux account (for xSpeed, `alim`). They exclude local SSH
+configuration, keys, agent, proxies and multiplexed sessions, so switching Tailnet
+identity cannot reuse an earlier login or fall back to public/key-based SSH.
+HTTP control admission and Tailscale SSH policy remain separate prerequisites.
+An actual SSH policy denial is reported separately; timeout or missing profile
+facts are unavailable evidence. Owner registrations with Tailnet HTTP control
+keep their separate SSH transport; HTTP configuration alone does not enable
+Tailscale SSH on another server. Their multiplexing is disabled before launching a command when the
+UNIX socket path, including OpenSSH's temporary suffix, cannot fit; no command is
+retried and no socket is moved to a shared directory.
+
+Hermes repository authentication and interactive chat use the same joined SSH
+policy, including TTY handling and credential input through stdin. Runtime source
+upload, provisioning, service start/migration and broker cleanup retain the full
+registration through the shared transport. Pro-plugin rsync derives its destination
+operand and SSH command from the same resolved endpoint. These changes preserve
+existing nonjoined owner SSH behavior; they do not remove the separate lifecycle
+credential or normal host/CI secret-preflight prerequisites.
 
 Every direct `remote ssh` command requires `--confirm`, including read-only commands,
 and a short `--reason`.

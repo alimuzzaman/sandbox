@@ -1,9 +1,14 @@
 """Share links for hosted targets (spec 081).
 
 A target opts in with a ``share:`` block in its hosting manifest. Links open at
-``https://<gate hostname>/s/<random id>#<token>``: the id is 128 random bits, the token
-256, and only the token's SHA-256 is stored anywhere. The contract is
-docs/login-service.md#share-links and specs/081-hosted-share-links/.
+``https://<gate hostname>/s/#<token>``: one 128-bit token after the ``#``, so no request
+line holds it, and only its SHA-256 is stored anywhere. The public id is ``l-`` and the
+first 12 hex characters of that hash. The contract is docs/login-service.md#share-links
+and specs/081-hosted-share-links/ (Story 7 for the short form).
+
+Links minted before Story 7 read ``/s/l-<32 random hex>#<43-character token>``. The gate
+keeps opening them until they expire (30 days at most), so the id rules below still
+accept that form; search ``LEGACY(081 short links)`` to remove it (tasks.md T049).
 
 This module holds the types and rules both the controller and its tests rely on. The
 gate runtime (``login_service/runtime.py``) is injected into a container as one stdlib
@@ -43,9 +48,12 @@ MAX_STACK_HOSTS = 16
 # range nothing else in Sandbox uses (plugin-check lanes take 19000-20999).
 GATE_PORT_OFFSET = 3000
 
-LINK_ID_RE = re.compile(r"l-[0-9a-f]{32}")
+SHORT_ID_HEX = 12
+TOKEN_BYTES = 16
+# A short link's id, then (LEGACY(081 short links)) an old-form random id.
+LINK_ID_RE = re.compile(r"l-[0-9a-f]{12}|l-[0-9a-f]{32}")
 SESSION_ID_RE = re.compile(r"s-[0-9a-f]{32}")
-REVOKE_TARGET_RE = re.compile(r"all|[ls]-[0-9a-f]{32}")
+REVOKE_TARGET_RE = re.compile(r"all|l-[0-9a-f]{12}|[ls]-[0-9a-f]{32}")
 _TTL_RE = re.compile(r"([0-9]{1,7})([smhdw]?)")
 _TTL_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 # What a scope may hold: an encoded URL path, nothing that needs quoting in a header.
@@ -88,21 +96,23 @@ class MintedLink:
         return token_hash(self.token)
 
 
-def new_link_id() -> str:
-    return "l-" + secrets.token_hex(16)
-
-
 def new_token() -> str:
-    return secrets.token_urlsafe(32)
+    """128 random bits, 22 URL-safe characters."""
+    return secrets.token_urlsafe(TOKEN_BYTES)
 
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
-def share_url(hostname: str, link_id: str, token: str) -> str:
+def short_link_id(token: str) -> str:
+    """The public id: 48 bits of the hash, which name the link and do not lead back to it."""
+    return "l-" + token_hash(token)[:SHORT_ID_HEX]
+
+
+def share_url(hostname: str, token: str) -> str:
     """The fragment never reaches a request line, so no access log can hold the token."""
-    return f"https://{hostname}{LINK_PREFIX}{link_id}#{token}"
+    return f"https://{hostname}{LINK_PREFIX}#{token}"
 
 
 def parse_ttl(value: object) -> int:
@@ -180,7 +190,8 @@ def mint(request: LinkRequest, *, now: float, ends_at: int) -> MintedLink:
     if expires - issued < MIN_TTL_SECONDS:
         raise ShareRefusal("login_service_expired",
                            "the gate's enabled_until is less than a minute away; extend it and apply")
-    return MintedLink(new_link_id(), new_token(), issued, expires, clamped)
+    token = new_token()
+    return MintedLink(short_link_id(token), token, issued, expires, clamped)
 
 
 # ---------------------------------------------------------------------------

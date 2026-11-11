@@ -824,7 +824,7 @@ class _SiteBase(unittest.TestCase):
 
     def link_path(self, token=None):
         """/s/<id> of a minted token, or of an id nothing knows."""
-        return share.LINK_PREFIX + (self.ids.get(token) or share.new_link_id())
+        return share.LINK_PREFIX + (self.ids.get(token) or _legacy_link_id())
 
     def manage(self, *argv, stdin=""):
         out = io.StringIO()
@@ -837,7 +837,7 @@ class _SiteBase(unittest.TestCase):
         token = token or secrets_token()
         issued = int(self.now)
         record = {"schema": "sandbox.share-link.v2", "entry": "mockup",
-                  "id": link_id or share.new_link_id(),
+                  "id": link_id or _legacy_link_id(),
                   "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
                   "issued_at": issued, "expires_at": issued + ttl, "uses": uses, "scope": scope,
                   "kind": "site"}
@@ -877,7 +877,31 @@ def secrets_token():
     return base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
 
 
+def _legacy_link_id():
+    """An old-form (2026-11-10) random link id. These 075 tests open links on the old
+    `/s/<id>` path, which stays until old links expire. LEGACY(081 short links)."""
+    return "l-" + os.urandom(16).hex()
+
+
 class SiteLinkTests(_SiteBase):
+    def test_a_short_site_link_opens_on_the_short_path(self):
+        """Spec 081 Story 7: what `host login-url --service <site entry>` mints now."""
+        request = share.LinkRequest(entry="mockup", kind="site", scope="/", ttl_seconds=900, uses=1)
+        minted = share.mint(request, now=self.now, ends_at=self.config["enabled_until_epoch"])
+        reply = self.manage("mint", "mockup", stdin=json.dumps(
+            {"link": share.link_record(request, minted), "stack": None}))
+        self.assertEqual(reply["id"], minted.link_id)
+        url = urllib.parse.urlsplit(share.share_url(SITE, minted.token))
+        self.assertEqual((url.path, url.fragment), (share.LINK_PREFIX, minted.token))
+        self.assertEqual(self.request("GET", url.path)[0].status, 200)
+        body = urllib.parse.urlencode({"token": url.fragment})
+        response, _ = self.request("POST", url.path, body=body,
+                                   headers={"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual((response.status, response.getheader("Location")), (303, "/"))
+        again, _ = self.request("POST", url.path, body=body,
+                                headers={"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(again.status, 404)
+
     def test_link_page_needs_a_live_link_and_never_holds_the_token(self):
         self.assertEqual(self.request("GET", self.link_path())[0].status, 404)
         token, _ = self.mint()

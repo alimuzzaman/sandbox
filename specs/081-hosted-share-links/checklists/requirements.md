@@ -37,3 +37,7 @@
   requirements, not implementation choices, so they stay.
 - Validation pass 1: all items pass.
 - 2026-11-11: re-validated after the panel follow-up (Story 6, FR-029..FR-034, SC-007..SC-008). All items still pass; no clarification markers.
+- 2026-11-11: re-validated after the short links follow-up (Story 7, FR-035..FR-041,
+  SC-009..SC-011; FR-014 and FR-015 amended). The new URL form `/s/#<token>`, the 128-bit
+  token and the 12-hex id are owner-fixed contract values, like the old `/s/<id>` form.
+  All items still pass; no clarification markers.

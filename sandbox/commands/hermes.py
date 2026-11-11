@@ -76,14 +76,10 @@ def _repo_action(args) -> dict:
                 "--token-stdin accepts only a GitHub fine-grained token",
                 "fine_grained_token_required",
             )
-        parts = remote.remote_ssh_parts(entry)
-        cmd = ["ssh"]
-        if parts["port"]:
-            cmd += ["-p", str(parts["port"])]
-        availability_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"], "command -v gh"]
-        login_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"],
-                     "gh auth login --hostname github.com --git-protocol https --with-token"]
-        status_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"], "gh auth status --hostname github.com"]
+        availability_cmd = remote.ssh_command_args(entry, 'command -v gh')
+        login_cmd = remote.ssh_command_args(entry,
+            'gh auth login --hostname github.com --git-protocol https --with-token')
+        status_cmd = remote.ssh_command_args(entry, 'gh auth status --hostname github.com')
         try:
             if subprocess.run(availability_cmd, check=False, capture_output=True).returncode != 0:
                 raise hermes.HermesError(

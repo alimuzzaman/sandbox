@@ -846,7 +846,7 @@ class StatusTests(unittest.TestCase):
 
 
 SITE_HOST = "share.example.test"
-CANARY = "C4nAryT0kenC4nAryT0kenC4nAryT0kenC4nAryT0k"  # 43 characters, like token_urlsafe(32)
+CANARY = "C4nAryT0kenC4nAryT0ken"  # 22 characters, like token_urlsafe(16) (spec 081 Story 7)
 
 
 def _site_entry(**fields):
@@ -1074,13 +1074,11 @@ class SiteCommandTests(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self._assert_no_leak(out, err)
         self.assertEqual(self.terminal.final.count(CANARY), 1)
-        self.assertRegex(self.terminal.final.strip(),
-                         rf"^https://{re.escape(SITE_HOST)}/s/l-[0-9a-f]{{32}}#{re.escape(CANARY)}$")
+        self.assertEqual(self.terminal.final.strip(), f"https://{SITE_HOST}/s/#{CANARY}")
         reply = json.loads(out)
         self.assertNotIn("url", reply)
         self.assertEqual((reply["ok"], reply["uses"], reply["link_shown_on"]), (True, 3, "terminal"))
-        self.assertRegex(reply["link_id"], r"^l-[0-9a-f]{32}$")
-        self.assertIn(reply["link_id"], self.terminal.final)
+        self.assertEqual(reply["link_id"], "l-" + hashlib.sha256(CANARY.encode()).hexdigest()[:12])
         payload = json.loads(self.inputs[0])
         self.assertIsNone(payload["stack"])
         record = payload["link"]
@@ -1135,9 +1133,16 @@ class SiteCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["revoked_sessions"], 2)
         self.assertIn(f"site revoke mockup {LINK_ID}", self.commands[0])
-        # A 075-length id is no longer a valid target.
-        code, out, _ = self._run(revoke="l-000000000001")
-        self.assertEqual((code, json.loads(out)["code"]), (1, "site_link_unknown"))
+        # A short id (spec 081 Story 7, what this command mints now) reaches the gate too.
+        short = "l-" + hashlib.sha256(CANARY.encode()).hexdigest()[:12]
+        code, out, _ = self._run(revoke=short)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"site revoke mockup {short}", self.commands[0])
+        for bad in ("l-00000000001", "l-" + "0" * 13, "s-" + "0" * 12):
+            with self.subTest(target=bad):
+                code, out, _ = self._run(revoke=bad)
+                self.assertEqual((code, json.loads(out)["code"]), (1, "site_link_unknown"))
+                self.assertEqual(self.commands, [])
 
     def test_revoke_target_is_checked_before_the_remote(self):
         code, out, _ = self._run(revoke="x; rm -rf /")

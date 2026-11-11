@@ -31,7 +31,8 @@ from sandbox.hosting.share import MAX_STACK_HOSTS, SIGN_IN_SECONDS, ShareRefusal
 STACK_SCHEMA = "sandbox.share-stack.v1"
 KEY_FILE_PREFIX = "sandbox-share-"
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
-_KID = re.compile(r"[0-9a-f]{32}")
+# The link id without "l-": 12 hex, or 32 for an old-form link (LEGACY(081 short links)).
+_KID = re.compile(r"[0-9a-f]{12}|[0-9a-f]{32}")
 _KEY = re.compile(r"[0-9a-f]{64}")
 _URL_PATH = re.compile(r"/[A-Za-z0-9._~/-]*")
 

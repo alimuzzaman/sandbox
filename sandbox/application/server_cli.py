@@ -353,6 +353,10 @@ def _read_server_cli_context() -> ServerCLIContext:
             raise ServerCLIUnavailable('retained server CLI job deadline expired')
         owner = _current_owner()
         provenance = json.loads(row.get('execution_policy_provenance_json') or '{}')
+        if 'server_cli.absolute_deadline_at' in provenance:
+            from sandbox.application.server_cli_exec import remaining_deadline
+            remaining_deadline(provenance['server_cli.absolute_deadline_at'])
+            deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.absolute_deadline_at'].replace('Z', '+00:00')))
         if row.get('parent_job_id'):
             ancestor = repository.get(row['parent_job_id'])
             if ancestor.get('kind') != KIND or ancestor.get('lifecycle') not in {'running', 'succeeded'}:

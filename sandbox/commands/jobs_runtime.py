@@ -201,6 +201,7 @@ def configure_start_parser(parser) -> None:
     parser.add_argument('--server-cli-marker', help=argparse.SUPPRESS)
     parser.add_argument('--server-cli-origin', help=argparse.SUPPRESS)
     parser.add_argument('--server-cli-target-metadata', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-exec-selector', help=argparse.SUPPRESS)
     parser.add_argument('--parent-job-id', help=argparse.SUPPRESS)
     parser.add_argument("--materialization-source-root", help=argparse.SUPPRESS)
     target = parser.add_mutually_exclusive_group()
@@ -432,6 +433,18 @@ def _require_local_executable(command, project_root: str, cwd_relative: str,
     _die(f"{payload['code']}: {payload['error']}")
 
 def cmd_job_start(_cfg, args) -> None:
+    if getattr(args, 'server_cli_exec_selector', None) is not None:
+        from sandbox.application.server_cli_exec import receive_server_cli_exec
+        from sandbox.application.server_cli import ServerCLIUnavailable
+        from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
+        try:
+            accepted = receive_server_cli_exec(args, stdin_fd=__import__('sys').stdin.fileno())
+        except (ServerCLIUnavailable, AnonymousInputUnavailable):
+            _emit_json_line({'ok': False, 'code': 'server_cli_exec_unavailable',
+                'status': 'refused', 'error': 'fixed server exec could not be admitted; no job was accepted'})
+            raise SystemExit(1)
+        _emit_json_line(accepted)
+        return
     command = list(getattr(args, "command", ()) or ())
     if command[:1] == ["--"]:
         command = command[1:]

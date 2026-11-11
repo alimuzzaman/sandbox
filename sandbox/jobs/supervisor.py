@@ -122,6 +122,19 @@ def _inherited_server_cli_stdin(descriptor, current, *, fd=0):
     return stdin
 
 
+def _server_cli_deadline_remaining(descriptor, current):
+    value = descriptor.get('server_cli_deadline_at')
+    if value is None:
+        return None
+    if current.get('kind') != 'server-cli':
+        raise RuntimeError('absolute owner deadline requires the fixed CLI job')
+    proof = json.loads(current.get('execution_policy_provenance_json') or '{}')
+    if proof.get('server_cli.absolute_deadline_at') != value:
+        raise RuntimeError('retained original deadline changed')
+    from sandbox.application.server_cli_exec import remaining_deadline
+    return remaining_deadline(value)
+
+
 def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
@@ -159,6 +172,7 @@ def run_descriptor(path: str | Path) -> int:
                 raise RuntimeError('anonymous input is unavailable for managed project execution')
             return _run_managed_native(descriptor, repository, output)
         stdin = _inherited_server_cli_stdin(descriptor, current)
+        original_remaining = _server_cli_deadline_remaining(descriptor, current)
         with _child_identity_context(descriptor.get("authoritative_context"), descriptor.get('environment')) as environment:
             command = subprocess.Popen(
                 descriptor["argv"], cwd=descriptor["cwd"],
@@ -190,6 +204,8 @@ def run_descriptor(path: str | Path) -> int:
         selector.register(command.stdout, selectors.EVENT_READ, "stdout")
         selector.register(command.stderr, selectors.EVENT_READ, "stderr")
         deadline = time.monotonic() + int(descriptor["deadline_seconds"])
+        if original_remaining is not None:
+            deadline = min(deadline, time.monotonic() + _server_cli_deadline_remaining(descriptor, current))
         next_metric = time.monotonic()
         timed_out = False
         stall_cancelled = False

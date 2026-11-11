@@ -34,6 +34,17 @@ def _emit_json_line(payload: dict) -> None:
     print(encoded, flush=True)
 
 
+def _server_cli_ancestor_refusal(args, reason='parent_cancelled_or_unavailable'):
+    message = ('the original server CLI ancestor no longer permits new admission; '
+               'this attempt will not launch a new child. Retain the request and inspect the ledger for any earlier receipt')
+    if getattr(args, 'json', False):
+        _emit_json_line({'ok': False, 'status': 'refused', 'code': 'server_cli_ancestor_refused',
+            'reason': reason, 'request_id': getattr(args, 'request_id', None),
+            'acceptance': 'not_started_by_this_attempt', 'receipt_lookup_required': True, 'error': message})
+        raise SystemExit(1)
+    _die('server_cli_ancestor_refused: ' + message)
+
+
 def _remote_job_transport_failure(exc, args, operation: str) -> None:
     """Render one bounded remote-job error instead of a traceback.
 
@@ -493,10 +504,14 @@ def cmd_job_start(_cfg, args) -> None:
         expected['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
         if parent_job_id:
             from sandbox.application.server_cli import validate_nested_parent
-            expected['server_cli.parent_deadline_at'] = validate_nested_parent(parent_job_id,
-                target_identity=cap['target_identity'], marker=cap['ownership_marker'],
-                revision=cap['runtime_revision'], origin_remote_name=origin_remote_name,
-                timeout_seconds=policy.deadline_seconds)
+            from sandbox.application.server_cli import ServerCLIUnavailable
+            try:
+                expected['server_cli.parent_deadline_at'] = validate_nested_parent(parent_job_id,
+                    target_identity=cap['target_identity'], marker=cap['ownership_marker'],
+                    revision=cap['runtime_revision'], origin_remote_name=origin_remote_name,
+                    timeout_seconds=policy.deadline_seconds)
+            except ServerCLIUnavailable:
+                _server_cli_ancestor_refusal(args)
         from dataclasses import replace
         policy = replace(policy, provenance=expected)
     source = SourceIdentity(
@@ -539,8 +554,11 @@ def cmd_job_start(_cfg, args) -> None:
                                   getattr(args, "cwd_relative", ".") or ".",
                                   as_json=bool(getattr(args, "json", False)))
         from sandbox.workspaces.repository import WorkspaceIndexError
+        from sandbox.jobs.server_cli_lineage import ServerCliLineageError
         try:
             accepted = dependencies["job_service"].submit(submission)
+        except ServerCliLineageError as exc:
+            _server_cli_ancestor_refusal(args, exc.reason)
         except WorkspaceIndexError as exc:
             # A workspace ownership refusal is a typed outcome, not a crash:
             # over SSH a traceback becomes an unreadable transport error.

@@ -41,6 +41,7 @@ class CaptureArtifactsTests(unittest.TestCase):
         self.proof = {'server_cli.target_identity': owner.target_identity,
             'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
             'server_cli.remote_name': 'box', 'server_cli.exec_service': 'wordpress', 'server_cli.exec_target': 'fixture/dev',
+            'server_cli.target_metadata': '{"front_door":"nginx"}',
             'server_cli.target_selector_digest': 'sha256:' + 'd' * 64, 'server_cli.output_contract': capture.OUTPUT_CONTRACT,
             'server_cli.absolute_deadline_at': self.deadline,
             'server_cli.target_snapshot': json.dumps({'schema_version': 1, 'origin_remote_name': 'box',
@@ -69,6 +70,7 @@ class CaptureArtifactsTests(unittest.TestCase):
             'source': {'identity': source_identity, 'commit': '1' * 40},
             'execution_policy': {'provenance': self.proof}}
         self.real_open_existing = JobStorage.open_existing
+        self.real_current_context = server_cli.current_server_cli_context
         for patch in (mock.patch.object(_paths, 'RUNTIME_DIR', self.runtime),
                 mock.patch.object(server_cli, 'current_server_cli_context', return_value=self.context),
                 mock.patch.object(JobStorage, 'open_existing', return_value=self.storage)):
@@ -268,6 +270,26 @@ class CaptureArtifactsTests(unittest.TestCase):
         self.assertEqual(len(self.service.list_artifacts(self.job_id)), 3)
         with self.assertRaises(capture.CaptureUnavailable):
             self.publish(b'different')
+
+    def test_real_current_context_reader_can_publish_without_a_second_writer_under_its_own_lock(self):
+        self.repository.put_process_identity(self.job_id, host_boot_id='fixture-boot',
+            supervisor_pid=1001, supervisor_start_identity='supervisor-start',
+            supervisor_nonce_hash='a' * 64, child_pid=1000, child_pgid=1000,
+            child_start_identity='child-start')
+        from types import SimpleNamespace
+        def identity(pid):
+            return SimpleNamespace(host_boot_id='fixture-boot',
+                start_identity='child-start' if pid == 1000 else 'supervisor-start')
+        with mock.patch.object(server_cli, 'current_server_cli_context', self.real_current_context), \
+                mock.patch.object(server_cli.os, 'environ', {'SANDBOX_DURABLE_JOB_ID': self.job_id}), \
+                mock.patch.object(server_cli.os, 'getpid', return_value=1000), \
+                mock.patch.object(server_cli.os, 'getppid', return_value=1001), \
+                mock.patch.object(server_cli, '_current_owner', return_value=self.context.owner), \
+                mock.patch.object(server_cli, 'installed_cli', return_value=Path(self.context.owner.executable)), \
+                mock.patch('sandbox.jobs.process.capture_process_identity', side_effect=identity):
+            envelope = self.publish(b'exact bytes')
+        self.assertEqual(envelope['capture']['contract'], capture.CONTRACT)
+        self.assertEqual(len(self.service.list_artifacts(self.job_id)), 3)
 
     def test_same_anchor_lookup_rejects_replaced_directory(self):
         custody = capture.prepare_server_cli_capture()

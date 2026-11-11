@@ -369,13 +369,13 @@ def _read_server_cli_context() -> ServerCLIContext:
             from sandbox.application.server_cli_exec import remaining_deadline
             remaining_deadline(provenance['server_cli.absolute_deadline_at'])
             deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.absolute_deadline_at'].replace('Z', '+00:00')))
-        if row.get('parent_job_id'):
-            ancestor = repository.get(row['parent_job_id'])
-            if ancestor.get('kind') != KIND or ancestor.get('lifecycle') not in {'running', 'succeeded'}:
-                raise ServerCLIUnavailable('original parent job no longer permits execution')
-            deadline = min(deadline, datetime.fromisoformat(provenance['server_cli.parent_deadline_at']))
-            if datetime.now(timezone.utc) >= deadline:
-                raise ServerCLIUnavailable('original parent job deadline expired')
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        try:
+            inherited = check_server_cli_lineage(repository.server_cli_ancestry(job_id))
+        except ServerCliLineageError:
+            raise ServerCLIUnavailable('original ancestor cancellation or deadline refuses execution') from None
+        if inherited is not None:
+            deadline = min(deadline, inherited)
         origin_remote_name = provenance.get('server_cli.remote_name')
         target_metadata = validate_target_metadata(json.loads(provenance.get('server_cli.target_metadata', '{}')))
         if (provenance.get('server_cli.target_identity') != owner.target_identity
@@ -455,6 +455,11 @@ def validate_nested_parent(parent_job_id: str, *, target_identity: str,
     repository = JobRepository(Path(RUNTIME_DIR) / 'jobs/registry.sqlite3')
     try:
         row = repository.snapshot(parent_job_id)
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        try:
+            inherited = check_server_cli_lineage(repository.server_cli_ancestry(parent_job_id))
+        except ServerCliLineageError:
+            raise ServerCLIUnavailable('original ancestor cancellation or deadline refuses nested admission') from None
     finally:
         repository.close()
     process = row.get('process') or {}
@@ -482,6 +487,8 @@ def validate_nested_parent(parent_job_id: str, *, target_identity: str,
     deadline = datetime.fromisoformat(row['started_at'].replace('Z', '+00:00')) + timedelta(seconds=row['deadline_seconds'])
     if proof.get('server_cli.parent_deadline_at'):
         deadline = min(deadline, datetime.fromisoformat(proof['server_cli.parent_deadline_at']))
+    if inherited is not None:
+        deadline = min(deadline, inherited)
     remaining = math.floor((deadline - datetime.now(timezone.utc)).total_seconds())
     if remaining <= 0:
         raise ServerCLIUnavailable('nested CLI exceeds original remaining deadline')

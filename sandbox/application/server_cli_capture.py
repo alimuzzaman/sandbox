@@ -120,14 +120,18 @@ class CaptureCustody:
     def __exit__(self, *args):
         self.close()
 
-    def _current(self):
+    def _current(self, *, verify_process=True):
         from sandbox.application.server_cli import current_server_cli_context
         if type(self) is not CaptureCustody or self._seal is not _ISSUER or self._closed:
             raise CaptureUnavailable('byte custody is unavailable')
-        if current_server_cli_context() != self._context:
+        if verify_process and current_server_cli_context() != self._context:
             raise CaptureUnavailable('original capture process or installed owner changed')
+        if datetime.now(timezone.utc) >= datetime.fromisoformat(self._context.deadline_at):
+            raise CaptureUnavailable('original capture deadline expired')
         if _binding(self._context, self._repository.get(self._context.job_id)) != self._binding:
             raise CaptureUnavailable('original capture binding changed or was cancelled')
+        from sandbox.jobs.server_cli_lineage import check_server_cli_lineage
+        check_server_cli_lineage(self._repository.server_cli_ancestry(self._context.job_id))
         held = os.fstat(self._directory)
         descriptors = []
         try:
@@ -208,7 +212,12 @@ class CaptureCustody:
             # Existing job cleanup owns later collection; execution is never replayed.
             publishing = True
             with self._repository.transaction(immediate=True):
-                self._current()
+                # Kernel/unit proof was just checked before this transaction.
+                # Re-read the original row and ancestor fence on THIS locked
+                # connection; opening a second migrating repository here would
+                # contend with our own writer lock. Full proof is checked again
+                # after commit before any metadata is acknowledged.
+                self._current(verify_process=False)
                 for name, data in payloads.items():
                     identifier = artifact_id(self._context.job_id, name)
                     self._repository.add_artifact(self._context.job_id, artifact_id=identifier,

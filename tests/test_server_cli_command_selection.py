@@ -79,3 +79,48 @@ class StrictForwardingTests(unittest.TestCase):
         values = ['host', 'exec', '--', 'echo', '--strict-runtime']
         self.assertEqual(cli._forwarded_cli_argv(values, strict=False), tuple(values))
         self.assertEqual(cli._forwarded_cli_argv(values, strict=True), ('--strict-runtime', *values))
+
+
+class InstalledInputSelectionTests(unittest.TestCase):
+    def setUp(self):
+        # Build the actual installed parser, stopping before its first parse or
+        # any configuration, update, credential lookup or command dispatch.
+        previous = command_selection.bind_cli_command_parser(argparse.ArgumentParser(), lambda x: x)
+        self.addCleanup(command_selection.reset_cli_command_parser, previous)
+        class ParserCaptured(Exception):
+            pass
+        def capture(parser, *args, **kwargs):
+            self.parser = parser
+            raise ParserCaptured()
+        with mock.patch.object(argparse.ArgumentParser, 'parse_args', capture), \
+             mock.patch.object(cli.sys, 'argv', ['sb']), \
+             self.assertRaises(ParserCaptured):
+            cli.main()
+
+    def test_installed_stdin_spellings_refuse_before_lookup_or_acceptance(self):
+        commands = []
+        for flag in ('--stdin', '--std', '--stdi'):
+            commands.extend([
+                ('secrets', 'credential-set', '--source', 'personal', '--create-only', flag),
+                ('secrets', 'set', '--source', 'personal', 'FIXTURE_KEY', flag),
+                ('secrets', 'ownership', 'credential-set', '--profile', 'fixture',
+                 '--capability', 'read', '--create-only', flag),
+            ])
+        for flag in ('--token-stdin', '--token-st', '--passphrase-stdin', '--passphrase-st'):
+            commands.append(('hermes', 'drive', 'backup', '--remote', 'fixture', flag))
+        for values in commands:
+            with self.subTest(values=values), \
+                 mock.patch('sandbox.core._remote.get_remote') as lookup, \
+                 mock.patch('sandbox.resources.context.authenticated_target_identity') as identity, \
+                 mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.control') as control, \
+                 mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.submit') as submit:
+                with self.assertRaises(server_cli.ServerCLIStdinUnavailable):
+                    server_cli.dispatch_server_cli('fixture', values, project_dir='.',
+                                                   request_id='stdin-selection-fixture')
+                for operation in (lookup, identity, control, submit):
+                    operation.assert_not_called()
+
+    def test_option_value_matching_stdin_spelling_is_not_an_input_mode(self):
+        values = ('secrets', 'source-info', '--source=--std')
+        with mock.patch.object(server_cli, 'installed_cli', return_value=Path('/fixed/sb')):
+            self.assertEqual(server_cli.fixed_argv(values), ('/fixed/sb', *values))

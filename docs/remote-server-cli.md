@@ -106,7 +106,10 @@ hostname, or overwrites explicit routing metadata. Ambiguous or private-only
 interfaces leave origin evidence unavailable.
 
 Version1 retained jobs have no interactive stdin handoff. `host exec` and explicit
-stdin/interactive options refuse before lookup or acceptance; normal synchronous
+stdin/interactive options refuse before lookup or acceptance. These decisions
+use the installed parser's resolved input modes, including legal abbreviations
+and Hermes token/passphrase stdin, rather than matching original option text.
+Embeddings without that parser refuse ambiguous input-option prefixes. Normal synchronous
 CLI contracts remain unchanged. A local host-exec adapter may retain the original
 stdin FD with the validated local argv/environment ports, but that alone is not
 proof of an end-to-end remote stdin transport.

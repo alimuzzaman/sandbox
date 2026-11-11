@@ -203,13 +203,15 @@ def _command_argv(argv) -> tuple[str, ...]:
         raise ServerCLIUnavailable('server CLI expects command argv without an executable')
     # Secret values and free-form secret-printing shells are not a job contract.
     # Provider-specific normal commands consume the server store themselves.
-    from sandbox.application.command_selection import selected_command, CommandSelectionUnavailable
+    from sandbox.application.command_selection import selected_invocation, CommandSelectionUnavailable
     from sandbox.services.redaction import require_safe_argv
     require_safe_argv(values)
     try:
-        selected = selected_command(values)
+        selection = selected_invocation(values)
     except CommandSelectionUnavailable:
         raise ServerCLIUnavailable('retained command does not match the installed CLI grammar') from None
+    selected = selection.command if selection is not None else None
+    input_flags = ('--stdin', '--token-stdin', '--passphrase-stdin', '--interactive')
     if selected is None:
         # Non-CLI embeddings have no canonical parser. Preserve safe legacy
         # prefixes, but ambiguous sensitive syntax cannot grant execution.
@@ -217,10 +219,16 @@ def _command_argv(argv) -> tuple[str, ...]:
         if (selected[:1] in {('secrets',), ('host',)} and len(selected) > 1
                 and selected[1].startswith('-')):
             raise ServerCLIUnavailable('canonical installed CLI selection is unavailable')
+        # Embeddings without the installed parser cannot disambiguate option
+        # prefixes. Refuse possible input-mode spellings rather than supply EOF.
+        stdin_requested = any(value.startswith('--') and value != '--'
+                              and any(flag.startswith(value.split('=', 1)[0]) for flag in input_flags)
+                              for value in values)
+    else:
+        stdin_requested = selection.stdin_requested
     if selected[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
         raise ServerCLIUnavailable('secret value output is unavailable through server CLI jobs')
-    if (selected[:2] == ('host', 'exec')
-            or any(flag in values for flag in ('--stdin', '--token-stdin', '--interactive'))):
+    if selected[:2] == ('host', 'exec') or stdin_requested:
         raise ServerCLIStdinUnavailable('retained server CLI stdin transport is unavailable; no job was accepted')
     return values
 

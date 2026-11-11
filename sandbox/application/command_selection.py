@@ -2,10 +2,17 @@
 import argparse
 import copy
 from contextvars import ContextVar
+from dataclasses import dataclass
 
 
 class CommandSelectionUnavailable(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class ParsedCommandSelection:
+    command: tuple[str | None, str | None]
+    stdin_requested: bool
 
 
 _SELECTOR = ContextVar('sandbox_cli_command_selector', default=None)
@@ -22,6 +29,11 @@ def reset_cli_command_parser(token):
 
 
 def selected_command(argv):
+    selection = selected_invocation(argv)
+    return selection.command if selection is not None else None
+
+
+def selected_invocation(argv):
     selected = _SELECTOR.get()
     if selected is None:
         return None
@@ -45,4 +57,11 @@ def selected_command(argv):
         args = parser.parse_args(normalize(list(argv)))
     except (argparse.ArgumentError, SystemExit):
         raise CommandSelectionUnavailable('retained CLI command does not match the installed grammar') from None
-    return (getattr(args, 'cmd', None), getattr(args, 'action', None))
+    # Use the installed parser's resolved destinations. Argparse accepts legal
+    # abbreviations, so the original token spelling is not an input-mode fact.
+    stdin_requested = any(value is True and (name == 'stdin' or name.endswith('_stdin')
+                                             or name == 'interactive')
+                          for name, value in vars(args).items())
+    stdin_requested = stdin_requested or getattr(args, 'file', None) == '-'
+    return ParsedCommandSelection(
+        (getattr(args, 'cmd', None), getattr(args, 'action', None)), stdin_requested)

@@ -374,6 +374,42 @@ class HostApplyLeaseTests(unittest.TestCase):
             self.assertIn(owner, command)
             self.assertEqual(hosting_cmd._controller_lease_owner(), owner)
 
+    def test_edge_recovery_takes_the_lease_inside_its_authority_guard(self):
+        """Inside recovery's target serialization and before any effect is recorded."""
+        from contextlib import nullcontext
+        entry = {"provisioned": True, "ssh": "fixture@example.test"}
+        operation = {"evidence": {"host_identity": "H", "machine_identity": "M",
+                                  "edge_intent": {"i": 1}, "edge_intent_digest": "D"}}
+        validated = {"project": "example-site", "environment": "production"}
+        with patch.object(hosting_cmd.remote, "registered_remote_lock", return_value=nullcontext()), \
+                patch.object(hosting_cmd.remote, "registration_lock_name", return_value="x"), \
+                patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
+                patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv"), \
+                patch.object(hosting_cmd, "_registered_host_identity", return_value="H"), \
+                patch.object(hosting_cmd, "_authenticated_machine_identity", return_value="M"), \
+                patch.object(hosting_cmd, "validate_edge_intent", return_value={"i": 1}), \
+                patch.object(hosting_cmd, "_desired_edge_intent", return_value={"i": 1}), \
+                patch.object(hosting_cmd, "canonical_digest", return_value="D"):
+            with patch.object(hosting_cmd, "_acquire_host_apply_lease",
+                              side_effect=hosting.HostingError("host_apply_lease_held: x")), \
+                    patch.object(hosting_cmd, "_release_host_apply_lease") as release:
+                with self.assertRaises(hosting_cmd.RecoveryAuthorityError):
+                    with hosting_cmd._registered_recovery_authority(validated, "myvps", operation, {}, lease=True):
+                        self.fail("no edge effect under another controller's lease")
+                release.assert_not_called()
+            with patch.object(hosting_cmd, "_acquire_host_apply_lease", return_value={"t": 1}) as take, \
+                    patch.object(hosting_cmd, "_release_host_apply_lease") as release:
+                authority = {}
+                with hosting_cmd._registered_recovery_authority(validated, "myvps", operation, authority, lease=True):
+                    take.assert_called_once_with(entry, validated)
+                    release.assert_not_called()
+                    self.assertIs(authority["entry"], entry)
+                release.assert_called_once_with(entry, {"t": 1})
+            with patch.object(hosting_cmd, "_acquire_host_apply_lease") as take:
+                with hosting_cmd._registered_recovery_authority(validated, "myvps", operation, {}):
+                    pass
+                take.assert_not_called()
+
     def test_destroy_holds_the_same_lease(self):
         from sandbox.hosting import destroy
         held = subprocess.CompletedProcess([], 45, "", "")

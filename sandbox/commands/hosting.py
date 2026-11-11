@@ -2626,8 +2626,13 @@ def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = F
 
 @contextmanager
 def _registered_recovery_authority(validated: dict, remote_name: str, operation: dict,
-                                   authority: dict):
-    """Hold supported registration stable from validation through commit."""
+                                   authority: dict, *, lease: bool = False):
+    """Hold supported registration stable from validation through commit.
+
+    With ``lease`` (edge continuation), also hold the remote target lease (spec 081
+    rollout). It is taken here, inside recovery's target serialization and before any
+    effect is recorded, so another controller's lease is a refusal with no effect.
+    """
     with remote.registered_remote_lock(remote.registration_lock_name(remote_name)):
         current = remote.get_remote(remote_name)
         if not isinstance(current, dict) or not current.get("provisioned"):
@@ -2652,6 +2657,12 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
                 expected.get("edge_intent_digest") or
                 current_edge_intent != expected_edge_intent):
             raise RecoveryAuthorityError("registered edge intent changed")
+        held = None
+        if lease:
+            try:
+                held = _acquire_host_apply_lease(current, validated)
+            except hosting.HostingError as exc:
+                raise RecoveryAuthorityError(str(exc)) from None
         authority["entry"] = current
         authority["machine_identity"] = machine_identity
         authority["edge_intent"] = current_edge_intent
@@ -2659,6 +2670,7 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
             yield
         finally:
             authority.clear()
+            _release_host_apply_lease(current, held)
 
 
 def _nonsecret_host_intent(validated: dict) -> str:
@@ -3679,37 +3691,23 @@ def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> N
     authority = {}
 
     recovery_repository = RecoveryRepository()
-    # Spec 081 rollout: take the target lease before recovery records any effect, so
-    # another controller's lease is a plain refusal, not an uncertain edge effect.
-    held_lease = None
-    lease_entry = None
-    if action == RecoveryAction.CONTINUE_EDGE:
-        try:
-            lease_entry = remote.get_remote(remote_name)
-        except Exception:
-            lease_entry = None
-        if lease_entry:
-            held_lease = _acquire_host_apply_lease(lease_entry, validated)
-    edge_continuation = (_continue_host_edge_only_unleased if held_lease is not None
-                         else _continue_host_edge_only)
     service = RecoveryService(
         repository=recovery_repository, job_lookup=_recovery_job_lookup,
         source_check=lambda operation: _recovery_source_check(validated, operation),
         observer=lambda recovery_request, operation: _recovery_observer(
             validated, authority["entry"], remote_name, recovery_request, operation,
             authority["machine_identity"], authority["edge_intent"]),
-        edge_adapter=lambda recovery_request, operation: edge_continuation(
+        # The authority guard holds the target lease for edge continuation.
+        edge_adapter=lambda recovery_request, operation: _continue_host_edge_only_unleased(
             validated, authority["entry"], remote_name, recovery_request, operation),
         governance_check=lambda _request: _recovery_governance_authorized(
             validated, remote_name),
         broker_guard=lambda _request: personal_secrets.hosting_binding_broker_lock(),
         authority_guard=lambda _request, operation: _registered_recovery_authority(
-            validated, remote_name, operation, authority),
+            validated, remote_name, operation, authority,
+            lease=_request.action is RecoveryAction.CONTINUE_EDGE),
     )
-    try:
-        result = service.recover(request)
-    finally:
-        _release_host_apply_lease(lease_entry, held_lease)
+    result = service.recover(request)
     try:
         from sandbox.delivery.hosting import capture_recovery_result
         result = dict(result, recovery_delivery=capture_recovery_result(

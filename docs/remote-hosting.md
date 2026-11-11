@@ -2427,13 +2427,24 @@ install, not backed up or losslessly recoverable.
 
 ### `host_apply_lease_held`
 
-Every `sb host apply` and edge-only recovery holds one lease per target on the remote,
-`$SANDBOX_HOME/.sandbox/host-apply-<project>-<environment>.lease`, for the whole apply,
-so applies of the same target from two controllers cannot interleave route changes. A
-lease left by this controller (an apply that crashed) is taken over by its next apply.
-Another controller's lease refuses the apply until that apply finishes or the lease
-expires (4 hours). The lease file holds a random token, a random controller id
-(`$SANDBOX_HOME/runtime/hosting/controller-id`) and the expiry; nothing secret.
+Every `sb host apply`, edge-only recovery, `sb host destroy` and `sb host stack down`
+holds one lease per target on the remote,
+`$SANDBOX_HOME/.sandbox/host-apply-<project>-<environment>.lease`, for the whole
+operation, so two controllers cannot interleave changes to one target's route and
+runtime. The lease file holds a random token, a random controller id
+(`$SANDBOX_HOME/runtime/hosting/controller-id` on the controller) and the time it was
+taken; nothing secret.
+
+The lease never expires: an owner that outlived an expiry and kept writing would be
+the interleaving the lease is there to stop. The controller that holds it releases it,
+or takes it over on its next operation (an apply that crashed). When another controller
+holds it, finish or re-run the operation from that controller. If that controller is
+gone, first check on the remote that nothing of it still runs (no `sb` process for the
+target), then remove the lease file there by hand.
+
+The on-host stack reaper (spec 077) does not take the lease; it only removes targets
+whose lifetime record has expired. Controllers older than this lease do not take it
+either, so update every controller that applies a private target.
 
 ### `binding_mismatch` after a remote's connection changed
 

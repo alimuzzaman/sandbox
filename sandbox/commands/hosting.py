@@ -1351,10 +1351,13 @@ class _NginxHostEdge:
         """
         route = self.route_name(name)
         paths = self.nginx.existing_certificate(self.entry, route)
-        if paths is None and current is not None and re.search(r"^\s*listen\s+(\[::\]:)?443\b", current, re.M):
+        # Conservative: any sign of TLS in an existing route (any listen form, a
+        # certificate anywhere, QUIC or HTTP/2) counts as HTTPS to keep closed.
+        if paths is None and current is not None and re.search(
+                r"443|\bssl\b|ssl_certificate|\bquic\b|\bhttp2\b", current):
             raise hosting.HostingError(
-                "private_closure_https_unavailable: the current route serves HTTPS but its "
-                "certificate is gone, so a deny route cannot keep HTTPS closed")
+                "private_closure_https_unavailable: the current route may serve HTTPS and "
+                "this route has no certificate, so a deny route cannot keep HTTPS closed")
         cert_path, key_path = paths if paths else (None, None)
         return self.nginx.render_host_conf(
             {**validated, "route_deny": True}, runtime["loopback_port"], name=route,
@@ -4988,84 +4991,30 @@ def _local_image_apply_lease(validated: dict, remote_name: str,
         yield lease
 
 
-# Spec 081 rollout: one remote lease per target, held for a whole apply (closure,
-# source, runtime, route, rollback) so a second controller cannot interleave a route
-# change. The controller's own state lock already serializes its own applies, so a
-# lease left by this controller (a crashed apply) is taken over; another's waits out
-# its expiry.
-_HOST_APPLY_LEASE_TTL_SECONDS = 4 * 3600
-_HOST_APPLY_LEASE_SCRIPT = r"""set -eu
-f=$1; token=$2; owner=$3; ttl=$4; action=$5
-mkdir -p "$(dirname "$f")"
-exec 9>"$f.lock"
-flock -w 30 9 || exit 46
-now=$(date +%s)
-t=; o=; exp=0
-if [ -f "$f" ]; then read -r t o exp < "$f" || true; fi
-case "$exp" in ''|*[!0-9]*) exp=0 ;; esac
-case "$action" in
-acquire)
-  if [ -n "$t" ] && [ "$o" != "$owner" ] && [ "$exp" -ge "$now" ]; then echo "$exp"; exit 45; fi
-  umask 077
-  printf '%s %s %s\n' "$token" "$owner" "$((now + ttl))" > "$f.new"
-  mv -f "$f.new" "$f" ;;
-release)
-  if [ "$t" = "$token" ]; then rm -f "$f"; fi ;;
-*) exit 2 ;;
-esac
-"""
-
-
 def _controller_lease_owner() -> str:
-    """A stable random id for this controller (never a secret, never a hostname)."""
-    path = Path(RUNTIME_DIR) / "hosting" / "controller-id"
-    try:
-        value = path.read_text().strip()
-        if re.fullmatch(r"[0-9a-f]{32}", value):
-            return value
-    except FileNotFoundError:
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    value = secrets.token_hex(16)
-    temporary = path.with_name(f".controller-id.{value}")
-    temporary.write_text(value + "\n")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    return value
-
-
-def _host_apply_lease_command(path: str, token: str, owner: str, action: str) -> str:
-    return (f"sh -c {shlex.quote(_HOST_APPLY_LEASE_SCRIPT)} sandbox-lease {shlex.quote(path)} "
-            f"{token} {owner} {_HOST_APPLY_LEASE_TTL_SECONDS} {action}")
+    from sandbox.hosting import target_lease
+    return target_lease.controller_owner(RUNTIME_DIR)
 
 
 def _acquire_host_apply_lease(entry: dict, validated: dict) -> dict | None:
+    """Spec 081 rollout: the remote target lease (sandbox/hosting/target_lease.py)."""
+    from sandbox.hosting import target_lease
     if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
         return None
-    home = remote.resolve_sandbox_home(entry)
-    lease = {"path": f"{home}/.sandbox/host-apply-{validated['project']}-{validated['environment']}.lease",
-             "token": secrets.token_hex(16), "owner": _controller_lease_owner()}
-    result = remote.ssh_run(entry, _host_apply_lease_command(
-        lease["path"], lease["token"], lease["owner"], "acquire"), timeout=60)
-    if result.returncode == 45:
-        until = (result.stdout or "").strip()
-        raise hosting.HostingError(
-            "host_apply_lease_held: another controller is applying this target"
-            + (f" (lease expires at unix time {until})" if until.isdigit() else ""))
-    if result.returncode != 0:
-        raise hosting.HostingError(
-            f"host_apply_lease_unavailable: the target lease could not be taken (exit {result.returncode})")
-    return lease
+    path = target_lease.lease_path(remote.resolve_sandbox_home(entry),
+                                   validated["project"], validated["environment"])
+    try:
+        return target_lease.acquire(lambda command: remote.ssh_run(entry, command, timeout=60),
+                                    path, _controller_lease_owner())
+    except target_lease.LeaseHeld as exc:
+        raise hosting.HostingError(f"host_apply_lease_held: {exc}; see docs/remote-hosting.md") from None
+    except target_lease.LeaseUnavailable as exc:
+        raise hosting.HostingError(f"host_apply_lease_unavailable: {exc}") from None
 
 
 def _release_host_apply_lease(entry: dict, lease: dict | None) -> None:
-    if lease is None:
-        return
-    try:
-        remote.ssh_run(entry, _host_apply_lease_command(
-            lease["path"], lease["token"], lease["owner"], "release"), timeout=60)
-    except Exception:
-        pass  # The lease expires on its own; a failed release never fails the apply.
+    from sandbox.hosting import target_lease
+    target_lease.release(lambda command: remote.ssh_run(entry, command, timeout=60), lease)
 
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *args, **kwargs) -> dict:
@@ -5189,6 +5138,10 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     # updates the working tree), a private target's names are DNS-only and answer 404
     # behind a confirmed deny route.
     _refuse_proxied_records_for_private(client, validated, runtime)
+    from sandbox.hosting import login_service as _login
+    if _login.is_private(validated.get("login_service")):
+        # The closure changes the front door: record that before it runs.
+        attempt.checkpoint('source', 'edge_apply')
     private_closure = _close_route_for_private_apply(
         edge, caddy_name, validated=validated, runtime=runtime)
     attempt.checkpoint('source', 'source_publish')

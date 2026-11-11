@@ -416,6 +416,27 @@ def _kept_shared_row(item: dict) -> dict:
     return {"zone_id": item["zone_id"], "state": "kept_shared", "record_id": record_id}
 
 
+@contextlib.contextmanager
+def _target_lease(entry: dict, project: str, environment: str):
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.hosting import target_lease
+    if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
+        yield None
+        return
+    run = lambda command: remote.ssh_run(entry, command, timeout=60)  # noqa: E731
+    path = target_lease.lease_path(remote.resolve_sandbox_home(entry), project, environment)
+    try:
+        lease = target_lease.acquire(run, path, target_lease.controller_owner(RUNTIME_DIR))
+    except target_lease.LeaseHeld as exc:
+        raise DestroyError(f"{exc}; see docs/remote-hosting.md", "host_apply_lease_held") from None
+    except target_lease.LeaseUnavailable as exc:
+        raise DestroyError(str(exc), "host_apply_lease_unavailable") from None
+    try:
+        yield lease
+    finally:
+        target_lease.release(run, lease)
+
+
 def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             clear_fenced: bool = False, client_factory=None,
             lock_wait: float = 600) -> dict:
@@ -432,6 +453,9 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
         for owned_key in namesakes(remote_name, project, environment):
             owned.enter_context(repository.target_mutation_port(
                 "destroy", timeout_seconds=lock_wait).target_mutation_transaction(owned_key))
+        # Spec 081 rollout: the same remote target lease every apply holds, so another
+        # controller cannot destroy a target in the middle of its private apply.
+        owned.enter_context(_target_lease(entry, project, environment))
         with repository.state_lock(timeout_seconds=lock_wait):
             state = hosting.load_host_state()
         found = plan(state, entry, remote_name, project, environment)

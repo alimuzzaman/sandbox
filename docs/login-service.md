@@ -246,9 +246,12 @@ the route marker that apply checks.
 - Limits: on nginx, the deny route covers HTTPS only once the target's public
   certificate exists; on the very first apply HTTPS for those names is whatever the
   server answered before. Image activation checks privacy without the route tag.
-  Controllers older than this fix do not take the target lease (see
-  [remote hosting](remote-hosting.md)); update every controller that applies a private
-  target.
+  Applies and destroys of one target hold a remote lease (see `host_apply_lease_held` in
+  [remote hosting](remote-hosting.md)); controllers older than this fix and the on-host
+  stack reaper do not take it.
+- A destroy removes the route before it stops the containers. If the teardown then fails,
+  the names are unrouted while the runtime still runs: only a server-wide catch-all that
+  proxies to the target's own loopback port could reach it.
 - With an `autologin.login_service` block, `share` carries only `hostname`, `private`,
   `agent_mint` and `stack_sign_in`, and uses that block's fields. `share` is then a
   reserved entry name.

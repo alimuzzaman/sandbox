@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import sandbox.commands.hosting as hosting_cmd  # noqa: E402
 import sandbox.core._hosting as hosting  # noqa: E402
+from sandbox.hosting import target_lease  # noqa: E402
 from sandbox.hosting.front_door import nginx  # noqa: E402
 from tests.test_hosting import _HostingOwnerFixture, _manifest, _public_acme_manifest  # noqa: E402
 
@@ -305,16 +306,16 @@ class FrontDoorClosureCommandTests(unittest.TestCase):
 
 
 class HostApplyLeaseTests(unittest.TestCase):
-    """One remote lease per target across a whole apply, so controllers cannot interleave."""
+    """One remote lease per target across a whole operation, so controllers cannot interleave."""
 
     def run_script(self, path, token, owner, action):
-        command = hosting_cmd._host_apply_lease_command(path, token, owner, action)
+        command = target_lease.command(path, token, owner, action)
         return subprocess.run(["sh", "-c", command], capture_output=True, text=True, check=False).returncode
 
     @unittest.skipUnless(shutil.which("flock"), "flock(1) is Linux util-linux; remotes have it")
     def test_the_lease_script(self):
         with tempfile.TemporaryDirectory() as home:
-            path = f"{home}/.sandbox/host-apply-example-site-production.lease"
+            path = target_lease.lease_path(home, "example-site", "production")
             mine, other = "1" * 32, "2" * 32
             self.assertEqual(self.run_script(path, "a" * 32, mine, "acquire"), 0)
             self.assertEqual(self.run_script(path, "b" * 32, other, "acquire"), 45)
@@ -326,13 +327,13 @@ class HostApplyLeaseTests(unittest.TestCase):
             self.assertEqual(self.run_script(path, "c" * 32, mine, "release"), 0)
             self.assertEqual(self.run_script(path, "b" * 32, other, "acquire"), 0)
             with open(path) as handle:
-                token, owner, expires = handle.read().split()
+                token, owner, _since = handle.read().split()
             self.assertEqual((token, owner), ("b" * 32, other))
             self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
-            # An expired lease of another controller is taken.
+            # It never expires: an old lease of another controller still refuses.
             with open(path, "w") as handle:
                 handle.write(f"{'b' * 32} {other} 1\n")
-            self.assertEqual(self.run_script(path, "d" * 32, mine, "acquire"), 0)
+            self.assertEqual(self.run_script(path, "d" * 32, mine, "acquire"), 45)
 
     def test_every_apply_and_edge_continuation_holds_the_lease(self):
         entry = {"ssh": "fixture@example.test"}
@@ -373,6 +374,34 @@ class HostApplyLeaseTests(unittest.TestCase):
             self.assertIn(owner, command)
             self.assertEqual(hosting_cmd._controller_lease_owner(), owner)
 
+    def test_destroy_holds_the_same_lease(self):
+        from sandbox.hosting import destroy
+        held = subprocess.CompletedProcess([], 45, "", "")
+        with tempfile.TemporaryDirectory() as runtime, \
+                patch("sandbox.core._paths.RUNTIME_DIR", Path(runtime)), \
+                patch.object(destroy.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+                patch.object(destroy.remote, "ssh_run", return_value=held) as ssh:
+            with self.assertRaises(destroy.DestroyError) as caught:
+                with destroy._target_lease({"ssh": "fixture@example.test"}, "example-site", "production"):
+                    self.fail("the body must not run under another controller's lease")
+            self.assertEqual(caught.exception.code, "host_apply_lease_held")
+            self.assertIn("/srv/sandbox/.sandbox/host-apply-example-site-production.lease",
+                          ssh.call_args.args[1])
+        entered = []
+
+        @__import__("contextlib").contextmanager
+        def lease(*_a):
+            entered.append("lease")
+            raise destroy.DestroyError("held", "host_apply_lease_held")
+            yield  # pragma: no cover
+        with tempfile.TemporaryDirectory() as runtime, \
+                patch("sandbox.hosting.recovery.repository.RUNTIME_DIR", Path(runtime)), \
+                patch.object(destroy, "_target_lease", lease), \
+                patch.object(destroy.remote, "ssh_run", side_effect=AssertionError("no SSH before the lease")):
+            with self.assertRaises(destroy.DestroyError):
+                destroy.execute({"ssh": "fixture@example.test"}, "myvps", "example-site", "production")
+        self.assertEqual(entered, ["lease"])
+
 
 class DenyRouteTests(unittest.TestCase):
     def test_a_deny_route_sends_nothing_anywhere(self):
@@ -399,8 +428,13 @@ class DenyRouteTests(unittest.TestCase):
         self.assertIn(f"ssl_certificate {public[0]};", text)
         self.assertNotIn("proxy_pass", text)
         with patch.object(nginx, "existing_certificate", return_value=None):
-            with self.assertRaisesRegex(hosting.HostingError, "private_closure_https_unavailable"):
-                edge.deny_route(validated, runtime, ROUTE, current)
+            for https in (current, "server {\n    listen 0.0.0.0:443 ssl;\n}\n",
+                          "server {\n    listen 192.0.2.10:443 ssl;\n}\n",
+                          "server {\n    listen 8443 ssl;\n    ssl_certificate /opt/c.pem;\n}\n",
+                          "server {\n    listen [::]:443 quic;\n}\n"):
+                with self.subTest(https=https), \
+                        self.assertRaisesRegex(hosting.HostingError, "private_closure_https_unavailable"):
+                    edge.deny_route(validated, runtime, ROUTE, https)
             # No route yet (first apply) or a port-80-only route: nothing on HTTPS to keep.
             for previous in (None, "server {\n    listen 80;\n}\n"):
                 self.assertNotIn("listen 443", edge.deny_route(validated, runtime, ROUTE, previous))

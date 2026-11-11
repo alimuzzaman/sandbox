@@ -101,6 +101,9 @@ def capture_input(fd, *, timeout_seconds=30):
             'device': info.st_dev, 'inode': info.st_ino}, _ISSUER)
         issued.fileno()
         return issued
+    except OSError:
+        stream.close()
+        raise AnonymousInputUnavailable('original stdin intake is unavailable') from None
     except BaseException:
         stream.close()
         raise

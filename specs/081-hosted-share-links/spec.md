@@ -44,6 +44,26 @@ check or same-origin check." These answers are read from it.
 - Q: What does the panel do where the stack has no controller record (a server's own
   panel)? → A: It shows the refusal and the CLI command to run on the controller.
 
+### Session 2026-11-11 (short links follow-up)
+
+The owner approved a shorter link: "Today a link looks like
+`https://<gate>/s/l-<32 hex id>#<43-char 256-bit token>` (112 chars for the mockups
+gate). New format: `https://<gate>/s/#<token>`, with ONE 128-bit token (22 chars
+base64url) after the `#`, and no id in the URL." The owner also said yes to a short
+gate hostname. These answers are read from the approved brief.
+
+- Q: Where does the token go? → A: After the `#`, as before, so it never reaches the
+  server's request line, access logs or a Referer.
+- Q: What id do list, revoke and the panel show? → A: `l-` and the first 12 hex
+  characters of the token's SHA-256. The id must not be enough to rebuild the token.
+- Q: What happens to links minted in the old form? → A: They keep working until they
+  expire (30 days at most). The old path is marked for removal and not removed now.
+- Q: Is the gate hostname a secret? → A: No. A short name such as `s.<zone>` is fine;
+  the token is the only secret.
+- Q: Does `/s/` answer while no link is live? → A: Yes, with the same opener page every
+  time, so the page says nothing about which links exist. Every refusal happens on the
+  POST, with one 404.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - An agent makes a share link and hands it over (Priority: P1)
@@ -249,6 +269,41 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
    **Then** the list shows each link's id, expiry, uses and sessions, never a token,
    and the revoked link stops working.
 
+### User Story 7 - Short share links (Priority: P2)
+
+An agent or the owner makes a share link and pastes it into a chat. The link is short
+enough to read and type: the gate hostname, `/s/`, and one token after the `#`. A link
+made last week in the old, longer form still opens until it expires.
+
+**Why this priority**: The owner asked for it after using the links: the old form is
+112 characters for the mockups gate. It changes the link's shape, not who may make
+one, so it depends on Stories 1, 2 and 6.
+
+**Independent Test**: Mint a link: it reads `https://<gate>/s/#<22 characters>`. Open
+it in a fresh browser: the site opens and the address bar holds no token. Open an old
+`/s/l-<id>#<token>` link minted before the change: it still opens. Post a wrong,
+expired, revoked, spent or malformed token: each gets the same 404.
+
+**Acceptance Scenarios**:
+
+1. **Given** a target that allows share links, **When** a link is made from the CLI,
+   MCP or the panel, **Then** it reads `https://<gate hostname>/s/#<token>`, with a
+   22-character token and nothing else after the hostname.
+2. **Given** a new link, **When** it is opened, **Then** the token is swapped for the
+   share cookie, the address bar is cleared, and the browser lands on the link's scope
+   (or the stack page).
+3. **Given** a link minted in the old form before the change, **When** it is opened
+   before its expiry, **Then** it works as it did.
+4. **Given** a token that is wrong, unknown, expired, revoked, spent or malformed,
+   **When** it is posted to `/s/`, **Then** the answer is the same 404 with the same
+   headers, and the gate takes the same kind of work to give it.
+5. **Given** a new link, **When** the owner lists or revokes links, **Then** each link
+   shows as `l-` and 12 hex characters, revoke by that id and `revoke all` work, and
+   the id cannot be turned back into the token.
+6. **Given** a new link, **When** it is made, opened or revoked, **Then** its token
+   appears in no log, audit line, feedback record or progress output, and the panel
+   shows it once and never in the page markup or browser storage.
+
 ### Edge Cases
 
 - A link lifetime longer than the gate's remaining `enabled_until`: it is shortened to
@@ -276,6 +331,13 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
   panel): the refusal names the missing remote, and the panel shows the CLI command
   to run on the controller instead.
 - Two presses in a row mint two links. Each is shown once; both stay revocable.
+- Two live links whose hashes start with the same 12 hex characters: the second mint
+  is refused and the caller mints again. With at most 32 live links per entry this
+  is about one in ten billion.
+- A visitor opens `/s/` with no fragment, or a fragment of the wrong length: the page
+  says the link is incomplete and posts nothing.
+- An old-form link and a new-form link open in the same browser: both sessions live in
+  the one share cookie, as with two old-form links.
 
 ## Requirements *(mandatory)*
 
@@ -325,11 +387,12 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
 
 **Random ids**
 
-- **FR-014**: Link ids, session ids and tokens MUST come from a cryptographic random
-  source, with at least 128 bits for ids and 256 for tokens, URL-safe.
-- **FR-015**: A link URL MUST be `https://<gate hostname>/s/<random id>#<token>`. It
-  MUST NOT carry the shared path, a slug or any readable name. The scope stays on the
-  server.
+- **FR-014**: Session ids and tokens MUST come from a cryptographic random source,
+  URL-safe. A share link token MUST carry 128 bits (FR-035); a session id at least 128.
+  (The 2026-11-10 floor of 256 bits for a share token and 128 bits for a random link
+  id is superseded by FR-035 to FR-041.)
+- **FR-015**: A link URL MUST NOT carry the shared path, a slug or any readable name.
+  The scope stays on the server. Its form is set by FR-035.
 
 **Private by default**
 
@@ -397,6 +460,34 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
 - **FR-034**: Every panel create, list and revoke MUST be audited exactly as the CLI's
   are, by calling the same share operations in process.
 
+**Short links (follow-up, 2026-11-11)**
+
+- **FR-035**: A newly made link MUST be `https://<gate hostname>/s/#<token>`, where the
+  token is 128 random bits written as 22 URL-safe base64 characters, and nothing
+  follows the hostname but `/s/#` and the token. The CLI, MCP, the panel, `host
+  login-url --service <site entry>`, the documentation and the Sandbox CLI skill MUST
+  show this form.
+- **FR-036**: The gate MUST store only the token's SHA-256, find a link by that hash,
+  and compare hashes in constant time.
+- **FR-037**: A new link's public id MUST be `l-` and the first 12 hex characters of
+  the token's SHA-256. List, revoke by id, `revoke all`, sessions, audit and the stack
+  page's WordPress key MUST use that id. Minting MUST refuse an id that a live link of
+  the same entry already has.
+- **FR-038**: `GET` or `HEAD` on `/s/` MUST answer the same opener page whatever links
+  exist. A `POST` to `/s/` MUST give one 404, with the same body and headers, to a
+  token that is wrong, unknown, expired, revoked, spent or malformed, and MUST do the
+  same lookup work for each before answering. The per-entry rate limit (FR-012) MUST
+  cover these posts.
+- **FR-039**: A link minted in the old form (`/s/l-<32 hex>#<43 characters>`) MUST keep
+  working until it expires, revoked by its old id. The old form MUST NOT be minted
+  any more, and its removal MUST be a listed follow-up task.
+- **FR-040**: The token MUST stay out of logs, the audit trail, feedback records,
+  progress output, panel markup and browser storage, as FR-003 and FR-030 require for
+  the old form.
+- **FR-041**: Nothing in Sandbox MAY require a gate hostname that looks random. The
+  documentation MUST show a short gate hostname such as `s.<zone>` and say that the
+  hostname is not a secret.
+
 **Development-only**
 
 - **FR-028**: Agent-made links and stack pages create public login bypasses. They MUST
@@ -410,7 +501,9 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
   flag, agent opt-in, the login-service safety fields, and optional stack-page sign-in
   entries.
 - **Share link**: id, token hash, kind (site or stack), path scope, issue and expiry
-  times, optional use limit. It lives on the gate's private state.
+  times, optional use limit. It lives on the gate's private state. A new link's id is
+  `l-` and the first 12 hex characters of its token hash; an old-form link keeps its
+  random 32-hex id until it expires.
 - **Share session**: id, the link it came from, creation and expiry times. Held by
   hash; one browser cookie can carry several.
 - **Stack page record**: for a stack link, the hostnames, health probe targets, and
@@ -440,6 +533,13 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
   one minting response.
 - **SC-008**: 100% of share requests without the panel's Origin, JSON body or panel
   header are refused before any link is minted, listed or revoked.
+- **SC-009**: A newly made link for a gate hostname `s.<zone>` is the hostname plus 34
+  characters (`https://`, `/s/#`, a 22-character token), down from 112 characters for
+  the mockups gate.
+- **SC-010**: In the bad-token test set (wrong, unknown, expired, revoked, spent,
+  malformed), 100% of answers are byte-identical 404s.
+- **SC-011**: 100% of links minted in the old form before the change still open until
+  their expiry.
 
 ## Assumptions
 
@@ -466,6 +566,12 @@ or browser storage holds it. Revoke it from the live-links list: the link answer
   working, because the front door now reaches the same service directly.
 - The mockups target's manifest change is written up for the orchestrator and not
   applied here. The panel button was added as a follow-up (Story 6, 2026-11-11).
+- A 128-bit token makes guessing hopeless at the gate's rate limit (30 posts per minute
+  per entry), so the shorter token keeps the margin the 256-bit token gave in practice.
+- The 12-hex id is 48 bits of a hash of a 128-bit secret: shown in lists and audit, it
+  narrows nothing an attacker could search.
+- The mockups site's manifest move to a short gate hostname is the orchestrator's,
+  after the merge; this change only documents the short name.
 - The panel runs on a tailnet or loopback address with no login. The share endpoint's
   Origin, JSON and header checks are what stop a page in the owner's browser from
   driving it.

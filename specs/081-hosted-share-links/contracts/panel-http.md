@@ -18,7 +18,7 @@ Failure: `403 {"ok": false, "code": "panel_request_refused", "message": "..."}`.
 
 ```json
 {"action": "create" | "list" | "revoke", "remote": "<remote name>", "stack": "<slug>",
- "id": "l-<32hex>" | "s-<32hex>"}
+ "id": "l-<12hex>" | "l-<32hex>" (old form) | "s-<32hex>"}
 ```
 
 `id` only with `revoke`, and required there. Any other key, a non-string value, a

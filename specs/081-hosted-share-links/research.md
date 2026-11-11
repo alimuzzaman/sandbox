@@ -130,3 +130,58 @@
   shows that message plus the CLI command to run on the controller.
 - Options: none. The panel mints with the defaults (7 days, no use limit, the
   target's default email). Revoke takes one `l-` or `s-` id; `all` stays on the CLI.
+
+## R13. Short link form and lookup (2026-11-11)
+
+- **Decision**: New links are `https://<gate>/s/#<token>`, the token
+  `secrets.token_urlsafe(16)` (128 bits, 22 characters). `GET|HEAD /s/` always serves
+  the opener page. `POST /s/` reads the token, hashes it, and scans every stored link
+  record of the entry (at most 32), comparing each record's hash to the digest with
+  `hmac.compare_digest` and never stopping early. Only a match whose id is a short id
+  (R14) counts. Then the existing liveness, Origin, enabled and use-claim checks run,
+  and every refusal is the one `_answer_not_found` 404.
+- **Rationale**: The token stays in the fragment, so request lines, access logs and
+  Referer never hold it (FR-003). A constant opener page tells a prober nothing about
+  which links exist; the old per-id 404 was safe only because the id was secret-sized.
+  Scanning all records makes wrong, unknown, revoked and expired tokens do the same
+  work: revoked links have no file, and expired ones are still scanned like any other
+  record until pruned. A matched live record then checks its use markers (at most 20
+  `stat` calls), which only a holder of a once-valid token can observe.
+- **Alternatives considered**: Opening `links/<digest>.json` directly (the old path):
+  fast, but an expired-unpruned record costs a read and a parse that an unknown token
+  does not. Answering `/s/` with 404 while no link is live: hides an idle gate but
+  leaks "some link is live" the moment one is.
+
+## R14. The public id of a short link
+
+- **Decision**: `l-` + the first 12 hex characters of the token's SHA-256. The gate
+  refuses a record whose short id does not equal that prefix of its own hash, and
+  refuses a mint whose id a stored link already has. The WordPress key id (`kid`) of
+  a stack page is the id without `l-`, so 12 or 32 hex.
+- **Rationale**: The id must be shown (list, revoke, panel, audit) but must not lead
+  back to the token: it is 48 bits of a hash of a 128-bit secret. Deriving it from the
+  hash keeps one secret and one random draw. With at most 32 live links per entry a
+  prefix collision is about 32 / 2^48; the second mint is refused and minted again.
+- **Alternatives considered**: A separate random id (the old model): a second value to
+  generate and store for no gain once the id leaves the URL. The full hash: it would
+  let anyone with the list check a guessed token offline.
+
+## R15. Old-form links
+
+- **Decision**: `/s/l-<32 hex>` keeps its 2026-11-10 behaviour unchanged: 200 opener
+  only for a live id, a 43-character token whose record has that id. Nothing mints the
+  old form any more. The id rules accept both lengths. The old path is removed by a
+  listed task once 30 days have passed since the short form reached every gate.
+- **Rationale**: FR-039. A link lives at most 30 days, so after that window no old
+  link can still be live.
+- **Alternatives considered**: Rewriting old records to short ids: the old URL holds
+  the old id, so the links would break.
+
+## R16. Gate hostname
+
+- **Decision**: Nothing changes in validation: the gate hostname must be a served alias
+  of the target on `allowed_host_suffixes`, with no length or randomness rule. The docs
+  show `s.<zone>` and say the hostname is not a secret. A test validates a declaration
+  with a one-letter label.
+- **Rationale**: FR-041. The token is the only secret; a short name is what makes the
+  link short.

@@ -313,6 +313,19 @@ class ServerSelectionTests(OwnerTargetTests):
         with self.assertRaises(TargetRefusal):
             self.selected()
 
+    def test_expected_snapshot_digest_is_revalidated_at_held_consumption(self):
+        observed = self.selected()
+        expected = "sha256:" + observed.fingerprint
+        current = selection.read_owner_exec_selection(self.entry, name="named",
+            expected_selector_digest=expected)
+        current.require_current()
+        self.lifetime["copy_id"] = "abcd1234"
+        with self.assertRaises(TargetRefusal) as refusal:
+            current.require_current()
+        self.assertEqual(refusal.exception.code, "host_server_target_changed")
+        with self.assertRaises(TargetRefusal):
+            selection.read_owner_exec_selection(self.entry, name="named", expected_selector_digest="bad")
+
     def test_metadata_inspection_cannot_issue_execution_selection_or_serialize_owner_proof(self):
         reader = getattr(sdk, "read_current_server_owner", None)
         if reader is None:

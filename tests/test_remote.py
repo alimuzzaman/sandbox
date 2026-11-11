@@ -674,7 +674,7 @@ class TestSafeRemoteDiagnostics(unittest.TestCase):
 
 
 class TestRemoteDiagnostics(unittest.TestCase):
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_resource_and_inventory_use_authenticated_control_http(self, urlopen):
         response = MagicMock(status=200)
         response.read.side_effect = [
@@ -700,7 +700,7 @@ class TestRemoteDiagnostics(unittest.TestCase):
         self.assertEqual(urlopen.call_args_list[2].args[0].full_url,
                          "https://control.example.test/inventory?deep=1")
 
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_diagnostics_use_authenticated_https_without_ssh(self, urlopen):
         response = MagicMock(status=200)
         response.read.return_value = b'{"ok":true,"memory_available_mb":1024}'
@@ -713,7 +713,7 @@ class TestRemoteDiagnostics(unittest.TestCase):
         self.assertEqual(request.full_url, "https://control.example.test/diagnostics")
         self.assertEqual(request.get_header("Authorization"), "Bearer secret-token")
 
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_process_diagnostics_require_versioned_control_capability(self, urlopen):
         response = MagicMock(status=200)
         response.read.return_value = json.dumps({
@@ -734,7 +734,7 @@ class TestRemoteDiagnostics(unittest.TestCase):
             request.full_url, "https://control.example.test/diagnostics?processes=1"
         )
 
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_process_diagnostics_reject_old_service_without_capability(self, urlopen):
         response = MagicMock(status=200)
         response.read.return_value = b'{"ok":true,"memory_available_mb":1024}'
@@ -744,7 +744,7 @@ class TestRemoteDiagnostics(unittest.TestCase):
                 "control_url": "https://control.example.test", "bearer_token": "secret-token",
             }, include_processes=True)
 
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_diagnostics_allow_only_matching_registered_tailscale_http(self, urlopen):
         response = MagicMock(status=200)
         response.read.return_value = b'{"ok":true}'
@@ -817,7 +817,7 @@ class TestRemoteDiagnostics(unittest.TestCase):
         )
         self.assertEqual(process_view["status"], "unavailable")
 
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_verify_remote_returns_safe_authenticated_envelope(self, urlopen):
         response = MagicMock(status=400)
         response.__enter__.return_value = response
@@ -835,7 +835,7 @@ class TestRemoteDiagnostics(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
 
-    @patch("sandbox.core._remote.urllib.request.urlopen")
+    @patch("sandbox.core._remote._control_primary_open")
     def test_verify_remote_redacts_auth_failure_and_userinfo(self, urlopen):
         urlopen.side_effect = urllib.error.HTTPError(
             "https://control.example.test/mcp", 401, "Unauthorized", {}, None,

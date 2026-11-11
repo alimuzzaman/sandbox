@@ -3001,6 +3001,17 @@ class _OriginHTTPSHandler(urllib.request.HTTPSHandler):
                             req, context=self._context)
 
 
+class _ControlNoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        return None
+
+
+def _control_primary_open(request, timeout):
+    """One selected endpoint, without ambient proxies or redirected evidence."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _ControlNoRedirects())
+    return opener.open(request, timeout=timeout)
+
+
 def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     """Open a control request; survive a control host that stops resolving.
 
@@ -3009,26 +3020,26 @@ def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     ``origin_ipv4``, connect to that address instead: TLS is still verified
     for the control hostname, so this cannot reach a different server. With no
     recorded origin the error names the hostname that failed to resolve.
+    Primary requests always exclude proxies and redirects. The legacy direct
+    argument remains accepted; joined/Tailscale requests never retry an origin.
     """
     parsed = urlsplit(request.full_url)
+    if request.host != parsed.netloc or getattr(request, '_tunnel_host', None):
+        raise urllib.error.URLError('proxy host routing is not permitted for control requests')
     try:
-        if direct:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            return opener.open(request, timeout=timeout)
-        return urllib.request.urlopen(request, timeout=timeout)
+        return _control_primary_open(request, timeout)
     except urllib.error.URLError as exc:
         if not isinstance(exc.reason, socket.gaierror):
             raise
-        if request.host != parsed.netloc:
-            # The request went through a proxy; that proxy's name is what failed.
-            raise urllib.error.URLError(
-                f"proxy host {request.host} for control host {parsed.hostname} does not "
-                "resolve in DNS") from exc
         origin = remote.get("origin_ipv4")
         try:
             origin = str(ipaddress.IPv4Address(origin)) if origin else None
         except ValueError:
             origin = None
+        if remote.get('joined') is True or remote.get('control_transport') == 'tailscale':
+            raise urllib.error.URLError(
+                f"control host {parsed.hostname} does not resolve in DNS; restore its "
+                "selected Tailnet name or address") from exc
         if parsed.scheme != "https" or origin is None:
             raise urllib.error.URLError(
                 f"control host {parsed.hostname} does not resolve in DNS; restore its "

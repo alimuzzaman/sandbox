@@ -5,6 +5,14 @@ resource cleanup/revalidation, and dashboard inventory use the authenticated rem
 service. They fail closed when the service is unavailable; they do not fall back to
 SSH.
 
+Control HTTP requests go directly to the selected endpoint. Ambient HTTP proxies
+and redirects are disabled, including for the primary request and legacy bearer
+HTTPS requests. Redirect responses remain HTTP errors; neither a credential nor
+a mutation body follows them. Explicitly proxy-routed requests refuse before a
+connection. Joined/Tailscale registrations never retry a recorded public origin
+after DNS failure. Legacy owner HTTPS registrations retain the existing recorded
+origin fallback with TLS hostname verification and no proxy or redirect.
+
 | Surface | Current transport | Boundary |
 | --- | --- | --- |
 | `remote service diagnostics`, process/container view | authenticated service | migrated |

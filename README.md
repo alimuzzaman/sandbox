@@ -1513,5 +1513,133 @@ review and installed/runtime acceptance remain pending. See the
 runtime resets gate links/sessions, including legacy records; v2 requires explicit
 reissuance. Source capability declarations do not prove installed runtime revision or
 capability. Check JSON `ok` and `partial_reasons` when listing shares because a partial
-stack list can still exit zero. V1 WordPress actions remain unavailable. No rollout is
+stack list exits nonzero when its inventory is incomplete. V1 WordPress actions remain unavailable. No rollout is
 authorized by these docs.
+
+### Server credential selection: disabled source groundwork
+
+Feature 086 adds six host options in this source checkout. Omitted
+`--credential-scope`, or explicit `--credential-scope personal-local`, preserves
+existing local and remote personal credential behavior without server references.
+Server scope requires all six options and the existing explicit `--remote`:
+
+```bash
+./sb host validate --project-dir /ordinary/nonsecret/fixture --credential-scope server --remote fixture-server --credential-project fixture-project --credential-source fixture-source --credential-source-revision fixture-source-r1 --credential-profile fixture-profile --credential-profile-revision fixture-profile-r1 --json
+```
+
+The six options are `--credential-scope`, `--credential-project`,
+`--credential-source`, `--credential-source-revision`, `--credential-profile`,
+and `--credential-profile-revision`. References contain 1–128 ASCII letters,
+digits, underscores or hyphens, beginning with a letter or digit. They are
+nonsecret identifiers, never paths, URLs, commands or credential values. Pinned
+revisions identify declarations; parsing them authenticates nothing. Personal
+scope rejects server reference options. Existing personal remote selectors keep
+their meaning.
+
+Static validation reads only the selected environment in an ordinary
+`sandbox.hosting.yml` declaration, up to 1 MiB and 16,384 YAML tokens,
+with no aliases or duplicate keys. A single
+environment is selected automatically; otherwise supply `--environment NAME`
+or `--all` to check every environment. These selectors cannot be combined.
+It checks `compose.service` as the intended consumer and exact
+`secrets.required` and `secrets.generated` destination-to-source-name maps.
+Source and destination keys are bounded environment variable names. Provider
+and generated mappings remain distinct, and overlapping destinations refuse.
+Inline `secrets.values`, including an empty block, is unsupported. This is a
+credential declaration check, not complete hosting/Compose validation. It does
+not resolve a checkout, registered server, profile, source or any key presence.
+
+| Request using the same server selection | Code | Exit |
+| --- | --- | --- |
+| `host validate` with valid declarations | `server_credentials_static_validated` | 0 |
+| Malformed/missing/mixed selection or invalid declarations | `server_credentials_invalid_selection` | 2 |
+| `host secrets` without mutation options | `server_credentials_inventory_unavailable` | 2 |
+| Every other action, including `host stack up --plan`, `--confirm`, apply, stage, image, sync and generation | `server_credentials_unsupported` | 2 |
+
+Use the same selection options from the example with `host secrets` to request
+inventory, or with `host stack up --plan` to observe disabled execution. JSON and
+text retain the fixed result code. Availability is always `unverified` and
+execution always `disabled`. Inventory is `unavailable`, not evidence of absent
+keys or provider validity. Diagnostics never repeat invalid input. Refusal runs
+before controller auto-update, migration, configuration/registry access, local
+keys, remote lookup, source export, lifetime stores, claims, jobs or effects.
+There is no environment, context, manifest or flag that enables this path.
+
+All admitted operators must retain full current owner rights, including
+currently approved sudo, and the initiating ControlGate actor identity must
+survive future dispatch. A profile describes consumer purpose; it does not
+create restricted operator membership, roles or laptop grants. The current
+private installation layout and generic `secrets run` escalation guards remain.
+A canonical installation identity alone does not establish owner context.
+
+The [source contract](specs/086-shared-server-secret-use/contracts/source-groundwork.md)
+describes this limited branch. The
+[future owner/broker contract](specs/086-shared-server-secret-use/contracts/future-owner-broker.md)
+records the original increment. The active
+[authenticated consumption contract](specs/086-shared-server-secret-use/contracts/authenticated-consumption-v1.md)
+now specifies the expanded source work. Internal actor receipts, the additive
+jobs credential ledger, registered hosting profiles and broker callbacks exist.
+The admission service now commits a genuine broker preflight against a retained
+reservation before privately issuing a nonserializable receipt. Every receipt
+use rechecks the initiating gate, registered resolver and retained admission,
+including cancellation, deadline and exact intent. Retained replay never
+automatically reissues execution authority. These modules remain unverified and
+are not connected to installed dispatch, fixed consumers or the complete driver.
+No credential-consuming server capability is advertised.
+
+The internal effect boundary now requires a genuine committed receipt and a
+same-process/thread supervisor-held writer proof for the exact retained request,
+operation, canonical target, site incarnation and full intent digest. It checks
+host/gate ownership before consuming and retains a target-wide transaction
+through the effect, with short ledger CAS transactions and an unknown outcome
+when completion cannot be proved. Request and retry IDs use the host writer's
+64-character grammar. The supervisor port is still a source proposal; its lazy
+dependency is not an installed factory or acceptance of that proposal. No command
+or HTTP route constructs this composition yet, and no runtime checks ran here.
+The checkpoint revalidates both credential and held-writer authority at actual
+delivery after blocking secret resolution, and again before recording completion.
+The fixed consumer registration must still be the same bound registration at
+delivery. Revocation during resolution or consumption leaves an unknown step;
+an earlier successful check or consumer return cannot acknowledge success.
+
+The fixed consumer manifest now contains one source-owned Cloudflare address
+mutation consumer. It accepts a validated zone/record/address action, an explicit
+nonempty broker token, and performs one fixed API request per effect checkpoint.
+It returns no provider response or exception text and uses no ambient token
+fallback. Its private registration additionally requires the registered resolver
+to validate the exact action against the committed artifact/target; a matching
+intent digest alone cannot approve another hostname. That production resolver,
+application runtime-secret consumer, public dispatcher and factory remain missing.
+No provider request was executed while implementing this source.
+
+Creation now has an internal retained
+[target-preparation port](specs/086-shared-server-secret-use/contracts/target-preparation-v1.md)
+in the jobs owner. It allocates only nonsecret copy/incarnation metadata under
+the original authenticated request; it claims no host resources. Creation
+reservation freezes that exact metadata into its canonical intent. A host claim
+must later present the genuine committed credential receipt and match the
+retained preparation. No read initializes an identity, and a dictionary or
+`trusted` flag cannot authorize the claim. The production caller remains pending.
+
+Broker delivery must remain confined to the reviewed intended server consumer.
+Explicit minimal recipient environments or approved protected runtime-secret
+facilities are allowed; inherited owner environments and arbitrary staging or
+temporary secret files are not. Facility ownership, readers, retention, cleanup,
+backup and export behavior require explicit review. Clients, argv, logs, polls,
+ordinary job payloads, public artifacts and source/image layers contain no values.
+
+Disabled refusal is stateless. It reserves no identity and performs no missing-key
+preflight. Resolution before atomic reservation, frozen retained terminal
+no-effect missing-key refusal, original-id lookup after uncertainty, and an
+explicit linked new-id retry only after a known terminal refusal are blocked
+integration obligations at the public command boundary. The internal ledger and
+admission mechanisms alone do not make that boundary executable. Committed admission must precede staging or consumption;
+source validation cannot supply it. Generation cannot replace provider keys.
+
+Revision evidence: this source change was prepared against supplied baseline
+`e46777b`, also observed locally as
+`e46777bf0868d4ecc38bffdbf8f228828790ddbf`. These new options and result codes
+change source CLI behavior only; no server wire changes or installed capability
+are advertised. Installed client/controller revisions, real key availability,
+and runtime acceptance have not been observed for this feature. Independent
+checks, source review and human security review remain required before release.

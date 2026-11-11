@@ -29,6 +29,7 @@ from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
                                   signal_owned_process_group, verify_owned_process_identity,
                                   verify_process_identity, is_boot_session_identity,
                                   process_absence_proven)
+from sandbox.jobs.registry import JobTransitionConflict
 from sandbox.jobs.scheduler import HOST_WIDE_REFUSALS, WorkspaceBusy
 from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
@@ -464,6 +465,7 @@ class JobService:
                 }
                 return snapshot
             if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
+                claimed_here = False
                 try:
                     if (
                         snapshot.get("sync_relationship_id") is not None
@@ -480,6 +482,12 @@ class JobService:
                         if claimed is None:
                             return self.repository.snapshot(job_id)
                         snapshot = claimed
+                        claimed_here = True
+                    if (snapshot.get("queue_reason") == "sync_generation_launching"
+                            and not claimed_here):
+                        # Another caller owns this launch claim; only it may
+                        # admit, commit or reset it.
+                        return self.repository.snapshot(job_id)
                     if self.scheduler is not None:
                         self.scheduler.acquire(
                             snapshot,
@@ -500,10 +508,7 @@ class JobService:
                     self._launch(self.storage.job_dir(job_id) / "descriptor.json")
                     snapshot = self.repository.snapshot(job_id)
                 except WorkspaceBusy as busy:
-                    if (
-                        snapshot.get("sync_relationship_id") is not None
-                        and snapshot.get("queue_reason") == "sync_generation_launching"
-                    ):
+                    if claimed_here and snapshot.get("queue_reason") == "sync_generation_launching":
                         snapshot = self.repository.reset_pending_sync_launch(job_id)
                     snapshot["queue_reason"] = busy.queue_reason
                     if busy.kind != "admitted":
@@ -1097,13 +1102,17 @@ class JobService:
         changed = []
         try:
             scheduler.refresh_policy()
+            # One finite pass: jobs accepted after it starts wait for the next.
+            newest = scheduler.newest_queued()
+            if newest is None:
+                return changed
             after = None
             while True:
                 page = scheduler.queued_in_order(after=after, limit=DRAIN_PAGE_SIZE)
                 if not page:
                     return changed
-                for _accepted_at, job_id in page:
-                    if scheduler.free_slots() <= 0:
+                for accepted_at, job_id in page:
+                    if (accepted_at, job_id) > newest or scheduler.free_slots() <= 0:
                         return changed
                     scheduler.last_refusal = None
                     held_before = scheduler.holds_slot(job_id)
@@ -1176,8 +1185,16 @@ class JobService:
             if snapshot["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
                 if snapshot.get("queue_reason") == "sync_generation_launch_committed":
                     raise RuntimeError("process_launch_in_progress")
-                self.repository.transition(job_id, Lifecycle.CANCELLED,
-                    termination_reason="cancelled_before_process_start")
+                try:
+                    self.repository.transition(job_id, Lifecycle.CANCELLED,
+                        termination_reason="cancelled_before_process_start",
+                        expected_lifecycles=frozenset({Lifecycle.ACCEPTED.value,
+                                                       Lifecycle.QUEUED.value}),
+                        unless_queue_reason="sync_generation_launch_committed")
+                except JobTransitionConflict:
+                    # A launch won after the snapshot was read: decide again
+                    # from the job's current state (lifecycles only move on).
+                    return self.cancel(job_id, force=force)
                 if self.scheduler is not None:
                     self.scheduler.release(job_id)
                 self._finalize_terminal_workspace(job_id)

@@ -60,7 +60,9 @@ Updates `queue_reason` of a job that is still `queued`, nothing else; a no-op ot
 - Returns the ids of jobs that left `queued` during this pass.
 - No-op (returns `[]`) without a scheduler, or when already draining in this thread.
 - Walks every queued job, page by page through `queued_in_order`, so blocked older jobs
-  never hide a later startable one (FR-003). Before each job: stop if
+  never hide a later startable one (FR-003). A pass ends at the newest queued job
+  (`newest_queued()`) seen when it starts, so arrivals during a pass cannot keep it
+  running; they wait for the next drain. Before each job: stop if
   `free_slots() == 0`, then clear this thread's `last_refusal`. Calls
   the admission path of `get(id, reconcile=False)`, suppressing per-job errors. After
   it: stop if this thread's `last_refusal` is `capacity`, `floor` or `policy`;
@@ -92,3 +94,18 @@ it never starts ahead of one.
 
 `queue_details(row)["position"]` = 1 + the number of candidates older than the row
 (host-wide). Keys unchanged: `reason`, `position`, `blocking_jobs`, `namespace`.
+
+## Cancel before start
+
+`cancel` of a job it read as `accepted`/`queued` moves it to `cancelled` only if, in the
+same transaction, the job is still `accepted`/`queued` and its sync launch is not
+committed (`JobRepository.transition(..., expected_lifecycles=..., unless_queue_reason=...)`).
+If a drain launched it in between, the transition raises `JobTransitionConflict` and
+`cancel` decides again from the job's current state, so it never releases the leases of a
+running job.
+
+## Sync launch claims
+
+Only the caller that claimed a pending sync launch (`claim_pending_sync_launch`) may admit,
+commit or reset it. Another caller that reads the job as `sync_generation_launching`
+returns its snapshot unchanged.

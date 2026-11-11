@@ -33,6 +33,10 @@ class RequestIdConflict(JobRepositoryError):
     pass
 
 
+class JobTransitionConflict(JobRepositoryError):
+    """The job moved on since the caller looked; nothing was changed."""
+
+
 class JobNotFound(JobRepositoryError):
     pass
 
@@ -1016,7 +1020,17 @@ class JobRepository:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def transition(self, job_id: str, target: Lifecycle | str, **fields: Any) -> dict[str, Any]:
+    def transition(self, job_id: str, target: Lifecycle | str, *,
+                   expected_lifecycles: frozenset[str] | None = None,
+                   unless_queue_reason: str | None = None,
+                   **fields: Any) -> dict[str, Any]:
+        """Move a job to ``target``.
+
+        With ``expected_lifecycles`` (and ``unless_queue_reason``), the move
+        happens only while the job is still in one of those lifecycles (and
+        does not carry that queue reason), in the same transaction; otherwise
+        ``JobTransitionConflict`` is raised and nothing changes.
+        """
         target = Lifecycle(target)
         allowed_fields = {"exit_code", "termination_reason", "output_completeness",
                           "cleanup_state", "integrity_sha256", "result_json", "health",
@@ -1029,9 +1043,12 @@ class JobRepository:
                     "SELECT 1 FROM job_events WHERE job_id=? AND kind='supervisor_stop_uncertain' LIMIT 1",
                     (job_id,)).fetchone():
                 raise ValueError("owned work cessation is uncertain; retain job authority")
-            current = connection.execute("SELECT lifecycle FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            current = connection.execute("SELECT lifecycle, queue_reason FROM jobs WHERE job_id=?", (job_id,)).fetchone()
             if current is None:
                 raise JobNotFound(f"job {job_id!r} was not found")
+            if ((expected_lifecycles is not None and current[0] not in expected_lifecycles)
+                    or (unless_queue_reason is not None and current[1] == unless_queue_reason)):
+                raise JobTransitionConflict(f"job {job_id!r} is now {current[0]}")
             validate_transition(current[0], target)
             now = _now()
             timing = {}

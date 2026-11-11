@@ -185,6 +185,28 @@ class DrainTriggerTests(HostCase):
         self.assertEqual(nested, [[], []])
         self.assertEqual(self.host.launched, [holder, first, second])
 
+    def test_a_drain_pass_ends_at_the_newest_job_queued_when_it_started(self):
+        self.host.submit("w0")
+        self.host.scheduler.max_parallel = 10
+        blocked = [self.host.submit("w0") for _ in range(3)]  # own workspace busy
+        visits, arriving = [], []
+        original = self.host.service.get
+
+        def get_while_jobs_arrive(job_id, **kwargs):
+            if not arriving:
+                visits.append(job_id)
+                if len(visits) < 30:
+                    arriving.append(True)
+                    try:
+                        self.host.submit("w0")
+                    finally:
+                        arriving.clear()
+            return original(job_id, **kwargs)
+
+        with mock.patch.object(self.host.service, "get", get_while_jobs_arrive):
+            self.host.service.drain_queue()
+        self.assertEqual(visits, blocked)
+
     def test_a_capacity_refusal_does_not_stop_a_later_drain_at_a_dependency_wait(self):
         blocker = self.host.repo.accept(JobSubmission(
             "test", self.host.root, "p", "local", "dep", ("echo", "x"), 60, SourceIdentity("s")))[0]
@@ -240,6 +262,25 @@ class AdmittedGuardTests(HostCase):
         self.assertEqual(self.host.launched.count(waiting), 1)
         self.assertEqual(self.host.state(waiting)[0], "queued")
         self.assertEqual(self.host.held(), 1)
+
+
+class CancelRaceTests(HostCase):
+    def test_a_cancel_that_read_the_job_queued_never_cancels_it_once_it_runs(self):
+        job = self.host.submit("w0")  # admitted; the fake launcher leaves it queued
+        stale = self.host.repo.snapshot(job)
+        self.host.repo.transition(job, "running")  # its supervisor won meanwhile
+        reads = iter([stale])
+        original = self.host.repo.snapshot
+
+        def first_read_is_stale(job_id):
+            return next(reads, None) or original(job_id)
+
+        with mock.patch.object(self.host.repo, "snapshot", first_read_is_stale):
+            with self.assertRaises(RuntimeError) as refused:
+                self.host.service.cancel(job)
+        self.assertEqual(str(refused.exception), "process_identity_mismatch")
+        self.assertEqual(self.host.state(job)[0], "running")
+        self.assertTrue(self.host.scheduler.holds_slot(job))
 
 
 class BlockedOlderJobTests(HostCase):

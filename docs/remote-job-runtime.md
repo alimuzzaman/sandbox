@@ -192,7 +192,8 @@ floor, an invalid policy). It runs:
   reconciliation, so a running job whose supervisor is proved gone frees its slot
   without any command.
 
-A status read of a queued job runs that drain before it looks at its own job, and its
+One pass ends at the newest job that was queued when it started. A status read of a
+queued job runs that drain before it looks at its own job, and its
 own job starts only when no older job waits, so a frequent poller never jumps the queue. Read commands can therefore start other
 queued jobs. A job that is live but silent past its stall threshold keeps its slot
 unless it was submitted with `--cancel-on-stall`; pass that flag for unattended runs.

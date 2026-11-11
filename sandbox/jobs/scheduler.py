@@ -308,6 +308,14 @@ class JobScheduler:
             "ORDER BY accepted_at, job_id LIMIT ?",
             (accepted_at, accepted_at, job_id, int(limit))).fetchall()]
 
+    def newest_queued(self) -> tuple[str, str] | None:
+        """``(accepted_at, job_id)`` of the newest queued job, or None."""
+        row = self.repository.connection.execute(
+            "SELECT accepted_at, job_id FROM jobs WHERE lifecycle='queued' "
+            "AND kind NOT IN ('matrix','plan') "
+            "ORDER BY accepted_at DESC, job_id DESC LIMIT 1").fetchone()
+        return None if row is None else (str(row[0]), str(row[1]))
+
     def free_slots(self) -> int:
         """Slots free under the last loaded policy; a drain refreshes it first."""
         held = self.repository.connection.execute(

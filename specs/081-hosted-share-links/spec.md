@@ -28,6 +28,22 @@ answers are read from it and recorded so planning can cite them.
   port, forwarded by `tailscale serve` or SSH. `sb host tailnet-name` is documented as
   a later option once its hardening merges.
 
+### Session 2026-11-11 (panel follow-up)
+
+The orchestrator relayed the panel button as a follow-up to this feature: "Show the
+`link` once, with a copy button, `expires_at` and `uses`. Never store, log or cache it,
+and keep it out of panel API responses that get polled or persisted." "The panel is
+tailnet-only and auto-trusted, so the button must be a deliberate POST with a CSRF
+check or same-origin check." These answers are read from it.
+
+- Q: Which link options does the panel offer? → A: None. The panel mints with the
+  defaults (7 days, no use limit, the target's default email); other options stay on
+  the CLI and MCP.
+- Q: May the panel revoke? → A: Yes, one link or session at a time from the live-links
+  list. `all` stays on the CLI.
+- Q: What does the panel do where the stack has no controller record (a server's own
+  panel)? → A: It shows the refusal and the CLI command to run on the controller.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - An agent makes a share link and hands it over (Priority: P1)
@@ -195,8 +211,43 @@ once, and a second use is refused.
 6. **Given** a stack whose target does not declare the share gate, **When** a stack link
    is requested, **Then** it is refused with guidance on what to declare.
 7. **Given** the Sandbox web panel, **When** it needs a "Share this stack" action,
-   **Then** a documented command with JSON output gives it the link, without the
-   panel code being part of this change.
+   **Then** a documented command with JSON output gives it the link.
+
+### User Story 6 - Share a stack from the panel (Priority: P2)
+
+The owner looks at a stack on the panel's Hosting page and wants to hand a tester its
+stack page. They press "Share this stack" on the stack's card, see the link once with
+a copy button, its expiry and its use limit, and paste it into a chat. Later they open
+the stack's live links and revoke one.
+
+**Why this priority**: "share the stack page from sandbox web that has autologin
+links". It depends on Story 5.
+
+**Independent Test**: On a controller panel with a recorded stack whose target sets
+`share.agent_mint: true`, press "Share this stack": the link appears once, copies, and
+opens the stack page. Reload the Hosting page: the link is gone, and no panel response
+or browser storage holds it. Revoke it from the live-links list: the link answers 404.
+
+**Acceptance Scenarios**:
+
+1. **Given** a stack whose target allows agent-made links, **When** the owner presses
+   "Share this stack" and confirms, **Then** the panel shows the link once, with a copy
+   button, its expiry and its use limit.
+2. **Given** the link was shown, **When** the panel polls, reloads, or the dialog is
+   closed, **Then** the link appears in no panel response other than the one that
+   minted it, in no browser storage, and in no panel log.
+3. **Given** a target without `share.agent_mint: true`, **When** the button is pressed,
+   **Then** the panel shows the refusal and explains that the target must set
+   `share.agent_mint: true` and be applied again.
+4. **Given** a stack whose manifest has no `share:` block, **When** the button is
+   pressed, **Then** the panel explains that the stack template needs a `share:` block
+   and a new `sb host stack up`.
+5. **Given** a request that does not come from the panel page itself (no Origin, a
+   foreign Origin, a form post, a missing panel header), **When** it reaches the share
+   endpoint, **Then** it is refused before any link is minted, listed or revoked.
+6. **Given** a stack with live links, **When** the owner lists them and revokes one,
+   **Then** the list shows each link's id, expiry, uses and sessions, never a token,
+   and the revoked link stops working.
 
 ### Edge Cases
 
@@ -219,6 +270,12 @@ once, and a second use is refused.
   contradicts the no-index default.
 - An MCP client: it has no terminal, so a target without the agent opt-in always
   refuses.
+- The panel always mints as an agent: it never falls back to the owner's terminal,
+  because the panel process has none the owner is watching.
+- The panel runs on a machine without the stack's controller record (a server's own
+  panel): the refusal names the missing remote, and the panel shows the CLI command
+  to run on the controller instead.
+- Two presses in a row mint two links. Each is shown once; both stay revocable.
 
 ## Requirements *(mandatory)*
 
@@ -315,7 +372,30 @@ once, and a second use is refused.
   that only the stack link's lifetime allows. Revoking or expiring the stack link
   MUST stop new sign-ins.
 - **FR-027**: The Sandbox panel MUST be able to make a stack link through the same
-  command with JSON output. This change MUST NOT edit the panel files.
+  command with JSON output. (The 2026-11-10 clause that kept the panel files out of
+  this change is superseded by FR-029 to FR-034.)
+
+**Panel button (follow-up, 2026-11-11)**
+
+- **FR-029**: Each stack card on the panel's Hosting page MUST offer "Share this
+  stack". It mints a stack link for that stack and remote, as an agent caller, with
+  the default options, after one confirmation.
+- **FR-030**: The panel MUST show a minted link once, with a copy action, its expiry
+  and its use limit. The link MUST NOT be written to any polled or persisted panel
+  response, panel log, browser storage or URL. The response that carries it MUST
+  forbid caching.
+- **FR-031**: The panel's share requests MUST be refused, before any effect, unless
+  they pass the panel's access gate and also carry an Origin equal to the request's
+  Host, a JSON body, and a panel-only request header. Remote and stack names MUST be
+  validated against their naming rules, and a revoke target MUST be one link or
+  session id.
+- **FR-032**: A refusal MUST show its code and message. `agent_mint_not_enabled` and
+  `stack_share_not_declared` MUST each come with a plain explanation of what to change.
+  An unexpected error MUST show a generic message, never its detail.
+- **FR-033**: The panel MUST list a stack's live links and sessions (id, kind, expiry,
+  uses, used) and revoke one link or session at a time after a confirmation.
+- **FR-034**: Every panel create, list and revoke MUST be audited exactly as the CLI's
+  are, by calling the same share operations in process.
 
 **Development-only**
 
@@ -355,6 +435,11 @@ once, and a second use is refused.
   404, and websockets close within 30 seconds.
 - **SC-006**: A tester with no tailnet signs in to a stack's WordPress admin from the
   stack page in two clicks, and the same sign-in link fails on a second use.
+- **SC-007**: The owner makes a stack link from the panel in two clicks (share,
+  confirm), and canary tests find the panel-minted token in 0 places other than the
+  one minting response.
+- **SC-008**: 100% of share requests without the panel's Origin, JSON body or panel
+  header are refused before any link is minted, listed or revoked.
 
 ## Assumptions
 
@@ -379,5 +464,8 @@ once, and a second use is refused.
 - Gate routing moves from the project's edge to the front door for every gate
   hostname. A 075 target that forwards its gate hostname in its own edge keeps
   working, because the front door now reaches the same service directly.
-- The panel button, and the mockups target's manifest change, are written up for the
-  orchestrator and not applied here.
+- The mockups target's manifest change is written up for the orchestrator and not
+  applied here. The panel button was added as a follow-up (Story 6, 2026-11-11).
+- The panel runs on a tailnet or loopback address with no login. The share endpoint's
+  Origin, JSON and header checks are what stop a page in the owner's browser from
+  driving it.

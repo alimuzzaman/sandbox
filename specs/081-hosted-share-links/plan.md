@@ -110,3 +110,46 @@ is injected into the container. `hosting.py` only dispatches to the new command.
 |---|---|---|
 | A second managed loopback port for the gate | Front doors have one upstream per target; the gate must answer gate hostnames without a project edge | Proxying all traffic through the gate puts a Python proxy in front of every public site |
 | HMAC key in a WordPress mu-plugin | Per-view sign-in links must be minted by the gate, which cannot write into the WordPress container | A controller round trip per view needs the controller online; giving the gate Docker access is a privilege escalation |
+
+## Panel follow-up (2026-11-11): "Share this stack"
+
+Spec: User Story 6, FR-029 to FR-034, SC-007 and SC-008. Contract:
+[contracts/panel-http.md](contracts/panel-http.md). Research: R10 to R12.
+
+**Summary**: The `sb web` panel gains one route, `POST /api/hosting/share`, with three
+actions: `create`, `list` and `revoke`. It calls `create_share`, `list_shares` and
+`revoke_share` from `sandbox/commands/host_share.py` in process, with `caller="panel"`
+and `stack=<slug>`, so refusals, audit and the agent opt-in are the CLI's. Each stack
+card on `/hosting` gets "Share this stack" and "Live links". A minted link is shown
+once in a dialog that lives outside the re-rendered app root, with a copy action,
+expiry and use limit; closing it drops the only reference.
+
+**Technical Context (delta)**: Python `http.server` handler in
+`sandbox/commands/ui_dash.py`; TypeScript SPA in `src/web/src` built by
+`scripts/build-web-js.sh` and `scripts/build-web-css.sh` into `config/sandbox-web.js`
+and `.css`. Tests: `tests/test_web_share.py` (new) on xspeed-dev, plus an import-free
+node test `src/web/tests/sharelabels.test.ts` (runs where node 24 exists).
+Constraint: the panel stays off `host_share.py`'s internals; it uses only the three
+public functions and `ShareRefusal`.
+
+**Constitution Check (delta)**: III: one new route and one new page module; no new
+consumer of the registry or `sandbox_core.py`. IV: the route is proven over a real
+loopback socket; minting against a live target is the orchestrator's step after the
+panel deploy. V: docs (`docs/login-service.md`, sandbox-cli skill and its
+`.agents` mirror, byte-identical) land with the code. VI: nothing is removed; every
+other route keeps its gate. Gate result: PASS.
+
+**Source (delta)**:
+
+```text
+sandbox/commands/ui_dash.py          # _share_request_allowed, _web_share, POST /api/hosting/share
+src/web/src/api.ts                   # postShare (JSON, X-Sandbox-Panel)
+src/web/src/types.ts                 # ShareCreated, ShareList, ShareRevoked, ShareRefused
+src/web/src/ui/sharelabels.ts        # import-free: refusal help, expiry and uses text, button rule
+src/web/src/pages/share.ts           # one-shot link dialog, live-links dialog, revoke
+src/web/src/pages/hosting.ts         # buttons on stack cards
+src/web/src/main.ts                  # sb.shareStack, sb.shareLinks
+config/sandbox-web.js, config/sandbox-web.css   # rebuilt
+tests/test_web_share.py, src/web/tests/sharelabels.test.ts
+docs/login-service.md, skills/sandbox-cli/SKILL.md, .agents/skills/sandbox-cli/SKILL.md
+```

@@ -92,3 +92,41 @@
   shells out to `sb host share create --json` and returns its JSON. The MCP layer must
   not log subprocess stdout.
 - **Rationale**: Job output is stored; MCP results go only to the calling agent.
+
+## R10. Panel request gate (2026-11-11)
+
+- Decision: the share route passes the panel's normal access gate and then requires an
+  `Origin` whose scheme is http or https and whose host and port equal `Host`, a
+  `Content-Type` of `application/json`, the header `X-Sandbox-Panel: share`, and, when
+  the browser sends `Sec-Fetch-Site`, the value `same-origin`. A body over 4 KiB, an
+  unknown key or a bad name is refused before any share call.
+- Rationale: the panel has no login. A cross-site form cannot send JSON or a custom
+  header, and a cross-site `fetch` that does triggers a CORS preflight the panel never
+  answers. Requiring `Origin` (the rest of the panel allows its absence for GETs and
+  scripts) stops a script or a page from another loopback origin on the same machine.
+- Framing: every panel response forbids framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`),
+  because a same-origin gate does not stop a framed panel from being clicked through.
+- Alternatives: a CSRF token in the page shell (the shell is inlined at start and
+  cached by nothing, but a token adds state for no gain over Origin plus a custom
+  header); reusing `_local()` alone (allows a missing Origin and a loopback Origin
+  from another local port).
+
+## R11. Where the link lives in the browser
+
+- Decision: the create response is held only by the dialog built for it, appended to
+  `document.body` outside the app root, so polling and re-rendering never touch it.
+  Closing the dialog removes the element. Nothing goes to `store`, `localStorage`,
+  `sessionStorage`, the URL or the console.
+- Copy: `navigator.clipboard` where the page is a secure context (loopback, or
+  `https://*.ts.net`); otherwise select the read-only field and use the legacy copy
+  command, and tell the owner to press the copy shortcut if that fails too. A plain
+  `http://<tailnet IP>` page is not a secure context.
+
+## R12. Which stacks get the buttons
+
+- Decision: every stack card whose `remote` is a remote name (not `this-server`). The
+  share functions need the controller's remote registration and stack record; on a
+  server's own panel they refuse with `share_failed` or `stack_unknown`, and the panel
+  shows that message plus the CLI command to run on the controller.
+- Options: none. The panel mints with the defaults (7 days, no use limit, the
+  target's default email). Revoke takes one `l-` or `s-` id; `all` stays on the CLI.

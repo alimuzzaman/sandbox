@@ -2,6 +2,7 @@
 
 import type {
   AppData, ActionResult, JobSnapshot, Usage, RemoteInventory, RemoteSummary, HostingView,
+  ShareCreated, ShareList, ShareRevoked, ShareRefused,
 } from "./types";
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -34,4 +35,29 @@ export async function postAction(
   const body = await r.json() as ActionResult;
   if (!r.ok && !body.output) throw new Error(`Request failed (${r.status})`);
   return body;
+}
+
+// "Share this stack" (spec 081 follow-up). The server refuses a share request
+// without this exact JSON body and panel header, or with an Origin other than
+// its own (contracts/panel-http.md). The result is never cached or kept.
+type ShareTarget = { remote: string; stack: string };
+export function postShare(body: ShareTarget & { action: "create" }): Promise<ShareCreated | ShareRefused>;
+export function postShare(body: ShareTarget & { action: "list" }): Promise<ShareList | ShareRefused>;
+export function postShare(body: ShareTarget & { action: "revoke"; id: string }): Promise<ShareRevoked | ShareRefused>;
+export async function postShare(body: ShareTarget & { action: string; id?: string }): Promise<unknown> {
+  let r: Response;
+  try {
+    r = await fetch("/api/hosting/share", {
+      method: "POST", cache: "no-store", credentials: "same-origin", redirect: "error",
+      headers: { "content-type": "application/json", "x-sandbox-panel": "share" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, code: "panel_unreachable", message: "The panel could not be reached." };
+  }
+  try {
+    return await r.json();
+  } catch {
+    return { ok: false, code: "share_failed", message: `Request failed (${r.status})` };
+  }
 }

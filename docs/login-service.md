@@ -357,8 +357,26 @@ manifest needs a `share` block with `agent_mint: true`. Health comes from the ga
 the project's network for the stack's own hostnames, and over public HTTPS for linked
 WordPress sites on `allowed_host_suffixes`. A stack session reaches only the page.
 
-The panel can call `sandbox.commands.host_share.create_share(remote, stack=<slug>,
-caller="panel")`, which returns the same result as `create --json`.
+### From the panel
+
+On a controller, each stack card on the `sb web` Hosting page has **Share this stack**
+and **Live links**. Share asks once, then mints a stack link with the defaults (7 days,
+no use limit) through `create_share(remote, stack=<slug>, caller="panel")`, so it needs
+`share.agent_mint: true` like any agent. The link is shown once, with a copy button,
+its expiry and use limit. It is never saved: not in the page's data, browser storage,
+the URL or a log. Close the dialog and it is gone; revoke it from Live links, which
+lists ids, expiry and uses for links and sessions, never a link itself.
+
+Refusals show their code and message. `agent_mint_not_enabled` and
+`stack_share_not_declared` come with the fix. A server's own panel has no controller
+record for its stacks and shows the `sb host share create` command to run on the
+controller instead.
+
+The panel has no login, so the share route (`POST /api/hosting/share`) refuses any
+request that does not carry an Origin equal to its Host, a JSON body and the panel's
+own `X-Sandbox-Panel` header, and no page may frame the panel. Over plain `http://<tailnet IP>` the browser blocks the
+clipboard API; the dialog selects the link for a manual copy instead. Contract:
+`specs/081-hosted-share-links/contracts/panel-http.md`.
 
 ## Sharing a private site with a `site_gate` entry (075)
 

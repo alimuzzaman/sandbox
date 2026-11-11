@@ -221,6 +221,120 @@ def _instance_route_file_names() -> list[str]:
         return []
 
 
+# ---- "Share this stack" (spec 081 follow-up, contracts/panel-http.md) ----
+# The panel has no login, and a share link is a login bypass. Beyond the panel's
+# access gate, a share request must prove it came from the panel's own page: an
+# Origin equal to Host, a JSON body and a panel-only header. A cross-site form can
+# send neither; a cross-site fetch that tries triggers a preflight nothing answers.
+_SHARE_PATH = "/api/hosting/share"
+_SHARE_HEADER = "X-Sandbox-Panel"
+_SHARE_BODY_MAX = 4096
+_SHARE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+_SHARE_ID_RE = re.compile(r"[ls]-[0-9a-f]{32}")
+_SHARE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_SHARE_KEYS = {"create": frozenset({"action", "remote", "stack"}),
+               "list": frozenset({"action", "remote", "stack"}),
+               "revoke": frozenset({"action", "remote", "stack", "id"})}
+_SHARE_CREATE_FIELDS = ("ok", "link", "link_id", "target", "entry", "kind", "scope", "expires_at",
+                        "expires_clamped", "uses", "hostname", "notes")
+_SHARE_LINK_FIELDS = ("id", "kind", "scope", "issued_at", "expires_at", "uses", "used")
+_SHARE_SESSION_FIELDS = ("id", "link", "created_at", "expires_at")
+_SHARE_REVOKE_FIELDS = ("ok", "target", "entry", "revoked_links", "revoked_sessions", "revoked_keys")
+
+
+def _share_request_allowed(peer, bound_host, headers, allowed_names: frozenset[str] = frozenset()) -> bool:
+    """True only for a same-origin JSON request from the panel's page (R10)."""
+    host, origin = headers.get("Host"), headers.get("Origin")
+    if not host or not origin:
+        return False
+    if not _web_request_allowed(peer, bound_host, host, origin, allowed_names):
+        return False
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    if parts.netloc.lower() != host.lower() or parts.path or parts.query or parts.fragment:
+        return False
+    if (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower() != "application/json":
+        return False
+    if headers.get(_SHARE_HEADER) != "share":
+        return False
+    site = headers.get("Sec-Fetch-Site")
+    if site is not None and site != "same-origin":
+        return False
+    try:
+        length = int(headers.get("Content-Length") or 0)
+    except ValueError:
+        return False
+    return 0 < length <= _SHARE_BODY_MAX
+
+
+def _share_request(payload) -> tuple[str, str, str, str | None]:
+    """(action, remote, stack, id) from a share body; ValueError names what is wrong."""
+    import sandbox.core._remote as remote_core
+
+    if not isinstance(payload, dict):
+        raise ValueError("the body must be a JSON object")
+    action = payload.get("action")
+    keys = _SHARE_KEYS.get(action) if isinstance(action, str) else None
+    if keys is None:
+        raise ValueError("action must be create, list or revoke")
+    if set(payload) != keys:
+        raise ValueError(f"{action} takes exactly: " + ", ".join(sorted(keys)))
+    if not all(isinstance(payload[key], str) for key in keys):
+        raise ValueError("every value must be a string")
+    remote_name, stack = payload["remote"], payload["stack"]
+    try:
+        if remote_core.validate_remote_name(remote_name) != remote_name:
+            raise ValueError
+    except ValueError:
+        raise ValueError("remote is not a valid remote name") from None
+    if not _SHARE_SLUG_RE.fullmatch(stack):
+        raise ValueError("stack is not a valid stack slug")
+    link_id = payload.get("id")
+    if action == "revoke" and not _SHARE_ID_RE.fullmatch(link_id):
+        raise ValueError("id must be one link (l-...) or session (s-...) id")
+    return action, remote_name, stack, link_id
+
+
+def _pick(source: dict, fields) -> dict:
+    return {key: source[key] for key in fields if key in source}
+
+
+def _web_share(payload) -> tuple[int, dict]:
+    """Create, list or revoke a stack's share links in process, as the panel caller.
+
+    The share functions own validation, the agent opt-in and the audit. Only the
+    create result carries ``link``; nothing here prints, logs or keeps it.
+    """
+    import sandbox.core._remote as remote_core
+    from sandbox.commands import host_share
+    from sandbox.hosting.share import ShareRefusal
+
+    try:
+        action, remote_name, stack, link_id = _share_request(payload)
+    except ValueError as exc:
+        return 400, {"ok": False, "code": "panel_request_invalid", "message": str(exc)}
+    try:
+        if action == "create":
+            return 200, _pick(host_share.create_share(remote_name, stack=stack, caller="panel"),
+                              _SHARE_CREATE_FIELDS)
+        if action == "list":
+            result = host_share.list_shares(remote_name, stack=stack)
+            return 200, {"ok": True, "target": result.get("target"), "entry": result.get("entry"),
+                         "links": [_pick(row, _SHARE_LINK_FIELDS) for row in result.get("links") or []
+                                   if isinstance(row, dict)],
+                         "sessions": [_pick(row, _SHARE_SESSION_FIELDS) for row in result.get("sessions") or []
+                                      if isinstance(row, dict)]}
+        return 200, _pick(host_share.revoke_share(remote_name, link_id, stack=stack), _SHARE_REVOKE_FIELDS)
+    except ShareRefusal as exc:
+        code = exc.code if isinstance(exc.code, str) and _SHARE_CODE_RE.fullmatch(exc.code) else "share_failed"
+        return 409, {"ok": False, "code": code, "message": remote_core.redact_text(str(exc.message))[:500]}
+    except (Exception, SystemExit):  # noqa: BLE001 -- the panel never shows an unexpected error's detail
+        return 500, {"ok": False, "code": "share_failed",
+                     "message": "the share request failed; run `sb host share` on the controller for details"}
+
+
 def _hosting_view() -> tuple[int, dict]:
     """The read-only stacks and hosted sites view: this server's records, then the controller's."""
     import sandbox.core._hosting as hosting_core
@@ -301,6 +415,10 @@ def cmd_web(cfg, args) -> None:
             data = body.encode() if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            # No page may frame the panel: a framed panel could be clickjacked into
+            # its mutating actions, such as "Share this stack".
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
             if no_store:
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
@@ -332,6 +450,19 @@ def cmd_web(cfg, args) -> None:
             return _web_request_allowed(self.client_address[0], self.server.server_address[0],
                                         self.headers.get("Host"), self.headers.get("Origin"),
                                         allowed_names)
+
+        def _share(self):
+            if not _share_request_allowed(self.client_address[0], self.server.server_address[0],
+                                          self.headers, allowed_names):
+                return self._send(403, json.dumps({
+                    "ok": False, "code": "panel_request_refused",
+                    "message": "share requests must come from the panel page"}), no_store=True)
+            try:
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            except (ValueError, RecursionError):  # deep nesting fits in 4 KiB
+                payload = None
+            code, result = _web_share(payload)
+            return self._send(code, json.dumps(result), no_store=True)
 
         def do_DELETE(self):
             if self.path.startswith("/api/instance/"):
@@ -418,6 +549,10 @@ def cmd_web(cfg, args) -> None:
                 except ValueError:
                     return self._send(400, json.dumps({"ok": False, "error": "bad JSON"}))
                 return self._bridge("POST", body)
+            if self.path == _SHARE_PATH:
+                # _share_request_allowed applies the _local() gate first, then its own checks,
+                # so every share response (refusals included) is answered no-store.
+                return self._share()
             if not self._local():
                 return self._send(403, json.dumps({"error": "forbidden"}))
             if self.path != "/api/action":

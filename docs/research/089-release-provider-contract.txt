@@ -1,0 +1,37 @@
+089 immutable release provider, source contract v1
+
+Callable: sandbox.installation.provider.installed_release(binding, *, paths=ManagedPaths()) -> dict
+Production callers use the default fixed paths. paths is an injected local-test
+dependency, never a request/client field. InstallationBindingError (with .code)
+or an inaccessible/missing protected file means unavailable; never READY.
+
+Input: the genuine current service-process schema1 installation binding from
+read_installation_binding(), not caller JSON. Core authority is revalidated
+before and after metadata access without recursively computing capabilities.
+Effect consumers still call validate_current() for the complete binding.
+
+Root registration: /etc/sandbox/installation.json, root-owned, protected ancestry,
+non-link opened descriptor and lookup identity checked by RootDirectory.
+Exact fields: schema_version=1, installation_id, incarnation, machine_identity,
+runtime_revision, policy_digest, bundle_digest, source_revision.
+Identity/revision/policy must equal the current genuine binding. Bundle/source
+must equal the verified root release descriptor at:
+/usr/local/lib/sandbox/releases/<runtime_revision>/release.json.
+
+Return: those exact registration fields plus root, executable and python derived
+only from /usr/local/lib/sandbox/releases/<runtime_revision>:
+executable=<root>/sb; python=<root>/.cli-venv/bin/python.
+The immutable release helper verifies root ownership, protected ancestors,
+prepared executables and actual runtime source hash. No home-based fallback.
+
+This port does NOT mint an actor, consume client source, select a workload,
+reconstruct persisted FDs or advertise execution capabilities. 085 owns actual
+handler/listener/worker assembly and verifiers via register_capability. Default
+missing assembly stays unavailable even with a valid release descriptor.
+
+The lifecycle source writes the managed root registration. Owner mode needs an
+explicit supported root lifecycle registration before this provider can succeed;
+personal ~/sandbox/sb-src is never inferred to be root executable authority.
+That owner registration and the full managed lifecycle remain under development.
+This contract checkpoint is source-only, not installed acceptance or a passed
+test/review claim. No credentials, host resources or services were accessed.

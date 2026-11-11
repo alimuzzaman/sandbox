@@ -189,8 +189,7 @@ class JobScheduler:
         # so a config change applies to the next admission without a restart.
         self.policy_loader = policy_loader
         self.policy_error: JobSchedulerConfigError | None = None
-        # Per thread: the remote service shares one scheduler across request
-        # threads, and a drain reads the refusal of the admission it just ran.
+        # Per thread, so a drain reads the refusal of the admission it just ran.
         self._local = threading.local()
 
     @property
@@ -234,7 +233,8 @@ class JobScheduler:
         except OSError:
             return False
         try:
-            available = next((line for line in open("/proc/meminfo") if line.startswith("MemAvailable:")), None)
+            with open("/proc/meminfo") as meminfo:
+                available = next((line for line in meminfo if line.startswith("MemAvailable:")), None)
             if available is not None and int(available.split()[1]) // 1024 < self.min_free_memory_mb:
                 return False
         except (OSError, ValueError):

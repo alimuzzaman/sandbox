@@ -34,8 +34,10 @@
   (`queued_in_order`) and calls `get(job_id, reconcile=False)` for each, which runs the
   existing admission and launch path. It stops when the scheduler records a host-wide
   refusal (slots, floor, policy) or no slot is free. The refusal kind and the
-  re-entrancy flag are thread-local, because the remote service shares one
-  `JobService` across request threads.
+  re-entrancy flag are thread-local. The remote service runs its sync MCP tools on the
+  event-loop thread (FastMCP in `mcp==1.25.0`), and the tick and the supervisor build
+  their own repository and connection, so one registry connection is never used by
+  two threads; `JobRepository` does not support that.
 - **Status reads**: outside a drain, a status read of a queued job runs the drain
   first and only then reads its own job, whose `acquire` stays behind the order gate,
   so stale reasons cannot let a poller jump ahead (analyze I1).

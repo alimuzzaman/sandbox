@@ -6,7 +6,6 @@ import os
 import random
 import sqlite3
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -169,20 +168,22 @@ class DrainTriggerTests(HostCase):
         self.assertEqual([self.host.repo.get(job) for job in queued], before)
         self.assertEqual(len(self.host.launched), 1)
 
-    def test_a_nested_drain_in_the_same_thread_is_a_no_op_but_not_in_another(self):
+    def test_a_drain_reentered_from_a_launch_is_a_no_op_and_the_outer_one_finishes(self):
         holder = self.host.submit("w0")
-        waiting = self.host.submit("wa")
+        first, second = self.host.submit("wa"), self.host.submit("wb")
+        self.host.scheduler.max_parallel = 3
         self.host.free_without_drain(holder)
-        self.host.service._drain_local.active = True
-        try:
-            self.assertEqual(self.host.service.drain_queue(), [])
-            result = []
-            other = threading.Thread(target=lambda: result.extend(self.host.service.drain_queue()))
-            other.start()
-            other.join(10)
-        finally:
-            self.host.service._drain_local.active = False
-        self.assertEqual(result, [waiting])
+        nested = []
+        launch = self.host._launch
+
+        def reentering_launch(descriptor_path):
+            launch(descriptor_path)
+            nested.append(self.host.service.drain_queue())
+
+        self.host.service.launcher = reentering_launch
+        self.assertEqual(self.host.service.drain_queue(), [first, second])
+        self.assertEqual(nested, [[], []])
+        self.assertEqual(self.host.launched, [holder, first, second])
 
     def test_a_capacity_refusal_does_not_stop_a_later_drain_at_a_dependency_wait(self):
         blocker = self.host.repo.accept(JobSubmission(

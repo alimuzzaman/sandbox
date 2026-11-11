@@ -88,7 +88,7 @@ class JobService:
     workspace_registry: Any = None
     sync_gateway: Any = None
     mount_controller: Any = None
-    # Per thread: the remote service shares one JobService across threads.
+    # Per thread, so a drain in one thread never silences another's.
     _drain_local: Any = field(default_factory=threading.local, repr=False, compare=False)
 
     def submit(self, submission: JobSubmission):

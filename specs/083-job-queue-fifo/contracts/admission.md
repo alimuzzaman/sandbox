@@ -66,8 +66,9 @@ Updates `queue_reason` of a job that is still `queued`, nothing else; a no-op ot
   it: stop if this thread's `last_refusal` is `capacity`, `floor` or `policy`;
   otherwise continue (`workspace`, `order`, `admitted`, dependency waits, launch
   failures).
-- Safe to run concurrently from several threads and processes; the gate in `acquire`
-  keeps order and the slot limit, and kind `admitted` stops double admission.
+- Safe to run concurrently from several processes, or threads that each hold their own
+  repository; the gate in `acquire` keeps order and the slot limit, and kind `admitted`
+  stops double admission.
 
 ## Status read of a queued job (`JobService.get`)
 

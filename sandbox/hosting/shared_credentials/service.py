@@ -100,15 +100,34 @@ def held_credential_execution(receipt, *, intent: CredentialIntent, held_writer,
 
 
 class _Checkpoint:
-    def __init__(self, ledger, scope, claim, held_writer, expected):
+    def __init__(self, ledger, scope, claim, held_writer, expected, receipt, intent):
         self._ledger, self._scope, self._claim = ledger, scope, claim
         self._held_writer, self._expected = held_writer, expected
+        self._receipt, self._intent = receipt, intent
+        self._owner = (os.getpid(), threading.get_ident())
         self._done = False
+
+    def require_current(self):
+        """Recheck both authorities at delivery, after any blocking resolution."""
+        if self._done or self._owner != (os.getpid(), threading.get_ident()):
+            raise CredentialExecutionError()
+        with _HELD_LOCK:
+            held = _HELD.get(self._receipt)
+        if (held is None or held[1] is not self._held_writer
+                or held[2] != self._expected or held[4] != self._owner):
+            raise CredentialExecutionError()
+        row = require_committed(self._receipt, intent_digest=self._intent.intent_digest())
+        if (row.operation_id != self._claim.operation_id or row.scope != self._scope
+                or row.canonical_intent != self._intent.canonical_json()):
+            raise CredentialExecutionError()
+        _require_host_writer(self._held_writer, self._expected)
 
     def complete(self, code):
         if self._done or code not in ("succeeded", "failed", "effects_unknown"):
             raise CredentialExecutionError("credential_effect_completion_invalid")
-        _require_host_writer(self._held_writer, self._expected)
+        # A successful consumer return is not proof that credential authority
+        # remained current while it ran. Failure here leaves the step unknown.
+        self.require_current()
         outcome = {"succeeded": EffectOutcome.SUCCEEDED,
                    "failed": EffectOutcome.FAILED,
                    "effects_unknown": EffectOutcome.UNKNOWN}[code]
@@ -169,13 +188,12 @@ def credential_effect_boundary(receipt, *, intent: CredentialIntent,
             expected_version=row.row_version, effect_step=effect_step)
         if claim is None:
             raise CredentialExecutionError("credential_deadline_expired")
-        checkpoint = _Checkpoint(ledger, row.scope, claim, writer, expected)
+        checkpoint = _Checkpoint(ledger, row.scope, claim, writer, expected, receipt, intent)
         failed = False
         try:
             # Recheck after irreversible step admission, immediately before
             # the broker resolves/delivers the value to its trusted consumer.
-            require_committed(receipt, intent_digest=intent.intent_digest())
-            _require_host_writer(writer, expected)
+            checkpoint.require_current()
             yield checkpoint
             if not checkpoint._done:
                 failed = True

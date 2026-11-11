@@ -83,13 +83,13 @@ page follows.
 
 ## Phase 8: Convergence
 
-- [ ] T028 Add the share types (`ShareCreated`, `ShareList`, `ShareRevoked`, `ShareRefused`) to `src/web/src/types.ts` and the import-free helpers in `src/web/src/ui/sharelabels.ts` (refusal help, expiry and uses text, button rule) per FR-032, R12 (missing)
-- [ ] T029 Write `tests/test_web_share.py` first: gate refusals (no Origin, foreign Origin, loopback Origin from another port, form content type, missing panel header, cross-site `Sec-Fetch-Site`, oversized body), body validation, create/list/revoke mapping with `caller="panel"`, refusal 409 mapping, generic 500, `no-store`, the link absent from `GET /api/hosting` and from stdout/stderr per FR-030, FR-031, SC-007, SC-008 (missing)
-- [ ] T030 Add `_share_request_allowed` and `_web_share` plus `POST /api/hosting/share` to `sandbox/commands/ui_dash.py` per contracts/panel-http.md, FR-031, FR-034 (missing)
-- [ ] T031 Add `postShare` to `src/web/src/api.ts` (JSON, `X-Sandbox-Panel: share`, `cache: "no-store"`) per R10 (missing)
-- [ ] T032 Add `src/web/src/pages/share.ts`: confirm, one-shot link dialog outside the app root with copy fallback, live-links dialog with per-id revoke; wire `sb.shareStack` and `sb.shareLinks` in `src/web/src/main.ts` and `SbApi` per FR-029, FR-030, FR-033, R11 (missing)
-- [ ] T033 Add "Share this stack" and "Live links" to stack cards in `src/web/src/pages/hosting.ts` per FR-029, R12 (missing)
-- [ ] T034 Add `src/web/tests/sharelabels.test.ts` and register it in `tests/test_web_poller.py`'s node suite per FR-032 (missing)
-- [ ] T035 Rebuild `config/sandbox-web.js` and `config/sandbox-web.css` with the repo scripts (typecheck clean) per plan: panel follow-up (missing)
-- [ ] T036 Update `docs/login-service.md` and the sandbox-cli skill in `skills/` and `.agents/skills/` (byte-identical) for the panel button per Constitution V (missing)
+- [x] T028 Add the share types (`ShareCreated`, `ShareList`, `ShareRevoked`, `ShareRefused`) to `src/web/src/types.ts` and the import-free helpers in `src/web/src/ui/sharelabels.ts` (refusal help, expiry and uses text, button rule) per FR-032, R12 (missing)
+- [x] T029 Write `tests/test_web_share.py` first: gate refusals (no Origin, foreign Origin, loopback Origin from another port, form content type, missing panel header, cross-site `Sec-Fetch-Site`, oversized body), body validation, create/list/revoke mapping with `caller="panel"`, refusal 409 mapping, generic 500, `no-store`, the link absent from `GET /api/hosting` and from stdout/stderr per FR-030, FR-031, SC-007, SC-008 (missing)
+- [x] T030 Add `_share_request_allowed` and `_web_share` plus `POST /api/hosting/share` to `sandbox/commands/ui_dash.py` per contracts/panel-http.md, FR-031, FR-034 (missing)
+- [x] T031 Add `postShare` to `src/web/src/api.ts` (JSON, `X-Sandbox-Panel: share`, `cache: "no-store"`) per R10 (missing)
+- [x] T032 Add `src/web/src/pages/share.ts`: confirm, one-shot link dialog outside the app root with copy fallback, live-links dialog with per-id revoke; wire `sb.shareStack` and `sb.shareLinks` in `src/web/src/main.ts` and `SbApi` per FR-029, FR-030, FR-033, R11 (missing)
+- [x] T033 Add "Share this stack" and "Live links" to stack cards in `src/web/src/pages/hosting.ts` per FR-029, R12 (missing)
+- [x] T034 Add `src/web/tests/sharelabels.test.ts` and register it in `tests/test_web_poller.py`'s node suite per FR-032 (missing)
+- [x] T035 Rebuild `config/sandbox-web.js` and `config/sandbox-web.css` with the repo scripts (typecheck clean) per plan: panel follow-up (missing)
+- [x] T036 Update `docs/login-service.md` and the sandbox-cli skill in `skills/` and `.agents/skills/` (byte-identical) for the panel button per Constitution V (missing)
 - [ ] T037 Run the touched suites on xspeed-dev against an `origin/latest` baseline, and check the dialog against a placeholder fixture per quickstart.md (missing)

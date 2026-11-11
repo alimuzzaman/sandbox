@@ -1,5 +1,6 @@
 """Behavior definitions for controller fanout; run by the separate checker."""
 import contextlib
+import io
 import json
 from dataclasses import replace
 import tempfile
@@ -11,6 +12,11 @@ from unittest.mock import patch
 from sandbox.commands import host_share
 from sandbox.hosting import share, stack_registry
 from sandbox.hosting.share import attempts as ledger, fanout, stack_page
+
+# Capture the production boundary before each fixture replaces transport/mint ports.
+_REAL_MINT_LINK = host_share.mint_link
+_REAL_DESCRIPTOR = fanout.descriptor
+_REAL_INSTALL_WORDPRESS_KEY = stack_page.install_wordpress_key
 
 
 class FanoutTests(unittest.TestCase):
@@ -131,6 +137,59 @@ class FanoutTests(unittest.TestCase):
         self.install.assert_not_called()
         self.mint.assert_not_called()
         self.assertEqual(fanout.recorded("dev", stack="parent"), ())
+
+    def test_real_mint_boundary_preserves_preallocation_and_private_companion_payload(self):
+        from sandbox.commands import hosting as commands
+        from sandbox.hosting.login_service import runtime
+
+        sent, returned = [], []
+
+        def transport(validated, _remote, entry, verb, *, input_data):
+            self.assertEqual((entry, verb), ("share", "mint"))
+            envelope = json.loads(input_data)
+            sent.append((validated["project"], envelope))
+            self.assertEqual(set(envelope), {"link", "stack"})
+            config = {**validated["login_service"], "enabled_until_epoch": self.now + 200}
+            output = io.StringIO()
+            code = runtime.manage(config, [verb, entry],
+                Path(self.tmp.name) / "gate" / validated["project"],
+                stdin=io.StringIO(input_data), stdout=output, clock=lambda: self.now)
+            self.assertEqual(code, 0)
+            reply = json.loads(output.getvalue())
+            self.assertTrue(reply["ok"], reply)
+            return reply
+
+        def real_mint(validated, entry, request, *, minted, stack_record):
+            actual, reply = _REAL_MINT_LINK(validated, entry, request,
+                                           minted=minted, stack_record=stack_record)
+            self.assertIs(actual, minted)
+            returned.append(actual)
+            return actual, reply
+
+        with patch.object(host_share, "mint_link", side_effect=real_mint), \
+                patch.object(commands, "_site_remote", side_effect=transport), \
+                patch.object(share, "mint", wraps=share.mint) as allocate:
+            result = fanout.create(self.members[0], self.request)
+
+        self.assertEqual(result["phase"], "active")
+        self.assertEqual(allocate.call_count, 2)
+        self.assertEqual([name for name, _ in sent], ["child", "parent"])
+        child, parent = [envelope for _, envelope in sent]
+        self.assertEqual(child["stack"]["companions"], [])
+        companion = parent["stack"]["companions"][0]
+        self.assertEqual(companion["token"], returned[0].token)
+        self.assertEqual(companion["link_id"], child["link"]["id"])
+        for envelope, minted in zip((child, parent), returned):
+            self.assertEqual(envelope["link"]["id"], minted.link_id)
+            self.assertEqual(envelope["link"]["token_sha256"], minted.token_sha256)
+            self.assertEqual(envelope["stack"]["link"], minted.link_id)
+            self.assertEqual(envelope["link"]["expires_at"], self.now + 200)
+        self.assertIs(result["_minted"], returned[1])
+        self.assertNotIn(returned[0].token, json.dumps(child))
+        self.assertNotIn(returned[1].token, json.dumps(sent))
+        retained = repr(fanout.recorded("dev", stack="parent"))
+        self.assertNotIn(returned[0].token, retained)
+        self.assertNotIn(returned[1].token, retained)
 
     def test_unknown_linked_access_reports_all_gaps_without_effects(self):
         for member in self.members:
@@ -449,6 +508,80 @@ class FanoutTests(unittest.TestCase):
              patch.object(commands, "_remote_checked", return_value="sandbox-key-absent"):
             self.assertTrue(fanout.revoke_attempt(wp_repo.read(attempt.id))["ok"])
             self.assertTrue(fanout.revoke_attempt(wp_repo.read(attempt.id))["ok"])
+
+    def test_real_wordpress_descriptor_install_and_lost_reply_require_exact_cleanup_receipt(self):
+        import sandbox.commands.hosting as commands
+        import sandbox.core._remote as remote
+
+        parent = self.members[0]
+        parent.validated["autologin"] = {
+            "user": "admin", "service": "web", "request_path": "/wp-login.php",
+            "container_path": "/var/www/html/wp-content/mu-plugins/99-sandbox-host-autologin.php"}
+        parent.validated["login_service"]["share"]["route_sign_in"] = {
+            "parent.example.test": "$wordpress"}
+        installed, cleanup_calls = [], []
+        marker = ["unconfirmed"]
+
+        def install(found, page, expires):
+            self.install_key(found, page, expires)
+            if page["wordpress"]:
+                installed.append((page["wordpress"], expires))
+            _REAL_INSTALL_WORDPRESS_KEY(found, page, expires)
+
+        def mint(validated, entry, request, *, minted, stack_record):
+            if validated["project"] == "parent":
+                raise TimeoutError("synthetic lost parent mint acknowledgement")
+            return self.mint_link(validated, entry, request, minted=minted, stack_record=stack_record)
+
+        def execute(_entry, command, **kwargs):
+            if "input_data" in kwargs:
+                wordpress, expires = installed[-1]
+                self.assertIn(wordpress["key"], kwargs["input_data"])
+                self.assertNotIn(wordpress["key"], command)
+                self.assertIn(f"sandbox-share-{expires}-{wordpress['kid']}.php", command)
+                return ""
+            cleanup_calls.append(command)
+            if "sandbox-key-absent" in command:
+                return marker[0]
+            return json.dumps({"ok": False, "code": "site_link_unknown"})
+
+        with patch.object(remote, "resolve_sandbox_home", return_value="/srv/fixture"), \
+                patch.object(fanout, "descriptor", side_effect=_REAL_DESCRIPTOR), \
+                patch.object(stack_page, "install_wordpress_key", side_effect=install), \
+                patch.object(host_share, "mint_link", side_effect=mint), \
+                patch.object(commands, "_remote_checked", side_effect=execute):
+            result = fanout.create(parent, self.request)
+
+        self.assertFalse(result["ok"])
+        row = fanout.recorded("dev", stack="parent")[0]
+        original_ids = tuple(grant.id for grant in row.grants)
+        wp = row.grants[0].cleanup.wordpress
+        self.assertIsNotNone(wp)
+        self.assertEqual(wp.service, "web")
+        self.assertEqual(wp.key_id, installed[0][0]["kid"])
+        self.assertEqual(wp.expires_at, installed[0][1])
+        self.assertTrue(row.grants[0].gate_revoked)
+        self.assertFalse(row.grants[0].wordpress_revoked)
+        self.assertEqual(row.phase, "cleanup_pending")
+        exact = f"sandbox-share-{wp.expires_at}-{wp.key_id}.php"
+        self.assertTrue(any(exact in command for command in cleanup_calls))
+
+        # Retry must use original persisted cleanup identity even without a manifest.
+        marker[0] = "sandbox-key-absent"
+        cleanup_calls.clear()
+        with patch.object(host_share, "resolve_target", side_effect=AssertionError("no manifest")), \
+                patch.object(remote, "resolve_sandbox_home", side_effect=AssertionError("no current home")), \
+                patch.object(commands, "_remote_checked", side_effect=execute):
+            reply = fanout.revoke_attempt(row)
+            again = fanout.revoke_attempt(fanout.recorded("dev", stack="parent")[0])
+        self.assertTrue(reply["ok"])
+        self.assertTrue(again["ok"])
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertIn(exact, cleanup_calls[0])
+        retained = fanout.recorded("dev", stack="parent")[0]
+        self.assertEqual(tuple(grant.id for grant in retained.grants), original_ids)
+        self.assertTrue(retained.grants[0].wordpress_revoked)
+        self.assertEqual(retained.phase, "revoked")
 
     def test_prepared_wordpress_plan_closes_locally_without_remote_effects(self):
         parent = ledger.Parent(fanout.target(self.members[0]), "parent")

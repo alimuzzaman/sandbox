@@ -595,8 +595,31 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "stack_uses_missing")
 
     def test_down_reports_dependents_and_preserves_their_reference(self):
-        with patch.object(host_stack, "_submit", return_value="job-uses"):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        from sandbox.jobs.registry import JobRepository
+
+        def submit_terminal_job(argv):
+            # Persist the original job through its repository API. A fabricated
+            # id has no cessation evidence and must not pass down's admission guard.
+            repository = JobRepository(self.runtime.runtime / "jobs" / "registry.sqlite3")
+            try:
+                row, _ = repository.accept(JobSubmission(
+                    kind="test", project_root=argv[argv.index("--project-dir") + 1],
+                    project_identity="dependent-down-fixture", target_kind="local",
+                    workspace_label="default", argv=("true",), deadline_seconds=60,
+                    request_id=argv[argv.index("--request-id") + 1],
+                    source=SourceIdentity("sha256:" + "a" * 64)))
+                job_id = row["job_id"]
+                repository.transition(job_id, "running")
+                repository.transition(job_id, "succeeded", exit_code=0)
+                return job_id
+            finally:
+                repository.close()
+
+        with patch.object(host_stack, "_submit", side_effect=submit_terminal_job):
             host_stack._up(self.args("up", confirm=True))
+        original = stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_id"]
+        self.assertEqual(host_stack.job_view(original)["lifecycle"], "succeeded")
         with stack_registry.locked() as registry:
             registry.put({"remote": "r", "slug": "consumer", "project": "consumer",
                           "environment": "sandbox", "uses": ["demo"], "ports": {}})

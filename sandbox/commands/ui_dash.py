@@ -545,10 +545,12 @@ def cmd_web(cfg, args) -> None:
                 except ValueError:
                     return self._send(400, json.dumps({"ok": False, "error": "bad JSON"}))
                 return self._bridge("POST", body)
+            if self.path == _SHARE_PATH:
+                # _share_request_allowed applies the _local() gate first, then its own checks,
+                # so every share response (refusals included) is answered no-store.
+                return self._share()
             if not self._local():
                 return self._send(403, json.dumps({"error": "forbidden"}))
-            if self.path == _SHARE_PATH:
-                return self._share()
             if self.path != "/api/action":
                 return self._send(404, json.dumps({"error": "not found"}))
             length = int(self.headers.get("Content-Length", 0))

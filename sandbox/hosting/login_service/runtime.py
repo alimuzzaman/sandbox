@@ -54,6 +54,9 @@ SHARE_COOKIE = "__Host-sandbox_share"
 # Every gate answer carries it, so apply can tell the gate's 404 from a front
 # door's (sandbox.commands.hosting._GATE_HEADER names the same header).
 GATE_HEADER = "X-Sandbox-Gate"
+# Reserved before any site, entry or upstream: the gate itself answers it 404, so apply
+# verification can tell the gate from an application (sandbox.commands.hosting._GATE_CHECK_PATH).
+GATE_CHECK_PATH = "/__sandbox/gate-check"
 SHARE_COOKIE_SESSIONS = 8
 SHARE_PREFIX = "/s/"
 STACK_PAGE_PATH = "/__sandbox/stack"
@@ -966,6 +969,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         gate = self.gate
         # Only origin-form targets: self.path is forwarded to the capture service.
         if not gate.enabled() or not self.path.startswith("/") or self.path.startswith("//"):
+            return self._not_found()
+        if urllib.parse.urlsplit(self.path).path == GATE_CHECK_PATH:
             return self._not_found()
         host = self._host()
         site = gate.site_for_host(host)

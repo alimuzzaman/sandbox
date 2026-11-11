@@ -18,7 +18,9 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import sandbox.commands.hosting as hosting_cmd  # noqa: E402
-from tests.test_hosting import _HostingOwnerFixture, _public_acme_manifest  # noqa: E402
+import sandbox.core._hosting as hosting  # noqa: E402
+from sandbox.hosting.front_door import nginx  # noqa: E402
+from tests.test_hosting import _HostingOwnerFixture, _manifest, _public_acme_manifest  # noqa: E402
 
 PRIMARY = "site.example.test"
 ALIAS = "www.example.test"
@@ -27,9 +29,12 @@ APPLY_LOG = "/srv/sandbox/runtime/hosts/example-site/production/apply.log"
 ROUTE = "sandbox-host-example-site-production"
 
 
-def _private_manifest(private=True):
+TAG = "0123456789abcdef" * 2
+
+
+def _private_manifest(private=True, *, proxied=False):
     enabled_until = (dt.date.today() + dt.timedelta(days=10)).isoformat()
-    manifest = _public_acme_manifest(
+    manifest = (_manifest if proxied else _public_acme_manifest)(
         f"        - hostname: {ALIAS}\n          mode: serve\n"
         f"        - hostname: {GATE}\n          mode: serve")
     manifest = manifest.replace("primary: আমারসোনার.বাংলা", f"primary: {PRIMARY}")
@@ -58,11 +63,20 @@ class _Response:
         return False
 
 
-def _http_error(code, gate=False):
+def _http_error(code, gate=False, tag=None):
     headers = Message()
     if gate:
         headers["X-Sandbox-Gate"] = "1"
+    if tag:
+        headers["X-Sandbox-Route"] = tag
     return urllib.error.HTTPError("https://x/", code, "status", headers, io.BytesIO())
+
+
+def _target(url):
+    """A probe URL without its random cache-busting query (checked to be there)."""
+    base, _, query = url.partition("?")
+    assert re.fullmatch(r"sandbox-verify=[0-9a-f]{16}", query), url
+    return base
 
 
 @patch("sandbox.commands.hosting.time.sleep")
@@ -71,7 +85,8 @@ class PrivateVerificationTests(unittest.TestCase):
     def verify(self, build_opener, answers, route, **kwargs):
         build_opener.return_value.open.side_effect = answers
         hosting_cmd._verify_edge([route], **kwargs)
-        return [call.args[0].full_url for call in build_opener.return_value.open.call_args_list]
+        return [_target(call.args[0].full_url)
+                for call in build_opener.return_value.open.call_args_list]
 
     def test_a_private_primary_passes_on_404(self, build_opener, _sleep):
         urls = self.verify(build_opener, [_http_error(404)], {"hostname": PRIMARY, "mode": "serve"},
@@ -96,6 +111,7 @@ class PrivateVerificationTests(unittest.TestCase):
                            gate_hostnames=frozenset({GATE}))
         self.assertEqual(urls, [f"https://{GATE}/__sandbox/gate-check"])
         build_opener.return_value.open.reset_mock()
+        build_opener.return_value.open.reset_mock()
         build_opener.return_value.open.side_effect = lambda *_a, **_k: (_ for _ in ()).throw(_http_error(404))
         with self.assertRaisesRegex(RuntimeError, "HTTP 404, but not from the gate"):
             hosting_cmd._verify_edge([{"hostname": GATE, "mode": "serve"}], gate_hostnames=frozenset({GATE}))
@@ -103,11 +119,49 @@ class PrivateVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HTTP 200 without a session"):
             hosting_cmd._verify_edge([{"hostname": GATE, "mode": "serve"}], gate_hostnames=frozenset({GATE}))
 
+    def test_a_404_without_this_applys_route_tag_fails(self, build_opener, _sleep):
+        """A stale route, or a cache, answers 404 too, but without the new tag."""
+        for answer, tag in ((_http_error(404), None), (_http_error(404, tag="f" * 32), "stale")):
+            with self.subTest(tag=tag):
+                build_opener.return_value.open.side_effect = lambda *_a, _e=answer, **_k: (_ for _ in ()).throw(_e)
+                with self.assertRaisesRegex(RuntimeError, "without this apply's route tag"):
+                    hosting_cmd._verify_edge([{"hostname": PRIMARY, "mode": "serve"}],
+                                             private_hostnames=frozenset({PRIMARY}), route_tag=TAG)
+        build_opener.return_value.open.side_effect = [_http_error(404, tag=TAG)]
+        hosting_cmd._verify_edge([{"hostname": PRIMARY, "mode": "serve"}],
+                                 private_hostnames=frozenset({PRIMARY}), route_tag=TAG)
+        build_opener.return_value.open.side_effect = [_http_error(404, gate=True, tag=TAG)]
+        hosting_cmd._verify_edge([{"hostname": GATE, "mode": "serve"}],
+                                 gate_hostnames=frozenset({GATE}), route_tag=TAG)
+
+    def test_every_try_asks_a_new_url(self, build_opener, _sleep):
+        build_opener.return_value.open.side_effect = [_http_error(404), _http_error(404, tag=TAG)]
+        hosting_cmd._verify_edge([{"hostname": PRIMARY, "mode": "serve"}],
+                                 private_hostnames=frozenset({PRIMARY}), route_tag=TAG)
+        urls = [call.args[0].full_url for call in build_opener.return_value.open.call_args_list]
+        self.assertEqual(len(set(urls)), 2)
+        self.assertEqual({_target(url) for url in urls}, {f"https://{PRIMARY}/"})
+        self.assertEqual(build_opener.return_value.open.call_args.args[0].get_header("Cache-control"),
+                         "no-cache")
+
+    def test_a_gate_behind_basic_auth(self, build_opener, _sleep):
+        """Only a public target can have Basic Auth (share.private refuses it)."""
+        build_opener.return_value.open.side_effect = [_http_error(401, tag=TAG)]
+        hosting_cmd._verify_edge([{"hostname": GATE, "mode": "serve"}], gate_hostnames=frozenset({GATE}),
+                                 route_tag=TAG, basic_auth_enabled=True)
+        build_opener.return_value.open.reset_mock()
+        build_opener.return_value.open.side_effect = [_http_error(404, gate=True, tag=TAG)]
+        hosting_cmd._verify_edge([{"hostname": GATE, "mode": "serve"}], gate_hostnames=frozenset({GATE}),
+                                 route_tag=TAG, basic_auth_enabled=True,
+                                 basic_auth_credentials=("owner", "pw"))
+        sent = build_opener.return_value.open.call_args.args[0].get_header("Authorization")
+        self.assertEqual(sent, "Basic b3duZXI6cHc=")
+
     def test_a_gate_on_a_public_target_is_checked_and_the_primary_stays_public(self, build_opener, _sleep):
         answers = {f"https://{GATE}/__sandbox/gate-check": _http_error(404, gate=True)}
 
         def answer(request, timeout=None):
-            found = answers.get(request.full_url)
+            found = answers.get(request.full_url.partition("?")[0])
             if found is not None:
                 raise found
             return _Response(200)
@@ -128,79 +182,176 @@ class PrivacyArgumentsTests(unittest.TestCase):
         self.assertEqual(hosting_cmd._privacy_verify_kwargs(plain), {})
 
 
+class RenderedPrivateRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.validated = _HostingOwnerFixture(self, _private_manifest()).validated
+        self.port = 18123
+
+    def renders(self, validated):
+        return {"caddy": hosting.caddyfile(validated, self.port, "/c", "/k"),
+                "nginx": nginx.render_host_conf(validated, self.port, name="host-example-site-production",
+                                                cert_path="/c", key_path="/k")}
+
+    def test_a_private_route_is_marked_and_tagged_on_both_front_doors(self):
+        for door, text in self.renders({**self.validated, "route_tag": TAG}).items():
+            with self.subTest(door=door):
+                self.assertTrue(hosting.is_marked_private_route(text))
+                self.assertIn(f'X-Sandbox-Route "{TAG}"', text)
+                self.assertFalse(_serves_app(text, self.port))
+
+    def test_nginx_tags_every_level_that_carries_the_robots_header(self):
+        text = self.renders({**self.validated, "route_tag": TAG})["nginx"]
+        self.assertEqual(text.count("add_header X-Robots-Tag"), text.count("add_header X-Sandbox-Route"))
+
+    def test_a_changed_or_public_route_is_not_marked(self):
+        for door, text in self.renders(self.validated).items():
+            with self.subTest(door=door):
+                self.assertTrue(hosting.is_marked_private_route(text))
+                tampered = text.replace("404", "200", 1)
+                self.assertFalse(hosting.is_marked_private_route(tampered))
+        public = _HostingOwnerFixture(self, _private_manifest(private=False)).validated
+        for door, text in self.renders(public).items():
+            with self.subTest(door=door, public=True):
+                self.assertFalse(hosting.is_marked_private_route(text))
+        for value in (None, "", "# sandbox-private-route v1 " + "0" * 64 + "\n"):
+            self.assertFalse(hosting.is_marked_private_route(value))
+
+    def test_a_route_tag_must_be_32_hex(self):
+        for bad in ("abc", "G" * 32, TAG + "\n", 7):
+            with self.subTest(tag=bad), self.assertRaises(hosting.HostingError):
+                hosting.caddyfile({**self.validated, "route_tag": bad}, self.port, "/c", "/k")
+
+    def test_share_private_refuses_cloudflare_proxying(self):
+        with self.assertRaisesRegex(hosting.HostingError, "share.private needs cloudflare.proxied: false"):
+            _HostingOwnerFixture(self, _private_manifest(proxied=True))
+
+
 class FailedPrivateApplyTests(unittest.TestCase):
     """A private apply that fails never leaves the public name serving the application."""
 
     def fixture(self, previous, *, private=True):
         fixture = _HostingOwnerFixture(self, _private_manifest(private))
-        fixture.patch.object(hosting_cmd, "_read_remote_optional", return_value=previous)
         self.port = fixture.runtime["loopback_port"]
+        self.live = {"route": previous}
+
+        def read(_entry, path, *_a, **_k):
+            return self.live["route"] if path.endswith(f"/{ROUTE}.caddy") else None
+
+        def configure(_entry, _name, content, *_a, **_k):
+            self.live["route"] = content
+            return {"state": "changed", "digest": "x"}
+
+        def restore(_entry, _name, previous_route, **_k):
+            self.live["route"] = previous_route
+            return {"state": "rollback_complete", "digest": "x"}
+        fixture.patch.object(hosting_cmd, "_read_remote_optional", side_effect=read)
+        fixture.configure_edge.side_effect = configure
+        fixture.restore_edge.side_effect = restore
+        fixture.manager = MagicMock()
+        fixture.manager.attach_mock(fixture.compose, "compose")
+        fixture.manager.attach_mock(fixture.configure_edge, "configure")
+        fixture.manager.attach_mock(fixture.restore_edge, "restore")
         return fixture
 
     def public_route(self):
         return f"{PRIMARY}, {ALIAS} {{\n    reverse_proxy 127.0.0.1:{self.port}\n}}\n"
 
-    def live_route(self, fixture, previous):
-        """What the front door serves after the apply, from the order of edge calls."""
-        live = previous
-        for name, args, _kwargs in fixture.manager.mock_calls:
-            if name == "configure":
-                live = args[2]
-            elif name == "restore":
-                live = args[2]
-        return live
+    def calls(self, fixture):
+        return [name for name, _args, _kwargs in fixture.manager.mock_calls if "." not in name]
 
     def run_failing(self, fixture):
-        fixture.manager = MagicMock()
-        fixture.manager.attach_mock(fixture.configure_edge, "configure")
-        fixture.manager.attach_mock(fixture.restore_edge, "restore")
         with self.assertRaises(Exception):
             fixture.apply()
 
-    def test_verification_fails_after_the_private_route_is_live(self):
+    def assert_never_public(self, fixture):
+        """Once compose has run, no installed route sends a public name to the app."""
+        composed = False
+        live = None
+        for name, args, _kwargs in fixture.manager.mock_calls:
+            if name == "compose":
+                composed = True
+            elif name in ("configure", "restore"):
+                live = args[2]
+            if composed:
+                self.assertFalse(_serves_app(live, self.port), (name, live))
+        self.assertTrue(composed)
+
+    def test_a_public_route_comes_down_before_the_runtime_changes(self):
         fixture = self.fixture(None)
-        previous = self.public_route()
-        fixture.patch.object(hosting_cmd, "_read_remote_optional", return_value=previous)
+        self.live["route"] = self.public_route()
         fixture.edge.side_effect = RuntimeError(f"edge verification failed for {PRIMARY}: HTTP 404")
         self.run_failing(fixture)
-        fixture.configure_edge.assert_called_once()
-        fixture.restore_edge.assert_not_called()
-        live = self.live_route(fixture, previous)
-        self.assertFalse(_serves_app(live, self.port))
+        self.assertEqual(self.calls(fixture)[:3], ["restore", "compose", "configure"])
+        self.assertIsNone(fixture.restore_edge.call_args_list[0].args[2])
+        # The private route this apply installed stays after the failure.
+        self.assertEqual(self.calls(fixture), ["restore", "compose", "configure"])
+        self.assert_never_public(fixture)
+        live = self.live["route"]
+        self.assertTrue(hosting.is_marked_private_route(live))
         self.assertIn(f"reverse_proxy 127.0.0.1:{self.port + 3000}", live)
 
-    def test_a_runtime_failure_before_the_edge_removes_a_public_route(self):
-        fixture = self.fixture(None)
-        previous = self.public_route()
-        fixture.patch.object(hosting_cmd, "_read_remote_optional", return_value=previous)
+    def test_a_runtime_failure_before_the_edge_leaves_no_route(self):
+        fixture = self.fixture(self.public_route())
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
         fixture.configure_edge.assert_not_called()
-        fixture.restore_edge.assert_called_once_with(fixture.entry, ROUTE, None, log_path=APPLY_LOG)
-        self.assertFalse(_serves_app(self.live_route(fixture, previous), self.port))
+        self.assertEqual(self.calls(fixture)[:2], ["restore", "compose"])
+        self.assertTrue(all(call.args[2] is None for call in fixture.restore_edge.call_args_list))
+        self.assertIsNone(self.live["route"])
+        self.assert_never_public(fixture)
 
-    def test_an_already_private_route_is_restored(self):
-        previous = f"{PRIMARY} {{\n    respond 404\n}}\n{GATE} {{\n    reverse_proxy 127.0.0.1:21000\n}}\n"
-        fixture = self.fixture(previous)
+    def test_no_runtime_change_when_the_route_cannot_be_closed(self):
+        for failure in ("restore", "still_there"):
+            with self.subTest(failure=failure):
+                fixture = self.fixture(self.public_route())
+                if failure == "restore":
+                    fixture.restore_edge.side_effect = hosting.HostingError("rollback_incomplete: Caddy restore failed")
+                else:
+                    fixture.restore_edge.side_effect = lambda *_a, **_k: {"state": "rollback_complete"}
+                with self.assertRaisesRegex(hosting.HostingError, "private_route_closure_failed"):
+                    fixture.apply()
+                fixture.compose.assert_not_called()
+                fixture.configure_edge.assert_not_called()
+
+    def test_a_marked_private_route_is_restored(self):
+        fixture = self.fixture(None)
+        previous = hosting.caddyfile({**fixture.validated, "route_tag": "e" * 32},
+                                     self.port, "/c", "/k")
+        self.live["route"] = previous
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
+        self.assertEqual(self.calls(fixture), ["compose", "restore"])
         fixture.restore_edge.assert_called_once_with(fixture.entry, ROUTE, previous, log_path=APPLY_LOG)
-        self.assertFalse(_serves_app(self.live_route(fixture, previous), self.port))
+        self.assert_never_public(fixture)
+
+    def test_an_unmarked_route_that_looks_private_is_removed(self):
+        """Only a route Sandbox rendered private and nobody changed counts as private."""
+        fixture = self.fixture(None)
+        self.live["route"] = (f"{PRIMARY} {{\n    respond 404\n}}\n"
+                              f"{GATE} {{\n    reverse_proxy localhost:{self.port}\n}}\n")
+        fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
+        self.run_failing(fixture)
+        self.assertEqual(self.calls(fixture)[:2], ["restore", "compose"])
+        self.assertIsNone(self.live["route"])
 
     def test_a_public_manifest_still_restores_its_previous_route(self):
         fixture = self.fixture(None, private=False)
         previous = self.public_route()
-        fixture.patch.object(hosting_cmd, "_read_remote_optional", return_value=previous)
+        self.live["route"] = previous
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
+        self.assertEqual(self.calls(fixture), ["compose", "restore"])
         fixture.restore_edge.assert_called_once_with(fixture.entry, ROUTE, previous, log_path=APPLY_LOG)
 
-    def test_a_good_private_apply_verifies_with_its_privacy(self):
+    def test_a_good_private_apply_verifies_with_its_privacy_and_route_tag(self):
         fixture = self.fixture(None)
         fixture.apply()
         kwargs = fixture.edge.call_args.kwargs
         self.assertEqual(kwargs["gate_hostnames"], frozenset({GATE}))
         self.assertEqual(kwargs["private_hostnames"], frozenset({PRIMARY, ALIAS}))
+        self.assertRegex(kwargs["route_tag"], r"\A[0-9a-f]{32}\Z")
+        self.assertIn(f'X-Sandbox-Route "{kwargs["route_tag"]}"', self.live["route"])
+        self.assertTrue(hosting.is_marked_private_route(self.live["route"]))
         fixture.restore_edge.assert_not_called()
 
 

@@ -87,6 +87,45 @@ _NOINDEX_HEADER_BLOCK = (
     "        X-Robots-Tag \"noindex, nofollow, noarchive\"\n"
     "    }\n"
 )
+# Spec 081 rollout: a per-apply tag the front door adds to every answer of a target
+# with a gate, so delivery verification can prove an answer came from the route it
+# just installed (an application, or a stale route, cannot know it).
+ROUTE_TAG_HEADER = "X-Sandbox-Route"
+_ROUTE_TAG_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def route_tag_lines(validated: dict) -> str | None:
+    """The validated route tag of a render, or None. Refuses anything but 32 hex."""
+    tag = validated.get("route_tag")
+    if tag is None:
+        return None
+    if not isinstance(tag, str) or not _ROUTE_TAG_RE.fullmatch(tag):
+        raise HostingError("route_tag must be 32 lowercase hex characters")
+    return tag
+
+
+# Spec 081 rollout: the last line of a front-door route rendered for a `share.private`
+# manifest. It carries the SHA-256 of everything above it, so a failed apply can tell a
+# route Sandbox rendered private (safe to put back) from anything else (removed).
+_PRIVATE_ROUTE_MARK = "# sandbox-private-route v1 "
+
+
+def mark_private_route(text: str) -> str:
+    body = text if text.endswith("\n") else text + "\n"
+    return body + _PRIVATE_ROUTE_MARK + hashlib.sha256(body.encode()).hexdigest() + "\n"
+
+
+def is_marked_private_route(text) -> bool:
+    """True only for an unmodified route that `mark_private_route` produced."""
+    if not isinstance(text, str):
+        return False
+    prefix, _, last = text.rstrip("\n").rpartition("\n")
+    if not last.startswith(_PRIVATE_ROUTE_MARK) or not prefix:
+        return False
+    digest = last[len(_PRIVATE_ROUTE_MARK):]
+    return hmac.compare_digest(digest, hashlib.sha256((prefix + "\n").encode()).hexdigest())
+
+
 _PORT_START = 18000
 _PORT_COUNT = 1000
 # Spec 071: named stack ports (Mailpit and friends) own this slice of the web
@@ -747,6 +786,10 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             share=env.get("share"))
     except login_service.LoginServiceError as exc:
         raise HostingError(str(exc)) from None
+    if login_service.is_private(login_declaration) and (env.get("cloudflare") or {}).get("proxied"):
+        raise HostingError("login_service_invalid: share.private needs cloudflare.proxied: false, "
+                           "so no Cloudflare cache can keep serving pages from before the site went "
+                           "private")
     if basic_auth and login_service.is_private(login_declaration):
         raise HostingError("login_service_invalid: share.private answers every non-gate hostname "
                            "with 404, so basic_auth has nothing to protect; remove one of them")
@@ -1081,6 +1124,9 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
     gate_hosts = [host for host in served if host in gate]
     robots = _ROBOTS_DENY_BLOCK if validated.get("robots") == "deny" else ""
     noindex = _NOINDEX_HEADER_BLOCK if validated.get("indexing", "noindex") != "public" else ""
+    route_tag = route_tag_lines(validated)
+    if route_tag:
+        noindex += f"    header {{\n        defer\n        {ROUTE_TAG_HEADER} \"{route_tag}\"\n    }}\n"
     tls = f"    tls {cert_path} {key_path}\n" if cert_path and key_path else ""
     auth = validated.get("basic_auth")
     if auth and basic_auth_hash is None and not redact_basic_auth:
@@ -1172,7 +1218,8 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
             # share.private: a redirect alias would announce the primary, so it answers 404 too.
             answer = "respond 404" if private else f"redir {route['target']}{{uri}} 308"
             blocks.append(f"{route['hostname']} {{\n{noindex}    {answer}\n}}\n")
-    return "\n".join(blocks)
+    rendered = "\n".join(blocks)
+    return mark_private_route(rendered) if private else rendered
 
 
 def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | None = None) -> dict:

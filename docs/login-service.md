@@ -211,16 +211,30 @@ the route marker that apply checks.
 
 - Pick a gate hostname that says nothing, such as a few random characters. It is the
   only public way in.
-- **Apply verification follows privacy.** Every gate hostname must answer a request with
-  no session with the gate's own 404, marked `X-Sandbox-Gate: 1`. With `private: true`,
+- **Apply verification follows privacy.** Every gate hostname must answer
+  `/__sandbox/gate-check` with the gate's own 404, marked `X-Sandbox-Gate: 1`; the gate
+  reserves that path ahead of every link, session and upstream. With `private: true`,
   the primary, serve aliases and redirect aliases must answer 404: an answer of 2xx or
-  3xx fails the apply. The application's own health is still checked on its loopback port.
-- **A failed apply fails closed.** The apply recreates the containers before it touches
-  the front door, and a failure does not roll them back. For a private manifest the
-  front door is therefore never put back in a state that serves the new runtime on a
-  public name: a private route the apply already installed stays, a previous route is
-  restored only if it sends nothing to the application's port, and otherwise the route
-  is removed. Run the apply again once the cause is fixed.
+  3xx fails the apply. Each apply renders a fresh random `X-Sandbox-Route` tag into the
+  front-door route of a target with a gate, and those 404s must carry it, so an older
+  route or a cached page cannot pass. Every probe asks a new URL (a random
+  `sandbox-verify` query). A gate behind a public target's Basic Auth gets its
+  credentials. The application's own health is still checked on its loopback port.
+  Image activation does not re-render the route, so it checks privacy without the tag.
+- **No Cloudflare proxying.** `private: true` refuses `cloudflare.proxied: true`, so no
+  Cloudflare cache can keep serving pages from before the site went private.
+- **A private apply closes the public name first.** Before it touches the runtime, an
+  apply of a private manifest removes the previous front-door route unless that route is
+  one Sandbox rendered private and nobody changed since (its last line is
+  `# sandbox-private-route v1 <sha256 of the text above>`), and reads it back to confirm.
+  If the removal cannot be confirmed, the apply stops before the runtime changes. The
+  first private apply over a route without that mark (including one rendered private
+  before the mark existed) therefore leaves the hostnames unrouted, the gate included,
+  until the new route is live.
+- **A failed apply fails closed.** The apply recreates the containers before it installs
+  the new route, and a failure does not roll them back. For a private manifest a private
+  route the apply already installed stays, a marked private previous route goes back,
+  and anything else is removed. Run the apply again once the cause is fixed.
 - With an `autologin.login_service` block, `share` carries only `hostname`, `private`,
   `agent_mint` and `stack_sign_in`, and uses that block's fields. `share` is then a
   reserved entry name.

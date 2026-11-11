@@ -170,9 +170,14 @@ def render_host_conf(validated: dict, port: int, *, name: str,
         else:
             verifier = "Basic " + base64.b64encode(
                 f"{auth['username']}:{basic_auth_password}".encode()).decode()
-    return _render(validated, port, name=name, cert_path=cert_path, key_path=key_path,
-                   verifier=verifier, marker=marker, ipv6=ipv6,
-                   http2_directive=http2_directive, realip=realip, streaming=streaming)
+    rendered = _render(validated, port, name=name, cert_path=cert_path, key_path=key_path,
+                       verifier=verifier, marker=marker, ipv6=ipv6,
+                       http2_directive=http2_directive, realip=realip, streaming=streaming)
+    from sandbox.core._hosting import mark_private_route
+    from sandbox.hosting import login_service
+    if login_service.is_private(validated.get("login_service")):
+        rendered = mark_private_route(rendered)
+    return rendered
 
 
 def route_marker(content: str) -> str | None:
@@ -208,6 +213,12 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
     tag = f'add_header X-Robots-Tag "{ROBOTS_TAG}" always;'
     ni_server = [f"    {tag}"] if noindex else []
     ni_loc = [f"        {tag}"] if noindex else []
+    from sandbox.core._hosting import ROUTE_TAG_HEADER, route_tag_lines
+    route_tag = route_tag_lines(validated)
+    if route_tag:
+        # Spec 081 rollout: on the same levels as X-Robots-Tag, so it is never dropped.
+        ni_server.append(f'    add_header {ROUTE_TAG_HEADER} "{route_tag}" always;')
+        ni_loc.append(f'        add_header {ROUTE_TAG_HEADER} "{route_tag}" always;')
     out: list[str] = [
         f"# Managed by Sandbox (front door: nginx). Owner: {name}.",
         "# Do not edit: re-run the Sandbox command that owns this route.",

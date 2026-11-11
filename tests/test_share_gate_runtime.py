@@ -338,6 +338,21 @@ class NoIndexTests(_Gate):
                 # Apply verification tells the gate's 404 from a front door's by this.
                 self.assertEqual(response.msg.get_all(runtime.GATE_HEADER), ["1"])
 
+    def test_the_gate_check_path_is_the_gates_own_404(self):
+        """Reserved before any link, session or upstream, so apply verification sees the gate."""
+        token, _ = self.mint()
+        cookie = self.cookie(token)
+        for response, _ in (self.request("GET", runtime.GATE_CHECK_PATH + "?sandbox-verify=0a1b"),
+                            self.get(runtime.GATE_CHECK_PATH, cookie)):
+            with self.subTest(status=response.status):
+                self.assertEqual(response.status, 404)
+                self.assertEqual(response.msg.get_all(runtime.GATE_HEADER), ["1"])
+
+    def test_the_gate_check_path_matches_the_verifier(self):
+        import sandbox.commands.hosting as hosting_cmd
+        self.assertEqual(runtime.GATE_CHECK_PATH, hosting_cmd._GATE_CHECK_PATH)
+        self.assertEqual(runtime.GATE_HEADER, hosting_cmd._GATE_HEADER)
+
     def test_errors_http_server_raises_itself_carry_the_header(self):
         for method in ("TRACE", "PROPFIND"):
             with self.subTest(method=method):

@@ -285,8 +285,6 @@ class RefreshPublicTargetTests(unittest.TestCase):
         real_write, real_os_write = refresh.AuditLog.write, os.write
 
         def short(fd, data):
-            if data == b"\n":
-                return real_os_write(fd, data)
             return real_os_write(fd, data[:len(data) // 2])
 
         def write(audit, **fields):
@@ -311,6 +309,25 @@ class RefreshPublicTargetTests(unittest.TestCase):
         with self._short_audit_write("start"), self.assertRaises(refresh.FrontDoorRefreshRefused):
             target.run()
         target.configure.assert_not_called()
+        # A later run's records start on their own lines after the partial one.
+        self.assertEqual(target.run()["action"], "refreshed")
+        lines = refresh.audit_path(target.fx.home / "runtime").read_text().splitlines()
+        with self.assertRaises(ValueError):
+            json.loads(lines[0])
+        later = [json.loads(line) for line in lines[1:]]
+        self.assertEqual([line["op"] for line in later][-2:], ["start", "end"])
+        self.assertEqual(later[-1]["outcome"], "refreshed")
+
+    def test_a_record_after_an_unterminated_line_stands_alone(self):
+        path = refresh.audit_path(_Refresh(self).fx.home / "runtime")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"op": "start", "outco')
+        with refresh.AuditLog(path) as audit:
+            audit.write(op="start", outcome="started")
+            audit.write(op="end", outcome="refreshed")
+        lines = path.read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual([json.loads(line)["op"] for line in lines[1:]], ["start", "end"])
 
     def test_a_short_success_line_rolls_the_route_back(self):
         target = _Refresh(self)

@@ -54,3 +54,6 @@ From the validated manifest: `project`, `environment`, `routes`, `cloudflare.pro
 
 `{"at", "op": "start"|"end", "controller", "remote", "target", "front_door", "outcome", "code",
 "route_before", "route_after", "restore"}`. Digests only; no route text, secret or address.
+Appended and synced under an exclusive `flock` on the file; a short write fails the run, and
+the next writer ends a partial last line before appending, so every complete record is
+readable JSONL.

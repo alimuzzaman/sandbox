@@ -13,6 +13,7 @@ JSON line per event to a controller file opened before the first remote change.
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -282,7 +283,8 @@ class AuditLog:
     def __init__(self, path: Path):
         try:
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._fd: int | None = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            # Read access only to check the last byte: a record must start on its own line.
+            self._fd: int | None = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
         except OSError as exc:
             raise FrontDoorRefreshRefused(
                 AUDIT_UNAVAILABLE, f"cannot open the front-door refresh audit log: {exc.strerror}") from None
@@ -294,16 +296,23 @@ class AuditLog:
         record = {key: fields.get(key) for key in AUDIT_FIELDS}
         record["at"] = int(record["at"] if record["at"] is not None else time.time())
         line = (json.dumps(record, sort_keys=True) + "\n").encode()
-        if os.write(self._fd, line) != len(line):
-            # A partial line is not an audit record; fail inside the caller's boundary.
-            # Terminate it first (best effort) so the next record starts on its own line.
-            try:
-                os.write(self._fd, b"\n")
-            except OSError:
-                pass
-            raise OSError(errno.EIO, "short write to the front-door refresh audit log")
-        # Durable here, inside the caller's failure boundary, so closing cannot fail later.
-        os.fsync(self._fd)
+        # Every controller run shares this file, so append and boundary repair happen
+        # under one exclusive lock: no writer appends between another's check and write.
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        try:
+            size = os.fstat(self._fd).st_size
+            if size and os.pread(self._fd, 1, size - 1) != b"\n":
+                # An earlier short write left a partial line; end it so this record
+                # stands alone (the partial line itself is not an audit record).
+                line = b"\n" + line
+            if os.write(self._fd, line) != len(line):
+                # A partial line is not an audit record; fail inside the caller's boundary.
+                # The next write, under this lock, ends it before appending.
+                raise OSError(errno.EIO, "short write to the front-door refresh audit log")
+            # Durable here, inside the caller's failure boundary, so closing cannot fail later.
+            os.fsync(self._fd)
+        finally:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
 
     def close(self) -> None:
         """Never raises: every line was already written and synced by ``write``."""

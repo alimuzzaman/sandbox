@@ -1261,7 +1261,10 @@ It refuses, before any change:
 
 Each run appends `start` and `end` lines (digests, never route text, secrets or
 addresses) to `$SANDBOX_HOME/runtime/front-door-refresh/audit.jsonl`; refusals inside the
-lease add an `end`/`refused` line. The target record keeps `front_door_refresh` (last
+lease add an `end`/`refused` line. Each line is written and synced under an exclusive
+lock on the file, and a write that cannot complete fails the run (before the reload it
+refuses, after it the previous route is restored); the next line starts on its own line, so
+a partial one never hides it. The target record keeps `front_door_refresh` (last
 outcome) and `front_door_declaration`.
 
 A delivery fence does not stop a refresh. A refused or interrupted `host apply` leaves its

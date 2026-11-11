@@ -207,3 +207,15 @@ selector are assembled. The client observes that contract before reading stdin
 or submitting a job. Older receivers refuse as capability unavailable at this
 read-only stage. Source checks, independent review and installed end-to-end
 acceptance are still required.
+
+`read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15)` observes
+one original retained job. It checks the request/source/provenance and selected
+machine/owner against the receipt. A running result returns status without child
+output. After termination it reads bounded retained stdout pages, verifies the
+fixed host-exec result's target/service/exit code and returns the original capture
+envelope for the caller to render. It makes no submission, retries or stdin
+replay. Malformed, missing, mismatched or truncated observations raise
+`ServerCLIExecObservationUnavailable` with the known job and request IDs; known
+acceptance is not relabeled as a new unknown submission. Compatible service
+updates may permit reading an older job's ledger without rewriting that job's
+original revision or granting it a new execution context.

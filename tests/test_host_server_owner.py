@@ -54,9 +54,9 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(kwargs["request_id"], "original")
         self.assertEqual(json.loads(output.getvalue()), self.submit.return_value)
 
-    def test_observation_validation_plan_and_exec_do_not_stage_cwd_or_consume_stdin(self):
+    def test_observation_validation_and_plan_do_not_stage_cwd_or_consume_stdin(self):
         for action, subaction in (("stack", "list"), ("logs", None), ("status", None),
-                ("diagnose", None), ("validate", None), ("plan", None), ("exec", None)):
+                ("diagnose", None), ("validate", None), ("plan", None)):
             with self.subTest(action=action):
                 self.args.action, self.args.image_action = action, subaction
                 self.args.project_dir = "/nonexistent/not-a-checkout"
@@ -127,7 +127,7 @@ class OwnerTargetTests(unittest.TestCase):
             (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(),
             ("host", "exec"), "box", MappingProxyType({"front_door": "nginx"}), self.owner)
         self.current = self.enterContext(patch.object(sdk, "validate_owner_current", return_value=self.context))
-        self.enterContext(patch.object(sdk, "server_cli_context_if_selected", return_value=self.context))
+        self.selected_context = self.enterContext(patch.object(sdk, "server_cli_context_if_selected", return_value=self.context))
         self.entry = targets.selected_owner_target("box")
 
     def test_only_original_alias_selects_owner_and_no_dict_can_grant_it(self):
@@ -271,6 +271,14 @@ class ServerSelectionTests(OwnerTargetTests):
     def selected(self):
         return selection.read_owner_exec_selection(self.entry, name="named")
 
+    def bind_original_selector(self):
+        digest = "sha256:" + self.selected().fingerprint
+        self.context = replace(self.context, target_selector_digest=digest)
+        self.current.return_value = self.context
+        self.selected_context.return_value = self.context
+        self.entry = targets.selected_owner_target("box")
+        return digest
+
     def test_metadata_git_never_executes_repository_fsmonitor_or_content_filters(self):
         from sandbox.services.process import ProcessResult
         from tests.subprocess_support import run_test_process, synthetic_environment
@@ -329,6 +337,7 @@ class ServerSelectionTests(OwnerTargetTests):
 
     def test_owner_exec_prepare_uses_selected_server_manifest_without_laptop_history(self):
         from sandbox.commands import host_exec
+        self.bind_original_selector()
         args = Namespace(remote="box", name="named", target=None, environment=None,
             project_dir="/unrelated/controller", exec_argv=["id", "-un"], service="web", timeout=30, json=True)
         with patch("sandbox.hosting.stack_registry.read", side_effect=AssertionError("local registry")), \
@@ -340,6 +349,140 @@ class ServerSelectionTests(OwnerTargetTests):
         self.assertEqual(shlex.split(prefix), ["docker", "exec", "-i", "f" * 12])
         self.assertNotIn("environment.env", prefix)
         self.assertIs(type(entry), targets.OwnerHostTarget)
+
+    def test_owner_exec_without_original_selector_refuses_before_metadata_or_effects(self):
+        from sandbox.commands import host_exec
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["id"], service="web", timeout=30, json=True)
+        with self.assertRaises(host_exec.ExecRefusal) as refusal:
+            host_exec._prepare(args)
+        self.assertEqual(refusal.exception.code, "server_cli_target_binding_unavailable")
+        self.process.assert_not_called()
+
+    def test_held_exec_contends_with_actual_native_alias_locks(self):
+        from sandbox.commands import host_exec
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        repository = RecoveryRepository(self.home / "hosts.json", self.home / "native-locks")
+        self.bind_original_selector()
+        selected = selection.read_owner_exec_selection(self.entry, name="named",
+            expected_selector_digest=self.context.target_selector_digest)
+        request = host_exec.ExecRequest(selected.target, "web", ("id",), owner_selection=selected)
+        lease = {"path": str(self.home / "lease"), "token": "a" * 32, "owner": "b" * 32}
+        with patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                patch("sandbox.hosting.target_lease.acquire", return_value=lease) as acquire:
+            with host_exec._execution_scope(request, self.entry):
+                for key in selected.native_keys:
+                    with self.assertRaises(TimeoutError), repository.effect_lock(key, timeout_seconds=0):
+                        self.fail("native alias was not held")
+            acquire.assert_called_once()
+        # The same actual native locks become available after complete exit.
+        for key in selected.native_keys:
+            with repository.effect_lock(key, timeout_seconds=0):
+                pass
+        self.assertTrue(self.process.call_args.args[1].endswith(" release"))
+
+    def test_native_exit_failure_does_not_retire_physical_fence(self):
+        from sandbox.commands import host_exec
+        from contextlib import contextmanager
+        self.bind_original_selector()
+        selected = selection.read_owner_exec_selection(self.entry, name="named",
+            expected_selector_digest=self.context.target_selector_digest)
+        request = host_exec.ExecRequest(selected.target, "web", ("id",), owner_selection=selected)
+        @contextmanager
+        def broken_exit(*args, **kwargs):
+            yield
+            raise OSError("synthetic native unlock failure")
+        repository = Mock()
+        repository.effect_lock.side_effect = broken_exit
+        with patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                patch("sandbox.hosting.target_lease.acquire", return_value={
+                    "path": "synthetic", "token": "a" * 32, "owner": "b" * 32}), \
+                self.assertRaises(OSError):
+            with host_exec._execution_scope(request, self.entry):
+                pass
+        self.assertFalse(any(call.args[1].endswith(" release") for call in self.process.call_args_list))
+
+    def test_byte_emitter_publishes_only_metadata_after_entire_held_scope(self):
+        from sandbox.commands import host_exec
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        from contextlib import contextmanager
+        self.bind_original_selector()
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["synthetic"], service="web", timeout=30, json=True, exec_capture_artifacts=True)
+        outcome = host_exec.host_exec.ExecOutcome(0, "ok", 1, stdout=b"\x00\xff" + b"AIza" + b"A" * 40)
+        metadata = {"ok": True, "code": "ok", "exit_code": 0,
+                    "capture": {"contract": "job.server-cli.capture-artifact.v1"}}
+        events = []
+        custody = Mock()
+        def prepare():
+            events.append("prepare")
+            return custody
+        def publish(actual):
+            self.assertIs(actual, outcome)
+            self.assertEqual(events, ["prepare", "run", "scope_exited"])
+            events.append("publish")
+            return metadata
+        custody.publish.side_effect = publish
+        actual_scope = host_exec._execution_scope
+        @contextmanager
+        def scope(request, entry):
+            with actual_scope(request, entry):
+                yield
+            events.append("scope_exited")
+        def run(*args, **kwargs):
+            events.append("run")
+            return outcome
+        repository = RecoveryRepository(self.home / "hosts.json", self.home / "native-locks")
+        audit = Mock()
+        audit.__enter__ = Mock(return_value=audit)
+        audit.__exit__ = Mock(return_value=False)
+        output = io.StringIO()
+        with patch("sandbox.application.server_cli_capture.prepare_server_cli_capture", side_effect=prepare), \
+                patch.object(host_exec, "_execution_scope", side_effect=scope), \
+                patch.object(host_exec.host_exec, "run", side_effect=run), \
+                patch.object(host_exec.host_exec, "AuditLog", return_value=audit), \
+                patch.object(sdk, "owner_command_args", return_value=["synthetic"]), \
+                patch.object(sdk, "owner_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                patch("sandbox.hosting.target_lease.acquire", return_value={
+                    "path": "synthetic", "token": "a" * 32, "owner": "b" * 32}), redirect_stdout(output):
+            host_exec.cmd_host_exec(args)
+        self.assertEqual(json.loads(output.getvalue()), metadata)
+        self.assertNotIn("stdout", output.getvalue())
+        self.assertNotIn("AIza", output.getvalue())
+        self.assertEqual(events[-1], "publish")
+        custody.close.assert_called_once()
+        audit.write.assert_called_once()
+
+    def test_byte_emitter_cleanup_failure_closes_custody_without_publishing(self):
+        from sandbox.commands import host_exec
+        from contextlib import contextmanager
+        self.bind_original_selector()
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["synthetic"], service="web", timeout=30, json=True, exec_capture_artifacts=True)
+        @contextmanager
+        def failed_cleanup(*args):
+            yield
+            raise RuntimeError("synthetic cleanup uncertainty")
+        custody = Mock()
+        audit = Mock()
+        audit.__enter__ = Mock(return_value=audit)
+        audit.__exit__ = Mock(return_value=False)
+        output = io.StringIO()
+        with patch("sandbox.application.server_cli_capture.prepare_server_cli_capture", return_value=custody), \
+                patch.object(host_exec, "_execution_scope", side_effect=failed_cleanup), \
+                patch.object(host_exec.host_exec, "run", return_value=host_exec.host_exec.ExecOutcome(
+                    0, "ok", 1, stdout=b"synthetic private output")), \
+                patch.object(host_exec.host_exec, "AuditLog", return_value=audit), \
+                patch.object(sdk, "owner_command_args", return_value=["synthetic"]), \
+                patch.object(sdk, "owner_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            host_exec.cmd_host_exec(args)
+        self.assertEqual(failure.exception.code, host_exec.host_exec.EXIT_TRANSPORT)
+        self.assertEqual(json.loads(output.getvalue())["code"], "host_exec_capture_unavailable")
+        self.assertNotIn("synthetic private output", output.getvalue())
+        custody.publish.assert_not_called()
+        custody.close.assert_called_once()
 
     def test_owner_exec_refuses_a_service_without_a_unique_first_container(self):
         selected = self.selected()
@@ -388,6 +531,37 @@ class ServerSelectionTests(OwnerTargetTests):
         self.summary["stack"]["commit"] = "b" * 40
         with self.assertRaises(TargetRefusal):
             self.selected()
+
+    def test_expected_snapshot_digest_is_revalidated_at_held_consumption(self):
+        observed = self.selected()
+        expected = "sha256:" + observed.fingerprint
+        current = selection.read_owner_exec_selection(self.entry, name="named",
+            expected_selector_digest=expected)
+        current.require_current()
+        self.lifetime["copy_id"] = "abcd1234"
+        with self.assertRaises(TargetRefusal) as refusal:
+            current.require_current()
+        self.assertEqual(refusal.exception.code, "host_server_target_changed")
+        with self.assertRaises(TargetRefusal):
+            selection.read_owner_exec_selection(self.entry, name="named", expected_selector_digest="bad")
+
+    def test_prepare_consumes_selector_only_from_genuine_retained_context(self):
+        from sandbox.commands import host_exec
+        observed = self.selected()
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            project_dir="/unrelated/controller", exec_argv=["id", "-un"], service="web", timeout=30, json=True)
+        expected = "sha256:" + observed.fingerprint
+        self.context = replace(self.context, target_selector_digest=expected)
+        self.current.return_value = self.context
+        with patch.object(sdk, "server_cli_context_if_selected", return_value=self.context):
+            self.entry = targets.selected_owner_target("box")
+            request, _, _ = host_exec._prepare(args)
+        self.assertEqual(request.owner_selection.expected_selector_digest, expected)
+        self.lifetime["copy_id"] = "abcd1234"
+        with patch.object(sdk, "server_cli_context_if_selected", return_value=self.context), \
+                self.assertRaises(TargetRefusal) as refused:
+            host_exec._prepare(args)
+        self.assertEqual(refused.exception.code, "host_server_target_changed")
 
     def test_metadata_inspection_cannot_issue_execution_selection_or_serialize_owner_proof(self):
         reader = getattr(sdk, "read_current_server_owner", None)

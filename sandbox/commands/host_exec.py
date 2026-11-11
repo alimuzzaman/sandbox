@@ -16,6 +16,13 @@ from sandbox.hosting import host_exec, target_resolution
 from sandbox.hosting.host_exec import ExecRefusal, ExecRequest
 from sandbox.hosting.server_cli_target import host_target, is_owner_target, can_operate_host
 
+# v1 means retained selector consumption plus the native/physical held scope
+# below. It describes the existing redacted UTF-8 capture, not binary transport.
+SERVER_CLI_EXEC_BINDING_VERSION = 1
+# Requires the committed private-artifact custody API, metadata-only emitter,
+# actual EOF capture and byte-aware client renderer shipped in this increment.
+SERVER_CLI_EXEC_CAPTURE_VERSION = 1
+
 
 def _refuse(code: str, message: str, *, as_json: bool, exit_code: int) -> None:
     if as_json:
@@ -65,10 +72,14 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
                           f"remote '{args.remote}' is not provisioned")
     if is_owner_target(entry):
         from sandbox.hosting.server_target_selection import read_owner_exec_selection
+        context = entry.require_current()
+        if context.target_selector_digest is None:
+            raise ExecRefusal("server_cli_target_binding_unavailable",
+                              "original server exec has no retained target selector")
         selected = read_owner_exec_selection(entry,
             target=getattr(args, "target", None), name=getattr(args, "name", None),
-            environment=getattr(args, "environment", None))
-        context = entry.require_current()
+            environment=getattr(args, "environment", None),
+            expected_selector_digest=context.target_selector_digest)
         remaining = int((datetime.datetime.fromisoformat(context.deadline_at.replace("Z", "+00:00"))
                          - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
         if remaining <= 0:
@@ -126,6 +137,11 @@ def _execution_scope(request, entry):
     from sandbox.hosting import target_lease
     if type(selected) is not OwnerExecSelection or not is_owner_target(entry):
         raise ExecRefusal(host_exec.TRANSPORT_FAILED, "current server target evidence is required")
+    context = entry.require_current()
+    if (context.target_selector_digest is None or
+            selected.expected_selector_digest != context.target_selector_digest):
+        raise ExecRefusal("server_cli_target_binding_unavailable",
+                          "original server exec target binding changed")
     repository = RecoveryRepository()
     with ExitStack() as held:
         for key in selected.native_keys:
@@ -138,26 +154,44 @@ def _execution_scope(request, entry):
         lease = target_lease.acquire(lambda command: entry.process(command, timeout=30),
             target_lease.lease_path(entry.sandbox_home(), selected.target.project,
                                     selected.target.environment), owner)
-        clean_exit = False
-        try:
-            selected.require_current()
-            yield
-            selected.require_current()
-            clean_exit = True
-        finally:
-            if clean_exit:
-                # Do not acknowledge successful cleanup on an unavailable
-                # process result. The generic release helper is best-effort.
-                result = entry.process(target_lease.command(lease["path"], lease["token"],
-                    lease["owner"], "release"), timeout=30)
-                if result.returncode:
-                    raise RuntimeError("host_exec_lease_retirement_unknown")
+        selected.require_current()
+        yield
+        selected.require_current()
+    # Native context exit can fail. Retain the physical fence in that case;
+    # neither clean child exit nor a successful inner check proves cleanup.
+    selected.require_current()
+    result = entry.process(target_lease.command(lease["path"], lease["token"],
+        lease["owner"], "release"), timeout=30)
+    if result.returncode:
+        raise RuntimeError("host_exec_lease_retirement_unknown")
+
+
+@contextmanager
+def _capture_lifetime(custody):
+    try:
+        yield
+    finally:
+        if custody is not None:
+            custody.close()
 
 
 def cmd_host_exec(args) -> None:
     as_json = bool(getattr(args, "json", False))
+    artifact_capture = bool(getattr(args, "exec_capture_artifacts", False))
+    custody = None
+    capture_metadata = None
+    setup_complete = False
     try:
         request, entry, prefix = _prepare(args)
+        if artifact_capture:
+            if not as_json or not is_owner_target(entry) or request.owner_selection is None:
+                raise ExecRefusal(host_exec.USAGE, "artifact capture requires original server exec",
+                                  host_exec.EXIT_USAGE)
+            # This hidden receiver option cannot select paths or issue custody.
+            # The SDK revalidates the genuine retained original execution.
+            from sandbox.application.server_cli_capture import prepare_server_cli_capture
+            request.owner_selection.require_current()
+            custody = prepare_server_cli_capture()
         command = (shlex.join(["timeout", "--kill-after=10", str(request.timeout_seconds), "env"]) +
                    " " + prefix + " " + shlex.join(request.argv) if request.owner_selection is not None else
                    host_exec.remote_command(prefix, request))
@@ -170,15 +204,29 @@ def cmd_host_exec(args) -> None:
         else:
             ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
         audit = host_exec.AuditLog()
+        setup_complete = True
     except ExecRefusal as exc:
         _refuse(exc.code, exc.detail, as_json=as_json, exit_code=exc.exit_code)
     except hosting.HostingError as exc:
         _refuse(getattr(exc, "code", None) or "host_exec_refused",
                 getattr(exc, "detail", None) or str(exc), as_json=as_json,
                 exit_code=host_exec.EXIT_REFUSAL)
+    except ImportError:
+        if not artifact_capture:
+            raise
+        _refuse("host_exec_capture_unavailable", "installed original capture facility is unavailable",
+                as_json=as_json, exit_code=host_exec.EXIT_REFUSAL)
+    except RuntimeError as error:
+        if not artifact_capture or getattr(error, "code", None) != "server_cli_capture_unavailable":
+            raise
+        _refuse("host_exec_capture_unavailable", "original capture preparation is unavailable before effects",
+                as_json=as_json, exit_code=host_exec.EXIT_REFUSAL)
+    finally:
+        if not setup_complete and custody is not None:
+            custody.close()
     audit_failed = False
     started = time.monotonic()
-    with audit:
+    with audit, _capture_lifetime(custody):
         try:
             with _execution_scope(request, entry):
                 outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source(),
@@ -188,6 +236,12 @@ def cmd_host_exec(args) -> None:
                     # Preserve the physical fence when descendant completion
                     # cannot be established. Never replay the command here.
                     raise RuntimeError("host_exec_effects_unknown")
+            if custody is not None:
+                # Historical byte custody follows all writer/context cleanup.
+                # Cleanup failure must never create a positive capture receipt.
+                request.owner_selection.require_current()
+                entry.require_current()
+                capture_metadata = custody.publish(outcome)
         except KeyboardInterrupt:
             outcome = host_exec.ExecOutcome(
                 exit_code=130, code=host_exec.INTERRUPTED,
@@ -205,7 +259,14 @@ def cmd_host_exec(args) -> None:
             audit_failed = True
             print(f"sb host exec: warning: audit record not written: {exc.strerror or exc}",
                   file=sys.stderr)
-    if as_json:
+    if artifact_capture:
+        if capture_metadata is None:
+            _refuse("host_exec_capture_unavailable",
+                    "original capture could not be retained; inspect the original job before replay",
+                    as_json=as_json, exit_code=host_exec.EXIT_TRANSPORT)
+        # No raw or reversibly encoded output enters the ordinary job log.
+        print(json.dumps(capture_metadata, sort_keys=True))
+    elif as_json:
         envelope = outcome.envelope(request)
         if audit_failed:
             envelope["audit"] = "failed"

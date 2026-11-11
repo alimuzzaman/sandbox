@@ -48,10 +48,12 @@ def _dispatch_host_if_selected(args) -> bool:
     remote_name = getattr(args, "remote", None)
     if not original or not remote_name:
         return False
-    # These commands already have synchronous observation/stdin contracts and
-    # must not acquire a local Git/source-staging prerequisite merely to select
-    # the server. Fixed durable apply is the only automatic handoff here.
+    # Observations stay on their existing paths. Exec has a separate no-source
+    # contract and result adapter; only fixed apply may stage controller source.
     action = getattr(args, "action", None)
+    if action == "exec":
+        from sandbox.hosting.server_cli_exec_client import dispatch_exec_if_selected
+        return dispatch_exec_if_selected(args)
     selected_apply = (action == "apply" or
                       (action == "stack" and getattr(args, "image_action", None) == "up"))
     if not selected_apply or not getattr(args, "confirm", False) or getattr(args, "plan", False):

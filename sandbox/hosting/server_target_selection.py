@@ -38,12 +38,14 @@ class OwnerExecSelection:
     fingerprint: str
     _entry: object = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
+    expected_selector_digest: str | None = field(default=None, repr=False)
 
     def require_current(self):
         if type(self) is not OwnerExecSelection or self._seal is not _ISSUER:
             _refuse()
         current = read_owner_exec_selection(self._entry,
-            target=self.target.label, name=None, environment=self.target.environment)
+            target=self.target.label, name=None, environment=self.target.environment,
+            expected_selector_digest=self.expected_selector_digest)
         if current != self:
             _refuse()
         return self
@@ -69,14 +71,21 @@ def _git_metadata(source, *args):
             '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never', '-C', str(source), *args]
 
 
-def read_owner_exec_selection(entry, *, target=None, name=None, environment=None):
+def read_owner_exec_selection(entry, *, target=None, name=None, environment=None,
+                              expected_selector_digest=None):
     from sandbox.hosting.server_cli_target import require_owner_target
     context = require_owner_target(entry)
+    if expected_selector_digest is not None and (not isinstance(expected_selector_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_selector_digest) is None):
+        raise TargetRefusal("host_target_invalid", "expected server selector digest is invalid")
     snapshot = _read_exec_snapshot(context.owner, entry.remote_name,
         target=target, name=name, environment=environment,
         run=lambda argv: entry.process(shlex.join(argv), timeout=30), check=entry.require_current)
     entry.require_current()
-    return OwnerExecSelection(**snapshot, _entry=entry, _seal=_ISSUER)
+    if expected_selector_digest is not None and expected_selector_digest != "sha256:" + snapshot["fingerprint"]:
+        _refuse("host_server_target_changed")
+    return OwnerExecSelection(**snapshot, _entry=entry, _seal=_ISSUER,
+        expected_selector_digest=expected_selector_digest)
 
 
 def inspect_server_exec_target(*, origin_remote_name, target=None, name=None, environment=None):

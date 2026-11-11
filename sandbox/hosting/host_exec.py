@@ -203,12 +203,14 @@ class _BoundedBuffer:
         self.limit = limit
         self.data = bytearray()
         self.truncated = False
+        self.complete = False
 
     def drain(self, pipe) -> None:
         try:
             while True:
                 chunk = pipe.read(64 * 1024)
                 if not chunk:
+                    self.complete = True
                     return
                 room = self.limit - len(self.data)
                 if room > 0:
@@ -292,7 +294,17 @@ def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotoni
     else:
         exit_code, code = classify(returncode, elapsed, request.timeout_seconds,
                                    locally_killed=locally_killed)
+        if request.owner_selection is not None and returncode == 255 and not locally_killed:
+            # This path has a genuine local owner process, not an SSH transport.
+            # Preserve a known command exit 255 as failure with capturable bytes.
+            code = FAILED
     out, err = (buffers + [_BoundedBuffer(0), _BoundedBuffer(0)])[:2]
+    if capture and (any(thread.is_alive() for thread in threads)
+                    or any(not buffer.complete for buffer in buffers)):
+        # Child exit does not prove capture EOF: a descendant may still own a
+        # pipe or a reader may have failed. Preserve the existing unknown fence
+        # rather than publish a mutable/partial byte artifact as complete.
+        exit_code, code = EXIT_TRANSPORT, WATCHDOG_EXPIRED
     return ExecOutcome(
         exit_code=exit_code, code=code, duration_ms=int(elapsed * 1000),
         stdout=bytes(out.data), stderr=bytes(err.data),

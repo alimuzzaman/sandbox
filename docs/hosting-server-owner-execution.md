@@ -8,14 +8,27 @@ prerequisite. An explicit `--credential-scope personal-local` retains the existi
 controller credential workflow. The separate explicit registered-profile contract
 remains separate and cannot silently become this execution path.
 
-Observation, validation, planning and existing exec commands retain their
-synchronous result and stdin contracts. They are not automatically staged from
-the invoking cwd or converted to accepted-job responses. In particular the
-durable supervisor has no controller stdin delivery port; automatic exec
-handoff stays disabled rather than accepting a job with silent EOF. The owner
-exec adapter below is for a genuine already-admitted server CLI invocation,
-and does not itself supply controller stdin transport or a new read-only
-server-target discovery endpoint.
+Observation, validation and planning keep their existing paths. Joined
+`host exec --remote NAME --name STACK --service SERVICE -- COMMAND` uses
+metadata-only server selection and one no-source retained job. It needs no
+local checkout, stack registry or hosting history. The client waits for the
+original job and returns its validated capture and underlying exit code.
+`--target PROJECT/ENVIRONMENT` is also supported. Non-joined targets and explicit
+personal-local execution keep their existing paths.
+
+The UTF-8 v1 batch contract transfers original non-TTY stdin once through the SDK's
+hash-bound anonymous input facility, bounded to 1 MiB and a 30-second intake
+deadline. TTY input remains empty as in existing host exec. No named payload
+file or source upload is created. Running-job observations return no child
+output. Terminal capture is bounded and passes through existing job redaction.
+Plain output and JSON retain UTF-8 replacement semantics; JSON additionally
+identifies the original request and job. This is not binary parity, a live
+stream or an interactive TTY contract.
+
+Preacceptance unavailability, lost acceptance and unavailable observation of an
+accepted job are distinct errors. The latter retains the known job ID. None
+resubmits, falls back to controller state or automatically cancels an original
+operation. An interrupted wait preserves that original handle.
 
 The server job retains its original alias, machine/service pins, source,
 request, process identities and deadline. A same-server hosting target is issued
@@ -101,9 +114,13 @@ receiver composition port. It uses the SDK's current installed owner reader,
 fixed bounded Git/Docker metadata commands and a complete current-source
 snapshot. Its result is ordinary data, never a held writer or retained job
 receipt. Missing installed owner-reader support refuses explicitly. The SDK
-still owns authenticated transport registration, no-source job admission and
+owns authenticated transport registration, no-source job admission and
 controller stdin delivery. A consuming job must reread the selector under its
-actual process proof and compare the exact selector digest before effects.
+actual process proof and compare the exact retained selector digest before
+effects. Missing digest refuses before runtime metadata queries. The
+`commands.host_exec.SERVER_CLI_EXEC_BINDING_VERSION = 1` source contract means
+that check is assembled with native-lock and physical-lease scope. SDK exec
+capability discovery requires this contract; it grants no authority by itself.
 
 This source increment requires the assembled `job.server-cli.v1` adapter from
 the access transport feature. Old installations must report capability
@@ -113,6 +130,46 @@ installed acceptance are separate gates. This document does not claim a live
 stack creation or provider validation. Authentication and production-path
 changes require owner review before release. No install, provider action,
 migration or retry of the old GS operation is performed by this increment.
+
+No-source exec additionally requires the actual SDK
+`job.server-cli.exec-stdin.v1` admission/result ports and
+`host.target-inspect.v1` metadata port, together with this digest-aware handler.
+The generic v1 source-job adapter continues to refuse exec/stdin. Installing a
+descriptor or this version constant without the composition does not enable it.
+
+Exact binary output needs a separate privacy-reviewed retained capture contract.
+`--output-encoding base64` in inner JSON would not be sufficient: the generic
+job output redactor can recognize and rewrite arbitrary base64 text. This
+increment does not bypass redaction. The separate artifact capture composition
+uses a hidden receiver-only `--exec-capture-artifacts` option. It prepares SDK
+custody before effects under the genuine original owner/selector, captures up
+to 1 MiB per stream and requires actual reader EOF. After the whole held target
+scope exits successfully, native locks exit, physical retirement succeeds and
+the current selector/owner validate again, it publishes the actual `ExecOutcome`
+through that custody. Ordinary job stdout contains only the returned metadata.
+Cleanup failure or missing custody refuses capture publication.
+
+The client renders verified SDK `stdout_bytes` and `stderr_bytes` directly to
+the corresponding plain-output byte streams. User JSON keeps the default UTF-8
+replacement projection. It never puts raw/base64 artifact bytes back into job
+logs. The SDK owns byte artifact storage, immutable registry/manifest bindings,
+retention, authenticated chunk retrieval and a separate capture capability.
+The actual committed custody/result API is SDK
+`f09bc57b464a1fb58c5ed2b1fbcdf4313d9ca555`. This composition exports
+`SERVER_CLI_EXEC_CAPTURE_VERSION = 1` with the emitter, EOF checks and byte-aware
+renderer. The normal client explicitly selects `output_mode='artifact'`; a
+server lacking the separate capture capability refuses before stdin intake or
+submission. There is no automatic downgrade to the older lossy log capture.
+The SDK's explicit `output_mode='utf8'` remains the old profile. An export and
+source agreement are not test, review, installed or binary-runtime acceptance.
+
+Artifact capture is bounded to 1 MiB per stream and seven days of exposure,
+subject to the existing job cleanup lifecycle. It holds intended command-output
+bytes in private server job artifacts rather than in ordinary lexical logs.
+The publisher and reader bind the original job/request, source, installed owner,
+target selector, service, deadline and exact hashes. Missing, changed, expired
+or cancelled custody cannot become success or authorize a replay. Live TTY,
+unbounded input/output and streaming parity remain outside this contract.
 
 ## Minimal installed-e467 composition
 
@@ -135,6 +192,7 @@ explicit controller execution choice; it requires no registered-profile fields.
 
 Owned runtime files are `commands/hosting.py`, `commands/host_stack.py`,
 `commands/host_exec.py`, `hosting/host_exec.py`, `hosting/server_cli_dispatch.py`,
+`hosting/server_cli_exec_client.py`,
 `hosting/server_cli_target.py`, `hosting/server_target_selection.py`, and the
 two exact owner-target branches in `delivery/context.py`. Apply only this access
 delta, rather than copying the whole feature's hosting or CLI files. The SDK

@@ -15,6 +15,18 @@ def dispatch_host_if_selected(args) -> bool:
     remote_name = getattr(args, "remote", None)
     if not original or not remote_name:
         return False
+    # These commands already have synchronous observation/stdin contracts and
+    # must not acquire a local Git/source-staging prerequisite merely to select
+    # the server. Fixed durable apply is the only automatic handoff here.
+    action = getattr(args, "action", None)
+    selected_apply = (action == "apply" or
+                      (action == "stack" and getattr(args, "image_action", None) == "up"))
+    if not selected_apply or not getattr(args, "confirm", False) or getattr(args, "plan", False):
+        return False
+    from sandbox.hosting.host_exec import split_passthrough
+    head, tail = split_passthrough(list(original))
+    if tail is not None:
+        raise ValueError("server_cli_unexpected_stdin_or_command")
     # Explicit credential declarations retain their existing closed contract.
     # Explicit personal-local is also an execution choice, not a fallback.
     if getattr(args, "credential_scope", None) is not None or any(

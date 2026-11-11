@@ -76,7 +76,8 @@ Never silently filter a route, truncate a list or mint a partial page.
 
 All grants share E=min(requested expiry,parent window,each companion window), with
 at least 60 seconds left. Each enabled_until must be unexpired and within 30 days.
-Report clamp reasons. Companions require agent mint without terminal prompts.
+Report the effective expiry and boolean `expires_clamped`; no clamp-reason list is
+exposed. Companions require agent mint without terminal prompts.
 
 ## Landed short-link API and durable orchestration
 
@@ -132,9 +133,10 @@ when available. It reconciles recorded original ids plus individually selected l
 grants from the current parent gate; it never issues a gate-wide `all` request.
 
 CLI refusal JSON is `{ok:false,code,message}`; coverage failures additionally carry
-`gaps` with `stack,target,piece,code,fix` and optional `hostname`. Create/revoke
-cleanup-pending results exit nonzero. Stack list may exit zero despite JSON `ok:false`;
-callers must inspect `ok` and `partial_reasons`. The panel API list projects safe
+`gaps` with `stack,target,piece,code,fix` and optional `hostname`. Create, list and
+revoke partial results exit nonzero. Text list output includes retained attempt/grant
+identities, status and partial reasons; JSON retains `ok:false` and `partial_reasons`.
+The panel API list projects safe
 attempt ids, phases, link ids, expiry and bounded still-live rows; it returns HTTP 200
 only for complete evidence and 409 for partial or invalid evidence. It omits cleanup
 descriptors. Expiry clamp reporting is the boolean `expires_clamped`, not a reason list.

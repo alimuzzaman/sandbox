@@ -1571,6 +1571,16 @@ automatically reissues execution authority. These modules remain unverified and
 are not connected to installed dispatch, fixed consumers or the complete driver.
 No credential-consuming server capability is advertised.
 
+The internal effect boundary now requires a genuine committed receipt and a
+same-process/thread supervisor-held writer proof for the exact retained request,
+operation, canonical target, site incarnation and full intent digest. It checks
+host/gate ownership before consuming and retains a target-wide transaction
+through the effect, with short ledger CAS transactions and an unknown outcome
+when completion cannot be proved. Request and retry IDs use the host writer's
+64-character grammar. The supervisor port is still a source proposal; its lazy
+dependency is not an installed factory or acceptance of that proposal. No command
+or HTTP route constructs this composition yet, and no runtime checks ran here.
+
 Broker delivery must remain confined to the reviewed intended server consumer.
 Explicit minimal recipient environments or approved protected runtime-secret
 facilities are allowed; inherited owner environments and arbitrary staging or

@@ -296,6 +296,11 @@ class AuditLog:
         line = (json.dumps(record, sort_keys=True) + "\n").encode()
         if os.write(self._fd, line) != len(line):
             # A partial line is not an audit record; fail inside the caller's boundary.
+            # Terminate it first (best effort) so the next record starts on its own line.
+            try:
+                os.write(self._fd, b"\n")
+            except OSError:
+                pass
             raise OSError(errno.EIO, "short write to the front-door refresh audit log")
         # Durable here, inside the caller's failure boundary, so closing cannot fail later.
         os.fsync(self._fd)

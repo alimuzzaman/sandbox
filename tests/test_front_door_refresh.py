@@ -285,8 +285,9 @@ class RefreshPublicTargetTests(unittest.TestCase):
         real_write, real_os_write = refresh.AuditLog.write, os.write
 
         def short(fd, data):
-            real_os_write(fd, data[:-1])
-            return len(data) - 1
+            if data == b"\n":
+                return real_os_write(fd, data)
+            return real_os_write(fd, data[:len(data) // 2])
 
         def write(audit, **fields):
             if fields.get("op") == op and fields.get("outcome") != "failed":
@@ -318,6 +319,13 @@ class RefreshPublicTargetTests(unittest.TestCase):
             error = target.refused(refresh.FAILED)
         self.assertEqual(error.restore, "restored")
         self.assertEqual(target.live["route"], previous)
+        # The partial line stands alone; the failure record after it is still readable.
+        lines = refresh.audit_path(target.fx.home / "runtime").read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        with self.assertRaises(ValueError):
+            json.loads(lines[1])
+        failed = json.loads(lines[2])
+        self.assertEqual((failed["outcome"], failed["restore"]), ("failed", "restored"))
 
     def test_a_re_run_after_an_interrupted_refresh_converges(self):
         target = _Refresh(self)

@@ -64,6 +64,23 @@ class RetireThroughRecordedScopeTests(unittest.TestCase):
             self.retire(_recorded("another-attempt"))
         self.assertEqual(caught.exception.code, "required_evidence_missing")
 
+    def test_an_attempt_of_another_hosted_runtime_is_never_retired(self):
+        # One checkout serving two hosted projects shares a request scope; the
+        # attempt found there belongs to the other runtime.
+        self.current = {**make_target(), "runtime_identity": "another-hosted-project"}
+        patcher = patch.object(delivery, "target_for_project", return_value=self.current)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        before = self.repository.lookup_request(
+            request_scope(make_target()), "stack-attempt")["operation"]
+        for recorded in (None, _recorded()):
+            with self.subTest(recorded=recorded), self.assertRaises(DeliveryError) as caught:
+                self.retire(recorded)
+            self.assertEqual(caught.exception.code, "binding_mismatch")
+        after = self.repository.lookup_request(
+            request_scope(make_target()), "stack-attempt")["operation"]
+        self.assertEqual(after, before)
+
     def test_a_record_bound_to_another_root_or_target_refuses(self):
         for recorded in (_recorded(project_root_digest="sha256:" + "9" * 64),
                          _recorded(target={"remote": "other-remote", "environment": "qa"})):
@@ -89,17 +106,23 @@ class InspectThroughRecordedScopeTests(unittest.TestCase):
                          {"project_identity": "fixture-project", "project_root_digest": OLD_ROOT})
         self.assertEqual(selectors["request_id"], "stack-attempt")
 
-    def test_a_record_of_another_project_gives_no_recorded_scope(self):
+    def test_a_named_target_without_its_own_record_refuses(self):
+        # Falling back to the checkout's scope could show another hosted project's attempts.
         resolved = target_resolution.ResolvedTarget(
             remote="fixture-remote", project="site", environment="qa", kind="stack",
             project_dir="/sandbox/runtime/stacks/site", slug="site")
         other = _recorded(target={"remote": "fixture-remote", "project": "other", "environment": "qa"})
-        state = {"hosts": {resolved.state_key: {"hosting_operation": other}}}
         args = types.SimpleNamespace(remote="fixture-remote", name="site", target=None,
                                      project_dir=None, environment=None, label=None)
-        with patch.object(target_resolution, "resolve", return_value=resolved), \
-                patch("sandbox.core._hosting.load_host_state", return_value=state):
-            self.assertNotIn("recorded_scope", delivery_cmd._recorded_target_selectors(args))
+        for record in ({"hosting_operation": other}, {}, {"hosting_operation": None}):
+            state = {"hosts": {resolved.state_key: record}}
+            with self.subTest(record=record), \
+                    patch.object(target_resolution, "resolve", return_value=resolved), \
+                    patch("sandbox.core._hosting.load_host_state", return_value=state):
+                result = delivery_cmd._recorded_target_selectors(args)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "binding_mismatch")
+            self.assertNotIn("recorded_scope", result)
 
     def test_an_unknown_stack_refuses_with_the_resolution_code(self):
         args = types.SimpleNamespace(remote="fixture-remote", name="missing", target=None,
@@ -160,6 +183,14 @@ class InspectThroughRecordedScopeTests(unittest.TestCase):
                             recorded_scope={"project_identity": "fixture-project",
                                             "project_root_digest": OLD_ROOT})
         self.assertEqual(caught.exception.code, "delivery_contract_invalid")
+        # The shared scope's history is never read, so no path (errors included) carries it.
+        with patch.object(repository, "history_scope",
+                          side_effect=AssertionError("shared history read")):
+            again = service.inspect(project_dir="/stack", remote="fixture-remote", environment="qa",
+                                    request_id="stack-attempt",
+                                    recorded_scope={"project_identity": "fixture-project",
+                                                    "project_root_digest": OLD_ROOT})
+        self.assertEqual(again["selected_operation"]["request_id"], "stack-attempt")
 
 
 if __name__ == "__main__":

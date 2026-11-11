@@ -146,7 +146,13 @@ def _recorded_target_selectors(args):
                 and isinstance(operation.get("request_id"), str)):
             # Default to the attempt the record names: the one the next apply checks.
             selectors["request_id"] = operation["request_id"]
-    return selectors
+        return selectors
+    # Without that binding, the checkout's own scope may hold another hosted
+    # project's attempts; a named target never falls back to it (spec 084).
+    return {"schema_version": 1, "ok": False, "error": {
+        "code": "binding_mismatch",
+        "message": "this target's hosting record names no delivery attempt of its own; "
+                   "inspect with --project-dir instead"}}
 
 
 def cmd_delivery(cfg, args):

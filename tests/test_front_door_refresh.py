@@ -280,6 +280,45 @@ class RefreshPublicTargetTests(unittest.TestCase):
         audit.close()
         self.assertIsNone(audit._fd)
 
+    def _short_audit_write(self, op):
+        import os
+        real_write, real_os_write = refresh.AuditLog.write, os.write
+
+        def short(fd, data):
+            real_os_write(fd, data[:-1])
+            return len(data) - 1
+
+        def write(audit, **fields):
+            if fields.get("op") == op and fields.get("outcome") != "failed":
+                with patch.object(refresh.os, "write", short):
+                    return real_write(audit, **fields)
+            return real_write(audit, **fields)
+
+        return patch.object(refresh.AuditLog, "write", write)
+
+    def test_a_short_audit_write_is_a_failure(self):
+        import os
+        audit = refresh.AuditLog(refresh.audit_path(_Refresh(self).fx.home / "runtime"))
+        self.addCleanup(audit.close)
+        real_os_write = os.write
+        with patch.object(refresh.os, "write", lambda fd, data: real_os_write(fd, data[:5])):
+            with self.assertRaises(OSError):
+                audit.write(op="start", outcome="started")
+
+    def test_a_short_start_line_refuses_before_any_reload(self):
+        target = _Refresh(self)
+        with self._short_audit_write("start"), self.assertRaises(refresh.FrontDoorRefreshRefused):
+            target.run()
+        target.configure.assert_not_called()
+
+    def test_a_short_success_line_rolls_the_route_back(self):
+        target = _Refresh(self)
+        previous = target.live["route"]
+        with self._short_audit_write("end"):
+            error = target.refused(refresh.FAILED)
+        self.assertEqual(error.restore, "restored")
+        self.assertEqual(target.live["route"], previous)
+
     def test_a_re_run_after_an_interrupted_refresh_converges(self):
         target = _Refresh(self)
         target.state["hosts"][target.key]["front_door_refresh"] = {"state": "started", "at": 1}

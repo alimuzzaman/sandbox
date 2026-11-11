@@ -133,6 +133,11 @@ def retire_interrupted_operation(validated, remote_name, original_request_id, *,
             original_request_id)
     if operation is None:
         raise DeliveryError('required_evidence_missing')
+    if operation['target'].get('runtime_identity') != target.get('runtime_identity'):
+        # One checkout can serve several hosted projects in one environment, and they
+        # share a request scope. Retiring clears this target's fences, so the attempt
+        # must be this target's own (spec 084).
+        raise DeliveryError('binding_mismatch')
     if operation['execution_state'] in TERMINAL or operation['terminal_snapshot_digest'] is not None:
         # Already closed. Retiring it again would rewrite a settled outcome.
         raise DeliveryError('delivery_terminal_conflict')

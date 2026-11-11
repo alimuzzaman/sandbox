@@ -12,6 +12,7 @@ JSON line per event to a controller file opened before the first remote change.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -292,7 +293,10 @@ class AuditLog:
             raise ValueError("audit log is closed")
         record = {key: fields.get(key) for key in AUDIT_FIELDS}
         record["at"] = int(record["at"] if record["at"] is not None else time.time())
-        os.write(self._fd, (json.dumps(record, sort_keys=True) + "\n").encode())
+        line = (json.dumps(record, sort_keys=True) + "\n").encode()
+        if os.write(self._fd, line) != len(line):
+            # A partial line is not an audit record; fail inside the caller's boundary.
+            raise OSError(errno.EIO, "short write to the front-door refresh audit log")
         # Durable here, inside the caller's failure boundary, so closing cannot fail later.
         os.fsync(self._fd)
 

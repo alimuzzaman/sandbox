@@ -25,8 +25,9 @@ sb delivery inspect --remote R (--name STACK | --target P/E | --project-dir DIR 
 Resolves the target like `host status --name`, then reads in the delivery scope the
 target's hosting record names, for one attempt only (`--request-id`, `--operation-id`, or
 by default the request the record names); history and latest summaries are omitted and an
-attempt of another hosted runtime refuses `binding_mismatch`. `--project-dir` keeps its
-current behaviour.
+attempt of another hosted runtime refuses `binding_mismatch`. A target whose hosting record
+names no attempt of its own refuses `binding_mismatch` rather than falling back to the
+checkout's scope. `--project-dir` keeps its current behaviour.
 
 ## `sb host retire-delivery` additions
 
@@ -36,7 +37,9 @@ sb host retire-delivery --remote R (--name STACK | --target P/E | --project-dir 
 ```
 
 When the attempt is not in the current checkout's scope, retire uses the scope the
-target's hosting record names, only when that record names this exact request id.
+target's hosting record names, only when that record names this exact request id. With
+any selector, an attempt whose hosted runtime identity is not the target's refuses
+`binding_mismatch` before any delivery or host-state change.
 
 ## MCP `host_front_door_refresh`
 

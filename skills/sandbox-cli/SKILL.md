@@ -558,7 +558,9 @@ completeness, and refuses while the owning job is active (`accepted`, `queued`,
 For a hosted stack, select it with `--name <stack>` (or `--target P/E`) on both commands
 instead of `--project-dir`: they read the delivery scope the target's hosting record
 names, because each `stack up` makes a new checkout and the attempt stays under the old
-one. The request to retire is the target's `hosting_operation.request_id`.
+one. The request to retire is the target's `hosting_operation.request_id`. A named inspect
+refuses `binding_mismatch` when the record names no attempt of its own, and retiring an
+attempt of another hosted runtime refuses `binding_mismatch` before any change.
 
 Retiring the delivery record does not reset the target's staged runtime state. A
 failed apply that staged its revision leaves `staged_revision` set with

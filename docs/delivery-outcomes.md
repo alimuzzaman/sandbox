@@ -146,6 +146,13 @@ otherwise. Retire with `--project-dir <rendered stack dir>` falls back to the re
 scope too, only for the exact request id the record names. The request to retire is the
 target's `hosting_operation.request_id`, which a refused apply also prints.
 
+Both stay inside the one hosted runtime. A named inspect refuses `binding_mismatch` when
+the target's hosting record names no attempt of its own (there is nothing to fall back
+to that could not be another project's), so use `--project-dir` for such a target.
+Retirement, by any selector, refuses `binding_mismatch` before changing anything when
+the attempt belongs to another hosted runtime of the same checkout, because retiring
+clears the selected target's fences.
+
 ## Deployment trace v1
 
 The deployment trace is a separate diagnostic owner for one full command. It

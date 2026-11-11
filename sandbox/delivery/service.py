@@ -496,10 +496,16 @@ class DeliveryService:
         selected = None
         original_id = None
         try:
-            history = self.repository.history_scope(request_scope(target), limit=limit, cursor=cursor)
-            result["latest_attempt"] = history.pop("latest_attempt")
-            result["latest_retained_complete_success"] = history.pop("latest_retained_complete_success")
-            result["history"] = history
+            if recorded_scope is None:
+                history = self.repository.history_scope(request_scope(target), limit=limit, cursor=cursor)
+                result["latest_attempt"] = history.pop("latest_attempt")
+                result["latest_retained_complete_success"] = history.pop("latest_retained_complete_success")
+                result["history"] = history
+            else:
+                # Spec 084: a scope reached through a hosting record may be shared with
+                # other hosted runtimes of the same checkout. Its history and latest
+                # summaries are never read, so no path (errors included) can carry them.
+                result["history"] = _empty_history("partial")
             if operation_id is not None or request_id is not None:
                 lookup = self.repository.lookup_operation(request_scope(target), operation_id) if operation_id is not None else self.repository.lookup_request(request_scope(target), request_id)
                 selected = lookup["operation"]
@@ -532,12 +538,6 @@ class DeliveryService:
             # Spec 084: a scope reached through a hosting record is confined to that
             # record's hosted runtime (one checkout can serve several hosted projects).
             raise DeliveryError("binding_mismatch")
-        if recorded_scope is not None:
-            # History and latest summaries of that scope may belong to another hosted
-            # runtime; answer only for the selected attempt (spec 084).
-            result["latest_attempt"] = None
-            result["latest_retained_complete_success"] = None
-            result["history"] = _empty_history("partial")
         # For a retained old incarnation, recorded projections are read using
         # its exact target; current observations always use the selected target.
         recorded_target = selected["target"] if selected is not None else target

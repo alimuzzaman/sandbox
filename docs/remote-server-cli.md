@@ -5,6 +5,17 @@ This source contract is not installed acceptance. A server lacking the assembled
 adapter. It must not be described as denying an admitted owner. The managed
 installation feature remains separate and paused.
 
+Ordinary joined `job-start` selection also discovers the installed contract
+automatically. The application target resolver calls the shared execution remote
+adapter when `job.exec` is missing, reads `job-capabilities` over the selected
+keyless Tailnet transport, validates its machine/marker/revision against the
+joined registration, and publishes only observed contracts by compare-and-swap.
+This happens before source staging or job acceptance. `job-list` success alone
+does not establish execution support. An older installed CLI without discovery
+reports `remote_execution_capability_unavailable`; it does not become an owner
+denial or authorize invented registration flags. A supported runtime update and
+separate installed acceptance remain necessary for that older receiver.
+
 `sandbox.application.server_cli.dispatch_server_cli(remote_name, argv, *,
 project_dir, request_id, timeout_seconds=900)` submits before controller secret
 preflight. `argv` starts with the CLI command, without an executable. The adapter

@@ -318,6 +318,14 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
     if len(differences) > MAX_SUBMISSION_ITEMS:
         raise ValueError("compatibility differences exceed the durable snapshot limit")
     source = raw["source"]
+    from .server_cli_retained import retained_provenance_value
+    raw_provenance = dict(raw.get("execution_policy_provenance") or {})
+    provenance = {}
+    for key, value in raw_provenance.items():
+        key = _bounded_text(key, "execution policy provenance key", maximum=64)
+        retained = retained_provenance_value(key, value, submission=raw, provenance=raw_provenance)
+        provenance[key] = (retained if retained is not None else
+                           _bounded_text(value, "execution policy provenance value", maximum=128))
     snapshot = {
         "version": 1,
         "kind": _bounded_text(raw["kind"], "job kind", maximum=64),
@@ -343,11 +351,7 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "cancel_grace_seconds": int(raw["cancel_grace_seconds"]),
         "cancel_on_stall": bool(raw["cancel_on_stall"]),
         "cleanup_policy": raw["cleanup_policy"],
-        "execution_policy_provenance": {
-            _bounded_text(key, "execution policy provenance key", maximum=64):
-            _bounded_text(value, "execution policy provenance value", maximum=128)
-            for key, value in dict(raw.get("execution_policy_provenance") or {}).items()
-        },
+        "execution_policy_provenance": provenance,
         "request_id": _bounded_text(raw.get("request_id"), "request id", maximum=64, allow_none=True),
         "parent_job_id": raw.get("parent_job_id"),
         "retry_of_job_id": raw.get("retry_of_job_id"),

@@ -18,6 +18,14 @@ OWNER = cli.ServerCliOwner(1001, '/home/fixture', '/home/fixture/sandbox',
 
 
 class ServerCLIContractTest(unittest.TestCase):
+    def test_public_receiver_reader_is_metadata_not_an_execution_grant(self):
+        with mock.patch.object(cli, '_current_owner', return_value=OWNER):
+            self.assertEqual(cli.read_current_server_owner(), OWNER)
+        with mock.patch.object(cli, 'current_server_cli_context', side_effect=cli.ServerCLIUnavailable('no retained job')), \
+                mock.patch('sandbox.services.process.BoundedProcessRunner.run') as run:
+            with self.assertRaises(cli.ServerCLIUnavailable):
+                cli.owner_process(OWNER, 'single-effect')
+        run.assert_not_called()
     def test_selected_nonsecret_unit_proves_fixed_executable_without_reading_environment_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -26,7 +34,7 @@ class ServerCLIContractTest(unittest.TestCase):
             executable = root / 'sb'
             executable.write_text('#!/bin/sh\nexit 0\n')
             executable.chmod(0o700)
-            unit = home / '.config/systemd/user/sandbox-remote-mcp.service'
+            unit = home / '.config/systemd/user' / _remote.REMOTE_MCP_SERVICE
             unit.parent.mkdir(parents=True)
             unit.write_text('EnvironmentFile=/synthetic/never-open-owner-credentials\n'
                 'Environment=SANDBOX_REMOTE_MCP_MARKER=' + 'a' * 24 + '\n'

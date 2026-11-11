@@ -1225,7 +1225,20 @@ class JobService:
         snapshot = self.repository.snapshot(job_id)
         server_children = []
         if snapshot.get('kind') == 'server-cli':
-            for child in self.repository.children(job_id):
+            self.repository.server_cli_ancestry(job_id)  # refuse corrupt/cyclic parent links before traversal
+            self.repository.request_server_cli_cancellation(job_id)
+            pending = list(self.repository.children(job_id))
+            seen = {job_id}
+            while pending:
+                child = pending.pop(0)
+                if child['job_id'] in seen:
+                    raise RuntimeError('job_descendant_cycle')
+                seen.add(child['job_id'])
+                if child['lifecycle'] in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}:
+                    # A completed process is not signalled. Its active children
+                    # still belong to the original cancellation authority.
+                    pending.extend(self.repository.children(child['job_id']))
+                    continue
                 if child['lifecycle'] not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}:
                     try:
                         server_children.append(self.cancel(child['job_id'], force=force))
@@ -1298,9 +1311,9 @@ class JobService:
                 raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
-        # Verify before publishing cancellation intent.  Publishing it first lets the
-        # supervisor classify a concurrently reaped child as cancelled, rather than
-        # racing from ``failed`` back to ``cancelling`` after signal delivery.
+        # Verify before the process-lifecycle transition and signal. The earlier
+        # server-CLI lineage fence blocks admission/effects; it makes no claim
+        # that this process was signalled or that owned work has stopped.
         if not verify_owned_process_identity(identity):
             raise RuntimeError("process_identity_mismatch")
         if snapshot["lifecycle"] != Lifecycle.CANCELLING.value:

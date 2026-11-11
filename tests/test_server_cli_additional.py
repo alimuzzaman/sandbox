@@ -153,9 +153,14 @@ class NestedServerCLITest(unittest.TestCase):
             'deadline_at': (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()}}
         for state in ('running', 'succeeded'):
             repository.get.return_value = {'kind': 'server-cli', 'lifecycle': state}
+            repository.server_cli_ancestry.return_value = [{'kind': 'server-cli', 'lifecycle': state,
+                'server_cli_cancel_requested': False, 'started_at': datetime.now(timezone.utc).isoformat(),
+                'deadline_seconds': 30}]
             self.assertIsNone(_server_cli_parent_reason(descriptor, repository))
         for state in ('cancelled', 'cancelling', 'failed', 'timed_out', 'interrupted'):
             repository.get.return_value = {'kind': 'server-cli', 'lifecycle': state}
+            repository.server_cli_ancestry.return_value = [{'kind': 'server-cli', 'lifecycle': state,
+                'server_cli_cancel_requested': False}]
             self.assertEqual(_server_cli_parent_reason(descriptor, repository), 'parent_cancelled_or_unavailable')
         descriptor['server_cli_parent']['deadline_at'] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         self.assertEqual(_server_cli_parent_reason(descriptor, repository), 'parent_deadline_exceeded')

@@ -2791,8 +2791,9 @@ else:
  result=libc.renamex_np(os.fsencode(source),os.fsencode(target),2 if flag==2 else 4)
 if result:
  error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
+print('exchanged' if flag==2 else 'installed',flush=True)
 fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
-print('exchanged' if flag==2 else 'installed')'''
+'''
 _REMOTE_SOURCE_ROLLBACK_PROGRAM = r'''import ctypes,os,sys
 mode,source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
 flag=2 if mode=='exchanged' else 1
@@ -5322,7 +5323,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "test \"$(cat -- \"$stage_root/receipt.json\")\" = " + shlex.quote(expected_receipt) + "; "
         "activate_source() { python3 -c " + shlex.quote(_REMOTE_SOURCE_ACTIVATE_PROGRAM)
         + " \"$source_stage\" \"$runtime\" </dev/null; }; "
-        "source_mode=''; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
+        "source_mode=''; source_attempted=0; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
         "restore_file() { saved=$1; target=$2; tmp=$(mktemp \"$target.rollback.XXXXXX\") || return 1; "
         "cp \"$saved\" \"$tmp\" && chmod 600 \"$tmp\" && mv \"$tmp\" \"$target\" || "
         "{ rm -f -- \"$tmp\"; return 1; }; }; "
@@ -5332,16 +5333,19 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "if test \"$had_unit\" = 1; then restore_file \"$backup/unit\" \"$unit_path\" || failed=1; else rm -f \"$unit_path\" || failed=1; fi; "
         "if test \"$had_env\" = 1; then restore_file \"$backup/env\" \"$env_path\" || failed=1; else rm -f \"$env_path\" || failed=1; fi; "
         "systemctl --user daemon-reload || failed=1; "
-        "if test -n \"$source_mode\"; then python3 -c " + shlex.quote(_REMOTE_SOURCE_ROLLBACK_PROGRAM)
-        + " \"$source_mode\" \"$source_stage\" \"$runtime\" </dev/null || failed=1; fi; "
-        f"if test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
-        "if test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
+        "case \"$source_mode\" in exchanged|installed) python3 -c " + shlex.quote(_REMOTE_SOURCE_ROLLBACK_PROGRAM)
+        + " \"$source_mode\" \"$source_stage\" \"$runtime\" </dev/null || failed=1;; "
+        "'') if test \"$source_attempted\" = 1; then failed=1; fi;; *) failed=1;; esac; "
+        f"if test \"$failed\" = 0 && test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
+        "if test \"$failed\" = 0 && test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
+        f"if test \"$failed\" != 0; then systemctl --user stop {REMOTE_MCP_SERVICE} || failed=1; fi; "
         "if test -n \"$unit_tmp\"; then rm -f -- \"$unit_tmp\" || failed=1; fi; "
         "if test -n \"$env_tmp\"; then rm -f -- \"$env_tmp\" || failed=1; fi; "
-        "rm -rf -- \"$backup\" || failed=1; test ! -e \"$backup\" || failed=1; "
+        "if test \"$failed\" = 0; then rm -rf -- \"$backup\" || failed=1; test ! -e \"$backup\" || failed=1; fi; "
         "test \"$failed\" = 0; }; "
         "on_exit() { status=$?; trap - EXIT; rollback || exit 44; exit \"$status\"; }; "
-        "trap on_exit EXIT; source_mode=$(activate_source); "
+        "trap on_exit EXIT; source_attempted=1; source_mode=$(activate_source); "
+        "case \"$source_mode\" in exchanged|installed) :;; *) exit 1;; esac; "
         + runtime_preflight +
         "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
         + unit + "UNIT\n"

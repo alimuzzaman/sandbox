@@ -55,6 +55,13 @@ plans, stack reservations or delivery evidence. Strict or unproven compatibility
 refuses. Older controllers must receive the reviewed client update to gain this
 option; removing/rejoining is unnecessary. Normal refresh and operation-bound
 revision checks remain strict, so old plans are not revived by this command.
+
+Installer rollback keeps its private source/unit/environment recovery material
+when restoration is incomplete. Source exchange reports its mode before the
+post-exchange durability check so a failed fsync can still restore the exact
+prior source. Missing activation outcome or failed restoration returns
+`remote_service_rollback_indeterminate`, stops the selected Sandbox service and
+withholds restart. Inspect that original attempt before another migration.
 Ordinary host-memory status and authenticated target-identity lookup also enforce
 the saved machine pin; a changed machine or malformed pin refuses without refresh.
 Legacy owner registrations with no machine pin keep their existing behavior.

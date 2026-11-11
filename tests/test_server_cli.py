@@ -44,7 +44,8 @@ class ServerCLIContractTest(unittest.TestCase):
             self.assertFalse(Path('/synthetic/never-open-owner-credentials').exists())
 
     def test_installed_capability_is_actual_parser_plus_owner_binding(self):
-        with mock.patch.object(cli, '_current_owner', return_value=OWNER):
+        with mock.patch.object(cli, '_current_owner', return_value=OWNER), \
+                mock.patch.object(cli, '_receiver_routing_metadata', return_value={}):
             value = cli.capabilities()
         self.assertIn(cli.CONTRACT, value['capabilities'])
         self.assertEqual(value['target_identity'], OWNER.target_identity)
@@ -122,6 +123,12 @@ class ServerCLIDispatchTest(unittest.TestCase):
                 self.assertIsInstance(result, cli.ServerCLIUnavailable)
                 transport.submit_server_cli.assert_not_called()
 
+    def test_actual_receiver_origin_fills_missing_controller_routing_metadata(self):
+        result, transport = self.dispatch(capability={'target_metadata': {'origin_ipv4': '93.184.216.34'}})
+        self.assertEqual(result['job_id'], 'd' * 32)
+        selected = transport.submit_server_cli.call_args.args[1]
+        self.assertEqual(selected['origin_ipv4'], '93.184.216.34')
+
 
 class RetainedServerCLIContextTest(unittest.TestCase):
     def observe(self, *, row_fields=None, process_fields=None, dispatch=False):
@@ -148,7 +155,7 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                 return SimpleNamespace(host_boot_id='boot',
                     start_identity='child-start' if pid == 1234 else 'parent-start')
             with mock.patch.object(_paths, 'RUNTIME_DIR', runtime), \
-                    mock.patch.dict(os.environ, {'SANDBOX_DURABLE_JOB_ID': 'd' * 32}), \
+                    mock.patch.object(cli.os, 'environ', {'SANDBOX_DURABLE_JOB_ID': 'd' * 32}), \
                     mock.patch.object(cli.os, 'getpid', return_value=1234), \
                     mock.patch.object(cli.os, 'getppid', return_value=1000), \
                     mock.patch.object(cli, '_current_owner', return_value=OWNER), \

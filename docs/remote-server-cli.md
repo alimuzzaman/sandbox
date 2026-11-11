@@ -25,6 +25,13 @@ stays acceptance unknown. Legacy submissions omit the optional field, preserving
 their original canonical request digests and replay receipts. New materialized
 submissions require the installed `job.source-content.v1` contract.
 
+Control protocol 24 records these wire changes. The runtime continues serving
+the common older control protocols, while new materialized jobs must provide
+the measured-source binding. Older job writers must update to the reviewed
+client revision; missing binding refuses before new admission. Existing receipt
+replay remains valid. Updating client code does not authorize rewriting saved
+registrations, strict pins, old jobs or plans.
+
 Joined execution observes current installed contracts before deployment, even
 when its local metadata already lists them. Discovery replaces known component
 claims while preserving unrelated capabilities, so a stale registration cannot

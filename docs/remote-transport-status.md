@@ -24,7 +24,10 @@ recovery paths. The operator command is deliberately explicit:
 
 Joining records the admitted service's ownership marker, runtime revision and
 canonical machine identity from the existing schema-1 host-memory status contract.
-An existing joined controller with missing metadata can run:
+Ordinary access automatically repairs missing metadata on an existing joined
+controller through the authenticated service, within the caller's budget. No
+per-controller permission or credential approval is required. An optional explicit
+metadata refresh remains available:
 
 ```sh
 ./sb remote service refresh NAME --json
@@ -46,8 +49,12 @@ refuses before any request. Exhausted or unavailable identity evidence never
 dispatches the requested history or mutation. Refresh also refuses a malformed
 existing pin instead of silently normalizing it.
 
-Partial joined service metadata can leave ownership/authentication display fields
-unproven or unknown. Runtime compatibility is independently derived from the
+Service status reports live HTTP admission as `control_admission` and uses that
+evidence for `authenticated`: true when admitted, false for an observed HTTP
+401/403, and null when unavailable. `ssh_access` separately reports the selected
+Linux account's SSH path. Missing unit metadata can leave ownership, bind, port,
+and service name unknown; it does not establish denied Tailnet access.
+Runtime compatibility is independently derived from the
 actual selected SSH user's service-unit revision and protocol declaration.
 Compatible protocol evidence can admit a differing controller hash; missing,
 malformed or incompatible unit evidence cannot. A separate Linux user's empty
@@ -55,8 +62,11 @@ home is still a different SSH execution context. This does not repair that home
 or establish that every Linux user sees the owner's state.
 
 Joined registrations historically omitted the host front-door profile and therefore
-defaulted to Caddy. On a server already using incumbent nginx, explicitly adopt
-that local metadata with `remote join NAME USER@HOST --front-door nginx` or
+defaulted to Caddy. Ordinary access now adopts a missing profile only after
+read-only SSH proves the same machine and uniquely observed nginx or Sandbox
+Caddy listener ownership. Unavailable evidence leaves the profile unavailable;
+routing refuses instead of assuming Caddy. Explicit nginx adoption is also
+available with `remote join NAME USER@HOST --front-door nginx` or
 `remote service refresh NAME --front-door nginx --json` for an existing join.
 This optional profile step uses bounded read-only SSH probes, checks the same
 canonical machine identity as the authenticated control service, and requires
@@ -65,6 +75,18 @@ host configuration and cannot replace an explicit different profile. Plain
 refresh continues to use HTTP only. Existing failed/reserved stack manifests and
 delivery requests are not rewritten or retried by adoption. Do not use `remote add`
 to repair a join: it changes provisioning metadata.
+
+For joined Tailnet registrations, SSH, SCP and Git use the recorded private Tailnet
+address and selected Linux account (for xSpeed, `alim`). They exclude local SSH
+configuration, keys, agent, proxies and multiplexed sessions, so switching Tailnet
+identity cannot reuse an earlier login or fall back to public/key-based SSH.
+HTTP control admission and Tailscale SSH policy remain separate prerequisites.
+An actual SSH policy denial is reported separately; timeout or missing profile
+facts are unavailable evidence. Owner registrations with Tailnet HTTP control
+keep their separate SSH transport; HTTP configuration alone does not enable
+Tailscale SSH on another server. Their multiplexing is disabled before launching a command when the
+UNIX socket path, including OpenSSH's temporary suffix, cannot fit; no command is
+retried and no socket is moved to a shared directory.
 
 Every direct `remote ssh` command requires `--confirm`, including read-only commands,
 and a short `--reason`.

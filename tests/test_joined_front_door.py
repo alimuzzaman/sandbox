@@ -128,7 +128,7 @@ class ProfileProbeEvidenceTest(unittest.TestCase):
                 'include /etc/nginx/conf.d/*.conf;' if '-T' in argv else '')
             return SimpleNamespace(returncode=0, stdout=output, stderr='')
 
-        def execute(_entry, program, payload):
+        def execute(_entry, program, payload, *, timeout=90):
             output = io.StringIO()
             with mock.patch('subprocess.run', side_effect=process), \
                     mock.patch('shutil.which', side_effect=lambda name: '/usr/sbin/nginx' if name == 'nginx' else None), \

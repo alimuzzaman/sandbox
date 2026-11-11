@@ -10,7 +10,7 @@ Late import only from `sandbox.installation.binding`: `read_installation_binding
 
 ControlGate creates frozen AuthenticatedControlReceipt through a module-private issuer after actual successful admission. Middleware attaches it to request.state; do not accept headers/body actor, login, receipt or grant fields. Tailnet receipt records via=tailnet, verified login and node, and server policy epoch; token receipt records via=token and a stable configured service-principal ID, with human identity absent. Never persist the bearer or derive a principal from token content. Revalidate current member policy/installation policy at consume and before effects. Equal admitted operators have full owner rights, while individual actor/request grants remain distinct.
 
-Only CredentialAdmissionService.commit(receipt, resolved_intent, successful_preflight) can create CommittedCredentialReceipt after a durable transaction. An internal constructor seal plus retained row validation prevents dictionary/dataclass construction from becoming authority. `admit_operation` accepts the exact in-process committed receipt and rechecks the retained admission/installation; it does not accept serialized evidence. Private classes are an accidental misuse boundary, not isolation from malicious same-process privileged code. On restart the worker obtains a fresh server-only receipt by validating retained admission, original authenticated provenance, current policy and worker identity; no wire receipt is redeemable. Sibling OwnerJobOperation, delivery.validate_durable_context and ordinary job identity remain separate evidence.
+Only CredentialAdmissionService.commit(receipt, resolved_intent, successful_preflight) can create CommittedCredentialReceipt after a durable transaction. An internal constructor seal plus retained row validation prevents dictionary/dataclass construction from becoming authority. Execution accepts the exact in-process committed receipt and rechecks retained admission/installation; it does not accept serialized evidence. Private classes prevent accidental misuse, not malicious same-process privileged code. Restart without the genuine retained actor and issued preflight proofs permits inspection only. Persisted admission cannot reconstruct those proofs or redispatch effects. A fresh genuine original-owner invocation has its own truthful owner-peer actor, never a reconstructed tailnet actor. Sibling OwnerJobOperation, delivery.validate_durable_context and ordinary job identity remain separate evidence.
 
 ## Wire and supported CLI
 
@@ -48,4 +48,13 @@ Generated-runtime credentials remain a distinct kind and separate generation aut
 
 ## Ownership and release
 
-086 implements this service, dispatcher, broker and consumer source. Installation owner implements binding.py, discovery and join/adopt/refresh only. 085/088 remain untouched. Actual supported lifecycle ports must be called, not reconstructed by copying their evidence. Root owns integration, independent review and all acceptance. No network, secret/native-store access, runtime/jobs, deployment, migration or GS retry is authorized by this contract. Missing installed dependencies refuse truthfully even after source tests pass.
+The source wire parser accepts optional registration_revision for compatibility
+with isolated foundation fixtures. Production resolution requires the exact
+SHA256 registration revision, including immutable consumer actions and native
+bindings. Omission refuses before preflight or effects. The revision is frozen
+into canonical intent and retained preparation and is not a mutable latest alias.
+
+See final-publication-v1.md for internal success, exact lease retirement and the
+separate durable public ACK marker. No effect success CAS is sufficient alone.
+
+086 implements this service, dispatcher, broker and consumer source. Installation owner implements binding.py, discovery and join/adopt/refresh. 085/088 remain separately owned. Call actual lifecycle ports; copied evidence is not authority. The feature owner runs bounded synthetic checks and fresh independent review. Root owns combined staging checks and separately authorized runtime acceptance. No real network, credential/native-store access, runtime jobs, deployment, migration or GS retry is authorized by this contract. Missing installed dependencies refuse truthfully even after source tests pass.

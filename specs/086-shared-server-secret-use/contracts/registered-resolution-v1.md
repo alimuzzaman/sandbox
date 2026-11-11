@@ -49,6 +49,22 @@ source revision, profile and registration. A repaired source cannot reopen the
 old operation. Recovery without the actual process-held actor/preflight proofs
 is inspection only, never receipt reconstruction from persisted claims.
 
-The registration producer, generic fresh/existing dispatcher, application
+Authenticated `recipe_registration.register_recipe` now measures and atomically
+publishes metadata through the registry's compare-and-update API. It never
+claims host resources or stages source. Same-name plans are immutable and repeat
+only their exact original selection. A changed concurrent registry record
+refuses; another recipe publication cannot silently erase it.
+
+Optional hosting profile `recipeTemplate` binds the committed template path and
+its source digest. The actual `stack_template.render` produces a distinct
+canonical project and hosts for the requested new name. Candidate ports are
+nonbinding metadata and require atomic admitted host availability checks.
+The frozen rendered plan lives under `recipe_instances[profile/name]`, with its
+own manifest and registration digests. Reads rerender and compare that plan;
+they never reuse an unrelated existing target or old GS reservation. Typed
+recipe data includes manifest_bytes, future manifest_path, template_path/digest
+and rendered_ports. Source/manifest staging remains post-admission only.
+
+The generic fresh/existing dispatcher, application
 consumer facility, installed capability registration and runtime acceptance are
 separate required integration work. This source contract advertises none.

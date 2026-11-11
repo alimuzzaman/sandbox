@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from .models import CredentialMapping, CredentialValidationError
@@ -29,9 +30,18 @@ def normalize_hosting_profiles(raw, sources) -> dict:
     result = {}
     for name, descriptor in raw.items():
         if (not isinstance(name, str) or not _ID.fullmatch(name)
-                or type(descriptor) is not dict or set(descriptor) != _FIELDS):
+                or type(descriptor) is not dict or not _FIELDS <= descriptor.keys()
+                or set(descriptor) - _FIELDS - {"recipeTemplate"}):
             raise ValueError("hosting profile has invalid fields")
         source = descriptor["source"]
+        template = descriptor.get("recipeTemplate")
+        if template is not None:
+            if (descriptor.get("action") != "stack_up" or not isinstance(template, str)
+                    or not template or len(template) > 1024 or "\\" in template
+                    or PurePosixPath(template).is_absolute()
+                    or any(part in ("", ".", "..") or part.startswith(".env") or part == ".git"
+                           for part in template.split("/"))):
+                raise ValueError("hosting recipe template is invalid")
         if not isinstance(source, str) or source not in sources:
             raise ValueError("hosting profile requires an explicitly registered source")
         if descriptor["action"] not in ("stack_up", "host_apply"):
@@ -87,13 +97,15 @@ class HostingProfile:
     manifest_digest: str
     mappings: tuple[CredentialMapping, ...]
     revision: str
+    template_relative: str | None = None
 
     def matches(self, intent) -> bool:
         return (self.name == intent.profile_ref and self.revision == intent.profile_revision
                 and self.source == intent.source_ref and self.action == intent.action
                 and self.environment == intent.environment and self.source_commit == intent.source_commit
                 and self.artifact_digest == intent.artifact_digest
-                and self.manifest_digest == intent.manifest_digest and self.mappings == intent.mappings)
+                and (self.manifest_digest == intent.manifest_digest or self.template_relative is not None)
+                and self.mappings == intent.mappings)
 
 
 def registered_profiles(normalized) -> MappingProxyType:
@@ -104,7 +116,8 @@ def registered_profiles(normalized) -> MappingProxyType:
             ensure_ascii=True, allow_nan=False).encode("ascii")).hexdigest()
         profiles[name] = HostingProfile(name, item["source"], item["action"], item["environment"],
             item["sourceCommit"], item["artifactDigest"], item["manifestDigest"],
-            tuple(CredentialMapping.parse(value) for value in item["mappings"]), revision)
+            tuple(CredentialMapping.parse(value) for value in item["mappings"]), revision,
+            item.get("recipeTemplate"))
     return MappingProxyType(profiles)
 
 

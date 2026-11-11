@@ -28,6 +28,7 @@ class CredentialExecutionError(ValueError):
 # Process-private scoped association, never read from request fields or disk.
 _HELD = {}
 _HELD_LOCK = threading.Lock()
+_ACTIVE_EFFECTS = {}
 
 
 def _require_host_writer(proof, expected):
@@ -107,10 +108,11 @@ def held_credential_execution(receipt, *, intent: CredentialIntent, held_writer,
 
 
 class _Checkpoint:
-    def __init__(self, ledger, scope, claim, held_writer, expected, receipt, intent):
+    def __init__(self, ledger, scope, claim, held_writer, expected, receipt, intent, consumer_id):
         self._ledger, self._scope, self._claim = ledger, scope, claim
         self._held_writer, self._expected = held_writer, expected
         self._receipt, self._intent = receipt, intent
+        self._consumer_id = consumer_id
         self._owner = (os.getpid(), threading.get_ident())
         self._done = False
 
@@ -129,6 +131,11 @@ class _Checkpoint:
             raise CredentialExecutionError()
         _require_host_writer(self._held_writer, self._expected)
         require_native_mutations(held[3])
+        return row
+
+    @property
+    def effective_deadline(self):
+        return self.require_current().effective_deadline
 
     def complete(self, code):
         if self._done or code not in ("succeeded", "failed", "effects_unknown"):
@@ -195,23 +202,46 @@ def credential_effect_boundary(receipt, *, intent: CredentialIntent,
         expected_version=row.row_version, effect_step=effect_step)
     if claim is None:
         raise CredentialExecutionError("credential_deadline_expired")
-    checkpoint = _Checkpoint(ledger, row.scope, claim, writer, expected, receipt, intent)
+    checkpoint = _Checkpoint(ledger, row.scope, claim, writer, expected, receipt, intent, consumer_id)
+    owner = (os.getpid(), threading.get_ident())
     failed = False
     try:
         # Recheck after irreversible step admission, immediately before
         # the broker resolves/delivers the value to its trusted consumer.
         checkpoint.require_current()
+        with _HELD_LOCK:
+            if owner in _ACTIVE_EFFECTS:
+                raise CredentialExecutionError("credential_effect_scope_busy")
+            _ACTIVE_EFFECTS[owner] = checkpoint
         yield checkpoint
         if not checkpoint._done:
             failed = True
     except BaseException:
         failed = True
     finally:
+        with _HELD_LOCK:
+            if _ACTIVE_EFFECTS.get(owner) is checkpoint:
+                del _ACTIVE_EFFECTS[owner]
         if failed:
             checkpoint._unknown()
     if failed:
         raise CredentialExecutionError("credential_effects_unknown") from None
 
 
+def require_current_consumer_effect(*, intent_digest: str, consumer_id: str):
+    """Concrete fixed-consumer port to the actual currently claimed effect.
+
+    Selection fields are comparisons only. A caller cannot construct/register a
+    checkpoint through this port, recover one after exit, or cross threads.
+    """
+    with _HELD_LOCK:
+        checkpoint = _ACTIVE_EFFECTS.get((os.getpid(), threading.get_ident()))
+    if (type(checkpoint) is not _Checkpoint or checkpoint._consumer_id != consumer_id
+            or checkpoint._intent.intent_digest() != intent_digest):
+        raise CredentialExecutionError()
+    checkpoint.require_current()
+    return checkpoint
+
+
 __all__ = ["CredentialExecutionError", "held_credential_execution",
-           "credential_effect_boundary"]
+           "credential_effect_boundary", "require_current_consumer_effect"]

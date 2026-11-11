@@ -227,6 +227,7 @@ class CredentialIntent:
     requested_deadline: float
     retry_of: str | None
     principal_id: str
+    registration_revision: str | None
 
     def request_scope(self) -> RequestScope:
         binding = self.expected_installation
@@ -264,8 +265,8 @@ class CredentialIntent:
 
 
 def parse_operation(body: bytes, receipt: AuthenticatedControlReceipt) -> CredentialIntent:
-    fields = set(CredentialIntent.__dataclass_fields__) - {"principal_id", "retry_of"}
-    data = _closed(parse_json_body(body), fields | {"schema_version"}, {"retry_of"})
+    fields = set(CredentialIntent.__dataclass_fields__) - {"principal_id", "retry_of", "registration_revision"}
+    data = _closed(parse_json_body(body), fields | {"schema_version"}, {"retry_of", "registration_revision"})
     _version(data["schema_version"])
     if data["action"] not in ("stack_up", "host_apply") or type(data["generate_requested"]) is not bool:
         raise CredentialValidationError()
@@ -288,7 +289,9 @@ def parse_operation(body: bytes, receipt: AuthenticatedControlReceipt) -> Creden
                   mappings=mappings, generate_requested=data["generate_requested"],
                   requested_deadline=_positive(data["requested_deadline"]),
                   retry_of=_request_id(data["retry_of"]) if "retry_of" in data else None,
-                  principal_id=require_authenticated(receipt))
+                  principal_id=require_authenticated(receipt),
+                  registration_revision=(_hex(data["registration_revision"], 64)
+                      if data.get("registration_revision") is not None else None))
     if values["retry_of"] == values["request_id"]:
         raise CredentialValidationError("credential_retry_invalid")
     intent = object.__new__(CredentialIntent)

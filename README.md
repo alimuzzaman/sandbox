@@ -1617,6 +1617,16 @@ an installed capability or claim GS acceptance. The
 [authentication contract](specs/086-shared-server-secret-use/contracts/auth-transport-v1.md)
 documents real gate receipts and the separate live original-owner-peer bridge.
 
+The [runtime environment facility](specs/086-shared-server-secret-use/contracts/runtime-env-facility-v1.md)
+now has a fixed source consumer, with outputs discarded and an explicit minimal
+intended-recipient environment. Provider values and separately generated stack
+values remain inside the server consumer path. Its production recipe/compiler
+and dispatcher wiring are pending; no Docker or provider operation was run.
+Docker daemon administrators remain custody readers and require human release
+review. The [final publication contract](specs/086-shared-server-secret-use/contracts/final-publication-v1.md)
+keeps internal success publicly unknown until exact lease retirement and final
+publication. The additive jobs publication table has not been applied to a host.
+
 Broker delivery must remain confined to the reviewed intended server consumer.
 Explicit minimal recipient environments or approved protected runtime-secret
 facilities are allowed; inherited owner environments and arbitrary staging or

@@ -182,6 +182,31 @@ def require_committed(receipt, *, intent_digest: str) -> OperationEvidence:
     return receipt._issuer._require(receipt, intent_digest)
 
 
+def require_succeeded_operation(receipt, *, intent_digest: str) -> OperationEvidence:
+    """Current terminal observation for exact lease retirement, never effects.
+
+    The original private receipt, actor and successful issued broker proof must
+    still be current. A terminal row, wire status or repaired registration alone
+    cannot use this port, mint another receipt or satisfy require_committed.
+    """
+    if (type(receipt) is not CommittedCredentialReceipt
+            or getattr(receipt, "_seal", None) is not _SEAL
+            or type(getattr(receipt, "_issuer", None)) is not CredentialAdmissionService
+            or receipt._intent.intent_digest() != intent_digest):
+        raise AdmissionError()
+    issuer, intent = receipt._issuer, receipt._intent
+    issuer._current(receipt._actor, intent)
+    issuer._broker.validate_retained_preflight(intent, preflight_digest=receipt._preflight_digest)
+    row = issuer._ledger.lookup(intent.request_scope(), operation_id=receipt._operation_id)
+    if (row is None or row.state is not OperationState.SUCCEEDED
+            or row.canonical_intent != intent.canonical_json() or row.intent_digest != intent_digest
+            or row.admission_version != receipt._admission_version
+            or row.preflight_digest != receipt._preflight_digest or row.admitted_at is None
+            or row.cancel_requested or row.effective_deadline <= time.time()):
+        raise AdmissionError("credential_terminal_observation_invalid")
+    return row
+
+
 def prepare_target(ledger: CredentialOperationRepository, actor: AuthenticatedControlReceipt, *,
                    body: bytes, project_identity: str, project: str):
     """Server metadata allocation after genuine gate/source recipe resolution.
@@ -237,4 +262,4 @@ def require_target_preparation(receipt, *, name: str, project: str, environment:
 
 
 __all__ = ["AdmissionError", "CommittedCredentialReceipt", "CredentialAdmissionService",
-           "require_committed", "prepare_target", "require_target_preparation"]
+           "require_committed", "require_succeeded_operation", "prepare_target", "require_target_preparation"]

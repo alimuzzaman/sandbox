@@ -46,6 +46,8 @@ class RegisteredCredentialBroker:
         profile = self._secrets.hosting_profiles.get(intent.profile_ref)
         if profile is None or not profile.matches(intent):
             raise BrokerError("credential_profile_changed")
+        if profile.template_relative is not None and self._resolver is None:
+            raise BrokerError("credential_resolver_unavailable")
         return profile
 
     def _resolution(self, intent):
@@ -179,11 +181,9 @@ class RegisteredCredentialBroker:
         row = self._committed(receipt, intent)
         if row.operation_id != operation_id:
             raise BrokerError("credential_admission_invalid")
-        selected = tuple(item for item in profile.mappings if item.consumer_id == consumer_id)
+        selected = tuple(item for item in intent.mappings if item.consumer_id == consumer_id)
         if not selected:
             raise BrokerError("credential_consumer_denied")
-        if any(item.kind != "provider" for item in selected):
-            raise BrokerError("credential_generated_authority_required")
         try:
             from .manifest import require_consumer
             from .service import credential_effect_boundary
@@ -192,6 +192,10 @@ class RegisteredCredentialBroker:
         # Fixed trusted registry selects the real callable and validates exact
         # consumer revision, typed slot, purpose and measured artifact selector.
         consumer = require_consumer(intent, consumer_id=consumer_id)
+        if any(item.kind == "generated" for item in selected):
+            from .application import RuntimeEnvironmentConsumer
+            if type(consumer) is not RuntimeEnvironmentConsumer:
+                raise BrokerError("credential_generated_authority_required")
         keys = tuple(sorted({item.source_key for item in profile.mappings if item.kind == "provider"}))
 
         def invoke(values):
@@ -205,8 +209,12 @@ class RegisteredCredentialBroker:
             if require_consumer(intent, consumer_id=consumer_id) is not consumer:
                 raise BrokerError("credential_consumer_changed")
             checkpoint.require_current()
-            slots = {item.destination: values[item.source_key] for item in selected}
+            slots = {item.destination: values[item.source_key] for item in selected if item.kind == "provider"}
             try:
+                if any(item.kind == "generated" for item in selected):
+                    from .runtime_credentials import _generated_slots
+                    slots.update(_generated_slots(receipt, intent=intent, consumer_id=consumer_id))
+                checkpoint.require_current()
                 return consumer.consume(slots)
             finally:
                 slots.clear()

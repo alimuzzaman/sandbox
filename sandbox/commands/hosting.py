@@ -1295,6 +1295,10 @@ class _CaddyHostEdge:
             return _origin_certificate(self.entry, validated, runtime, state_entry, client, home)
         return None, None, None
 
+    def restorable(self, text: str) -> bool:
+        """Spec 084: Caddy's forced reload fails unless the configuration loads."""
+        return bool(text)
+
     def existing_certificate_for_refresh(self, proxied: bool, validated: dict, name: str):
         """Check only (spec 084): the certificate paths the route already uses."""
         if not proxied:
@@ -1414,6 +1418,10 @@ class _NginxHostEdge:
         # DNS-only and not issued yet: serve the ACME challenge first, issue
         # after the DNS step points the hostname here (after_dns).
         return None, None, None
+
+    def restorable(self, text: str) -> bool:
+        """Spec 084: a forced re-install can prove this route loaded (it has a marker)."""
+        return bool(self.nginx.route_marker(text) and self.nginx._probe_host(text))
 
     def existing_certificate_for_refresh(self, proxied: bool, validated: dict, name: str):
         """Check only (spec 084): a certificate covering every name, never issued here."""
@@ -4043,6 +4051,10 @@ def _prepare_front_door_refresh(validated: dict, entry: dict, remote_name: str,
                       _front_door_refresh_safe(exc, secret_values)) from None
     if previous is None:
         raise refused(front_door_refresh.NO_ROUTE, "the remote has no installed route for this target")
+    if not edge.restorable(previous):
+        raise refused(front_door_refresh.ROUTE_UNPROVABLE,
+                      "the installed route has no marker, so a failed refresh could not prove it "
+                      "was put back; run a full `sb host apply` instead")
     private = login.is_private(validated.get("login_service"))
     if private:
         _refuse_proxied_records_for_private(
@@ -4094,6 +4106,25 @@ def _record_front_door_refresh(key: str, fields: dict, *, declaration: str | Non
         if declaration is not None:
             record["front_door_declaration"] = declaration
         hosting.save_host_state(state)
+
+
+def _restore_front_door_route(edge, name: str, previous: str, log_path: str) -> tuple[str, str | None]:
+    """Put the installed route back and prove it (spec 084).
+
+    The previous route is what the refresh replaced, and the prepare step already
+    required it to be a marked private route for a private manifest, so it is the
+    route the fail-closed rule allows back. It goes back through the forced
+    re-install the spec 081 closure uses (validate, reload even when the file already
+    matches, and on nginx the route's own marker answering), then is read back
+    strictly. Anything less is ``restore_failed``.
+    """
+    try:
+        edge.reconcile(name, previous, log_path=log_path)
+        if edge.read_strict(name) != previous:
+            return "restore_failed", "the route read back differs from the previous route"
+        return "restored", None
+    except Exception as exc:  # noqa: BLE001 -- reported, never hidden
+        return "restore_failed", str(exc) or type(exc).__name__
 
 
 def _verify_front_door_refresh(validated: dict, secret_values: dict, prepared: dict) -> None:
@@ -4212,15 +4243,9 @@ def _refresh_host_front_door_leased(validated: dict, entry: dict, remote_name: s
             detail = _front_door_refresh_safe(exc, secret_values)
             restore = None
             if reloaded:
-                try:
-                    # Not live as "this apply's own private route": the previous route is
-                    # the marked private route (or the public one), so it goes back.
-                    restore = _restore_edge_fail_closed(
-                        edge, name, previous, validated=validated, new_edge_live=False,
-                        log_path=apply_log)
-                except Exception as restore_exc:
-                    restore = "restore_failed"
-                    detail += "; restore failed: " + _front_door_refresh_safe(restore_exc, secret_values)
+                restore, problem = _restore_front_door_route(edge, name, previous, apply_log)
+                if problem:
+                    detail += "; restore failed: " + _front_door_refresh_safe(problem, secret_values)
             # The outcome above is what the caller gets, whatever reporting does now.
             try:
                 audit.write(op="end", outcome="failed", code=front_door_refresh.FAILED,

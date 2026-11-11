@@ -87,6 +87,7 @@ class InspectThroughRecordedScopeTests(unittest.TestCase):
         self.assertEqual(selectors["environment"], "qa")
         self.assertEqual(selectors["recorded_scope"],
                          {"project_identity": "fixture-project", "project_root_digest": OLD_ROOT})
+        self.assertEqual(selectors["request_id"], "stack-attempt")
 
     def test_a_record_of_another_project_gives_no_recorded_scope(self):
         resolved = target_resolution.ResolvedTarget(
@@ -144,12 +145,21 @@ class InspectThroughRecordedScopeTests(unittest.TestCase):
             return {**resolver(**query), "runtime_identity": "another-hosted-project"}
 
         confined = DeliveryService(repository, target_resolver=other_runtime)
-        for selectors in ({"request_id": "stack-attempt"}, {}):
-            with self.subTest(selectors=selectors), self.assertRaises(DeliveryError) as caught:
-                confined.inspect(project_dir="/stack", remote="fixture-remote", environment="qa",
-                                 recorded_scope={"project_identity": "fixture-project",
-                                                 "project_root_digest": OLD_ROOT}, **selectors)
-            self.assertEqual(caught.exception.code, "binding_mismatch")
+        with self.assertRaises(DeliveryError) as caught:
+            confined.inspect(project_dir="/stack", remote="fixture-remote", environment="qa",
+                             recorded_scope={"project_identity": "fixture-project",
+                                             "project_root_digest": OLD_ROOT},
+                             request_id="stack-attempt")
+        self.assertEqual(caught.exception.code, "binding_mismatch")
+        # A shared scope answers only for one selected attempt: no history, no latest.
+        self.assertIsNone(found["latest_attempt"])
+        self.assertIsNone(found["latest_retained_complete_success"])
+        self.assertEqual(found["history"].get("operations") or [], [])
+        with self.assertRaises(DeliveryError) as caught:
+            service.inspect(project_dir="/stack", remote="fixture-remote", environment="qa",
+                            recorded_scope={"project_identity": "fixture-project",
+                                            "project_root_digest": OLD_ROOT})
+        self.assertEqual(caught.exception.code, "delivery_contract_invalid")
 
 
 if __name__ == "__main__":

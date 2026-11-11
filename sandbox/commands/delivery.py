@@ -142,6 +142,10 @@ def _recorded_target_selectors(args):
             and isinstance(operation.get("project_root_digest"), str)):
         selectors["recorded_scope"] = {"project_identity": operation["project_identity"],
                                        "project_root_digest": operation["project_root_digest"]}
+        if (getattr(args, "request_id", None) is None and getattr(args, "operation_id", None) is None
+                and isinstance(operation.get("request_id"), str)):
+            # Default to the attempt the record names: the one the next apply checks.
+            selectors["request_id"] = operation["request_id"]
     return selectors
 
 
@@ -170,10 +174,11 @@ def cmd_delivery(cfg, args):
         if selected.get("ok") is False:
             print(json.dumps(selected) if getattr(args, "json", False) else format_projection(selected))
             raise SystemExit(1)
-        result = inspect_with_factory(_service_factory, **selected, **{
-            name: getattr(args, name, None) if getattr(args, name, None) is not None else default
-            for name, default in (("operation_id", None), ("request_id", None), ("observe", False),
-                                  ("limit", 10), ("cursor", None))})
+        options = {name: getattr(args, name, None) if getattr(args, name, None) is not None else default
+                   for name, default in (("operation_id", None), ("request_id", None), ("observe", False),
+                                         ("limit", 10), ("cursor", None))}
+        options.update({key: selected.pop(key) for key in ("request_id",) if key in selected})
+        result = inspect_with_factory(_service_factory, **selected, **options)
         print(json.dumps(result, sort_keys=True, separators=(",", ":")) if getattr(args, "json", False) else format_projection(result))
         if not result["ok"]:
             raise SystemExit(1)

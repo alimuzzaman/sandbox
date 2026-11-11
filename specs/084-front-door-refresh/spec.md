@@ -226,8 +226,11 @@ same answer as with the exact project root the stack's apply was admitted with.
   hostnames the installed route serves (`front_door_refresh_names_changed`), so a reload
   can never add a name (and with it a certificate request) or drop one.
 - **FR-010**: On any failure after the route is installed, the refresh MUST restore the
-  previous route through the same fail-closed restore the apply uses, and report the
-  restore outcome; a restore failure MUST be reported, never hidden.
+  previous route (the route the fail-closed rule allows back, given FR-007) through a
+  forced re-install that proves it loaded (the spec 081 closure path) and a strict
+  read-back, and report the restore outcome; a restore failure MUST be reported, never
+  hidden, including when recording or auditing fails afterwards. A route whose restore
+  could not be proven (nginx without its marker) MUST be refused before any change.
 - **FR-011**: A route identical to the installed one MUST NOT be reloaded; the names are
   still verified.
 - **FR-012**: The refresh MUST NOT create, settle, retire or rewrite a delivery attempt or
@@ -263,8 +266,7 @@ same answer as with the exact project root the stack's apply was admitted with.
   certificate and its names.
 - **Installed route**: the route file the front door serves now, possibly marked private.
 - **Refresh outcome**: `refreshed`, `unchanged` or `failed` (with the restore outcome:
-  `restored` = previous route back, `removed` = route removed because the previous one was
-  not a marked private route on a private target, or `restore_failed`), kept on the
+  `restored` = previous route back and proven, or `restore_failed`), kept on the
   target's record and in the audit log; `refused` (with code) goes to the audit log only,
   since a refusal changes nothing.
 

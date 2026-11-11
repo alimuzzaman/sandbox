@@ -24,6 +24,7 @@ from typing import Literal
 FENCED = "front_door_refresh_fenced"
 NO_ROUTE = "front_door_refresh_no_route"
 ROUTE_UNREADABLE = "front_door_refresh_route_unreadable"
+ROUTE_UNPROVABLE = "front_door_refresh_route_unprovable"
 DECLARATION_CHANGED = "front_door_refresh_declaration_changed"
 CERTIFICATE_MISSING = "front_door_refresh_certificate_missing"
 PRIVACY_UNPROVEN = "front_door_refresh_privacy_unproven"
@@ -38,7 +39,7 @@ AUDIT_UNAVAILABLE = "front_door_refresh_audit_unavailable"
 FAILED = "front_door_refresh_failed"
 
 Outcome = Literal["refreshed", "unchanged", "failed"]
-Restore = Literal["restored", "removed", "restore_failed"]
+Restore = Literal["restored", "restore_failed"]
 
 # The record parts a declaration mismatch names.
 PARTS = ("front_door", "route_name", "loopback_port", "records", "dns_coverage",
@@ -292,11 +293,17 @@ class AuditLog:
         record = {key: fields.get(key) for key in AUDIT_FIELDS}
         record["at"] = int(record["at"] if record["at"] is not None else time.time())
         os.write(self._fd, (json.dumps(record, sort_keys=True) + "\n").encode())
+        # Durable here, inside the caller's failure boundary, so closing cannot fail later.
+        os.fsync(self._fd)
 
     def close(self) -> None:
+        """Never raises: every line was already written and synced by ``write``."""
         if self._fd is not None:
             fd, self._fd = self._fd, None
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def __enter__(self) -> "AuditLog":
         return self

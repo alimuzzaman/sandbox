@@ -23,7 +23,10 @@ sb delivery inspect --remote R (--name STACK | --target P/E | --project-dir DIR 
 ```
 
 Resolves the target like `host status --name`, then reads in the delivery scope the
-target's hosting record names. `--project-dir` keeps its current behaviour.
+target's hosting record names, for one attempt only (`--request-id`, `--operation-id`, or
+by default the request the record names); history and latest summaries are omitted and an
+attempt of another hosted runtime refuses `binding_mismatch`. `--project-dir` keeps its
+current behaviour.
 
 ## `sb host retire-delivery` additions
 

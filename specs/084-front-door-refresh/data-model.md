@@ -5,12 +5,11 @@
 | Field | Written by | Shape |
 |---|---|---|
 | `front_door_declaration` | successful apply, edge continuation, refresh | `"sha256:<64 hex>"`, digest of the non-secret front-door declaration |
-| `front_door_refresh` | refresh (start and end) | `{"state": "started"\|"refreshed"\|"unchanged"\|"failed", "at": int, "route_before": digest\|null, "route_after": digest\|null, "code": str\|null, "restore": "restored"\|"removed"\|"restore_failed"\|null}` |
+| `front_door_refresh` | refresh (start and end) | `{"state": "started"\|"refreshed"\|"unchanged"\|"failed", "at": int, "route_before": digest\|null, "route_after": digest\|null, "code": str\|null, "restore": "restored"\|"restore_failed"\|null}` |
 
-`restored`: the previous route is back. `removed`: a private target whose previous route was
-not a marked private route (unreachable after the FR-007 check; kept because the shared
-restore helper can return it). `restore_failed`: the restore raised; reported with the
-failure. Refusals are not written to the record (they change nothing); they go to the audit
+`restored`: the previous route was re-installed with a forced validate and reload (nginx:
+its marker answered) and read back unchanged. `restore_failed`: any of that failed;
+reported with the failure. Refusals are not written to the record (they change nothing); they go to the audit
 log.
 
 No other field is written by a refresh. `edge`, `runtime`, `hosting_operation`,
@@ -36,6 +35,8 @@ From the validated manifest: `project`, `environment`, `routes`, `cloudflare.pro
 | `front_door_refresh_fenced` | active operation, uncertain recovery, active image activation, destroy fence |
 | `host_apply_lease_held` / `host_apply_lease_unavailable` | remote target lease (existing codes) |
 | `front_door_refresh_no_route` | no successful delivery on record, no installed route, invalid recorded port |
+| `front_door_refresh_route_unreadable` | the installed route could not be read strictly |
+| `front_door_refresh_route_unprovable` | the installed nginx route has no marker to prove a restore |
 | `front_door_refresh_declaration_changed` | names, records, proxy, port, front-door kind, route name, coverage or declaration digest differ |
 | `front_door_refresh_certificate_missing` | certificate absent or not covering the names |
 | `front_door_refresh_privacy_unproven` | private manifest, installed route not a marked private route |

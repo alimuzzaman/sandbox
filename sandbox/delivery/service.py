@@ -478,7 +478,10 @@ class DeliveryService:
             raise DeliveryError("delivery_contract_invalid")
         if recorded_scope is not None and (
                 environment is None or not isinstance(recorded_scope, dict)
-                or set(recorded_scope) != {"project_identity", "project_root_digest"}):
+                or set(recorded_scope) != {"project_identity", "project_root_digest"}
+                or (operation_id is None and request_id is None) or cursor is not None):
+            # A recorded scope can be shared with other hosted runtimes of the same
+            # checkout, so it answers only for one explicitly selected attempt.
             raise DeliveryError("delivery_contract_invalid")
         resolver_selectors = {"recorded_scope": recorded_scope} if recorded_scope is not None else {}
         target = validate_target(self.target_resolver(project_dir=project_dir, remote=remote, environment=environment, label=label, **resolver_selectors))
@@ -529,6 +532,12 @@ class DeliveryService:
             # Spec 084: a scope reached through a hosting record is confined to that
             # record's hosted runtime (one checkout can serve several hosted projects).
             raise DeliveryError("binding_mismatch")
+        if recorded_scope is not None:
+            # History and latest summaries of that scope may belong to another hosted
+            # runtime; answer only for the selected attempt (spec 084).
+            result["latest_attempt"] = None
+            result["latest_retained_complete_success"] = None
+            result["history"] = _empty_history("partial")
         # For a retained old incarnation, recorded projections are read using
         # its exact target; current observations always use the selected target.
         recorded_target = selected["target"] if selected is not None else target

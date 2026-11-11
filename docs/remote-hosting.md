@@ -1228,9 +1228,13 @@ What it does:
   DNS coverage, certificate, and from now on a digest of the front-door declaration.
 - Reloads it (not when it is identical to the installed route), then verifies it with the
   same checks an apply's edge step uses, privacy and route tag included.
-- On any failure after the reload, puts the previous route back (the apply's fail-closed
-  restore) and reports `front_door_refresh_failed` with `restore`: `restored`, `removed`
-  or `restore_failed`. Recording and auditing the outcome are part of that boundary: a
+- On any failure after the reload, puts the previous route back and proves it: the forced
+  re-install the spec 081 private closure uses (validate and reload even when the file
+  already matches; on nginx the route's own marker must answer), then a strict read-back.
+  It reports `front_door_refresh_failed` with `restore`: `restored` or `restore_failed`.
+  The previous route is the one the fail-closed rule allows back: for a private manifest
+  it had to be a marked private route. An nginx route without a marker is refused up
+  front (`front_door_refresh_route_unprovable`), since its restore could not be proven. Recording and auditing the outcome are part of that boundary: a
   refresh whose outcome cannot be saved is rolled back too, and a later audit or record
   error never replaces the reported restore outcome.
 - Never touches Compose, containers, initializers, the checkout, DNS records, zone
@@ -1244,6 +1248,7 @@ It refuses, before any change:
 | `front_door_refresh_fenced` | an apply, recovery, destroy or image activation owns the target, or recovery is uncertain |
 | `host_apply_lease_held` | another controller holds the target lease |
 | `front_door_refresh_no_route` / `front_door_refresh_route_unreadable` | no successful delivery on record, no installed route, or the route could not be read |
+| `front_door_refresh_route_unprovable` | the installed nginx route has no marker, so a failed refresh could not prove it was put back |
 | `front_door_refresh_declaration_changed` (`part`) | the manifest differs from the delivered record: `front_door`, `route_name`, `loopback_port`, `records`, `dns_coverage`, `certificate` or `declaration` |
 | `front_door_refresh_certificate_missing` | the certificate is absent, pending, or does not cover every name (a refresh never issues one) |
 | `front_door_refresh_names_changed` | the new route would serve other hostnames than the installed one |

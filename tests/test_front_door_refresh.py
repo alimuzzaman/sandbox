@@ -62,9 +62,11 @@ class _Refresh:
         if front_door == "caddy":
             patcher.object(hosting_cmd, "_read_remote_strict", side_effect=self._read)
             self.configure = self.fx.configure_edge
-            self.restore = self.fx.restore_edge
             self.configure.side_effect = lambda entry, name, content, previous=None, **kw: self._set(content)
-            self.restore.side_effect = lambda entry, name, previous, **kw: self._set(previous)
+            # The refresh restores through the forced re-install (spec 081 closure path).
+            self.restore = patcher.object(
+                hosting_cmd, "_reconcile_host_caddy",
+                side_effect=lambda entry, name, keep, **kw: self._set(keep))
         else:
             patcher.object(nginx, "preflight", return_value={})
             patcher.object(nginx, "features", return_value={})
@@ -72,7 +74,7 @@ class _Refresh:
             self.configure = patcher.object(
                 nginx, "apply_route", side_effect=lambda entry, name, content, **kw: self._set(content))
             self.restore = patcher.object(
-                nginx, "restore_route", side_effect=lambda entry, name, previous: self._set(previous))
+                nginx, "reconcile_route", side_effect=lambda entry, name, keep, **kw: self._set(keep))
             self.public_cert = patcher.object(nginx, "public_certificate_present", return_value=True)
             self.origin_cert = patcher.object(nginx, "origin_certificate_present", return_value=True)
         self.verify = self.fx.edge
@@ -263,6 +265,21 @@ class RefreshPublicTargetTests(unittest.TestCase):
         target.fx.lease.assert_not_called()
         self.assertEqual(target.audit(), [])
 
+    def test_a_restore_that_does_not_read_back_is_reported(self):
+        target = _Refresh(self)
+        target.verify.side_effect = RuntimeError("primary answered 502")
+        target.restore.side_effect = lambda entry, name, keep, **kw: target._set(keep + "# drift\n")
+        error = target.refused(refresh.FAILED)
+        self.assertEqual(error.restore, "restore_failed")
+
+    def test_an_audit_log_close_error_never_escapes(self):
+        import os
+        audit = refresh.AuditLog(refresh.audit_path(_Refresh(self).fx.home / "runtime"))
+        audit.write(op="start", outcome="started")
+        os.close(audit._fd)  # the descriptor is gone: close() now gets EBADF
+        audit.close()
+        self.assertIsNone(audit._fd)
+
     def test_a_re_run_after_an_interrupted_refresh_converges(self):
         target = _Refresh(self)
         target.state["hosts"][target.key]["front_door_refresh"] = {"state": "started", "at": 1}
@@ -449,6 +466,15 @@ class RefreshNginxTests(unittest.TestCase):
         self.assertIn("X-Robots-Tag", target.live["route"])
         target.configure.assert_called_once()
         target.assert_no_delivery_effect()
+
+    def test_an_nginx_route_that_could_not_be_proven_back_refuses(self):
+        target = _Refresh(self, front_door="nginx")
+        target.state["hosts"][target.key]["front_door"] = "nginx"
+        marker = nginx.route_marker(target.live["route"])
+        self.assertTrue(marker)
+        target.live["route"] = target.live["route"].replace(marker, "unmarked")
+        target.refused(refresh.ROUTE_UNPROVABLE)
+        target.configure.assert_not_called()
 
     def test_an_nginx_route_without_a_covering_certificate_refuses(self):
         target = _Refresh(self, front_door="nginx")

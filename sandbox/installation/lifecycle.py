@@ -75,6 +75,7 @@ def render_unit(revision: str, bind: str, port: int, marker: str, paths=ManagedP
         'Type=simple', 'User=sandbox', 'Group=sandbox', 'UMask=0077',
         f'Environment=SANDBOX_HOME={paths.state}', 'Environment=SANDBOX_MANAGED=1',
         'Environment=SANDBOX_AUTO_UPDATE=0', f'Environment=SANDBOX_REMOTE_MCP_MARKER={marker}',
+        f'Environment=SANDBOX_SECRETS_FILE={paths.config}/secrets/personal.env',
         f'Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={revision}',
         f'EnvironmentFile={paths.config}/control.env', f'WorkingDirectory={root}',
         f'ExecStart={root}/sb mcp --transport streamable-http --bind {bind} --port {port}',
@@ -134,15 +135,21 @@ def plan(revision, bind, port, marker, *, paths=ManagedPaths()) -> dict:
 
 class LinuxHost:
     """Fixed argv only, no inherited controller credentials or arbitrary shell."""
-    def run(self, argv):
+    def observe(self, argv):
         result = subprocess.run(tuple(argv), check=False, capture_output=True, text=True,
             timeout=60, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C'})
+        if len(result.stdout) + len(result.stderr) > 1024 * 1024:
+            refuse('managed_host_output_unavailable', 'bounded host operation output was exceeded')
+        return result
+
+    def run(self, argv):
+        result = self.observe(argv)
         if result.returncode:
             refuse('managed_host_operation_failed', 'managed host operation failed; inspect bounded service diagnostics')
         return result
 
 
-def apply(expected_plan, *, confirm=False, approve_docker=False, maintenance=None,
+def apply(expected_plan, *, confirm=False, approve_docker=False, maintenance=None, request_id=None,
           paths=ManagedPaths(), host=None) -> dict:
     if not confirm or not approve_docker or os.geteuid() != 0:
         refuse('managed_authority_required', 'root confirmation and approved Docker authority are required')
@@ -154,7 +161,7 @@ def apply(expected_plan, *, confirm=False, approve_docker=False, maintenance=Non
         refuse('managed_plan_stale', 'managed lifecycle observations changed')
     host = host or LinuxHost()
     # Adapter holds the installation guard and proves all old writers fenced.
-    with maintenance.exclusive(expected_plan['plan_id']):
+    with maintenance.exclusive(request_id or expected_plan['plan_id']):
         if maintenance.writers_fenced() is not True:
             refuse('managed_writers_active', 'old installation writers are not proven fenced')
         known_user = principal(paths)

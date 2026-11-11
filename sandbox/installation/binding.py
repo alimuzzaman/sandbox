@@ -177,6 +177,14 @@ def is_managed_layout(*, home=None) -> bool:
     return record['layout_kind'] == 'managed'
 
 
+def read_installation_identity(*, home=None) -> dict:
+    """Read durable identity only; this is not evidence of a live service."""
+    root = _identity_root(home)
+    record = _read(root / 'identity.json', os.geteuid())
+    _validate_identity(record)
+    return record
+
+
 def validate_current(binding: Mapping, *, home=None) -> dict:
     if not isinstance(binding, Mapping):
         _error('installation_binding_invalid', 'bound installation must be an object')

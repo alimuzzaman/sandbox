@@ -74,7 +74,7 @@ class ServerCLIContractTest(unittest.TestCase):
 
     def test_typed_owner_value_alone_cannot_authorize_local_dispatch(self):
         with mock.patch.object(cli, 'current_server_cli_context', side_effect=cli.ServerCLIUnavailable('missing job')), \
-                mock.patch.object(cli.subprocess, 'run') as run:
+                mock.patch('sandbox.services.process.BoundedProcessRunner.run') as run:
             with self.assertRaises(cli.ServerCLIUnavailable):
                 cli.owner_process(OWNER, 'single-effect')
         run.assert_not_called()
@@ -141,7 +141,8 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                 'execution_policy_provenance_json': json.dumps({
                     'server_cli.target_identity': OWNER.target_identity,
                     'server_cli.runtime_revision': OWNER.runtime_revision,
-                    'server_cli.ownership_marker': OWNER.ownership_marker}), 'process': process}
+                    'server_cli.ownership_marker': OWNER.ownership_marker,
+                    'server_cli.remote_name': 'origin-box'}), 'process': process}
             row.update(row_fields or {})
             def captured(pid):
                 return SimpleNamespace(host_boot_id='boot',
@@ -155,7 +156,9 @@ class RetainedServerCLIContextTest(unittest.TestCase):
                     mock.patch.object(cli.pwd, 'getpwuid', return_value=SimpleNamespace(pw_name='fixture')), \
                     mock.patch('sandbox.jobs.registry.JobRepository') as repository, \
                     mock.patch('sandbox.jobs.process.capture_process_identity', side_effect=captured), \
-                    mock.patch.object(cli.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
+                    mock.patch('sandbox.services.process.BoundedProcessRunner.run', return_value=SimpleNamespace(
+                        returncode=0, argv=('/bin/sh', '-c', 'single-effect'), stdout='', stderr='',
+                        stdout_truncated=False, stderr_truncated=False, termination_reason=None)) as run:
                 repository.return_value.snapshot.return_value = row
                 try:
                     context = cli.current_server_cli_context()
@@ -169,6 +172,7 @@ class RetainedServerCLIContextTest(unittest.TestCase):
         context, run = self.observe(dispatch=True)
         self.assertEqual(context.owner, OWNER)
         self.assertEqual(context.request_id, 'original')
+        self.assertEqual(context.origin_remote_name, 'origin-box')
         self.assertEqual(context.source_commit, 'f' * 40)
         self.assertEqual(run.call_args.args[0], ['/bin/sh', '-c', 'single-effect'])
         self.assertNotIn('SSH_AUTH_SOCK', run.call_args.kwargs['env'])

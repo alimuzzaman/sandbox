@@ -325,6 +325,20 @@ def get_remote(name: str, *, budget_seconds: float = 15, adopt_joined: bool = Tr
     return copy
 
 
+def get_execution_remote(name: str, record: dict | None = None) -> dict | None:
+    """Ordinary joined job selection observes actual installed CLI contracts."""
+    record = get_remote(name) if record is None else record
+    if not isinstance(record, dict) or record.get('joined') is not True:
+        return record
+    from sandbox.transports.remote_jobs import RemoteJobTransport
+    from sandbox.remote_runtime.execution_capabilities import adopt_execution_capabilities
+    transport = RemoteJobTransport(deploy=deploy_exact_working_tree, ssh_run=ssh_run,
+        remote_lookup=lambda selected: record if selected == name else None,
+        remote_sb_path=remote_sb_path)
+    return adopt_execution_capabilities(name, record,
+        lambda argv: transport.control(name, argv, timeout=15))
+
+
 class RemoteRegistrationBusy(TimeoutError):
     """The registration lock stayed held past its wait budget.
 
@@ -981,6 +995,18 @@ def ssh_run(remote: dict, command: str, timeout: int = 30,
     return ssh_process(remote, command, input_data=input_data, timeout=timeout)
 
 
+def _owner_host_target(target):
+    # The module name is only an import filter, never authority. The sibling
+    # adapter's exact issued type and current retained process proof are required.
+    if type(target).__module__ != 'sandbox.hosting.server_cli_target':
+        return None
+    from sandbox.hosting.server_cli_target import OwnerHostTarget, require_owner_target
+    if type(target) is not OwnerHostTarget:
+        raise ValueError('an exact current owner host target is required')
+    require_owner_target(target)
+    return target
+
+
 def ssh_run_bounded(remote_or_target, command: str, *, timeout: int = 30,
                     max_output: int = 65_536,
                     terminate_on_output_limit: bool = True):
@@ -992,6 +1018,8 @@ def ssh_run_bounded(remote_or_target, command: str, *, timeout: int = 30,
     completion unknown.
     """
     from sandbox.services.process import BoundedProcessRunner
+    if _owner_host_target(remote_or_target) is not None:
+        raise RuntimeError('owner local bounded-output process adapter is unavailable')
 
     multiplex = True
     try:
@@ -1016,6 +1044,9 @@ def ssh_stream(remote_or_target, command: str, *, timeout: int = 30,
     the same SSH argument and multiplexing policy as ``ssh_process`` and never
     retries an ambiguous command.
     """
+    owner = _owner_host_target(remote_or_target)
+    if owner is not None:
+        return owner.stream(command, timeout=timeout, on_line=on_line)
     # Long builds get their own connection. A shared ControlMaster is reused
     # by every concurrent `sb` call to the host, and when it drops, each
     # session riding it exits 255 even if the remote command finished.
@@ -1131,6 +1162,9 @@ def ssh_process(remote_or_target, command: str, *, input_data=None,
     control socket. It is intentionally a single command/session API; callers
     still get an isolated remote shell and normal SSH exit status.
     """
+    owner = _owner_host_target(remote_or_target)
+    if owner is not None:
+        return owner.process(command, timeout=timeout, input_data=input_data)
     multiplex = True
     try:
         _ensure_ssh_control_dir()
@@ -1428,6 +1462,9 @@ def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
     resolved once via SSH rather than left as a literal shell variable,
     since a git push URL needs a real path, not something only a remote
     shell would expand."""
+    owner = _owner_host_target(remote)
+    if owner is not None:
+        return validate_remote_sandbox_home(owner.sandbox_home())
     timeout = normalize_remote_push_timeout(timeout)
     try:
         res = ssh_run(
@@ -5113,12 +5150,12 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
     }
 
 
-def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
+def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | None,
                                public_url: str | None = None, *, confirm: bool = False,
                                legacy_pidfile: bool = False,
                                source_revision: str | None = None,
                                staged_source: dict | None = None,
-                               acknowledged_pins=()) -> dict:
+                               acknowledged_pins=(), preserve_credentials: bool = False) -> dict:
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
@@ -5128,13 +5165,18 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     held by the remote install process itself until it exits. Every installer
     path (migrate, ``remote up``, provision) comes through here.
     """
+    if preserve_credentials and not (remote.get('joined') is True
+            and remote.get('control_transport') == 'tailscale' and remote.get('control_access') == 'tailnet'):
+        raise ValueError('preserving credentials requires the joined Tailnet owner path')
+    if preserve_credentials and legacy_pidfile:
+        raise RuntimeError('owner_service_credential_preservation_unavailable: legacy process requires a separate lifecycle repair')
     if not confirm:
         return remote_mcp_service_plan(
             remote, bind, port, public_url,
             observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
-    if not isinstance(token, str) or not token:
+    if not preserve_credentials and (not isinstance(token, str) or not token):
         raise ValueError("remote MCP token is required")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+    if not preserve_credentials and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise ValueError("remote MCP token has unsafe characters")
     if not isinstance(source_revision, str) \
             or _REMOTE_SOURCE_REVISION_RE.fullmatch(source_revision) is None:
@@ -5156,6 +5198,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
             or staged_source.get("receipt") != expected_receipt):
         raise ValueError("staged Sandbox source authority is unavailable or invalid")
     record = remote_mcp_service_record(bind, port, public_url)
+    if preserve_credentials and (remote.get('mcp_service') or {}).get('ownership_marker') != record['ownership_marker']:
+        raise RuntimeError('remote_service_ownership_unknown: existing service marker cannot be replaced')
     if record["runtime_revision"] != staged_source["runtime_revision"]:
         raise ValueError("staged Sandbox runtime record revision does not match exact source")
     plan = {
@@ -5163,7 +5207,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "steps": [
             "prepare the staged Sandbox CLI and MCP virtual environments",
             "refresh and verify the owner-scoped measured image staging helper",
-            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            ("preserve existing owner-only remote credential file" if preserve_credentials else
+             "write owner-only remote credential file"), "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
         "legacy_pidfile_detected": legacy_pidfile,
@@ -5214,12 +5259,23 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     )
     normalize_program = _REMOTE_HOME_NORMALIZE_PROGRAM
     stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
+    credential_preflight = (
+        'test -f "$env_path" && test ! -L "$env_path" && '
+        'test "$(stat -c \'%u:%a\' "$env_path")" = "$(id -u):600"; '
+    ) if preserve_credentials else ''
+    credential_write = '' if preserve_credentials else (
+        "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
+        "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
+        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; env_tmp=''; "
+    )
     command = (
-        "set -eu; umask 077; IFS= read -r sandbox_remote_mcp_token; "
+        "set -eu; umask 077; "
+        + ('' if preserve_credentials else 'IFS= read -r sandbox_remote_mcp_token; ') +
         "mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
         "python3 -c " + shlex.quote(normalize_program) + " \"$HOME/sandbox\" </dev/null; "
         f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
         + unit_ownership_preflight +
+        credential_preflight +
         "backup=$HOME/.sandbox/mcp-remote-backup-$$; mkdir -p \"$backup\"; "
         "early_cleanup() { rm -rf -- \"$backup\" && test ! -e \"$backup\" || exit 44; }; "
         "trap early_cleanup EXIT; chmod 700 \"$backup\"; "
@@ -5268,9 +5324,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
         + unit + "UNIT\n"
         "chmod 600 \"$unit_tmp\"; mv \"$unit_tmp\" \"$unit_path\"; unit_tmp=''; "
-        "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
-        "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
-        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; env_tmp=''; "
+        + credential_write +
         "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; legacy_stopped=1; fi; "
         "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\"; then "
         "exit 1; fi; "
@@ -5299,7 +5353,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     except PinError as exc:
         raise RuntimeError(f"{exc.code}: {exc}") from None
     try:
-        res = ssh_run(remote, gated, timeout=300, input_data=token + "\n")
+        res = ssh_run(remote, gated, timeout=300,
+                      input_data=None if preserve_credentials else token + "\n")
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("timed out installing the remote MCP service") from exc
     if res.returncode != 0:

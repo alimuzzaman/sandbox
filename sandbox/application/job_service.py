@@ -94,9 +94,13 @@ class JobService:
 
     def submit(self, submission: JobSubmission):
         if submission.kind == 'server-cli':
-            from sandbox.application.server_cli import installed_cli
+            from sandbox.application.server_cli import installed_cli, FixedServerCLI, ServerCLIUnavailable
             if submission.target_kind != 'local' or submission.argv[0] != str(installed_cli()):
                 raise ValueError('server CLI requires the fixed installed local executable')
+            component = self.components.get('server_cli')
+            if component is None or type(component.component) is not FixedServerCLI:
+                raise ServerCLIUnavailable('fixed installed CLI component is not assembled')
+            component.component.environment(submission)
         pending_sync = False
         request_digest = submission.canonical_digest()
         if submission.sync_relationship_id is not None:
@@ -262,7 +266,7 @@ class JobService:
         if submission.kind == 'server-cli':
             from sandbox.application.server_cli import FixedServerCLI, ServerCLIUnavailable
             component = self.components.get('server_cli')
-            if component is None or not isinstance(component.component, FixedServerCLI):
+            if component is None or type(component.component) is not FixedServerCLI:
                 raise ServerCLIUnavailable('fixed installed CLI component is not assembled')
             environment = component.component.environment(submission)
         # Runtime selection is part of the immutable submission decision.  A
@@ -288,12 +292,16 @@ class JobService:
                 "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": environment,
                 "execution_runtime": execution_runtime,
+                "server_cli_parent": ({'job_id': submission.parent_job_id,
+                    'deadline_at': submission.execution_policy_provenance['server_cli.parent_deadline_at']}
+                    if submission.kind == 'server-cli' and submission.parent_job_id else None),
                 "artifact_paths": list(submission.artifact_paths),
                 "workspace_cleanup": cleanup_context,
                 # Fixed, non-secret identity only. The supervisor injects these
                 # exact values without copying or enumerating its environment.
                 "authoritative_context": {
                     "job_id": row["job_id"],
+                    "execution_kind": row['kind'],
                     "request_id": row.get("request_id"),
                     "project_identity": row.get("project_identity"),
                     "project_root_digest": "sha256:" + hashlib.sha256(
@@ -378,6 +386,8 @@ class JobService:
         return result
 
     def _is_aggregate(self, snapshot: dict) -> bool:
+        if snapshot.get('kind') == 'server-cli':
+            return False  # It retains its own supervisor even when it submits children.
         return snapshot.get("kind") in {"matrix", "plan"} or bool(
             self.repository.children(snapshot["job_id"]))
 
@@ -596,6 +606,9 @@ class JobService:
                 "generation_id": snapshot.get("sync_generation_id"),
                 "source_access": snapshot.get("source_access"),
             }
+        if snapshot.get('kind') == 'server-cli':
+            snapshot['child_jobs'] = [{'job_id': child['job_id'], 'lifecycle': child['lifecycle'],
+                'request_id': child.get('request_id')} for child in self.repository.children(job_id)]
         return snapshot
 
     def _submission_from_snapshot(self, job_id: str) -> JobSubmission:
@@ -1179,6 +1192,11 @@ class JobService:
 
     def cancel(self, job_id: str, *, force: bool = False):
         snapshot = self.repository.snapshot(job_id)
+        server_children = []
+        if snapshot.get('kind') == 'server-cli':
+            for child in self.repository.children(job_id):
+                if child['lifecycle'] not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}:
+                    server_children.append(self.cancel(child['job_id'], force=force))
         if self._is_aggregate(snapshot):
             children = self.repository.children(job_id)
             cancelled = []
@@ -1190,6 +1208,8 @@ class JobService:
                     cancelled.append(self.cancel(child["job_id"], force=force))
             return self._get_parent(self.repository.snapshot(job_id)) | {"cancelled_children": cancelled}
         if snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            if server_children:
+                return {**snapshot, 'cancelled_children': server_children}
             raise RuntimeError("already_terminal")
         process = snapshot.get("process") or {}
         if not process.get("child_pid") or not process.get("child_pgid"):
@@ -1372,6 +1392,10 @@ class JobService:
                 metrics: bool = True) -> dict:
         import shutil
         state = self.repository.get(job_id)
+        if state.get('kind') == 'server-cli' and any(
+                child['lifecycle'] not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}
+                for child in self.repository.children(job_id)):
+            raise RuntimeError('nested_job_cleanup_protected')
         if state["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             raise RuntimeError("active_job_protected")
         directory = self.storage.job_dir(job_id)

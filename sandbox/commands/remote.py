@@ -836,8 +836,10 @@ def _cmd_service(args, as_json: bool) -> None:
             if not isinstance(bind, str) or not bind:
                 raise ValueError("remote service bind is unavailable; provision its control transport first")
             token = entry.get("bearer_token")
-            if not isinstance(token, str) or not token:
-                raise ValueError("remote service token is unavailable; provision the remote first")
+            preserve_credentials = (not token and entry.get('joined') is True
+                and entry.get('control_transport') == 'tailscale' and entry.get('control_access') == 'tailnet')
+            if not token and not preserve_credentials:
+                raise ValueError('owner_service_context_unavailable: existing owner credential context is unavailable')
             # Tailscale is a direct private bind, not a public reverse-proxy
             # origin. Passing its control URL as ``public_url`` changes the
             # service ownership marker and makes a valid existing unit look
@@ -869,6 +871,7 @@ def _cmd_service(args, as_json: bool) -> None:
                 source_revision=source_revision,
                 staged_source=staged_source if confirmed else None,
                 acknowledged_pins=acknowledged_pins,
+                **({'preserve_credentials': True} if preserve_credentials else {}),
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
@@ -1440,8 +1443,9 @@ def _cmd_tailnet_access(args, as_json: bool) -> None:
     if entry.get("control_transport") != "tailscale":
         die(f"tailnet member access needs a Tailscale control connection; '{name}' uses "
             f"{entry.get('control_transport') or 'none'}")
-    if not entry.get("bearer_token"):
-        die(f"only the controller that provisioned '{name}' can change who may use it")
+    if not entry.get('bearer_token') and not (entry.get('joined') is True
+            and entry.get('control_access') == 'tailnet'):
+        die('owner_service_context_unavailable: selected owner connection metadata is unavailable')
     home = sr.resolve_sandbox_home(entry)
     setting = _member_access_setting(entry, home)
     result = {"ok": True, "name": name, "setting": setting, "error": None}
@@ -2272,9 +2276,10 @@ def _cmd_up(args, as_json: bool) -> None:
     control_url = entry.get("control_url")
     port = entry.get("mcp_port") or sr.DEFAULT_MCP_PORT
     token = entry.get("bearer_token")
-    if not token:
-        die(f"remote '{name}' is missing recorded connection details — "
-            f"re-run `./sb remote provision {name}`")
+    preserve_credentials = (not token and entry.get('joined') is True
+        and control_transport == 'tailscale' and entry.get('control_access') == 'tailnet')
+    if not token and not preserve_credentials:
+        die('owner_service_context_unavailable: selected owner connection metadata is unavailable')
     if not _arg_true(args, "confirm"):
         result = {"ok": True, "name": name, "status": "planned",
                   "data": {"requires_confirm": True, "action": "start"}, "error": None}
@@ -2302,6 +2307,7 @@ def _cmd_up(args, as_json: bool) -> None:
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
                 source_revision=source_revision,
                 staged_source=staged_source,
+                **({'preserve_credentials': True} if preserve_credentials else {}),
             )
             sr.put_remote(name, mcp_service=plan["service"])
             _invalidate_readiness(name)

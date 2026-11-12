@@ -6,6 +6,7 @@ import { store } from "../state";
 import { fetchJob } from "../api";
 import { toast } from "./toast";
 import { busyHolder, jobFlags, startPoll } from "./poller";
+import { setConsoleExpanded } from "./console-access";
 
 // main.ts injects refresh() to avoid a circular import.
 let refresh: () => Promise<void> = async () => {};
@@ -39,21 +40,17 @@ const flags = jobFlags(store);
 
 export function consoleOpen(title: string): void {
   opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  $("console").inert = false;
-  $("console").classList.remove("w-0");
-  $("console").classList.add("w-[26rem]");
+  setConsoleExpanded($("console"), true);
   $("conTitle").textContent = title;
   $("conBody").textContent = "";
   $("conInputRow").classList.add("hidden");
   $("conDot").className = "w-2 h-2 rounded-full bg-amber-400 animate-pulse";
-  $("conClose").focus();
+  if (!$("console").inert) $("conClose").focus();
 }
 
 export function consoleClose(): void {
-  $("console").inert = true;
+  setConsoleExpanded($("console"), false);
   if (opener?.isConnected) opener.focus();
-  $("console").classList.add("w-0");
-  $("console").classList.remove("w-[26rem]");
   $("conInputRow").classList.add("hidden");
 }
 
@@ -85,10 +82,8 @@ export function pollJob(id: string, instance: string | null, label?: string): vo
       consoleWrite(`Job ${id}: following new output. Earlier output can be read by observing again after this observation stops.\n`);
       drawerOwner = owner;
     } else {
-      $("console").inert = false;
-      $("console").classList.remove("w-0");
-      $("console").classList.add("w-[26rem]");
-      $("conClose").focus();
+      setConsoleExpanded($("console"), true);
+      if (!$("console").inert) $("conClose").focus();
     }
     return;
   }
@@ -152,15 +147,13 @@ export function openTerminal(name: string): void {
   consoleOpen("Terminal · " + name);
   termInstance = name;
   drawerOwner = TERMINAL;
-  $("console").classList.remove("w-0");
-  $("console").classList.add("w-[26rem]");
   $("conTitle").textContent = "Terminal — " + name;
   $("conDot").className = "w-2 h-2 rounded-full bg-emerald-500";
   if (!$("conBody").textContent!.trim())
     consoleWrite("Terminal for " + name + " — runs inside the container.\n" +
       "Try: wp plugin list · wp option get siteurl · ls wp-content/plugins\n\n");
   $("conInputRow").classList.remove("hidden");
-  setTimeout(() => ($("conInput") as HTMLInputElement).focus(), 60);
+  setTimeout(() => { if (!$("console").inert) ($("conInput") as HTMLInputElement).focus(); }, 60);
 }
 
 async function runTerm(): Promise<void> {
@@ -187,7 +180,7 @@ function termKey(e: KeyboardEvent): void {
 }
 
 export function initConsole(): void {
-  $("console").inert = true;
+  setConsoleExpanded($("console"), false);
   $("console").addEventListener("keydown", event => {
     if (event.key === "Escape") consoleClose();
   });

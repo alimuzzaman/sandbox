@@ -1,4 +1,5 @@
 // The desktop rail becomes a disclosure on narrow screens.
+import { setConsoleCovered } from "./console-access";
 export function initNavigation(): () => void {
   const toggle = document.getElementById("navToggle") as HTMLButtonElement | null;
   const sidebar = document.getElementById("appSidebar");
@@ -14,7 +15,7 @@ export function initNavigation(): () => void {
     // Keep keyboard navigation inside the visible drawer while it overlays
     // the page. Closing restores the ordinary page tab order.
     if (content) content.inert = open;
-    if (consolePanel) consolePanel.inert = open;
+    if (consolePanel) setConsoleCovered(consolePanel, open);
   };
   const close = (): void => {
     const restore = open && narrow.matches && sidebar?.contains(document.activeElement);

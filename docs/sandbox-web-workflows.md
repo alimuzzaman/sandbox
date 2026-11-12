@@ -157,3 +157,6 @@ covered page leaves the keyboard tab order while the menu is open. Modified
 link clicks retain native browser behavior. The title truncates and the footer
 can wrap. These changes address observed horizontal overflow at 390px; deployed
 visual and keyboard acceptance of the new drawer is still required.
+Console visibility and menu coverage independently restrict console focus:
+closing the menu never enables a collapsed console, and opening the console
+while covered does not move focus behind the menu.

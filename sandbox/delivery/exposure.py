@@ -38,8 +38,14 @@ class ExposureAttempt:
         self.repository = DeliveryRepository(RUNTIME_DIR.parent)
         target = target_for_project(project['root'], remote_name, label=label,
                                     target_kind='preview' if kind == 'preview_creation' else 'deploy')
-        from sandbox.resources.context import authenticated_target_identity
-        target['machine_identity'] = authenticated_target_identity(remote_name)['target_identity']
+        from sandbox.hosting.server_cli_target import is_owner_target
+        if is_owner_target(entry):
+            if entry.remote_name != remote_name:
+                raise DeliveryError('delivery_contract_invalid')
+            target['machine_identity'] = entry.owner.target_identity
+        else:
+            from sandbox.resources.context import authenticated_target_identity
+            target['machine_identity'] = authenticated_target_identity(remote_name)['target_identity']
         from .context import registered_host_digest
         target['registered_host_digest'] = registered_host_digest(entry, remote_name)
         config_digest = canonical_digest({'kind': project.get('kind', 'wordpress'),

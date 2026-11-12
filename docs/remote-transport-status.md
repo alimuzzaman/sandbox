@@ -221,6 +221,11 @@ refuses. The optional `tailscale_host` retained metadata requires the matching
 protocol-25 receiver update; old installed metadata does not prove support.
 No client or server deployment or runtime acceptance is implied by this source.
 
+Delivery exposure attempts also recognize this genuine current owner target for
+machine identity and require the same retained remote alias. Other callers keep
+the existing authenticated remote identity lookup. A metadata dictionary cannot
+select owner execution or bypass that lookup.
+
 Image settlement signing is separate release approval authority. `host image
 settle --remote NAME --settlement-phase sign-approval|sign-forward-approval`
 requires its configured approval public key and SSH signing agent. Those keys

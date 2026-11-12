@@ -1050,6 +1050,7 @@ def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") ->
         # effects and any existing unknown-completion fence remain unchanged.
         raise hosting.HostingError("runtime file publication refused before replacement")
     if (result.returncode or not isinstance(receipt, dict) or receipt.get("ok") is not True
+            or not isinstance(receipt.get("status"), str)
             or receipt.get("status") not in {"already_current", "published"}):
         # Retain only fixed receipt metadata in the original job's error. Raw
         # output may contain interpreter diagnostics or intended-recipient data.

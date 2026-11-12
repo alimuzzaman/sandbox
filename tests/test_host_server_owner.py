@@ -215,6 +215,13 @@ class OwnerTargetTests(unittest.TestCase):
             (1, json.dumps({"ok": False, "status": marker}).encode(), "invalid_shape"),
             (1, b'{"ok":false,"status":"publication_unknown"}', "publication_unknown"),
             (1, json.dumps({"ok": False, "status": "not_published", "extra": marker}).encode(), "invalid_shape"),
+            (0, b'{"ok":true,"status":[]}', "invalid_shape"),
+            (0, b'{"ok":true,"status":{}}', "invalid_shape"),
+            (0, b'{"ok":true,"status":false}', "invalid_shape"),
+            (0, b'{"ok":1,"status":"published"}', "invalid_shape"),
+            (2, b'{"ok":true,"status":"published"}', "published"),
+            (2, b'{"ok":true,"status":"already_current"}', "already_current"),
+            (2, b'{"ok":false,"status":"not_published"}', "not_published"),
         )
         for code, stdout, hint in cases:
             with self.subTest(code=code, hint=hint), \
@@ -228,6 +235,35 @@ class OwnerTargetTests(unittest.TestCase):
                 self.assertNotIn(marker, message)
                 self.assertNotIn(str(self.home), message)
                 fence.assert_called_once_with(self.entry)
+
+    def test_writer_exit_metadata_is_bounded_and_does_not_clear_unknown_fence(self):
+        from sandbox.commands.hosting import _write_remote_text
+        from sandbox.core._hosting import HostingError
+        for code, hint in ((-255, "-255"), (255, "255"), (-256, "unavailable"),
+                           (256, "unavailable"), (None, "unavailable"),
+                           (True, "unavailable"), ("private-value", "unavailable")):
+            with self.subTest(code=code), patch.object(sdk, "owner_process",
+                    return_value=subprocess.CompletedProcess([], code, stdout=b"", stderr=b"")), \
+                    patch.object(targets, "withhold_owner_completion") as fence:
+                with self.assertRaises(HostingError) as caught:
+                    _write_remote_text(self.entry, str(self.home / "recipient.txt"), "synthetic-data")
+                self.assertIn(f"writer_exit={hint}; writer_receipt=empty;", str(caught.exception))
+                self.assertNotIn("private-value", str(caught.exception))
+                fence.assert_called_once_with(self.entry)
+
+    def test_malformed_writer_status_retains_apply_lease(self):
+        from sandbox.commands import hosting
+        from sandbox.core._hosting import HostingError
+        with patch.object(hosting, "_acquire_host_apply_lease", return_value={"token": "held"}), \
+                patch.object(hosting, "_release_host_apply_lease") as release, \
+                patch.object(sdk, "owner_process", return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=b'{"ok":true,"status":[]}', stderr=b"")), \
+                patch.object(hosting, "_apply_host_unleased", side_effect=lambda *a, **k:
+                    hosting._write_remote_text(self.entry, str(self.home / "recipient.txt"), "synthetic-data")):
+            with self.assertRaises(HostingError):
+                hosting._apply_host({}, self.entry, "box", {})
+        self.assertTrue(targets.owner_effect_unknown(self.entry))
+        release.assert_not_called()
 
     def test_fixed_recipient_writer_persists_only_private_intended_file_and_rejects_links(self):
         from sandbox.commands.hosting import _write_remote_text

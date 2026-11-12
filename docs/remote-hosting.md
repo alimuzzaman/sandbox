@@ -1665,6 +1665,8 @@ reports a known refusal before destination replacement. This does not assert
 that earlier steps of the apply had no effects or clear an existing completion
 fence. Missing, malformed, contradictory or unknown owner replies withhold
 completion through the existing operation fence.
+Receipt status values of the wrong JSON type also retain this fence and the
+original apply lease; they do not become parser exceptions that permit cleanup.
 
 The retained failure message includes only a bounded writer exit code and a
 fixed receipt classification: a recognized status, `empty`, `invalid_json`, or

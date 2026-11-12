@@ -1000,8 +1000,8 @@ def cmd_job_reconcile(_cfg, args) -> None:
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path).control(args.remote, argv)
         else:
-            result = durable_job_dependencies()["job_service"].reconcile_exec_lease(
-                job_id, confirm=confirm, expected_plan=expected)
+            from sandbox.application.server_cli_exec_recovery import reconcile_exec_lease
+            result = reconcile_exec_lease(job_id, confirm=confirm, expected_plan=expected)
         print(json.dumps(result, sort_keys=True))
         return
     if args.remote:
@@ -1273,6 +1273,15 @@ def _remote_control_predispatch(args) -> bool:
     return bool(getattr(args, "remote", None))
 
 
+def _exec_recovery_preconfiguration(args) -> bool:
+    # Exact recovery must not enter config migration/writers, even on the
+    # selected server where --remote is intentionally absent.
+    if any(getattr(args, name, None) for name in ("job_id", "confirm", "expected_plan")):
+        cmd_job_reconcile({}, args)
+        return True
+    return False
+
+
 register_specs((
     CommandSpec("job-start", cmd_job_start, configure=configure_start_parser, owner=__name__, scope="global"),
     CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
@@ -1284,7 +1293,7 @@ register_specs((
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
-    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch, preconfiguration_dispatch=_exec_recovery_preconfiguration),
     CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

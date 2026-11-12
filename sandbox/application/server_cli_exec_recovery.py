@@ -128,7 +128,21 @@ def _lease(path, job_id, row):
         os.close(descriptor)
 
 
-def reconcile_exec_lease(repository, job_id, *, confirm=False, expected_plan=None):
+def reconcile_exec_lease(job_id, *, confirm=False, expected_plan=None):
+    """Compose only this existing repository, never durable startup services."""
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.jobs.registry import JobRepository
+    validate_job_id(job_id)
+    repository = JobRepository.open_existing(RUNTIME_DIR / "jobs" / "registry.sqlite3",
+        read_only=not confirm)
+    try:
+        return _reconcile_exec_lease(repository, job_id,
+            confirm=confirm, expected_plan=expected_plan)
+    finally:
+        repository.close()
+
+
+def _reconcile_exec_lease(repository, job_id, *, confirm=False, expected_plan=None):
     validate_job_id(job_id)
     if type(confirm) is not bool or confirm != bool(expected_plan):
         _refuse()

@@ -210,7 +210,10 @@ sb job-reconcile --remote NAME --job-id ORIGINAL_JOB --json
 sb job-reconcile --remote NAME --job-id ORIGINAL_JOB --confirm --expected-plan PLAN_DIGEST --json
 ```
 
-The second command requires the exact digest returned by the first. This path
+The second command requires the exact digest returned by the first. The exact-job
+path opens only an existing current-schema job repository, read-only for planning,
+without migrations, startup reconciliation or a close-time checkpoint. It dispatches
+before CLI config/migration/generated-file work on both controller and receiver. This path
 does not run global reconciliation, drain queues, signal processes, replay a job,
 rewrite its terminal result or remove workspace/source fences. It requires the
 original terminal server-exec row, its durable stopped-work proof, the same boot,

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -408,6 +410,34 @@ def read_checkout_admissions(database, checkout, *, request_id=None, project_ide
 
 
 class JobRepository:
+    @classmethod
+    def open_existing(cls, path: str | Path, *, read_only: bool = True):
+        """Open the current schema without creation, migration or reconciliation."""
+        selected = Path(path).expanduser().absolute()
+        info = selected.lstat()
+        if (selected.resolve() != selected or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) & 0o022):
+            raise JobRepositoryError("existing job registry ownership is unavailable")
+        result = cls.__new__(cls)
+        result.path = selected
+        mode = "ro" if read_only else "rw"
+        result.connection = sqlite3.connect(selected.as_uri() + "?mode=" + mode,
+            uri=True, timeout=5, isolation_level=None, check_same_thread=False)
+        result.connection.row_factory = sqlite3.Row
+        result._lock = threading.RLock()
+        result._checkpoint_on_close = False
+        try:
+            if result.schema_version() != SCHEMA_VERSION:
+                raise JobRepositoryError("existing job registry schema is unavailable")
+            result.connection.execute("PRAGMA foreign_keys=ON")
+            if not read_only:
+                result.connection.execute("PRAGMA synchronous=FULL")
+            return result
+        except BaseException:
+            result.connection.close()
+            raise
+
     def __init__(self, path: str | Path, *, busy_timeout_ms: int = 5_000) -> None:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -428,7 +458,8 @@ class JobRepository:
 
     def close(self) -> None:
         try:
-            self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            if getattr(self, "_checkpoint_on_close", True):
+                self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
         except sqlite3.Error:
             pass
         self.connection.close()

@@ -24,7 +24,7 @@ def _text(value, limit=4096):
 
 
 def routing_metadata(value):
-    if not isinstance(value, dict) or set(value) - {'origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port'}:
+    if not isinstance(value, dict) or set(value) - {'origin_ipv4', 'origin_ipv6', 'tailscale_host', 'front_door', 'mcp_port'}:
         raise ValueError('original target routing metadata is invalid')
     result = dict(value)
     for field, version in (('origin_ipv4', 4), ('origin_ipv6', 6)):
@@ -35,6 +35,14 @@ def routing_metadata(value):
             if address.version != version:
                 raise ValueError('original target address family changed')
             result[field] = str(address)
+    if 'tailscale_host' in result:
+        if not isinstance(result['tailscale_host'], str):
+            raise ValueError('original Tailnet address must be text')
+        address = ipaddress.ip_address(result['tailscale_host'])
+        networks = (ipaddress.ip_network('100.64.0.0/10'), ipaddress.ip_network('fd7a:115c:a1e0::/48'))
+        if not any(address.version == net.version and address in net for net in networks):
+            raise ValueError('original Tailnet address is outside the Tailnet ranges')
+        result['tailscale_host'] = str(address)
     if 'front_door' in result and result['front_door'] not in {'nginx', 'caddy'}:
         raise ValueError('original target front door is invalid')
     if 'mcp_port' in result and (type(result['mcp_port']) is not int or not 1 <= result['mcp_port'] <= 65535):

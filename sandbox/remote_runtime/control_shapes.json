@@ -920,8 +920,10 @@
    "_read_server_cli_context:read[supervisor_start_identity]",
    "_read_server_cli_context:read[target_kind]",
    "_receiver_routing_metadata:read[addr_info]",
+   "_receiver_routing_metadata:read[ifname]",
    "_receiver_routing_metadata:read[local]",
    "_receiver_routing_metadata:read[scope]",
+   "_receiver_routing_metadata:result[tailscale_host]=",
    "addr_info",
    "capabilities",
    "capabilities:return={capabilities,executable,inspection_capabilities,ok,ownership_marker,runtime_revision,schema_version,server_exec_capabilities,server_exec_capture_capabilities,target_identity,target_metadata,uid}",
@@ -948,6 +950,7 @@
    "execution_policy_provenance_json",
    "host_boot_id",
    "identity",
+   "ifname",
    "inspection_capabilities",
    "joined",
    "kind",
@@ -984,6 +987,7 @@
    "started_at",
    "supervisor_pid",
    "supervisor_start_identity",
+   "tailscale_host",
    "target_identity",
    "target_kind",
    "target_metadata",
@@ -5137,5 +5141,5 @@
    "content_digest.head:subprocess.run(env=)={GIT_CONFIG_GLOBAL,GIT_CONFIG_NOSYSTEM,GIT_NO_REPLACE_OBJECTS,GIT_OPTIONAL_LOCKS,HOME,PATH}"
   ]
  },
- "spoken": 24
+ "spoken": 25
 }

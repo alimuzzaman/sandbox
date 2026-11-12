@@ -100,10 +100,33 @@ whose front door can be observed; explicit Caddy pins remain unsupported here.
 Malformed/conflicting pins, strict revision drift or unproven observations refuse.
 The option does not apply to `remote add` or other remote actions.
 
+After adoption, doctor uses the same tokenless header selection. The shared
+HTTP opener requires the saved numeric Tailnet address and refuses bearer
+headers, proxies, redirects and public endpoints. Joined SSH refuses a changed
+transport rather than returning to ordinary SSH. `remote up` and
+`remote service migrate` preserve the remote owner credential file even when a
+legacy bearer remains stored locally. The shared installer enforces that rule
+for low-level callers too. `remote provision --force` cannot replace a joined
+Tailnet registration; use the supported lifecycle commands instead.
+
+Control protocol 25 adds optional `tailscale_host` to receiver-owned server-CLI
+routing metadata and its retained provenance. It is emitted only for a unique
+Tailnet IPv4 address observed on the local `tailscale0` interface. Public
+`origin_ipv4` and `origin_ipv6` still require unique global interface addresses;
+they are never inferred from the Tailnet address. Missing or ambiguous Tailnet
+evidence omits that field. Historical retained metadata without it stays valid.
+Deploy matching source before relying on the new routing field. Older clients
+with strict routing-field validation may refuse responses containing the new
+field and must update before using server-CLI submission on this runtime.
+
 A connection change does not rewrite historical delivery bindings. If older
 target operations require a rebind, first inspect the supported
 `remote rebind-host NAME --json` plan; that command must prove the existing target
 records and current service identify the same machine before confirmation.
+The confirmed write also compares the registration observed before the machine
+probe, so concurrent registration changes refuse. Rebinding changes only the
+connection acceptance metadata, preserving the original registered digest and
+historical delivery receipts.
 Do not remove/rejoin the record or edit its state to bypass a refusal.
 Pinned history and apply first validate the live machine with the existing status
 contract, using the same total operation budget. A foreign apply-plan target

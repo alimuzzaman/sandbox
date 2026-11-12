@@ -861,9 +861,9 @@ def _cmd_service(args, as_json: bool) -> None:
             bind = (entry.get("tailscale_host") if transport == "tailscale" else "127.0.0.1")
             if not isinstance(bind, str) or not bind:
                 raise ValueError("remote service bind is unavailable; provision its control transport first")
-            token = entry.get("bearer_token")
-            preserve_credentials = (not token and entry.get('joined') is True
+            preserve_credentials = (entry.get('joined') is True
                 and entry.get('control_transport') == 'tailscale' and entry.get('control_access') == 'tailnet')
+            token = None if preserve_credentials else entry.get("bearer_token")
             if not token and not preserve_credentials:
                 raise ValueError('owner_service_context_unavailable: existing owner credential context is unavailable')
             # Tailscale is a direct private bind, not a public reverse-proxy
@@ -1314,7 +1314,7 @@ def _cmd_rebind_host(args, as_json: bool) -> None:
         "rebound" if getattr(args, "confirm", False) else "planned")
     if status == "rebound":
         _invalidate_readiness(name, before=True)
-        sr.put_remote(name, host_identity_pin={
+        sr.put_remote(name, _expected=entry, host_identity_pin={
             "registered_digest": registered, "accepted_digest": accepted,
             "machine_identity": machine,
             "confirmed_at": datetime.now(timezone.utc).isoformat()})
@@ -2061,6 +2061,9 @@ def _cmd_provision(args, as_json: bool) -> None:
     if not entry:
         die(f"no remote named '{name}' — register it first with "
             f"`./sb remote add {name} <ssh-connection>`")
+    if entry.get('joined') is True and entry.get('control_access') == 'tailnet':
+        die('remote_joined: Tailnet-only registrations use remote service migrate or remote up; '
+            'provision cannot replace their transport or credentials')
     if entry.get("joined") and not _arg_true(args, "force"):
         die(f"remote_joined: '{name}' was added with `sb remote join`. Provisioning would "
             "reinstall its control service and lock out every other controller; ask its "
@@ -2308,9 +2311,9 @@ def _cmd_up(args, as_json: bool) -> None:
     )
     control_url = entry.get("control_url")
     port = entry.get("mcp_port") or sr.DEFAULT_MCP_PORT
-    token = entry.get("bearer_token")
-    preserve_credentials = (not token and entry.get('joined') is True
+    preserve_credentials = (entry.get('joined') is True
         and control_transport == 'tailscale' and entry.get('control_access') == 'tailnet')
+    token = None if preserve_credentials else entry.get("bearer_token")
     if not token and not preserve_credentials:
         die('owner_service_context_unavailable: selected owner connection metadata is unavailable')
     if not _arg_true(args, "confirm"):

@@ -157,7 +157,7 @@ def capabilities() -> dict:
 
 
 def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
-    """Unique actual public interface addresses, never an Internet/hostname guess."""
+    """Unique actual public and Tailscale interface addresses, never DNS guesses."""
     from sandbox.services.process import BoundedProcessRunner
     try:
         observed = BoundedProcessRunner(max_output=65_536, terminate_on_output_limit=True).run(
@@ -169,6 +169,7 @@ def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
         if not isinstance(rows, list) or len(rows) > 64:
             return {}
         candidates = {4: set(), 6: set()}
+        tailnet = set()
         for row in rows:
             addresses = row.get('addr_info') if isinstance(row, dict) else None
             if not isinstance(addresses, list) or len(addresses) > 256:
@@ -181,8 +182,14 @@ def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
                 address = ipaddress.ip_address(item['local'])
                 if address.is_global:
                     candidates[address.version].add(str(address))
-        return {field: next(iter(candidates[version])) for field, version in
+                if (row.get('ifname') == 'tailscale0' and address.version == 4
+                        and address in ipaddress.ip_network('100.64.0.0/10')):
+                    tailnet.add(str(address))
+        result = {field: next(iter(candidates[version])) for field, version in
                 (('origin_ipv4', 4), ('origin_ipv6', 6)) if len(candidates[version]) == 1}
+        if len(tailnet) == 1:
+            result['tailscale_host'] = next(iter(tailnet))
+        return result
     except (OSError, ValueError, TypeError, KeyError):
         return {}  # Missing/ambiguous routing evidence is not denied owner access.
 

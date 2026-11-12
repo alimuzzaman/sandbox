@@ -914,10 +914,11 @@ def _ssh_transport_parts(remote_or_target):
     parts = remote_ssh_parts(remote_or_target)
     # Tailnet HTTP control on an existing owner registration does not imply
     # that its separately provisioned SSH server supports Tailscale SSH.
-    tailnet = (isinstance(remote_or_target, dict) and remote_or_target.get('joined') is True
-               and remote_or_target.get('control_transport') == 'tailscale')
+    tailnet = isinstance(remote_or_target, dict) and remote_or_target.get('joined') is True
     if not tailnet:
         return parts, False
+    if remote_or_target.get('control_transport') != 'tailscale':
+        raise ValueError('tailnet_ssh_target_unavailable: joined transport cannot fall back to ordinary SSH')
     address = remote_or_target.get('tailscale_host')
     if not isinstance(address, str):
         raise ValueError('tailnet_ssh_target_unavailable: a verified Tailnet address is required')
@@ -1343,7 +1344,7 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
         import urllib.error
         import urllib.request
         request = urllib.request.Request(endpoint, headers={
-            "Authorization": f"Bearer {token}",
+            **control_auth_headers(remote),
             "Accept": "application/json, text/event-stream",
         })
         try:
@@ -3034,6 +3035,20 @@ def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     argument remains accepted; joined/Tailscale requests never retry an origin.
     """
     parsed = urlsplit(request.full_url)
+    if remote.get('joined') is True:
+        try:
+            address = ipaddress.ip_address(remote.get('tailscale_host'))
+        except (ValueError, TypeError):
+            raise urllib.error.URLError('joined control requires a numeric Tailnet address') from None
+        networks = (ipaddress.ip_network('100.64.0.0/10'), ipaddress.ip_network('fd7a:115c:a1e0::/48'))
+        if (remote.get('control_transport') != 'tailscale'
+                or remote.get('control_access') != 'tailnet'
+                or not any(address.version == net.version and address in net for net in networks)
+                or parsed.scheme not in {'http', 'https'}
+                or parsed.hostname != str(address)
+                or parsed.username is not None or parsed.password is not None
+                or request.has_header('Authorization')):
+            raise urllib.error.URLError('joined control refuses public routing or bearer authentication')
     if request.has_proxy() or request.host != parsed.netloc or getattr(request, '_tunnel_host', None):
         raise urllib.error.URLError('proxy host routing is not permitted for control requests')
     try:
@@ -5207,6 +5222,11 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     held by the remote install process itself until it exits. Every installer
     path (migrate, ``remote up``, provision) comes through here.
     """
+    if remote.get('joined') is True:
+        if (remote.get('control_transport') != 'tailscale' or remote.get('control_access') != 'tailnet'
+                or bind != remote.get('tailscale_host') or public_url is not None):
+            raise ValueError('joined service lifecycle cannot replace the selected Tailnet transport')
+        preserve_credentials, token = True, None
     if preserve_credentials and not (remote.get('joined') is True
             and remote.get('control_transport') == 'tailscale' and remote.get('control_access') == 'tailnet'):
         raise ValueError('preserving credentials requires the joined Tailnet owner path')

@@ -5019,6 +5019,17 @@ class TestHostingSecrets(unittest.TestCase):
         self.assertEqual(ssh_run.call_args.args[1], "caddy hash-password")
         self.assertEqual(ssh_run.call_args.kwargs["input_data"], "secret-value\n")
 
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_remote_text_is_streamed_not_placed_in_argv(self, ssh_run):
+        ssh_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        text = "PG_PASSWORD=secret-value\n"
+        hosting_cmd._write_remote_text({"ssh": "alim@example.test"}, "/srv/run/environment.env", text)
+        command = ssh_run.call_args.args[1]
+        self.assertNotIn("secret-value", command)
+        self.assertNotIn(base64.b64encode(text.encode()).decode(), command)
+        self.assertEqual(ssh_run.call_args.kwargs["input_data"], text)
+        self.assertIn("mv -f", command)
+
     def test_renders_declared_public_and_secret_values(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = _manifest().replace(

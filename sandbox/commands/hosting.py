@@ -1019,14 +1019,18 @@ def _remote_basic_auth_hash(entry: dict, password: str) -> str:
 
 
 def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") -> None:
-    payload = base64.b64encode(text.encode()).decode()
+    # Text may hold runtime secrets: stream it over stdin, never argv, and
+    # publish it with one rename so the final path is never partly written.
+    if re.fullmatch(r"0?[0-7]{3}", mode) is None:
+        raise ValueError("remote file mode is invalid")
     parent = str(__import__("posixpath").dirname(path))
     command = (
-        f"mkdir -p {shlex.quote(parent)} && "
-        f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)} && "
-        f"chmod {mode} {shlex.quote(path)}"
+        f"set -eu; umask 077; mkdir -p {shlex.quote(parent)}; "
+        f"tmp=$(mktemp {shlex.quote(path + '.tmp.XXXXXX')}); "
+        "trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; "
+        f"chmod {mode} \"$tmp\"; mv -f \"$tmp\" {shlex.quote(path)}; trap - EXIT"
     )
-    _remote_checked(entry, command)
+    _remote_checked(entry, command, input_data=text)
 
 
 def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_path: str) -> str:

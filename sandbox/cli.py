@@ -1095,6 +1095,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host stack up/down: the stack slug; host exec/logs/status/diagnose/refresh-front-door/retire-delivery: a recorded stack to target")
     host_p.add_argument("--ref", default=None, metavar="BRANCH|COMMIT",
         help="host stack up: ref to deploy, resolved on this controller (default: the checkout's HEAD)")
+    host_p.add_argument('--server-cli-stack-ref', help=argparse.SUPPRESS)
     host_p.add_argument("--port", action="append", default=None, metavar="NAME=PORT",
         help="host stack up: pin a named stack port (repeatable)")
     host_p.add_argument("--plan", action="store_true",

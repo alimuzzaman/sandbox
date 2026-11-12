@@ -507,7 +507,8 @@ def _up(args) -> dict:
     remote_name = args.remote
     template_path = Path(args.template).expanduser().resolve()
     checkout, relpath = template_checkout(template_path)
-    ref = resolve_ref(checkout, getattr(args, "ref", None))
+    from sandbox.hosting.server_cli_dispatch import resolve_stack_ref
+    ref = resolve_stack_ref(args, checkout)
     template = load_template(checkout, relpath, ref.commit)
     lifetime, lifetime_source, ttl, new_ttl = _requested_lifetime(args, ref, template.dev_branch)
     caller = _caller(checkout, args)

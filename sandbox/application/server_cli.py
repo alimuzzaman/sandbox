@@ -142,6 +142,7 @@ def capabilities() -> dict:
     from sandbox.application.server_cli_capture import CONTRACT as CAPTURE_CONTRACT
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     from sandbox.workspaces.content import source_content_available
+    from sandbox.hosting.server_cli_dispatch import stack_ref_contract_available, STACK_REF_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
@@ -151,7 +152,8 @@ def capabilities() -> dict:
             'server_exec_capture_capabilities': [CAPTURE_CONTRACT] if capture_contract_available() else [],
             'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +
                 (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
-                 and source_content_available() else [])}
+                 and source_content_available() else []) +
+                ([STACK_REF_CONTRACT] if stack_ref_contract_available() else [])}
 
 
 def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
@@ -570,7 +572,8 @@ class FixedServerCLI:
 
 
 def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
-                        request_id: str, timeout_seconds: int = 900) -> dict:
+                        request_id: str, timeout_seconds: int = 900,
+                        source_ref: str | None = None) -> dict:
     """Submit before controller host/CI/provider-secret preflight.
 
     Returns the original remote durable acceptance receipt; never retries an
@@ -584,6 +587,9 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     from sandbox.config.runtime import resolve_execution_policy
     values = _command_argv(argv)
     require_safe_argv(values)
+    if source_ref is not None and (not isinstance(source_ref, str)
+            or re.fullmatch('[0-9a-f]{40}', source_ref) is None):
+        raise ValueError('server CLI source ref must be an exact resolved commit')
     if not request_id:
         raise ValueError('server CLI requires the original request identity')
     # JobSubmission validates all caller input before lookup or transport.
@@ -615,7 +621,10 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
                 {'schema_version': 1, 'target_identity': identity['target_identity']})):
         raise ServerCLIUnavailable('joined owner registration changed during identity observation')
     entry = current
-    transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+    from functools import partial
+    deploy = (_remote.deploy_exact_working_tree if source_ref is None else
+              partial(_remote.deploy_exact_working_tree, source_ref=source_ref, committed_only=True))
+    transport = RemoteJobTransport(deploy=deploy,
         ssh_run=_remote.ssh_run, remote_lookup=lambda name: entry if name == remote_name else None,
         remote_sb_path=_remote.remote_sb_path)
     try:
@@ -626,13 +635,17 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
         # is unavailable. Do not strand a request as unknown acceptance.
         raise ServerCLIUnavailable('installed server CLI capability could not be observed') from None
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
+    from sandbox.hosting.server_cli_dispatch import STACK_REF_CONTRACT
+    required = {CONTRACT, ACCEPTANCE_CONTRACT, 'job.source-content.v1'}
+    if source_ref is not None:
+        required.add(STACK_REF_CONTRACT)
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
             or observed.get('target_identity') != identity['target_identity']
             or observed.get('runtime_revision') != (entry.get('mcp_service') or {}).get('runtime_revision')
             or observed.get('ownership_marker') != (entry.get('mcp_service') or {}).get('ownership_marker')
             or not isinstance(observed.get('capabilities'), list)
             or any(not isinstance(value, str) for value in observed['capabilities'])
-            or not {CONTRACT, ACCEPTANCE_CONTRACT, 'job.source-content.v1'}.issubset(observed['capabilities'])):
+            or not required.issubset(observed['capabilities'])):
         raise ServerCLIUnavailable('installed server CLI contract is unavailable or changed')
     routing = validate_target_metadata(observed.get('target_metadata', {}))
     selected = dict(entry)

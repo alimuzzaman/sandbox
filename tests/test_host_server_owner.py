@@ -37,6 +37,8 @@ class DispatchTests(unittest.TestCase):
             timeout=None, json=True, _server_cli_argv=("host", "stack", "up", "--remote", "box",
                 "--project-dir", str(self.root), "--template", str(self.template), "--confirm"))
         self.enterContext(patch.object(sdk, "server_cli_context_if_selected", return_value=None))
+        self.enterContext(patch.object(host_stack, "resolve_ref",
+            return_value=host_stack.StackRef("HEAD", "e" * 40, "")))
         self.lookup = self.enterContext(patch("sandbox.core._remote.get_remote",
             return_value={"joined": True, "control_transport": "tailscale"}))
         self.submit = self.enterContext(patch.object(sdk, "dispatch_server_cli",

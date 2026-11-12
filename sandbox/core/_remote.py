@@ -508,14 +508,15 @@ def _registry_write_lock(timeout_seconds: float = 30):
         os.close(descriptor)
 
 
-def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
+def resolve_source_ref(project_root: str | Path, source_ref: str, *, require_clean: bool = True) -> str:
     """Resolve a named ref to one full commit before any remote mutation.
 
-    Immutable deploys intentionally reject every local dirty layer.  The
-    caller can therefore prove that the transferred source is exactly the
-    resolved commit and that a failed resolution never contacted the remote.
+    Ordinary immutable deploys reject local dirty layers. Committed stack
+    templates instead deliberately exclude those layers from publication.
     """
     root = Path(project_root).resolve()
+    if type(require_clean) is not bool:
+        raise ValueError('source ref cleanliness policy must be explicit')
     if not isinstance(source_ref, str) or not source_ref.strip() or "\x00" in source_ref:
         raise ValueError("source_ref is invalid")
     requested = source_ref.strip()
@@ -526,12 +527,13 @@ def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
     commit = (resolved.stdout or "").strip().lower()
     if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("source_ref could not be resolved to a full commit")
-    diff_text, untracked = capture_uncommitted(root)
-    if diff_text.strip() or untracked:
-        raise ValueError(
-            "source_ref requires a clean working tree; immutable source was not combined "
-            "with local changes"
-        )
+    if require_clean:
+        diff_text, untracked = capture_uncommitted(root)
+        if diff_text.strip() or untracked:
+            raise ValueError(
+                "source_ref requires a clean working tree; immutable source was not combined "
+                "with local changes"
+            )
     return commit
 
 
@@ -561,6 +563,7 @@ def deploy_exact_working_tree(
     required_subnets: int = 1,
     remote_name: str | None = None,
     push_timeout: int | None = None,
+    committed_only: bool = False,
 ) -> dict:
     """Deploy committed, modified, and untracked project state once.
 
@@ -569,6 +572,8 @@ def deploy_exact_working_tree(
     job to prove which exact working tree it was accepted against.
     """
     root = Path(project_root).resolve()
+    if type(committed_only) is not bool or (committed_only and source_ref is None):
+        raise ValueError('committed-only publication requires an explicit source ref')
     push_timeout = normalize_remote_push_timeout(
         REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS if push_timeout is None else push_timeout
     )
@@ -590,7 +595,8 @@ def deploy_exact_working_tree(
         )
         if network_capacity.get("ok") is not True:
             raise NetworkCapacityAdmissionError(network_capacity)
-    resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
+    resolved_source = (resolve_source_ref(root, source_ref,
+        **({'require_clean': False} if committed_only else {})) if source_ref is not None else None)
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
     overlay = snapshot_dirty_overlay(root, diff_text, untracked)
     # Source and artifact limits are validated locally before admission. The

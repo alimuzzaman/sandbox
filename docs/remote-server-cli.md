@@ -62,6 +62,13 @@ returns the original server acceptance receipt. Unknown acceptance is not retrie
 The fixed installed executable is selected on the server, with no project PATH,
 project script, self remote alias, instance ensure or SSH loop.
 
+The optional SDK `source_ref` is a full, locally resolved commit and selects the
+existing immutable measured-source deploy path instead of a working-tree overlay.
+Host stack creation uses it together with its retained original ref/branch binding.
+The installed real host parser and receiver advertise
+`job.server-cli-stack-ref.v1`; the SDK requires that observation before publishing
+or accepting this command. This adds no operator permission or provider grant.
+
 The server binds the original request, source identity, machine, ownership marker,
 CLI revision and deadline in the retained job. `current_server_cli_context()`
 returns a `ServerCLIContext` only for the actual retained running child: PID,

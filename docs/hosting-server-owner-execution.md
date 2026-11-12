@@ -8,6 +8,18 @@ prerequisite. An explicit `--credential-scope personal-local` retains the existi
 controller credential workflow. The separate explicit registered-profile contract
 remains separate and cannot silently become this execution path.
 
+Stack creation resolves `--ref` on the invoking controller before submission and
+publishes that exact committed source, even when the requested branch differs
+from the current checkout's HEAD. It retains the original ref and branch name in
+the original command so generated names and dev-branch lifetime rules survive
+the detached server checkout. Uncommitted edits are excluded, as in the existing
+committed stack-template workflow. The receiver checks this binding against the
+genuine retained job, current owner and actual staged HEAD without creating Git
+branches. This requires the observed `job.server-cli-stack-ref.v1` capability;
+an older receiver refuses before staging or acceptance. Ordinary controller
+execution and generic retained commands without this binding keep their existing
+ref resolution.
+
 Observation, validation and planning keep their existing paths. Joined
 `host exec --remote NAME --name STACK --service SERVICE -- COMMAND` uses
 metadata-only server selection and one no-source retained job. It needs no

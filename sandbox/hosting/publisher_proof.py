@@ -24,16 +24,19 @@ def contract_available():
 
 def _directory(path, uid):
     """Open the exact existing ancestor chain without following links."""
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    walk = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", walk)
     try:
         for part in path.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            child = os.open(part, walk, dir_fd=fd)
             os.close(fd)
             fd = child
             info = os.fstat(fd)
             if info.st_uid not in (0, uid) or stat.S_IMODE(info.st_mode) & 0o022:
                 raise ValueError("unsafe diagnostic ancestor")
-        return fd
+        child = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        return child
     except BaseException:
         os.close(fd)
         raise

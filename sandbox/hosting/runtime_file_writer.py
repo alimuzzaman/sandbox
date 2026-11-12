@@ -8,6 +8,7 @@ PROGRAM = r'''
 import fcntl,json,os,pathlib,secrets,signal,stat,sys
 
 LIMIT=16*1024*1024
+WALK=getattr(os,'O_PATH',os.O_RDONLY)|os.O_DIRECTORY|os.O_NOFOLLOW
 parent_fd=lock_fd=stage_fd=-1
 stage_name=None
 stage_identity=None
@@ -58,14 +59,21 @@ try:
  if (path.anchor!='/' or str(path)!=os.path.normpath(str(path))
      or any(part in ('.','..') for part in path.parts) or not path.name
      or mode not in (0o600,0o644)):refuse()
- parent_fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ parent_fd=os.open('/',WALK)
  safe_directory(os.fstat(parent_fd))
  for part in path.parent.parts[1:]:
-  try:child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+  try:child=os.open(part,WALK,dir_fd=parent_fd)
   except FileNotFoundError:
-   os.mkdir(part,0o700,dir_fd=parent_fd);os.fsync(parent_fd)
-   child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+   os.mkdir(part,0o700,dir_fd=parent_fd)
+   sync_fd=os.open('.',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+   try:os.fsync(sync_fd)
+   finally:os.close(sync_fd)
+   child=os.open(part,WALK,dir_fd=parent_fd)
   safe_directory(os.fstat(child));os.close(parent_fd);parent_fd=child
+ # Ancestors need search permission, not directory-list permission. Only the
+ # destination parent needs a readable descriptor for the publication fsync.
+ child=os.open('.',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+ os.close(parent_fd);parent_fd=child
  parent_identity=os.fstat(parent_fd)
  lock_name='.'+path.name+'.sandbox-publish.lock'
  lock_fd=os.open(lock_name,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=parent_fd)

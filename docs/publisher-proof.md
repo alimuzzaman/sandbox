@@ -31,6 +31,12 @@ single-link and owner-owned. Only fixed canary files are read. No existing
 runtime, credential, provider, lease or application contents are inspected.
 There are no caller-selected paths, payloads, shell commands or case options.
 
+On Linux, ancestor traversal uses `O_PATH` descriptors. Search-only ancestors
+such as root-owned `/home` at mode 0711 do not need directory-list permission.
+The destination parent is opened readably through its checked descriptor for
+fsync. Ownership, write-mode and no-symlink checks remain unchanged; no directory
+permissions are widened. Platforms without `O_PATH` retain readable traversal.
+
 Results contain fixed case names, booleans and allowlisted writer metadata.
 Raw output, errors, paths and payloads are omitted. Failure stops later cases.
 Uncertain execution preserves the existing owner completion fence. Files and
@@ -38,7 +44,9 @@ publisher locks remain for inspection; there is no automatic cleanup or retry.
 Even a successful result proves only this new diagnostic job. It cannot
 establish whether an older apply published its runtime files.
 
-This implementation is not yet deployed or accepted. Required acceptance is one
+The initial installed diagnostic refused during ancestor preparation before
+running a publisher case. The search-only traversal correction still requires
+deployment and genuine-owner acceptance. Required acceptance is one
 serialized genuine Linux owner job with all three cases complete, followed by
 preservation checks for the original CFE v6 job/delivery/leases and workloads.
 Local parser checks or synthetic owner tests do not establish that proof.

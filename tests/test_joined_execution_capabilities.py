@@ -9,6 +9,19 @@ from sandbox.jobs.models import TargetRequest
 
 
 class JoinedExecutionCapabilityTest(unittest.TestCase):
+    def test_real_installed_stack_ref_contract_is_accepted_and_removed_on_downgrade(self):
+        from sandbox.hosting.server_cli_dispatch import STACK_REF_CONTRACT
+        observed = {**self.observed, 'capabilities': [*self.observed['capabilities'],
+                    'job.source-content.v1', STACK_REF_CONTRACT]}
+        with mock.patch('sandbox.core._remote.put_remote',
+                        side_effect=lambda name, **fields: {**self.record,
+                            'capabilities': fields['capabilities']}) as writer:
+            adopted = adopt_execution_capabilities('box', self.record, lambda argv: observed)
+            self.assertIn(STACK_REF_CONTRACT, adopted['capabilities'])
+            downgraded = adopt_execution_capabilities('box', adopted, lambda argv: self.observed)
+        self.assertNotIn(STACK_REF_CONTRACT, downgraded['capabilities'])
+        self.assertEqual(writer.call_count, 2)
+
     def setUp(self):
         self.record = {'joined': True, 'provisioned': True, 'control_transport': 'tailscale',
             'control_identity': {'schema_version': 1, 'target_identity': 'c' * 24},

@@ -20,6 +20,11 @@ an older receiver refuses before staging or acceptance. Ordinary controller
 execution and generic retained commands without this binding keep their existing
 ref resolution.
 
+Ordinary joined jobs also recognize this shipped stack-reference contract in
+installed capability discovery. It is retained or removed by the same identity-
+checked registration update as other known contracts. Unknown or malformed
+capability entries still refuse; recognizing this contract grants no new role.
+
 Observation, validation and planning keep their existing paths. Joined
 `host exec --remote NAME --name STACK --service SERVICE -- COMMAND` uses
 metadata-only server selection and one no-source retained job. It needs no

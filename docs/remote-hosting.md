@@ -1970,6 +1970,9 @@ with `zone_not_allowed`. A controller state file that does not parse is
 **Configuration and the token.** The zones, the token reference and the ACME
 contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
+These are controller-owned even for a joined Tailnet remote. `host tailnet-name`
+runs on the controller; only its fixed nginx runner uses the registered remote
+transport. Do not move its broker, name records, or ACME account onto the server.
 The Cloudflare token (Zone:Read and DNS:Edit on those zones) is read through
 the secrets broker. It reaches only two programs, each run through a use
 profile that Sandbox defines in-process (`sandbox-tailnet-name-dns` and

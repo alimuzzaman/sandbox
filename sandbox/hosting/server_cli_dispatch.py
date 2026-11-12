@@ -110,7 +110,9 @@ def _dispatch_host_if_selected(args) -> bool:
         from sandbox.hosting.server_cli_exec_client import dispatch_exec_if_selected
         return dispatch_exec_if_selected(args)
     stack_action = getattr(args, "image_action", None)
-    selected = (action in {"plan", "status", "tailnet-name", "recover", "retire-delivery",
+    # Tailnet names retain controller-owned DNS records, ACME state and broker
+    # authority; their fixed remote runner already uses the registered transport.
+    selected = (action in {"plan", "status", "recover", "retire-delivery",
                            "refresh-front-door", "destroy"} or
                 (action == "apply" and getattr(args, "confirm", False)) or
                 (action == "stack" and stack_action in {

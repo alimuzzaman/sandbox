@@ -5095,6 +5095,8 @@ class TestHostingSecrets(unittest.TestCase):
         target = hosting_cmd._ensure_host_source({"ssh": "ubuntu@example.test"}, "/srv/sandbox", "alimuzzaman-me")
         self.assertEqual(target, "/srv/sandbox/deploy-src/hosts/alimuzzaman-me")
         self.assertIn("deploy-src/hosts/alimuzzaman-me", mocked.call_args.args[1])
+        # The owner publication guard refuses a group-writable destination.
+        self.assertTrue(mocked.call_args.args[1].startswith("umask 022; mkdir -p "))
 
 
 class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):

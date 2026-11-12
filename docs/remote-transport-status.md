@@ -195,6 +195,7 @@ Do not use that command as an automatic retry or to bypass a service revision mi
 On a joined Tailscale registration, `host plan`, `host stack list`,
 `host stack up --plan|--confirm`, `host stack down --confirm` and
 `host tailnet-name add|list|renew|remove` use the installed retained server CLI.
+`host plan --name STACK` resolves the server's recorded rendered manifest.
 They return the original durable acceptance receipt, not the command result.
 Pass a stable `--request-id`, retain `job_id`, and inspect it with
 `job-status JOB --remote NAME --json` and bounded

@@ -8773,7 +8773,7 @@ def cmd_host(cfg, args) -> None:
     if (args.action not in {"validate", "secrets", "image"}
             and not getattr(args, "remote", None)):
         die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, refresh-front-door, logs, sync, and login-url")
-    if args.action in {"logs", "status", "diagnose", "refresh-front-door", "retire-delivery"} and (
+    if args.action in {"plan", "logs", "status", "diagnose", "refresh-front-door", "retire-delivery"} and (
             getattr(args, "target", None) or getattr(args, "name", None)):
         # Spec 074: a recorded stack resolves to its rendered manifest, never
         # the template in the current directory (feedback da5d522e).

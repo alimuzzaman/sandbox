@@ -1043,6 +1043,12 @@ def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") ->
         receipt = json.loads(result.stdout)
     except (ValueError, TypeError):
         receipt = None
+    if (result.returncode == 1 and isinstance(receipt, dict)
+            and set(receipt) == {"ok", "status"} and receipt["ok"] is False
+            and receipt["status"] == "not_published"):
+        # This completed invocation did not replace its destination. Earlier
+        # effects and any existing unknown-completion fence remain unchanged.
+        raise hosting.HostingError("runtime file publication refused before replacement")
     if (result.returncode or not isinstance(receipt, dict) or receipt.get("ok") is not True
             or receipt.get("status") not in {"already_current", "published"}):
         if is_owner_target(entry):

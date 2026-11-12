@@ -1586,8 +1586,12 @@ Equal content and mode leaves the destination unchanged. The publisher refuses
 unsafe path components, symlinks, nonregular or multiply linked destinations,
 foreign owners, broad writable modes, and changes observed before replacement.
 Replies contain only `published`, `already_current`, `not_published`, or
-`publication_unknown` status, without payloads or content digests. An unusable
-owner reply withholds completion through the existing operation fence.
+`publication_unknown` status, without payloads or content digests. A completed
+process with exit 1 and exactly `{"ok": false, "status": "not_published"}`
+reports a known refusal before destination replacement. This does not assert
+that earlier steps of the apply had no effects or clear an existing completion
+fence. Missing, malformed, contradictory or unknown owner replies withhold
+completion through the existing operation fence.
 
 This publisher requires an installed owner revision containing
 `sandbox/hosting/runtime_file_writer.py`; protocol 25 is unchanged. Source
@@ -2572,7 +2576,8 @@ holds one lease per target on the remote,
 operation, so two controllers cannot interleave changes to one target's route and
 runtime. The lease file holds a random token, a random controller id
 (`$SANDBOX_HOME/runtime/hosting/controller-id` on the controller) and the time it was
-taken; nothing secret.
+taken; nothing secret. For server-owner execution, the holder is instead the
+first 32 hexadecimal characters of SHA-256 over `server-cli:<job_id>`.
 
 The lease never expires: an owner that outlived an expiry and kept writing would be
 the interleaving the lease is there to stop. The controller that holds it releases it,
@@ -2580,6 +2585,18 @@ or takes it over on its next operation (an apply that crashed). When another con
 holds it, finish or re-run the operation from that controller. If that controller is
 gone, first check on the remote that nothing of it still runs (no `sb` process for the
 target), then remove the lease file there by hand.
+
+Each server-owner job has a different holder, so starting a fresh job cannot
+take over an earlier job's lease. `host retire-delivery` closes the delivery
+record and its host-state claim; it does not release this separate lease.
+Do not repeat retirement or replay an uncertain apply to clear it. Exact manual
+recovery requires explicit operator approval after binding the lease holder to
+the original job, confirming its terminal delivery and process cessation, and
+checking a complete active-job inventory for competing writers. Hold the target's
+existing physical lease lock, recheck the exact lease identity and content under
+that lock, and remove only that lease. Preserve other leases, lock files and
+uncertain operation evidence. A changed identity or incomplete cessation proof
+refuses recovery; leases never expire automatically.
 
 The on-host stack reaper (spec 077) does not take the lease; it only removes targets
 whose lifetime record has expired. Controllers older than this lease do not take it

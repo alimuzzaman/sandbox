@@ -108,11 +108,6 @@ def _write_bytes(stream, content):
 
 def dispatch_exec_if_selected(args) -> bool:
     """Run before controller config and preserve the original synchronous CLI."""
-    if getattr(args, "credential_scope", None) is not None or any(
-            getattr(args, key, None) is not None for key in (
-                "credential_project", "credential_source", "credential_source_revision",
-                "credential_profile", "credential_profile_revision")):
-        return False
     from sandbox.application.server_cli import server_cli_context_if_selected, ServerCLIUnavailable
     request_id = getattr(args, "request_id", None) or "host-exec-" + secrets.token_hex(12)
     args._server_cli_request_id = request_id
@@ -136,6 +131,11 @@ def dispatch_exec_if_selected(args) -> bool:
         record = _remote.get_remote(args.remote)
         if not isinstance(record, dict) or not record.get("joined") or record.get("control_transport") != "tailscale":
             return False
+        if getattr(args, "credential_scope", None) is not None or any(
+                getattr(args, key, None) is not None for key in (
+                    "credential_project", "credential_source", "credential_source_revision",
+                    "credential_profile", "credential_profile_revision")):
+            _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
         timeout = host_exec.parse_timeout(getattr(args, "timeout", None))
         command = getattr(args, "exec_argv", None)
         service = getattr(args, "service", None)

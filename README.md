@@ -1159,6 +1159,13 @@ plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a rem
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
 — see [`docs/remote-hosting.md`](docs/remote-hosting.md).
 
+Native hosted WordPress login links remain expiring and one-time by default.
+`./sb host login-url --confirm --permanent` explicitly issues a reusable link with
+no expiry for a declared WordPress `autologin` target. Issuing another link revokes
+the previous one. Local auto-login and generic login-service behavior are unchanged.
+See [hosted WordPress login URLs](docs/remote-hosting.md#hosted-wordpress-login-urls)
+for HTTPS transport, supported options and revocation limits.
+
 CPU-heavy hosted application images can be built on a faster Linux controller:
 
 ```bash

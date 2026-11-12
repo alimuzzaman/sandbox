@@ -4421,10 +4421,14 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
 
 def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
                           state: dict, ttl_seconds: int | None,
-                          save_state=None) -> dict:
+                          save_state=None, *, permanent: bool = False) -> dict:
     config = validated.get("autologin")
     if not config:
         raise hosting.HostingError("this hosting environment does not declare autologin")
+    if type(permanent) is not bool:
+        raise hosting.HostingError("permanent must be an explicit boolean")
+    if permanent and ttl_seconds is not None:
+        raise hosting.HostingError("--permanent cannot be combined with --ttl-seconds")
     ttl = config["ttl_seconds"] if ttl_seconds is None else ttl_seconds
     if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
         raise hosting.HostingError("--ttl-seconds must be between 60 and 3600")
@@ -4433,10 +4437,13 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     if not isinstance(host_state, dict):
         raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
     token = secrets.token_urlsafe(32)
-    expires_at = int(time.time()) + ttl
-    plugin = hosting.render_autologin_mu_plugin(
-        hashlib.sha256(token.encode()).hexdigest(), config["user"], expires_at,
-    )
+    expires_at = 0 if permanent else int(time.time()) + ttl
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    if permanent:
+        hostname = next(route["hostname"] for route in validated["routes"] if route.get("primary"))
+        plugin = hosting.render_permanent_autologin_mu_plugin(token_hash, config["user"], f"https://{hostname}")
+    else:
+        plugin = hosting.render_autologin_mu_plugin(token_hash, config["user"], expires_at)
     home = remote.resolve_sandbox_home(entry)
     source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
@@ -4455,9 +4462,11 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     ), timeout=60)
     _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
+    if permanent:
+        host_state["autologin"]["one_time"] = False
     (save_state or hosting.save_host_state)(state)
-    return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
-            "one_time": True, "user": config["user"]}
+    url = hosting.autologin_url(validated, token, expires_at, permanent=True) if permanent else hosting.autologin_url(validated, token, expires_at)
+    return {"url": url, "expires_at": expires_at, "one_time": not permanent, "user": config["user"]}
 
 
 def _issue_host_login_link(validated: dict, entry: dict, remote_name: str, state: dict,
@@ -8330,6 +8339,8 @@ def _cmd_host_heal(args) -> None:
 
 
 def cmd_host(cfg, args) -> None:
+    if getattr(args, "permanent", False) and args.action != "login-url":
+        die("--permanent is only available with host login-url")
     if args.action == "exec":
         from sandbox.commands.host_exec import cmd_host_exec
         cmd_host_exec(args)
@@ -8672,6 +8683,15 @@ def cmd_host(cfg, args) -> None:
             print(output, end="" if output.endswith("\n") or not output else "\n")
         return
     if args.action == "login-url":
+        permanent = getattr(args, "permanent", False)
+        if permanent:
+            if not args.confirm:
+                die("host login-url is protected; pass --confirm to issue a permanent login link")
+            if getattr(args, "ttl_seconds", None) is not None:
+                die("--permanent cannot be combined with --ttl-seconds")
+            if validated.get("login_service") or any(getattr(args, name, None) for name in (
+                    "service", "email", "save_email", "list_links", "revoke")) or getattr(args, "uses", None) is not None:
+                die("--permanent is only supported by native hosted WordPress autologin")
         # Listing share links is read-only; minting and revoking stay protected.
         if not args.confirm and not getattr(args, "list_links", False):
             die("host login-url is protected; pass --confirm to issue a one-time admin link")
@@ -8687,7 +8707,7 @@ def cmd_host(cfg, args) -> None:
                 lambda current, durable_save: _issue_host_autologin(
                     validated, entry, args.remote, current,
                     getattr(args, "ttl_seconds", None),
-                    save_state=durable_save))
+                    save_state=durable_save, **({"permanent": True} if permanent else {})))
         except TimeoutError:
             die("another host apply or recovery owns this target")
         except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:

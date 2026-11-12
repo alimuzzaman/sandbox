@@ -1146,8 +1146,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="set one declared hosting secret through a hidden prompt")
     host_p.add_argument("--generate", dest="generate_secrets", action="store_true",
         help="generate any declared generated secrets that are missing")
-    host_p.add_argument("--ttl-seconds", type=int, default=None,
+    host_login_lifetime = host_p.add_mutually_exclusive_group()
+    host_login_lifetime.add_argument("--ttl-seconds", type=int, default=None,
         help="one-time login URL lifetime (60-3600 seconds; manifest default when omitted)")
+    host_login_lifetime.add_argument("--permanent", action="store_true",
+        help="host login-url: reusable native WordPress link without expiry; replaces the previous link")
     host_p.add_argument("--service", default=None, metavar="ENTRY",
         help="host login-url: declared autologin entry to issue a link for; host exec: deployed Compose service to run in")
     host_p.add_argument("--email", default=None,

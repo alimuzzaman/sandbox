@@ -3399,6 +3399,8 @@ legacy runner before summary/source/target effects. Missing or ambiguous facts
 refuse. Valid exact primary publications retain their port, including saved
 aliases proven by retained physical machine evidence. Unknown owners reserve ports.
 Interface-qualified addresses are normalized while reserving the same TCP number.
+For IPv6, both `[address%interface]` and the `[address]%interface` form emitted
+by `ss` are accepted. Unmatched brackets and duplicate scopes still refuse.
 An existing loopback socket is exempt only when a privileged read-only probe
 ties its kernel inode and held process descriptor to a root-owned `docker-proxy`
 executable and its exact published container destination. Matching Docker labels

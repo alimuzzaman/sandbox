@@ -57,6 +57,16 @@ def _identity(value):
 def _address(value):
     if type(value) is not str:
         _fail("invalid TCP address")
+    if value.startswith('['):
+        closing = value.find(']')
+        if closing < 0:
+            _fail("invalid TCP brackets")
+        body, suffix = value[1:closing], value[closing + 1:]
+        if suffix and (not suffix.startswith('%') or '%' in body):
+            _fail("invalid TCP scope")
+        value = body + suffix
+    elif '[' in value or ']' in value:
+        _fail("invalid TCP brackets")
     if value != "*":
         address, separator, interface = value.partition('%')
         if separator and not re.fullmatch(r'[A-Za-z0-9_.:@-]{1,64}', interface):
@@ -201,7 +211,14 @@ raw=sys.stdin.buffer.read(LIMIT+1)
 if len(raw)>LIMIT: raise RuntimeError('socket input exceeds bound')
 publications=json.loads(raw)
 def address(value):
-    base,sep,interface=value.strip('[]').partition('%')
+    if value.startswith('['):
+        closing=value.find(']')
+        if closing<0: raise ValueError()
+        body,suffix=value[1:closing],value[closing+1:]
+        if suffix and (not suffix.startswith('%') or '%' in body): raise ValueError()
+        value=body+suffix
+    elif '[' in value or ']' in value: raise ValueError()
+    base,sep,interface=value.partition('%')
     if sep and not re.fullmatch('[A-Za-z0-9_.:@-]{1,64}',interface): raise ValueError()
     return '*' if base=='*' else str(ipaddress.ip_address(base))
 def read_at(parent,name):

@@ -6,6 +6,13 @@ stdout, stderr, combined event order, metrics, and terminal integrity metadata t
 the job store. SSH and MCP retrieve bounded retained pages and never own the
 child pipes.
 
+Joined capability discovery recognizes the installed `preview.owner-cli.v1`
+component alongside the fixed job and stack-reference contracts. This is component
+metadata, not an owner-role grant; machine, marker and runtime pins still match
+before local metadata adoption. `job-capabilities --name` is an installed host-target
+selector, not remote selection. Invoke that metadata command on the selected server
+through the supported registered `remote ssh` command when diagnosing discovery.
+
 ## Source checkout shape
 
 Remote exec, test and job submissions push the project's committed `HEAD` plus a

@@ -148,3 +148,12 @@ timeout or an unusable acceptance receipt prevents automatic resubmission in
 that panel process. This in-memory tracking does not reconstruct an original job
 after a panel restart or establish why an older fetch failed. Local server rows
 and remote-only lifetime rows remain part of the combined inventory.
+
+## Navigation on narrow screens
+
+Below 768px the sidebar opens from the Menu button instead of reserving 240px
+beside the page. Escape, the backdrop and ordinary navigation close it. The
+covered page leaves the keyboard tab order while the menu is open. Modified
+link clicks retain native browser behavior. The title truncates and the footer
+can wrap. These changes address observed horizontal overflow at 390px; deployed
+visual and keyboard acceptance of the new drawer is still required.

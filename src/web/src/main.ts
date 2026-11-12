@@ -7,6 +7,7 @@ import { fetchData, fetchRemotes, fetchUsage, fetchRemote, fetchHosting } from "
 import { navigate, initRouter, onRoute, currentRoute, isHostingRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
+import { initNavigation } from "./ui/navigation";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
 import { rowMenuToggle, rowMenuClose, initRowMenuClose } from "./ui/rowmenu";
 import {
@@ -245,6 +246,7 @@ function boot(): void {
   initConsole();
   initCselOutsideClose();
   initRowMenuClose();
+  const closeNavigation = initNavigation();
   initRouter();
 
   // Static sidebar buttons (not data-link).
@@ -268,6 +270,7 @@ function boot(): void {
 
   // Re-render whenever the route changes (link clicks, back/forward, navigate()).
   onRoute((route) => {
+    closeNavigation();
     render();
     if (isHostingRoute(route)) refreshHosting();
     if (route.page === "remote" || route.page === "remote-instance" || route.page === "home" || route.page === "local-host") {

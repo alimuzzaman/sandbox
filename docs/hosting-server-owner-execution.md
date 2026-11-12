@@ -1,5 +1,10 @@
 # Hosting through the installed server CLI
 
+For the shipped protocol-25 client pin, normal-entry setup, remote receipt
+handling and verified coverage limits, read [Tailnet-only operations](tailnet-only-operations.md).
+The release's exact-byte exec proof does not establish safe secret reconciliation
+or atomic recipient-file publication; those remain separate P1 work.
+
 Confirmed joined Tailscale stack-up and apply requests select the fixed installed server CLI durable
 job before controller configuration and provider-key preflight. Every admitted
 operator has the existing Linux owner's Sandbox rights. No controller allowlist,

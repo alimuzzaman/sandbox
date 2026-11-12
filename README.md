@@ -3,6 +3,9 @@
 A real WordPress environment for plugin designers, developers, and QA teams,
 drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 
+For admitted remote operators, see [Tailnet-only operations](docs/tailnet-only-operations.md)
+for the shipped client, registration adoption and remote command receipts.
+
 ## Scoped recovery
 
 Recovery is profile-driven through `sb recovery`. Capture, restore apply, retention deletion,

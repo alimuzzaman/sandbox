@@ -110,7 +110,7 @@ def _dispatch_host_if_selected(args) -> bool:
         from sandbox.hosting.server_cli_exec_client import dispatch_exec_if_selected
         return dispatch_exec_if_selected(args)
     stack_action = getattr(args, "image_action", None)
-    selected = (action in {"plan", "tailnet-name", "recover", "retire-delivery",
+    selected = (action in {"plan", "status", "tailnet-name", "recover", "retire-delivery",
                            "refresh-front-door", "destroy"} or
                 (action == "apply" and getattr(args, "confirm", False)) or
                 (action == "stack" and stack_action in {

@@ -192,12 +192,14 @@ Do not use that command as an automatic retry or to bypass a service revision mi
 
 ## Joined hosting command results
 
-On a joined Tailscale registration, `host plan`, `host stack list`,
+On a joined Tailscale registration, `host plan`, `host status`, `host stack list`,
 `host stack up --plan|--confirm`, the other remote `host stack` actions,
 `host recover`, `host retire-delivery`, `host refresh-front-door`, `host destroy`
 and `host tailnet-name add|list|renew|remove` use the installed retained server CLI.
 Their existing plan/confirmation requirements still apply in the receiver.
 `host plan --name STACK` resolves the server's recorded rendered manifest.
+`host status --target PROJECT/ENVIRONMENT` reads the selected server's record;
+it does not require a controller-local hosting record.
 They return the original durable acceptance receipt, not the command result.
 Pass a stable `--request-id`, retain `job_id`, and inspect it with
 `job-status JOB --remote NAME --json` and bounded

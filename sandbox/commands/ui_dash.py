@@ -335,17 +335,20 @@ def _web_share(payload) -> tuple[int, dict]:
                      "message": "the share request failed; run `sb host share` on the controller for details"}
 
 
-def _hosting_view() -> tuple[int, dict]:
+def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
     """The read-only stacks and hosted sites view: this server's records, then the controller's."""
     import sandbox.core._hosting as hosting_core
     import sandbox.core._remote as remote_core
     from sandbox.core import _paths
     from sandbox.hosting import panel_lifetime, panel_records, panel_view, stack_registry
+    from sandbox.hosting.tailnet_names import panel as mail_panel
 
     try:
         sources, partial, known, lifetimes = [], [], [], {}
         now = int(time.time())
+        mail_inventory = None
         if _hosts_control_service():
+            mail_inventory = mail_panel.read_server(bound_host=bound_host, now=now)
             sources.append(panel_view.server_source(
                 panel_records.read_server_records(_paths.RUNTIME_DIR)))
             lifetimes["this-server"] = panel_lifetime.read_server(_paths.RUNTIME_DIR, now)
@@ -374,7 +377,7 @@ def _hosting_view() -> tuple[int, dict]:
             remotes = sorted({target["remote"] for target in controller["targets"]})
             lifetimes.update(_hosting_lifetimes().snapshot(remotes, now))
         view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
-                                     lifetimes=lifetimes)
+                                     lifetimes=lifetimes, mail_inventory=mail_inventory)
         view["partial_reasons"] = partial + view["partial_reasons"]
         return 200, remote_core.redact_structure(view)
     except Exception:
@@ -498,7 +501,7 @@ def cmd_web(cfg, args) -> None:
             if path == "/api/hosting":
                 if u.query:
                     return self._send(400, json.dumps({"error": "no query parameters are supported"}))
-                code, view = _hosting_view()
+                code, view = _hosting_view(bound_host=self.server.server_address[0])
                 return self._send(code, json.dumps(view), no_store=True)
             if path == "/api/remotes":
                 return self._send(200, json.dumps({

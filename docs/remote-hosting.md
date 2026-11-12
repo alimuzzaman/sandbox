@@ -2245,8 +2245,20 @@ The **Stacks & sites** page (`/hosting`, data at `GET /api/hosting`) is read-onl
 every `sb host stack` with one row per server created for it, plus the projects hosted with
 `sb host apply` without a stack. Each row is a link, with its state, its health and the
 ref it was built from. A stack also shows its slug, project, branch, commit, template
-path, last apply (status, time and request id), its Mailpit loopback port and named
-ports, and its created time. A TTL appears once stacks have one. The page has no actions.
+path, last apply (status, time and request id), its Mailpit upstream and named
+ports, and its created time. **Open inbox** appears only when this server has one
+managed tailnet HTTPS name for that exact `127.0.0.1:<mailpit-port>` upstream. The
+link opens `/mail/`. A bounded local read-only privileged helper projects the existing Sandbox-owned nginx block,
+public certificate and activation journal; it never reads a private key or probes
+the inbox. The managed activation must match the current block/certificate bytes, and the certificate must
+cover the name and be unexpired, and the loaded journal must match the exact
+block/certificate bytes. This is retained activation evidence, not a live health
+check. Missing, unmanaged, incomplete, changed or ambiguous records show an
+unavailable reason beside the upstream. Controller-only stacks show unavailable;
+a remote name or hostname pattern never establishes access. The managed name
+must bind the same tailnet IPv4 as the panel listener; a loopback-bound panel
+cannot establish this scope and shows access records unavailable. Discovery does not
+provision names or repair certificates. A TTL appears once stacks have one. The page has no actions.
 
 On a server it is built only from files on that server:
 

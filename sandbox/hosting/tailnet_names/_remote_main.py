@@ -978,6 +978,76 @@ def inspect(payload, paths, runner, lock_wait):
             "inventory": rows}
 
 
+def mail_access(payload, paths, runner, lock_wait):
+    """Read-only panel projection; private key contents are never opened."""
+    ip = _tailnet_ip(payload.get("tailnet_ip"))
+    result = {"available": False, "partial": False, "names": []}
+    conf = root = None
+    deadline = time.monotonic() + 8
+
+    def certificate_runner(argv, *, input=None, **_ignored):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refusal("observation_timeout")
+        return run(argv, input=input, timeout=min(2, remaining))
+
+    try:
+        conf = _open_dir(paths["conf_dir"], paths)
+        root = _open_dir(paths["cert_root"], paths)
+        with os.scandir(conf) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 1000 or time.monotonic() > deadline:
+                    result["partial"] = True
+                    break
+                if not (entry.name.startswith(FILE_PREFIX) and entry.name.endswith(".conf")):
+                    continue
+                fd = None
+                try:
+                    fqdn = _fqdn(entry.name[len(FILE_PREFIX):-len(".conf")])
+                    block, managed = _block(conf, fqdn, paths)
+                    header = _header(block) if managed else None
+                    if not header or header.get("version") != 1:
+                        raise Refusal("unmanaged_block")
+                    if header.get("tailnet_ip") != ip:
+                        continue
+                    upstream = header.get("upstream")
+                    match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", upstream or "")
+                    if not match or not 1 <= int(match[1]) <= 65535:
+                        continue
+                    row = {"upstream": upstream, "url": None}
+                    result["names"].append(row)
+                    fd = _name_dir(root, fqdn, paths)
+                    if fd is None:
+                        continue
+                    _owned_entries(fd, paths)
+                    key = _lstat(fd, "privkey.pem")
+                    journal = _journal(fd, paths)
+                    chain = _read(fd, "fullchain.pem", paths, mode=0o644)
+                    if (key is None or not stat.S_ISREG(key.st_mode) or key.st_nlink != 1
+                            or key.st_uid not in paths["trusted_uids"]
+                            or stat.S_IMODE(key.st_mode) != 0o600 or not chain or not journal
+                            or journal.get("state") != "loaded"
+                            or journal.get("generation") != _generation(block, chain)):
+                        continue
+                    facts = _chain_facts(chain, None, certificate_runner)
+                    if facts.get("expired") is False and fqdn in facts.get("cert_names", []):
+                        row["url"] = "https://" + fqdn + "/mail/"
+                except (Refusal, OSError, ValueError, TypeError):
+                    result["partial"] = True
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+        result["available"] = True
+    except (Refusal, OSError):
+        pass
+    finally:
+        if root is not None:
+            os.close(root)
+        if conf is not None:
+            os.close(conf)
+    return {"ok": True, **result}
+
+
 def _row(conf_fd, root, fqdn, paths, runner):
     content, managed = _block(conf_fd, fqdn, paths)
     row = {"fqdn": fqdn, "block_present": content is not None, "block_managed": managed,
@@ -1372,7 +1442,8 @@ def remove(payload, paths, runner, lock_wait):
         scope.close()
 
 
-ACTIONS = {"inspect": inspect, "reserve": reserve, "extend": extend, "release": release,
+ACTIONS = {"inspect": inspect, "mail-access": mail_access,
+           "reserve": reserve, "extend": extend, "release": release,
            "settle": settle, "csr": csr,
            "commit": commit, "remove": remove}
 

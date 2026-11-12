@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from sandbox.hosting import panel_lifetime as pl
 from sandbox.hosting import panel_records as pr
+from sandbox.hosting.tailnet_names import panel as mail_panel
 from sandbox.hosting.panel_health import NOT_CHECKED, HealthResult
 
 if TYPE_CHECKING:
@@ -74,6 +75,7 @@ class StackView(TypedDict):
     template: str
     ports: dict[str, int]
     mailpit_port: int | None
+    mail_access: mail_panel.MailAccess
     loopback_port: int | None
     created_at: int | None
     ttl_expires_at: int | None
@@ -334,6 +336,7 @@ LifetimeSources = Mapping[str, "pl.LifetimeListing | None"]
 
 def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = None,
                health: HealthLookup | None = None,
+               mail_inventory: mail_panel.Inventory | None = None,
                lifetimes: LifetimeSources | None = None,
                clock: Callable[[], float] = time.time) -> HostingView:
     """``lifetimes`` maps ``"this-server"`` (this server's records) and each
@@ -450,6 +453,8 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             "commit": stack.get("commit") or (target["commit"] or ""),
             "template": stack.get("template") or "", "ports": ports,
             "mailpit_port": ports.get("mailpit"), "loopback_port": target["loopback_port"],
+            "mail_access": mail_panel.access(ports.get("mailpit"), same_server=source == "this-server",
+                                             inventory=mail_inventory),
             "created_at": stack.get("created_at"), "ttl_expires_at": stack.get("ttl_expires_at"),
             "last_apply": _apply_view(target["last_apply"]),  # type: ignore[typeddict-item]
             "compose_project": compose_project,

@@ -95,11 +95,18 @@ export interface LifetimeRow extends LifetimeView {
   project: string; environment: string; compose_project: string;
   name: string; card: boolean;
 }
+export type MailAccess =
+  | { status: "ready"; url: string; upstream: string }
+  | { status: "unavailable"; upstream: string | null; reason:
+      "no_port" | "not_same_server" | "inventory_unavailable" | "inventory_partial" |
+      "not_found" | "not_ready" | "ambiguous" };
+
 export interface HostingStack {
   key: string; remote: string; source: "this-server" | "controller";
   slug: string; project: string; environment: string;
   ref: string; ref_branch: string; commit: string; template: string;
   ports: Record<string, number>; mailpit_port: number | null; loopback_port: number | null;
+  mail_access: MailAccess;
   created_at: number | null; ttl_expires_at: number | null;
   last_apply: HostingApply;
   compose_project: string; lifetime: LifetimeView;

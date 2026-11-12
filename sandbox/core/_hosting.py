@@ -951,6 +951,13 @@ def allocate_loopback_port(state: dict, key: str, *, observation=None,
         if value is None:
             continue
         value = valid_port(value)
+        physical = ((entry.get("hosting_operation") or {}).get("evidence") or {}).get("machine_identity")
+        if (observation is not None and isinstance(physical, str)
+                and re.fullmatch(r"[0-9a-f]{24}", physical)
+                and physical != observation["identity"]["target"]):
+            if entry_key in aliases:
+                refuse("alias machine disagrees with observed target")
+            continue  # Proven distinct hosts have separate port namespaces.
         if entry_key in aliases:
             if entry_key != key and (owner is None or entry.get("compose_project") != owner["project"]):
                 refuse("alias lacks matching Compose project metadata")

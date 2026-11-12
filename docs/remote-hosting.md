@@ -3398,6 +3398,14 @@ Docker publication and host-summary observation through the selected owner or
 legacy runner before summary/source/target effects. Missing or ambiguous facts
 refuse. Valid exact primary publications retain their port, including saved
 aliases proven by retained physical machine evidence. Unknown owners reserve ports.
+Interface-qualified addresses are normalized while reserving the same TCP number.
+An existing loopback socket is exempt only when a privileged read-only probe
+ties its kernel inode and held process descriptor to a root-owned `docker-proxy`
+executable and its exact published container destination. Matching Docker labels
+and ports alone are insufficient. Unknown or unsupported socket owners refuse
+reuse of that port; Docker NAT without a host socket remains supported.
+Reservations proven to belong to another physical machine do not occupy this
+host's namespace; records without that proof remain conservative reservations.
 Legacy target directories without a readable summary refuse allocation; ordinary
 housekeeping files are not target directories. This does not change named-stack
 port probing.
@@ -3419,6 +3427,8 @@ the argument alone cannot establish an allocation, even if local state never
 saved one. A free old port, live target primary publication, active operation,
 successful delivery, missing evidence or stale fence refuses. Reapply uses a new
 durable request identity; preserve the original child request as provenance.
+Any live publication by the predecessor on its old port refuses reassignment,
+even when the successor changes its service name or internal container port.
 
 The selected new port, old binding, failed operation/job and summary digests are
 bound into configuration and admission receipts, with predecessor history retained.
@@ -3429,7 +3439,11 @@ normal full-recreate/initializer behavior still applies to a partial failed targ
 Builds run outside ingress locks. Immediately before the same Compose up, a fresh
 check of the admitted primary/gate pair runs under continuous existing Caddy then
 nginx flocks. Root-owned locks use the supported noninteractive sudo wrapper;
-the check and Compose run as the observed account. Missing sudo authority refuses,
+the check and Compose run as the observed account. A fixed context allowlist,
+original groups, working directory and umask cross the privilege boundary only
+through anonymous stdin. Provider/application environments are not copied.
+The fresh recheck must match the originally observed Docker daemon ID before up.
+Missing sudo authority or account/context restoration refuses,
 with no unlocked fallback. Route transactions remain outside this critical section.
 Noncooperating processes can still race Docker/kernel binding and cause a failure.
 

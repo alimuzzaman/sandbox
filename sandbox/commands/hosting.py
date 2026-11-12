@@ -2018,7 +2018,9 @@ def _port_reallocation(args, validated, entry, state, observation):
         refuse()
     owner = {"project": summary["compose_project"], "service": validated["compose"]["service"],
              "container_port": validated["compose"]["container_port"]}
-    if ports.primary_ports(observation, owner):
+    if (ports.primary_ports(observation, owner)
+            or any(row["project"] == summary["compose_project"] and row["port"] == old
+                   for row in observation["publications"])):
         refuse()  # Never relocate a live primary, even if another bind conflicts.
     if not any(row["port"] == old for section in ("listeners", "publications")
                for row in observation[section]):
@@ -2060,17 +2062,11 @@ def _locked_host_compose_up(validated, runtime, command):
             if validated.get("login_service") else None)
     check = ports.recheck_command(identity=identity,
         runtime_dir=f"{identity['home']}/runtime", port=runtime["loopback_port"],
-        owner=owner, gate_owner=gate, gate_offset=login_service.GATE_PORT_OFFSET)
+        owner=owner, gate_owner=gate, gate_offset=login_service.GATE_PORT_OFFSET,
+        engine_id=runtime["port_engine_id"])
     joined = check + " && " + command
-    # sudo flock executes as root; explicitly restore the admitted account.
-    child = (shlex.join(["sh", "-c", joined]) if identity["uid"] == 0 else
-             shlex.join(["sudo", "-n", "-u", "#" + str(identity["uid"]),
-                         "--", "sh", "-c", joined]))
-    locked = shlex.join(["flock", "-w", "30", _CADDY_LOCK_PATH,
-                         "flock", "-w", "30", nginx.LOCK_PATH,
-                         "sh", "-c", child])
-    return ('set -eu; if [ "$(id -u)" = 0 ]; then ' + locked +
-            '; else sudo -n ' + locked + '; fi')
+    return ports.lock_context_command(joined, uid=identity["uid"],
+                                      locks=(_CADDY_LOCK_PATH, nginx.LOCK_PATH))
 
 
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
@@ -9066,6 +9062,7 @@ def cmd_host(cfg, args) -> None:
                     if retained_allocation and retained_allocation.get("new_port") == runtime["loopback_port"]:
                         runtime["port_allocation"] = retained_allocation
                 runtime["port_identity"] = observation["identity"]
+                runtime["port_engine_id"] = observation["engine_id"]
                 runtime["records"] = current_plan["records"]
 
                 store_client = ZoneCoverageClient(current_entry) if current_zone else None

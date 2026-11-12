@@ -45,19 +45,32 @@ class Inventory(TypedDict):
 MAX_NAMES = 1000
 
 
-def read_server(*, bound_host: str | None = None, now: float | None = None) -> Inventory:
+def read_server(*, upstreams: list[str], bound_host: str | None = None,
+                now: float | None = None) -> Inventory:
     """Project root-held route facts through the existing local helper, never SSH."""
-    from sandbox.hosting.tailnet_names import remote_program
-    from sandbox.services.process import BoundedProcessRunner
-
     result: Inventory = {"available": False, "partial": False, "names": []}
     try:
+        if not isinstance(upstreams, list) or len(upstreams) > MAX_NAMES:
+            return result
+        requested: list[str] = []
+        for upstream in upstreams:
+            match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", upstream) if isinstance(upstream, str) else None
+            if not match or not 1 <= int(match[1]) <= 65535:
+                return result
+            if upstream not in requested:
+                requested.append(upstream)
+        if not requested:
+            return {"available": True, "partial": False, "names": []}
         bound_ip = tailnet_address(bound_host)
+        from sandbox.hosting.tailnet_names import remote_program
+        from sandbox.services.process import BoundedProcessRunner
+
         # Only fixed read-only action metadata enters this local privileged helper.
         # Existing helper source is embedded as in the managed-name adapter; it
         # does not import mutable owner modules in the root interpreter.
         with tempfile.TemporaryFile() as payload:
-            payload.write(json.dumps({"action": "mail-access", "tailnet_ip": bound_ip}).encode())
+            payload.write(json.dumps({"action": "mail-access", "tailnet_ip": bound_ip,
+                                      "upstreams": requested}).encode())
             payload.seek(0)
             observed = BoundedProcessRunner(max_output=524288, terminate_on_output_limit=True).run(
                 ["sudo", "-n", "python3", "-c", remote_program.program_source()],

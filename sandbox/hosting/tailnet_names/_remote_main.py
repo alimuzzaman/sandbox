@@ -534,6 +534,14 @@ def _chain_facts(chain, key, runner):
     return facts
 
 
+def _panel_certificate_facts(chain, runner):
+    """Return only the public name and current-validity facts used by the panel."""
+    rc, out, _ = runner(["openssl", "x509", "-noout", "-checkend", "0",
+                         "-ext", "subjectAltName"], input=chain)
+    names = sorted(set(re.findall(r"DNS:([^,\s]+)", _text(out)))) if rc == 0 else []
+    return rc == 0, names
+
+
 def _check_chain(chain, key, fqdn, runner):
     facts = _chain_facts(chain, key, runner) if b"BEGIN CERTIFICATE" in chain else {}
     if not (facts.get("key_matches") is True and fqdn in facts.get("cert_names", [])
@@ -982,6 +990,17 @@ def mail_access(payload, paths, runner, lock_wait):
     """Read-only panel projection; private key contents are never opened."""
     ip = _tailnet_ip(payload.get("tailnet_ip"))
     result = {"available": False, "partial": False, "names": []}
+    upstreams = payload.get("upstreams")
+    if not isinstance(upstreams, list) or len(upstreams) > 1000:
+        raise Refusal("request_invalid", "invalid upstream list")
+    requested = set()
+    for upstream in upstreams:
+        match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", upstream) if isinstance(upstream, str) else None
+        if not match or not 1 <= int(match[1]) <= 65535:
+            raise Refusal("request_invalid", "invalid upstream")
+        requested.add(upstream)
+    if not requested:
+        return {"ok": True, "available": True, "partial": False, "names": []}
     conf = root = None
     deadline = time.monotonic() + 8
 
@@ -1012,7 +1031,8 @@ def mail_access(payload, paths, runner, lock_wait):
                         continue
                     upstream = header.get("upstream")
                     match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", upstream or "")
-                    if not match or not 1 <= int(match[1]) <= 65535:
+                    if (not match or not 1 <= int(match[1]) <= 65535
+                            or upstream not in requested):
                         continue
                     row = {"upstream": upstream, "url": None}
                     result["names"].append(row)
@@ -1029,8 +1049,8 @@ def mail_access(payload, paths, runner, lock_wait):
                             or journal.get("state") != "loaded"
                             or journal.get("generation") != _generation(block, chain)):
                         continue
-                    facts = _chain_facts(chain, None, certificate_runner)
-                    if facts.get("expired") is False and fqdn in facts.get("cert_names", []):
+                    valid, names = _panel_certificate_facts(chain, certificate_runner)
+                    if valid and fqdn in names:
                         row["url"] = "https://" + fqdn + "/mail/"
                 except (Refusal, OSError, ValueError, TypeError):
                     result["partial"] = True

@@ -56,9 +56,8 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(kwargs["request_id"], "original")
         self.assertEqual(json.loads(output.getvalue()), self.submit.return_value)
 
-    def test_observation_validation_and_plan_do_not_stage_cwd_or_consume_stdin(self):
-        for action, subaction in (("stack", "list"), ("logs", None), ("status", None),
-                ("diagnose", None), ("validate", None), ("plan", None)):
+    def test_unselected_commands_do_not_stage_cwd_or_consume_stdin(self):
+        for action, subaction in (("logs", None), ("diagnose", None), ("validate", None)):
             with self.subTest(action=action):
                 self.args.action, self.args.image_action = action, subaction
                 self.args.project_dir = "/nonexistent/not-a-checkout"
@@ -67,11 +66,49 @@ class DispatchTests(unittest.TestCase):
         self.submit.assert_not_called()
         self.lookup.assert_not_called()
 
-    def test_personal_local_and_explicit_profile_keep_their_existing_contract(self):
+    def test_joined_observations_use_owner_dispatch_without_confirmation(self):
+        for action, subaction in (("stack", "list"), ("status", None), ("plan", None)):
+            with self.subTest(action=action):
+                self.submit.reset_mock()
+                self.args.action, self.args.image_action = action, subaction
+                self.args.confirm = False
+                self.args._server_cli_argv = tuple(["host", action] +
+                    ([subaction] if subaction else []) + ["--remote", "box",
+                    "--project-dir", str(self.root), "--json"])
+                with redirect_stdout(io.StringIO()), patch("sandbox.commands.hosting._secret_status",
+                        side_effect=AssertionError("controller secret access")):
+                    self.assertTrue(dispatch.dispatch_host_if_selected(self.args))
+                self.submit.assert_called_once()
+                argv = self.submit.call_args.args[1]
+                self.assertNotIn("--confirm", argv)
+                self.assertEqual(argv[argv.index("--project-dir") + 1], ".")
+                self.assertNotIn("source_ref", self.submit.call_args.kwargs)
+
+    def test_joined_credential_overrides_refuse_without_controller_fallback(self):
         for fields in ({"credential_scope": "personal-local"},
-                       {"credential_source": "registered-source"}, {"plan": True}, {"confirm": False}):
+                       {"credential_source": "registered-source"}):
             with self.subTest(fields=fields), patch.dict(self.args.__dict__, fields):
-                self.assertFalse(dispatch.dispatch_host_if_selected(self.args))
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+                    dispatch.dispatch_host_if_selected(self.args)
+                self.assertEqual(caught.exception.code, 1)
+                self.assertEqual(json.loads(output.getvalue())["acceptance"], "not_accepted")
+        self.submit.assert_not_called()
+
+    def test_stack_plan_uses_owner_dispatch_and_preserves_plan_argv(self):
+        self.args.plan, self.args.confirm = True, False
+        self.args._server_cli_argv = tuple("--plan" if token == "--confirm" else token
+                                           for token in self.args._server_cli_argv)
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(dispatch.dispatch_host_if_selected(self.args))
+        self.submit.assert_called_once()
+        self.assertIn("--plan", self.submit.call_args.args[1])
+        self.assertNotIn("--confirm", self.submit.call_args.args[1])
+
+    def test_nonjoined_credential_selection_keeps_controller_contract(self):
+        self.lookup.return_value = {"joined": False}
+        self.args.credential_scope = "personal-local"
+        self.assertFalse(dispatch.dispatch_host_if_selected(self.args))
         self.submit.assert_not_called()
 
     def test_delimiter_is_refused_before_acceptance_for_automatic_apply(self):

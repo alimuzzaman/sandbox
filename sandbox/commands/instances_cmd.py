@@ -1,4 +1,5 @@
 from __future__ import annotations
+from sandbox.project_registry.lifecycle import serialized_lifecycle
 import argparse
 import copy
 import json
@@ -977,6 +978,7 @@ def _cleanup_native_owner(cfg, owner) -> bool:
     return True
 
 
+@serialized_lifecycle
 def cmd_instance(cfg, args) -> None:
     """List or change a sandbox instance lifecycle.
 
@@ -1014,7 +1016,9 @@ def cmd_instance(cfg, args) -> None:
         if not args.yes:
             die("remote instance deletion requires --yes")
         try:
-            remote_runtime.delete_remote_instance(entry, name)
+            remote_runtime.delete_remote_instance(entry, name,
+                creation_context=_creation_context_argument(args),
+                expected_incarnation=getattr(args, 'expected_incarnation', None))
         except (RuntimeError, ValueError) as exc:
             die(str(exc))
         ok(f"Remote instance '{name}' deleted from '{remote_name}'.")
@@ -1042,6 +1046,27 @@ def cmd_instance(cfg, args) -> None:
         die("unsupported instance action")
 
     owner = _core().registry_find_instance(name)
+    context = _creation_context_argument(args)
+    expected = getattr(args, 'expected_incarnation', None)
+    if context is not None or expected is not None:
+        from sandbox.server_config.creation_requests import lookup_creation_receipt
+        if (context is None or not isinstance(expected, str)
+                or re.fullmatch(r'inc_[0-9a-f]{32}', expected) is None):
+            die('conditional_instance_delete_requires_context_and_incarnation')
+        proof = lookup_creation_receipt(owner, context, expected)
+        receipt = proof.get('creation_receipt') or {}
+        if (not proof.get('ok') or not owner
+                or receipt.get('instance_id') != name
+                or receipt.get('label') != owner.get('label')
+                or receipt.get('completion') != 'succeeded'
+                or receipt.get('relation') != 'created'):
+            die('conditional_instance_delete_owner_mismatch')
+        from sandbox.config.facade import project_identity
+        from sandbox.server_config.models import creation_digest
+        identity = project_identity({'root': owner['root']}, label=owner['label'])
+        if (context['project_identity'] != identity['identity']
+                or context['project_root_digest'] != creation_digest(str(Path(owner['root']).resolve()))):
+            die('conditional_instance_delete_owner_mismatch')
     if owner and owner.get("runtime_mode") == "managed_native":
         if not _cleanup_native_owner(cfg, owner):
             return

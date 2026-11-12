@@ -1402,6 +1402,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="list all instances, or change one named instance's lifecycle",
     )
     ins.add_argument("name", nargs="?", help="instance name (not needed for list)")
+    ins.add_argument('--creation-context-json', default=None,
+        help='original creation context required for conditional delete')
+    ins.add_argument('--expected-incarnation', default=None,
+        help='delete only the exact originally created incarnation')
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
     ins.add_argument("--project-dir", default=None,
@@ -1629,6 +1633,16 @@ Per-project (each plugin carries its own sandbox.config.json):
     command_spec = COMMAND_SPECS.get(args.cmd)
     if (command_spec is not None and command_spec.preconfiguration_dispatch is not None
             and command_spec.preconfiguration_dispatch(args)):
+        return
+
+    if args.cmd == 'instance' and args.action == 'delete':
+        # Resolve, compare and delete under the same writer boundary. Do not
+        # regenerate runtime/config files before a conditional mismatch refuses.
+        from sandbox.project_registry.lifecycle import lifecycle_writer
+        from sandbox.commands.instances_cmd import cmd_instance
+        with lifecycle_writer():
+            args.resolved_instance = None
+            cmd_instance(load_config(), args)
         return
 
     # Spec 072: before any command effect, fast-forward this controller to a

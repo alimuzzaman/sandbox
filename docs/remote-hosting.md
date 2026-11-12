@@ -1995,13 +1995,42 @@ expiry record stored only under `$SANDBOX_HOME/runtime/remote-previews.json`.
 ./sb preview cleanup --remote myvps --confirm
 ```
 
+On joined Tailnet remotes, all four preview actions run in the retained installed
+server CLI before controller configuration or provider lookup. The server owns
+`remote-previews.json` and resolves Cloudflare through its own store; no token is
+forwarded from the laptop. `preview list --remote NAME` reads that server's
+inventory. Without `--remote`, list still reads the controller-local inventory.
+The source-staged job returns its original acceptance receipt; acceptance alone
+does not mean the preview is ready. Inspect the original job's terminal result.
+The installed receiver must advertise `preview.owner-cli.v1`; an older receiver
+refuses before source staging, with no name-only deletion fallback.
+
 `preview list` prints each preview's identifying fields and its `https://<domain>` address, never the saved login URL; `--remote` limits it to one remote. It does not scan those fields for secrets, so a domain or path you chose is printed as it is. `preview create --json` includes the login URL: that is how you get it.
 
 Creation is confirmation-gated because it deploys the selected checkout, creates
 one Cloudflare-proxied A record, configures a Caddy route, and starts a remote
-container. `destroy` removes only the recorded Caddy fragment, named Sandbox
-instance, and exact DNS record. `cleanup` removes previews whose recorded expiry
-has passed; it is intentionally an explicit command, not a background reaper.
+container. Caddy supports `preview_routes`; nginx still refuses create with
+`front_door_capability_unavailable`, before controller provider lookup or job
+submission. That refusal does not prove preview creation works on a live target.
+
+`destroy` and `cleanup` require the original alias/machine binding, successful
+created-instance receipt/context, and current exact incarnation. The receiver
+compares canonical ownership under the same lifecycle writer guard used by
+ensure, runtime ensure/apply/destroy and registry writes, then holds it through
+teardown and deregistration. Ordinary explicit `instance delete NAME --yes` is
+still available; previews always pass the conditional options. A label, name,
+expiry or legacy registry row is never sufficient authority. Legacy preview rows
+remain listable and require explicit reconciliation rather than automatic deletion.
+Route removal compares the generated fragment including its original incarnation
+under the instance-route writer lock. DNS creation uses create-only POST, and
+removal reobserves the recorded ID, address, type, proxy mode and incarnation
+comment. Unknown delete/route/DNS outcomes stay fenced in the preview record;
+rerunning cleanup never blindly retries them. `cleanup` only selects expired
+records for these same checks; it is not a background reaper.
+
+These are source contracts. No deployed target, including the xSpeed dev front
+door, was exercised for this change. Runtime, cancellation and concurrent-writer
+acceptance remain unrun.
 
 ## 6. Explicitly out of scope (Phase 1)
 

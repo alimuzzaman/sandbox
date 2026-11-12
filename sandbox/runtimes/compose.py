@@ -404,6 +404,13 @@ class ComposeAdapter:
         return float(value)
 
     def invoke(self, request: OperationRequest) -> OperationResult:
+        if request.operation in {'ensure', 'apply', 'destroy'}:
+            from sandbox.project_registry.lifecycle import lifecycle_writer
+            with lifecycle_writer():
+                return self._invoke_coordinated(request)
+        return self._invoke_coordinated(request)
+
+    def _invoke_coordinated(self, request: OperationRequest) -> OperationResult:
         refusal = self._remote_only_refusal(request)
         if refusal is not None:
             return refusal

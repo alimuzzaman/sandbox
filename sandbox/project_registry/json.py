@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .lifecycle import serialized_lifecycle
+
 from .base import (
     AmbiguousRegistryIdentity,
     RegistryCorruption,
@@ -131,6 +133,7 @@ class JsonRegistryRepository:
             return records[0]
         return next((item for item in records if item.get("is_default")), None)
 
+    @serialized_lifecycle
     def put(self, root: str, label: str = "default", **fields: Any) -> RegistryRecord:
         canonical = canonical_root(root)
         label = validate_label(label)
@@ -154,6 +157,7 @@ class JsonRegistryRepository:
             self._write(value)
             return dict(record)
 
+    @serialized_lifecycle
     def remove(self, root: str, label: str | None = None) -> bool:
         canonical = canonical_root(root)
         if label is not None:

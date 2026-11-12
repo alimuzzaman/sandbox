@@ -1,4 +1,5 @@
 from __future__ import annotations
+from sandbox.project_registry.lifecycle import serialized_lifecycle
 import argparse
 import copy
 import json
@@ -1494,6 +1495,7 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
     )
 
 
+@serialized_lifecycle
 def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     create: bool = False, php_version=None, wp_version=None,
                     config_label=None, config_file=None, creation_context=None,

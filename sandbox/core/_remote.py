@@ -1862,14 +1862,7 @@ def _validate_hostname(hostname: str, what: str) -> str:
     return hostname
 
 
-def _caddy_proxy_command(
-    hostname: str,
-    port: int,
-    conf_prefix: str,
-    *,
-    reject_managed_host: bool = False,
-    robots: str = "deny",
-) -> str:
+def _caddy_proxy_site(hostname: str, port: int, robots: str = "deny", incarnation=None) -> str:
     # Preview and control routes are publicly resolvable (a real DNS record on a
     # real zone) but are throwaway staging surfaces, often carrying an autologin
     # URL — nothing here should ever reach a search index. So /robots.txt is
@@ -1891,7 +1884,24 @@ def _caddy_proxy_command(
     proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
     body = (f"{noindex}{robots_block}    handle {{\n    {proxy}    }}\n"
             if robots_block else proxy)
-    site_q = shlex.quote(f"{hostname} {{\n{body}}}\n")
+    binding = ''
+    if incarnation is not None:
+        if not isinstance(incarnation, str) or re.fullmatch(r'inc_[0-9a-f]{32}', incarnation) is None:
+            raise ValueError('instance_incarnation_required')
+        binding = f'# Sandbox preview incarnation {incarnation}\n'
+    return f"{binding}{hostname} {{\n{body}}}\n"
+
+
+def _caddy_proxy_command(
+    hostname: str,
+    port: int,
+    conf_prefix: str,
+    *,
+    reject_managed_host: bool = False,
+    robots: str = "deny",
+    incarnation=None,
+) -> str:
+    site_q = shlex.quote(_caddy_proxy_site(hostname, port, robots, incarnation))
     file_q = shlex.quote(f"/etc/caddy/conf.d/{conf_prefix}-{hostname}.caddy")
     managed_host_guard = ""
     if reject_managed_host:
@@ -1932,7 +1942,25 @@ def _require_front_door(remote: dict, capability: str) -> str:
     return require_capability(remote, capability)
 
 
-def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
+def _instance_route_command(domain: str, command: str) -> str:
+    lock = f'/etc/caddy/conf.d/.sandbox-instance-{domain}.lock'
+    return ('if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO=sudo; fi; '
+            '$SUDO install -d -m 0755 /etc/caddy/conf.d; '
+            f'$SUDO flock {shlex.quote(lock)} sh -c {shlex.quote(command)}')
+
+
+def verify_instance_https_route(remote, domain: str, port: int, *, incarnation=None) -> None:
+    _require_front_door(remote, 'instance_routes')
+    domain = _validate_hostname(domain, 'remote instance domain')
+    digest = hashlib.sha256(_caddy_proxy_site(domain, port, incarnation=incarnation).encode()).hexdigest()
+    path = f'/etc/caddy/conf.d/sandbox-instance-{domain}.caddy'
+    command = f'test "$(sha256sum {shlex.quote(path)} | cut -d " " -f 1)" = {digest}'
+    result = ssh_run(remote, _instance_route_command(domain, command), timeout=30)
+    if result.returncode:
+        raise RuntimeError('preview_route_custody_mismatch')
+
+
+def configure_instance_https_route(remote: dict, domain: str, port: int, *, incarnation=None) -> None:
     """Route a preview hostname through Caddy unless permanent hosting owns it."""
     _require_front_door(remote, "instance_routes")
     domain = _validate_hostname(domain, "remote instance domain")
@@ -1941,8 +1969,9 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
         port,
         "sandbox-instance",
         reject_managed_host=True,
+        incarnation=incarnation,
     )
-    res = ssh_run(remote, cmd, timeout=120)
+    res = ssh_run(remote, _instance_route_command(domain, cmd), timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure remote instance HTTPS route: "
@@ -1950,19 +1979,25 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
         )
 
 
-def remove_instance_https_route(remote: dict, domain: str) -> None:
+def remove_instance_https_route(remote: dict, domain: str, *, expected_port=None, incarnation=None) -> None:
     """Remove only Sandbox's Caddy fragment for one public instance route."""
     _require_front_door(remote, "instance_routes")
     domain = _validate_hostname(domain, "remote instance domain")
     path = f"/etc/caddy/conf.d/sandbox-instance-{domain}.caddy"
+    guard = ''
+    if expected_port is not None:
+        if type(expected_port) is not int or not 1 <= expected_port <= 65535:
+            raise ValueError('invalid remote instance port')
+        digest = hashlib.sha256(_caddy_proxy_site(domain, expected_port, incarnation=incarnation).encode()).hexdigest()
+        guard = f'test "$(sha256sum {shlex.quote(path)} | cut -d " " -f 1)" = {digest}; '
     cmd = (
         "set -e; "
         "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
-        f"$SUDO rm -f {shlex.quote(path)}; "
+        f"{guard}$SUDO rm -f {shlex.quote(path)}; "
         "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
         "$SUDO systemctl reload caddy"
     )
-    res = ssh_run(remote, cmd, timeout=120)
+    res = ssh_run(remote, _instance_route_command(domain, cmd), timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not remove remote instance HTTPS route: "
@@ -2007,12 +2042,17 @@ def instance_route_hosts(remote: dict, port: int) -> list[str]:
     return hosts
 
 
-def delete_remote_instance(remote: dict, instance_name: str) -> None:
+def delete_remote_instance(remote: dict, instance_name: str, *,
+                           creation_context=None, expected_incarnation=None) -> None:
     """Delete precisely one named remote Sandbox instance and its Docker data."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,30}", instance_name or ""):
         raise ValueError("invalid remote Sandbox instance name")
     sb = remote_sb_path(remote)
-    res = ssh_run(remote, f"{shlex.quote(sb)} instance delete {shlex.quote(instance_name)} --yes", timeout=300)
+    if (creation_context is None) != (expected_incarnation is None):
+        raise ValueError('conditional_instance_delete_requires_context_and_incarnation')
+    conditional = _creation_transport_args(creation_context, expected_incarnation)
+    # Older receivers reject the required options; never retry by name.
+    res = ssh_run(remote, f"{shlex.quote(sb)} instance delete {shlex.quote(instance_name)} --yes --local" + conditional, timeout=300)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not delete remote Sandbox instance: "

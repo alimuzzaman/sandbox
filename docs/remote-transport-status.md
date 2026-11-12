@@ -232,6 +232,20 @@ requires its configured approval public key and SSH signing agent. Those keys
 are not transport login credentials. `install-approval` and
 `install-forward-approval` consume existing signed artifacts instead; all
 signature and target checks remain required. This does not promise that every
-remote-targeted operation needs no additional authority. Public preview
-create/destroy/cleanup still use their existing controller Cloudflare workflow;
-this hosting change does not establish server-provider execution for them.
+remote-targeted operation needs no additional authority.
+
+## Joined preview receiver contract
+
+The preview-owned preconfiguration hook consumes the real forwarded CLI argv and
+routes create/list/destroy/cleanup through a retained server CLI job. Its receiver
+must advertise `preview.owner-cli.v1` (actual preview grammar plus conditional
+delete options). This is an additional capability requirement within protocol 25;
+the transport implementation and image approval-signing authority are unchanged.
+A receiver upgrade and runtime acceptance are still required before relying on it.
+Caddy create uses the genuine owner's existing `deploy-src/hosts/preview-*`
+publication boundary, original staged root/commit, source lease and exposure
+request/receipt fences. Server inventory and Cloudflare stay with that owner.
+Nginx create remains unsupported and is a capability refusal, not a Tailnet
+transport failure. List and custody-checked destruction are still server-routed.
+No new nginx routing, controller token forwarding, server alias registration or
+self-SSH path is provided. No live provider, instance or frontend was exercised.

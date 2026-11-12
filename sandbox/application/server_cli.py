@@ -143,6 +143,7 @@ def capabilities() -> dict:
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     from sandbox.workspaces.content import source_content_available
     from sandbox.hosting.server_cli_dispatch import stack_ref_contract_available, STACK_REF_CONTRACT
+    from sandbox.commands.preview_server import preview_contract_available, CONTRACT as PREVIEW_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
@@ -153,7 +154,8 @@ def capabilities() -> dict:
             'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +
                 (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
                  and source_content_available() else []) +
-                ([STACK_REF_CONTRACT] if stack_ref_contract_available() else [])}
+                ([STACK_REF_CONTRACT] if stack_ref_contract_available() else []) +
+                ([PREVIEW_CONTRACT] if preview_contract_available() else [])}
 
 
 def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
@@ -581,7 +583,7 @@ class FixedServerCLI:
 
 def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
                         request_id: str, timeout_seconds: int = 900,
-                        source_ref: str | None = None) -> dict:
+                        source_ref: str | None = None, required_capabilities: tuple[str, ...] = ()) -> dict:
     """Submit before controller host/CI/provider-secret preflight.
 
     Returns the original remote durable acceptance receipt; never retries an
@@ -595,6 +597,10 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     from sandbox.config.runtime import resolve_execution_policy
     values = _command_argv(argv)
     require_safe_argv(values)
+    if (not isinstance(required_capabilities, tuple) or len(required_capabilities) > 16
+            or any(not isinstance(value, str) or re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,127}', value) is None
+                   for value in required_capabilities)):
+        raise ValueError('invalid required server CLI capabilities')
     if source_ref is not None and (not isinstance(source_ref, str)
             or re.fullmatch('[0-9a-f]{40}', source_ref) is None):
         raise ValueError('server CLI source ref must be an exact resolved commit')
@@ -645,6 +651,7 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     from sandbox.hosting.server_cli_dispatch import STACK_REF_CONTRACT
     required = {CONTRACT, ACCEPTANCE_CONTRACT, 'job.source-content.v1'}
+    required.update(required_capabilities)
     if source_ref is not None:
         required.add(STACK_REF_CONTRACT)
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1

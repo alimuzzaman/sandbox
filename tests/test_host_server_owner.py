@@ -195,13 +195,39 @@ class OwnerTargetTests(unittest.TestCase):
         marker = "synthetic-recipient-credential-canary"
         text = "APPLICATION_KEY=" + marker + "\n"
         with patch.object(sdk, "owner_process", return_value=subprocess.CompletedProcess(
-                [], 0, stdout="", stderr="")) as process:
+                [], 0, stdout=b'{"ok":true,"status":"published"}', stderr=b"")) as process:
             _write_remote_text(self.entry, str(self.home / "runtime/hosts/project/dev/environment.env"), text)
         command = process.call_args.args[1]
         self.assertNotIn(marker, command)
         self.assertNotIn(base64.b64encode(text.encode()).decode(), command)
-        self.assertEqual(process.call_args.kwargs["input_data"], text.encode())
+        frame = process.call_args.kwargs["input_data"]
+        self.assertEqual(int.from_bytes(frame[:8], "big"), len(text.encode()))
+        self.assertEqual(frame[8:], text.encode())
         self.assertNotIn(marker, repr(self.entry))
+
+    def test_unusable_writer_results_retain_only_fixed_metadata_and_unknown_fence(self):
+        from sandbox.commands.hosting import _write_remote_text
+        from sandbox.core._hosting import HostingError
+        marker = "synthetic-private-diagnostic-canary"
+        cases = (
+            (2, b"", "empty"),
+            (0, marker.encode(), "invalid_json"),
+            (1, json.dumps({"ok": False, "status": marker}).encode(), "invalid_shape"),
+            (1, b'{"ok":false,"status":"publication_unknown"}', "publication_unknown"),
+            (1, json.dumps({"ok": False, "status": "not_published", "extra": marker}).encode(), "invalid_shape"),
+        )
+        for code, stdout, hint in cases:
+            with self.subTest(code=code, hint=hint), \
+                    patch.object(sdk, "owner_process", return_value=subprocess.CompletedProcess(
+                        [], code, stdout=stdout, stderr=marker.encode())), \
+                    patch.object(targets, "withhold_owner_completion") as fence:
+                with self.assertRaises(HostingError) as caught:
+                    _write_remote_text(self.entry, str(self.home / "recipient.txt"), "synthetic-data")
+                message = str(caught.exception)
+                self.assertIn(f"writer_exit={code}; writer_receipt={hint};", message)
+                self.assertNotIn(marker, message)
+                self.assertNotIn(str(self.home), message)
+                fence.assert_called_once_with(self.entry)
 
     def test_fixed_recipient_writer_persists_only_private_intended_file_and_rejects_links(self):
         from sandbox.commands.hosting import _write_remote_text

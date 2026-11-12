@@ -1666,6 +1666,13 @@ that earlier steps of the apply had no effects or clear an existing completion
 fence. Missing, malformed, contradictory or unknown owner replies withhold
 completion through the existing operation fence.
 
+The retained failure message includes only a bounded writer exit code and a
+fixed receipt classification: a recognized status, `empty`, `invalid_json`, or
+`invalid_shape`. It includes no raw stdout/stderr, recipient path, payload or
+content digest. These observations describe that completed result and never
+clear its unknown-outcome fence. Older generic failures cannot be reconstructed
+from a later invocation or from current path metadata.
+
 This publisher requires an installed owner revision containing
 `sandbox/hosting/runtime_file_writer.py`; protocol 25 is unchanged. Source
 readiness alone does not prove interrupted owner-path delivery. Before real

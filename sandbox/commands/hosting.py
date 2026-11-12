@@ -1051,10 +1051,24 @@ def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") ->
         raise hosting.HostingError("runtime file publication refused before replacement")
     if (result.returncode or not isinstance(receipt, dict) or receipt.get("ok") is not True
             or receipt.get("status") not in {"already_current", "published"}):
+        # Retain only fixed receipt metadata in the original job's error. Raw
+        # output may contain interpreter diagnostics or intended-recipient data.
+        receipt_hint = ("empty" if result.stdout in (None, "", b"") else
+                        "invalid_json" if receipt is None else "invalid_shape")
+        if (isinstance(receipt, dict) and set(receipt) == {"ok", "status"}
+                and type(receipt["ok"]) is bool
+                and isinstance(receipt["status"], str)
+                and receipt["status"] in {"already_current", "published", "not_published", "publication_unknown"}):
+            receipt_hint = receipt["status"]
+        exit_hint = (str(result.returncode) if type(result.returncode) is int
+                     and -255 <= result.returncode <= 255 else "unavailable")
         if is_owner_target(entry):
             from sandbox.hosting.server_cli_target import withhold_owner_completion
             withhold_owner_completion(entry)
-        raise hosting.HostingError("runtime file publication unavailable; preserve the original operation before recovery")
+        raise hosting.HostingError(
+            "runtime file publication unavailable; "
+            f"writer_exit={exit_hint}; writer_receipt={receipt_hint}; "
+            "preserve the original operation before recovery")
 
 
 def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_path: str) -> str:

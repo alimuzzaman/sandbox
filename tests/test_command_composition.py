@@ -51,7 +51,7 @@ class TestCommandComposition(unittest.TestCase):
         load_builtin_commands()
         self.assertEqual(len(BUILTIN_COMMAND_MODULES), len(set(BUILTIN_COMMAND_MODULES)))
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
-        self.assertEqual(len(COMMANDS), 94)
+        self.assertEqual(len(COMMANDS), 95)
         self.assertIn("sandbox.commands.activation", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.domains", BUILTIN_COMMAND_MODULES)
@@ -61,13 +61,15 @@ class TestCommandComposition(unittest.TestCase):
         self.assertIn("sandbox.commands.owned_storage", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.server", BUILTIN_COMMAND_MODULES)
         self.assertEqual(set(COMMANDS) - {"secrets", "init", "activation", "sync", "storage", "server", "delivery",
-                                         "job-policy", "job-capabilities"},
+                                         "job-policy", "job-capabilities", "publisher-proof"},
                          set(LEGACY_BRIDGE_COMMANDS))
         self.assertEqual(validate_builtin_command_coverage(), ())
         self.assertEqual(COMMAND_SPECS.get("domains").owner, "sandbox.commands.domains")
         self.assertEqual(COMMAND_SPECS.get("secrets").owner, "sandbox.commands.secrets")
         self.assertEqual(COMMAND_SPECS.get('job-capabilities').owner, 'sandbox.commands.job_policy')
         self.assertIsNotNone(COMMAND_SPECS.get('job-capabilities').configure)
+        self.assertEqual(COMMAND_SPECS.get('publisher-proof').owner, 'sandbox.commands.publisher_proof')
+        self.assertIsNotNone(COMMAND_SPECS.get('publisher-proof').preconfiguration_dispatch)
         self.assertEqual(COMMAND_SPECS.get("init").owner, "sandbox.commands.instances_cmd")
         self.assertIsNotNone(COMMAND_SPECS.get("init").configure)
         self.assertIsNotNone(COMMAND_SPECS.get("init").predispatch_policy)

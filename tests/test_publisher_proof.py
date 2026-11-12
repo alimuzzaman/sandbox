@@ -1,5 +1,6 @@
 """Admission boundary checks only; these do not prove a Linux owner run."""
 from contextlib import redirect_stdout
+import argparse
 import io
 import json
 from types import SimpleNamespace
@@ -7,10 +8,25 @@ import unittest
 from unittest.mock import patch
 
 from sandbox.commands import publisher_proof as command
-from sandbox.hosting.publisher_proof import CONTRACT
+from sandbox.hosting.publisher_proof import CONTRACT, contract_available
 
 
 class PublisherProofAdmissionTest(unittest.TestCase):
+    def test_capability_requires_the_composed_parser(self):
+        from sandbox.application.command_selection import bind_cli_command_parser, reset_cli_command_parser
+        from sandbox.registry import COMMAND_SPECS, compose_missing_parsers
+        from sandbox.cli import _selection_argv
+        parser = argparse.ArgumentParser()
+        commands = parser.add_subparsers(dest="cmd")
+        commands.add_parser("fixture")
+        token = bind_cli_command_parser(parser, _selection_argv)
+        try:
+            self.assertFalse(contract_available())
+            compose_missing_parsers(commands, (COMMAND_SPECS.get("publisher-proof"),))
+            self.assertTrue(contract_available())
+        finally:
+            reset_cli_command_parser(token)
+
     def args(self, extra=(), request="proof"):
         return SimpleNamespace(remote="proof", request_id=request, json=True,
             _server_cli_argv=["publisher-proof", "--remote", "proof",

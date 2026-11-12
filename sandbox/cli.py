@@ -1247,6 +1247,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="with confirmed host stage, close only a fully proven v2 cleanup uncertainty")
     host_p.add_argument("--job-id", default=None,
         help="failed durable host-apply job identity for recovery")
+    host_p.add_argument("--reallocate-loopback-port", type=int, default=None, metavar="OLD",
+        help="apply only: replace a proven conflicting failed-target allocation; requires original request and generation")
     host_p.add_argument("--original-request-id", default=None,
         help="original failed host-apply request identity")
     host_p.add_argument("--expected-generation", type=int, default=None,

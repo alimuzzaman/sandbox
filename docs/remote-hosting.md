@@ -3388,3 +3388,53 @@ and the single-link regular ledger belong to the remote operator. While holding
 contents. This permission correction is reversible and does not clear live
 reservations. Retire the old writer from active use: running it again can recreate
 the group-writable file. Then retry the same immutable receipt.
+
+
+### Managed loopback port conflict recovery
+
+`host plan` reports `runtime.port_observation: provisional`: its local port is
+not an availability claim. Every apply obtains a complete bounded listener,
+Docker publication and host-summary observation through the selected owner or
+legacy runner before summary/source/target effects. Missing or ambiguous facts
+refuse. Valid exact primary publications retain their port, including saved
+aliases proven by retained physical machine evidence. Unknown owners reserve ports.
+Legacy target directories without a readable summary refuse allocation; ordinary
+housekeeping files are not target directories. This does not change named-stack
+port probing.
+
+A failed partial apply can explicitly replace its conflicting managed port:
+
+```text
+sb host apply --remote REMOTE --project-dir PROJECT --environment ENV --confirm \
+  --reallocate-loopback-port OLD --expected-generation N \
+  --original-request-id FAILED_CHILD_REQUEST
+```
+
+This opt-in is apply-only. It requires the exact retained failed child job,
+terminal non-delivered operation, target, physical machine and unchanged hosting
+generation. If the previous delivery is still nonterminal, inspect it and use
+supported `host retire-delivery` only when eligible. This flag never retires it.
+The old number must also match a same-target summary bound to that failed request;
+the argument alone cannot establish an allocation, even if local state never
+saved one. A free old port, live target primary publication, active operation,
+successful delivery, missing evidence or stale fence refuses. Reapply uses a new
+durable request identity; preserve the original child request as provenance.
+
+The selected new port, old binding, failed operation/job and summary digests are
+bound into configuration and admission receipts, with predecessor history retained.
+A retained replay uses that chosen number. It never selects another port after
+admission. Named volumes, Compose project and target/copy identity are preserved;
+normal full-recreate/initializer behavior still applies to a partial failed target.
+
+Builds run outside ingress locks. Immediately before the same Compose up, a fresh
+check of the admitted primary/gate pair runs under continuous existing Caddy then
+nginx flocks. Root-owned locks use the supported noninteractive sudo wrapper;
+the check and Compose run as the observed account. Missing sudo authority refuses,
+with no unlocked fallback. Route transactions remain outside this critical section.
+Noncooperating processes can still race Docker/kernel binding and cause a failure.
+
+Controller and installed owner must carry this source revision before this option
+is used. The installed CLI parser is the wire grammar; no new envelope or schema
+version is introduced. Deployment must verify the installed revision independently.
+Source review is required before deployment; tests and runtime acceptance were
+not performed as part of this source-only implementation.

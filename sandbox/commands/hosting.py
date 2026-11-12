@@ -1892,6 +1892,187 @@ def _preflight_login_service(entry: dict, prefix: str, validated: dict,
             "login_service_preflight_failed: the Compose topology could not be read") from None
 
 
+def _host_port_observation(entry, remote_name):
+    """Observe through the selected bounded channel before any target effects."""
+    from sandbox.hosting import ports
+    home = remote.resolve_sandbox_home(entry)
+    machine = _authenticated_machine_identity(remote_name)
+    result = remote.ssh_run_bounded(entry, "id -u", timeout=15, max_output=128,
+                                    terminate_on_output_limit=True)
+    if (result.returncode or getattr(result, "termination_reason", None)
+            or getattr(result, "stdout_truncated", False)
+            or getattr(result, "stderr_truncated", False)
+            or not re.fullmatch(r"[0-9]+\n?", result.stdout or "")):
+        raise hosting.HostingError("hosting_port_observation_identity_unavailable")
+    identity = {"target": machine, "uid": int(result.stdout.strip()), "home": home}
+    try:
+        snapshot = ports.observe_ports(
+            lambda command, **kwargs: remote.ssh_run_bounded(entry, command, **kwargs),
+            identity=identity, runtime_dir=f"{home}/runtime")
+    except ports.PortObservationError as exc:
+        raise hosting.HostingError(f"hosting_port_observation_failed: {exc}") from None
+    return snapshot
+
+
+def _port_alias_keys(state, key, owner, identity):
+    """Only retained physical machine evidence proves a saved alias."""
+    suffix = key.split("/", 1)[-1]
+    return [name for name, rec in state.get("hosts", {}).items()
+            if name != key and name.split("/", 1)[-1] == suffix
+            and isinstance(rec, dict) and rec.get("compose_project") == owner
+            and ((rec.get("hosting_operation") or {}).get("evidence") or {}).get(
+                "machine_identity") == identity["target"]]
+
+
+def _port_reallocation(args, validated, entry, state, observation):
+    """Authorize one failed predecessor, never infer an old bind from argv."""
+    from sandbox.hosting import ports
+    from sandbox.hosting.panel_records import parse_target_summary, summary_path
+    from sandbox.delivery.hosting import recorded_operation_lookup
+    from sandbox.delivery.context import target_for_project
+    from sandbox.delivery.repository import DeliveryRepository
+    from sandbox.core._paths import RUNTIME_DIR
+    old = getattr(args, "reallocate_loopback_port", None)
+    if old is None:
+        return state, None
+    def refuse():
+        raise hosting.HostingError("hosting_port_reallocation_evidence_mismatch")
+    key = hosting.state_key(args.remote, validated)
+    if getattr(state, "unreadable", None):
+        refuse()
+    rec = state.get("hosts", {}).get(key) or {}
+    op = rec.get("hosting_operation") or {}
+    if not isinstance(rec.get("port_reallocation_history", []), list):
+        refuse()
+    if op.get("digest") != canonical_digest({k: v for k, v in op.items() if k != "digest"}):
+        refuse()
+    _assert_no_active_host_operation(state, key)
+    generation = getattr(args, "expected_generation", None)
+    original = getattr(args, "original_request_id", None)
+    if (type(old) is not int or not 1 <= old <= 65535 or not original
+            or type(generation) is not int or generation < 0
+            or rec.get("generation", 0) != generation):
+        refuse()
+    context = _durable_host_context(validated["project_root"])
+    if context["request_id"] == original:
+        refuse()
+    previous = (op.get("evidence") or {}).get("port_allocation")
+    if op.get("request_id") == context["request_id"] and previous:
+        # Replays stay bound to the admitted new number, never rescan a new one.
+        if (previous.get("old_port") != old or previous.get("original_request_id") != original
+                or previous.get("generation") != generation):
+            refuse()
+        pinned = json.loads(json.dumps(state))
+        pinned["hosts"][key]["loopback_port"] = previous["new_port"]
+        return pinned, previous
+    if (op.get("target") != {"remote": args.remote, "project": validated["project"],
+                            "environment": validated["environment"]}
+            or op.get("request_id") != original or not op.get("job_id")
+            or op.get("starting_generation") != generation
+            or op.get("accepted_before_effects") is not True
+            or (op.get("evidence") or {}).get("machine_identity") != observation["identity"]["target"]):
+        refuse()
+    job = _recovery_job_lookup(op["job_id"])
+    submission = job.get("submission") or {}
+    if (job.get("job_id") != op["job_id"] or job.get("lifecycle") != "failed"
+            or submission.get("version") != 1 or submission.get("request_id") != original):
+        refuse()
+    from sandbox.hosting.recovery.policy import _host_apply_arguments
+    arguments = _host_apply_arguments(submission.get("argv"))
+    if (arguments is None or arguments["environment"] != validated["environment"]
+            or arguments["remote"] != args.remote
+            or submission.get("project_identity") != op.get("project_identity")
+            or "sha256:" + hashlib.sha256(str(submission.get("project_root") or "").encode()).hexdigest()
+               != op.get("project_root_digest")
+            or (submission.get("source") or {}).get("identity") != (op.get("source") or {}).get("identity")):
+        refuse()
+    project_arg = Path(arguments["project_dir"]).expanduser()
+    if not project_arg.is_absolute():
+        project_arg = Path(submission["project_root"]) / str(submission.get("cwd_relative") or ".") / project_arg
+    if "sha256:" + hashlib.sha256(str(project_arg.resolve()).encode()).hexdigest() != op.get(
+            "invocation_root_digest", op.get("project_root_digest")):
+        refuse()
+    target = target_for_project(validated.get("manifest_root") or validated["project_root"],
+                                args.remote, environment=validated["environment"])
+    retained = recorded_operation_lookup(DeliveryRepository(RUNTIME_DIR.parent), target, op, original)
+    if (not retained or retained.get("job_id") != op["job_id"]
+            or retained.get("execution_state") not in {"failed", "interrupted"}
+            or retained.get("terminal_snapshot_digest") is None
+            or retained.get("delivery_succeeded") is not False):
+        refuse()
+    path = summary_path(observation["identity"]["home"], validated["project"], validated["environment"])
+    program = ("import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
+               "assert not p.is_symlink() and p.stat().st_size<=65536; "
+               "sys.stdout.write(p.read_text())")
+    result = remote.ssh_run_bounded(entry, shlex.join(["python3", "-c", program, path]),
+        timeout=20, max_output=65536, terminate_on_output_limit=True)
+    if (result.returncode or getattr(result, "termination_reason", None)
+            or getattr(result, "stdout_truncated", False) or getattr(result, "stderr_truncated", False)):
+        refuse()
+    summary = parse_target_summary(json.loads(result.stdout))
+    if (summary["project"] != validated["project"] or summary["environment"] != validated["environment"]
+            or summary["compose_project"] != hosting.compose_project_name(validated)
+            or summary["remote"] != args.remote or summary["last_apply"]["status"] != "failed"
+            or summary["last_apply"]["request_id"] != original or summary["loopback_port"] != old
+            or rec.get("loopback_port", old) != old):
+        refuse()
+    owner = {"project": summary["compose_project"], "service": validated["compose"]["service"],
+             "container_port": validated["compose"]["container_port"]}
+    if ports.primary_ports(observation, owner):
+        refuse()  # Never relocate a live primary, even if another bind conflicts.
+    if not any(row["port"] == old for section in ("listeners", "publications")
+               for row in observation[section]):
+        refuse()  # A reservation hint alone is not an actual binding conflict.
+    try:
+        ports.check_pair(observation, old, owner)
+    except ports.PortObservationError:
+        pass
+    else:
+        refuse()  # An old port that is actually free needs no reassignment.
+    pinned = json.loads(json.dumps(state))
+    pinned.setdefault("hosts", {}).setdefault(key, {})["loopback_port"] = old
+    return pinned, {"old_port": old, "original_request_id": original,
+                    "job_id": op["job_id"], "operation_digest": op["digest"],
+                    "terminal_snapshot_digest": retained["terminal_snapshot_digest"],
+                    "generation": generation, "summary_digest": canonical_digest(summary),
+                    "identity": observation["identity"],
+                    "old_binding": {section: [row for row in observation[section] if row["port"] == old]
+                                    for section in ("listeners", "publications", "reservations")}}
+
+
+def _locked_host_compose_up(validated, runtime, command):
+    """Same admitted pair, same up, continuous Caddy then nginx locks.
+
+    Privilege is only for the root-owned locks. Run probe and Compose back as
+    the observed account, never as root merely because flock requires sudo.
+    Route transactions must remain outside this command to avoid nesting.
+    """
+    from sandbox.hosting import ports, login_service
+    from sandbox.hosting.front_door import nginx
+    identity = runtime.get("port_identity")
+    if not identity:
+        raise hosting.HostingError("hosting_port_observation_required")
+    owner = {"project": runtime["compose_project"],
+             "service": validated["compose"]["service"],
+             "container_port": validated["compose"]["container_port"]}
+    gate = ({"project": owner["project"], "service": login_service.SERVICE_NAME,
+             "container_port": login_service.INTERNAL_PORT}
+            if validated.get("login_service") else None)
+    check = ports.recheck_command(identity=identity,
+        runtime_dir=f"{identity['home']}/runtime", port=runtime["loopback_port"],
+        owner=owner, gate_owner=gate, gate_offset=login_service.GATE_PORT_OFFSET)
+    joined = check + " && " + command
+    # sudo flock executes as root; explicitly restore the admitted account.
+    child = (shlex.join(["sh", "-c", joined]) if identity["uid"] == 0 else
+             shlex.join(["sudo", "-n", "-u", "#" + str(identity["uid"]),
+                         "--", "sh", "-c", joined]))
+    locked = shlex.join(["flock", "-w", "30", _CADDY_LOCK_PATH,
+                         "flock", "-w", "30", nginx.LOCK_PATH,
+                         "sh", "-c", child])
+    return ('set -eu; if [ "$(id -u)" = 0 ]; then ' + locked +
+            '; else sudo -n ' + locked + '; fi')
+
+
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
@@ -1997,6 +2178,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         converge_flags = " --no-build --force-recreate --always-recreate-deps --renew-anon-volumes"
     pull_flag = " --pull never" if local_images_verified else ""
     command = f"{prefix} up -d{pull_flag}{converge_flags} --remove-orphans {service_args}"
+    command = _locked_host_compose_up(validated, runtime, command)
     _remote_checked(
         entry, command, timeout=build_timeout,
         progress=progress, log_path=apply_log,
@@ -2613,6 +2795,8 @@ def _host_config_digest(validated: dict, runtime: dict, *, binding_key: bytes | 
         "services": [validated["compose"]["service"],
                      *validated["compose"].get("background_services", [])],
     }
+    if runtime.get("port_allocation") is not None:
+        payload["port_allocation"] = runtime["port_allocation"]
     return "sha256:" + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -2900,7 +3084,8 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
                               broker_locked: bool = False,
                               publish_binding_key: bool = False,
                               source_artifact: dict | None = None,
-                              local_images_digest: str | None = None) -> dict | None:
+                              local_images_digest: str | None = None,
+                              port_allocation: dict | None = None) -> dict | None:
     """Persist current-contract apply authority before the first host effect."""
     context = _durable_host_context(validated["project_root"])
     try:
@@ -2972,6 +3157,8 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
         },
         "phases": [],
     }
+    if port_allocation is not None:
+        operation["evidence"]["port_allocation"] = port_allocation
     if source_artifact is not None:
         operation['source']['artifact'] = source_artifact
         invocation_root = str(Path(validated.get('_invocation_root') or
@@ -3032,6 +3219,11 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
         operation["digest"] = canonical_digest(operation)
         if len(json.dumps(operation, sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
             raise hosting.HostingError("recovery_receipt_unavailable")
+        if port_allocation is not None:
+            history = record.setdefault("port_reallocation_history", [])
+            if not any(isinstance(item, dict) and all(item.get(k) == v for k, v in port_allocation.items()) for item in history):
+                history.append({**port_allocation, "previous_operation": record.get("hosting_operation")})
+            record["loopback_port"] = port_allocation["new_port"]
         record["hosting_operation"] = operation
         save_state(state)
     return operation
@@ -5556,7 +5748,8 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             edge_intent=_desired_edge_intent(validated, entry),
             broker_locked=True, publish_binding_key=publish_binding_key,
             source_artifact=source_artifact,
-            local_images_digest=local_images_digest)
+            local_images_digest=local_images_digest,
+            port_allocation=runtime.get("port_allocation"))
         if operation is None:
             raise hosting.HostingError("recovery_receipt_unavailable")
         try:
@@ -8399,6 +8592,11 @@ def _cmd_host_heal(args) -> None:
 
 
 def cmd_host(cfg, args) -> None:
+    if getattr(args, "reallocate_loopback_port", None) is not None:
+        if (args.action != "apply" or getattr(args, "plan", False)
+                or not getattr(args, "original_request_id", None)
+                or getattr(args, "expected_generation", None) is None):
+            die("--reallocate-loopback-port requires host apply, --original-request-id and --expected-generation")
     if args.action == "exec":
         from sandbox.commands.host_exec import cmd_host_exec
         cmd_host_exec(args)
@@ -8849,7 +9047,25 @@ def cmd_host(cfg, args) -> None:
                 current_zone = decision.get("zone") if decision.get("mode") == "shared" else None
                 if current_zone and not any(claim["zone"] == current_zone for claim in claims):
                     claims.append({"mode": "shared", "zone": current_zone})
-                runtime = hosting.desired_runtime(validated, args.remote, state)
+                observation = _host_port_observation(current_entry, args.remote)
+                allocation_state, reallocation = _port_reallocation(
+                    args, validated, current_entry, state, observation)
+                replay = bool(reallocation and "new_port" in reallocation)
+                runtime = hosting.desired_runtime(
+                    validated, args.remote, allocation_state, observation=observation,
+                    require_observation=True,
+                    same_target_keys=_port_alias_keys(state, target_key,
+                        hosting.compose_project_name(validated), observation["identity"]),
+                    allow_reallocate=bool(reallocation and not replay),
+                    expected_old=reallocation["old_port"] if reallocation and not replay else None)
+                if reallocation:
+                    reallocation["new_port"] = runtime["loopback_port"]
+                    runtime["port_allocation"] = reallocation
+                else:
+                    retained_allocation = ((target_rec.get("hosting_operation") or {}).get("evidence") or {}).get("port_allocation")
+                    if retained_allocation and retained_allocation.get("new_port") == runtime["loopback_port"]:
+                        runtime["port_allocation"] = retained_allocation
+                runtime["port_identity"] = observation["identity"]
                 runtime["records"] = current_plan["records"]
 
                 store_client = ZoneCoverageClient(current_entry) if current_zone else None

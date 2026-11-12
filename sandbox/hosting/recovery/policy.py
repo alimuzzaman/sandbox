@@ -83,7 +83,8 @@ def _host_apply_arguments(argv: object) -> dict | None:
     flags = set()
     items = argv[host_index + 2:]
     index = 0
-    value_flags = {"--project-dir", "--environment", "--remote", "--local-images"}
+    value_flags = {"--project-dir", "--environment", "--remote", "--local-images",
+                   "--reallocate-loopback-port", "--original-request-id", "--expected-generation"}
     while index < len(items):
         item = items[index]
         matching = next((flag for flag in value_flags if item.startswith(flag + "=")), None)

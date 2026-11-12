@@ -2970,7 +2970,7 @@ def _host_apply_argv(validated: dict, remote_name: str, args=None) -> list[str]:
         value = getattr(args, name, None)
         if value is not None:
             argv.extend(("--" + name.replace('_', '-'), str(value)))
-    for name in ("allow_zone_ssl_change", "purge_edge_cache", "json"):
+    for name in ("allow_zone_ssl_change", "allow_record_overwrite", "purge_edge_cache", "json"):
         if getattr(args, name, False):
             argv.append("--" + name.replace('_', '-'))
     return argv

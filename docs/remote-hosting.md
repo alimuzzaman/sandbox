@@ -1775,6 +1775,12 @@ working-directory or environment option, and none is added.
   `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
   `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else.
 
+Joined-owner exec retains binary output in private, original-job-bound artifacts.
+The effect deadline remains the original request's deadline. Each result read has
+a separate finite 60-second budget for authenticated status, output metadata and
+artifact retrieval. A terminal read may finish after the effect deadline; it
+does not submit or repeat the command. Missing or cancelled capture still refuses.
+
 **`--target` on read-only commands.** `host logs`, `host status` and `host diagnose`
 take the same `--target` or `--name` with `--remote` and resolve them the same way,
 so a stack can be inspected from the checkout that holds its template instead of

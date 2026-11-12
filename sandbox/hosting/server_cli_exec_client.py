@@ -185,8 +185,11 @@ def dispatch_exec_if_selected(args) -> bool:
         while True:
             # At least one original-job observation is safe after the effect
             # deadline. It may establish the terminal result without rerunning.
+            # Result observation has several authenticated metadata/artifact
+            # requests. Keep its finite read budget separate from the original
+            # effect deadline; a late terminal read must not rerun execution.
             observed = read_server_cli_exec_result(args.remote, receipt,
-                budget_seconds=min(15, max(1, stop - time.monotonic())))
+                budget_seconds=60)
             if observed["result"] is not None:
                 _render(args, observed["result"], receipt, request_id)
                 return True

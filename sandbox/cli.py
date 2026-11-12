@@ -964,6 +964,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "remote that already hosts routes")
     remote_p.add_argument('--adopt-compatible-revision', action='store_true',
         help='remote service refresh: adopt an observed compatible revision cache on the same pinned owner/machine')
+    remote_p.add_argument('--tailnet-only', action='store_true',
+        help='remote service refresh: move this pinned owner registration to verified keyless Tailscale SSH')
     remote_p.add_argument("--remove-route", dest="remove_route", default=None,
         help="for `remote edge`: remove one Sandbox nginx route (e.g. host-myproj-production) "
              "and its certificates; requires --confirm")

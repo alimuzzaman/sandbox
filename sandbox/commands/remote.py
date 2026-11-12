@@ -245,6 +245,9 @@ def _latest_provision_log(name: str) -> dict | None:
 def cmd_remote(cfg, args) -> None:
     """`./sb remote <add|list|provision|up|down|remove|set-origin|docker-pool|domains> [name] [ssh_url] [--json]`
     -- register and manage remote VPS targets. See docs/remote-hosting.md."""
+    if _arg_true(args, 'tailnet_only') and (
+            getattr(args, 'action', None) != 'service' or getattr(args, 'name', None) != 'refresh'):
+        die('--tailnet-only requires remote service refresh; no registration changed')
     action = args.action
     as_json = bool(getattr(args, "json", False))
     dispatch = {
@@ -785,6 +788,8 @@ def _cmd_service(args, as_json: bool) -> None:
         die("--processes requires `remote service diagnostics <name>`")
     if _arg_true(args, 'adopt_compatible_revision') and operation != 'refresh':
         die('--adopt-compatible-revision requires remote service refresh')
+    if _arg_true(args, 'tailnet_only') and operation != 'refresh':
+        die('--tailnet-only requires remote service refresh')
     confirmed = _arg_true(args, "confirm")
     entry = {}
     try:
@@ -792,11 +797,21 @@ def _cmd_service(args, as_json: bool) -> None:
         if not entry:
             die(f"no remote named '{name}'")
         if operation == "refresh":
-            if entry.get("joined") is not True or entry.get("control_access") != "tailnet":
+            tailnet_only = _arg_true(args, 'tailnet_only')
+            if not tailnet_only and (entry.get("joined") is not True or entry.get("control_access") != "tailnet"):
                 raise ValueError("refresh requires an existing joined tailnet registration")
             from sandbox.remote_runtime.join_identity import discover_join_identity
             requested_profile = _arg_str(args, 'front_door')
-            if _arg_true(args, 'adopt_compatible_revision'):
+            if tailnet_only:
+                if requested_profile is not None:
+                    raise ValueError('Tailnet transport adoption preserves the observed existing front door')
+                from sandbox.remote_runtime.join_owner_transport import adopt_owner_tailnet
+                evidence = adopt_owner_tailnet(name, entry,
+                    request=sr.remote_host_memory_request, observe=sr._remote_mcp_service_status_via_ssh,
+                    connect=lambda selected: _first_ssh_login(selected['ssh'], None),
+                    profile=_joined_profile_evidence,
+                    adopt_revision=_arg_true(args, 'adopt_compatible_revision'))
+            elif _arg_true(args, 'adopt_compatible_revision'):
                 if requested_profile is not None:
                     raise ValueError('revision cache adoption does not replace a front-door profile')
                 from sandbox.remote_runtime.join_revision import adopt_compatible_join_revision

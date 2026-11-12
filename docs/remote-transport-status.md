@@ -76,6 +76,29 @@ refuse before exchange, without requesting a local token or input.
 Ordinary host-memory status and authenticated target-identity lookup also enforce
 the saved machine pin; a changed machine or malformed pin refuses without refresh.
 Legacy owner registrations with no machine pin keep their existing behavior.
+
+An existing owner's registration that still selects public SSH can explicitly
+move the same named record to keyless Tailnet transport:
+
+```sh
+./sb remote service refresh NAME --tailnet-only --adopt-compatible-revision --json
+```
+
+This requires the saved service marker/revision and a saved machine identity,
+either the control pin or a prior confirmed host-identity pin. It first verifies
+tokenless HTTP control, keyless SSH to the saved numeric Tailnet address, matching
+machine identities, the observed existing front door and the selected compatible
+owner unit. Only then does one local registration CAS change the connection.
+It preserves the Linux account, unrelated metadata, credentials and operation
+pins, and never changes the server, SSH policy, ingress or another controller.
+Malformed/conflicting pins, strict revision drift or unproven observations refuse.
+The option does not apply to `remote add` or other remote actions.
+
+A connection change does not rewrite historical delivery bindings. If older
+target operations require a rebind, first inspect the supported
+`remote rebind-host NAME --json` plan; that command must prove the existing target
+records and current service identify the same machine before confirmation.
+Do not remove/rejoin the record or edit its state to bypass a refusal.
 Pinned history and apply first validate the live machine with the existing status
 contract, using the same total operation budget. A foreign apply-plan target
 refuses before any request. Exhausted or unavailable identity evidence never

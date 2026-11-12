@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -326,9 +329,84 @@ class CacheTest(unittest.TestCase):
             return Done()
         fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=run)
         self.assertEqual(fetch("xspeed-dev")["ok"], True)
-        self.assertEqual(seen["argv"], ["/checkout/sb", "host", "stack", "list", "--remote", "xspeed-dev", "--json"])
+        self.assertEqual(seen["argv"][:5], ["/checkout/sb", "host", "stack", "list", "--request-id"])
+        self.assertRegex(seen["argv"][5], r"^panel-lifetime-[0-9a-f]{32}$")
+        self.assertEqual(seen["argv"][6:], ["--remote", "xspeed-dev", "--json"])
         self.assertEqual(seen["kwargs"]["env"]["SANDBOX_AUTO_UPDATE"], "0")
-        self.assertEqual(seen["kwargs"]["timeout"], pl.FETCH_TIMEOUT_SECONDS)
+        self.assertGreater(seen["kwargs"]["timeout"], 0)
+        self.assertLessEqual(seen["kwargs"]["timeout"], pl.FETCH_TIMEOUT_SECONDS)
+
+
+class AcceptedJobFetcherTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.job = "a" * 32
+        self.request = None
+        self.running = True
+        self.bad_digest = False
+        self.wrong_job = False
+        self.payload = {"ok": True, "stacks": [], "targets": [], "note": "বাংলা"}
+        self.body = json.dumps(self.payload, ensure_ascii=False).encode()
+        # Deliberately split a multibyte character across retained pages.
+        split = self.body.index("ব".encode()) + 1
+        self.parts = (self.body[:split], self.body[split:])
+
+    def run_command(self, argv, **kwargs):
+        self.calls.append(argv)
+        self.assertGreater(kwargs["timeout"], 0)
+        if argv[1] == "host":
+            self.request = argv[argv.index("--request-id") + 1]
+            value = {"ok": True, "status": "accepted", "job_id": self.job, "request_id": self.request}
+        elif argv[1] == "job-status":
+            self.assertEqual(argv[2], self.job)
+            value = {"ok": True, "job_id": "b" * 32 if self.wrong_job else self.job,
+                     "request_id": self.request, "lifecycle": "running" if self.running else "succeeded",
+                     "exit_code": 0, "output_completeness": "complete", "output": [{
+                         "stream": "stdout", "available": True, "complete": 1,
+                         "bytes_stored": len(self.body), "sha256": "0" * 64 if self.bad_digest
+                         else hashlib.sha256(self.body).hexdigest()}]}
+        else:
+            self.assertEqual(argv[1:3], ["job-output", self.job])
+            self.assertEqual(argv[argv.index("--encoding") + 1], "base64")
+            second = "--cursor" in argv
+            if second:
+                self.assertEqual(argv[argv.index("--cursor") + 1], "next-page")
+            value = {"ok": True, "job_id": self.job, "stream": "stdout", "encoding": "base64",
+                     "data": base64.b64encode(self.parts[int(second)]).decode(),
+                     "has_more": not second, "cursor": "next-page"}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(value), stderr="")
+
+    def test_refresh_observes_original_job_and_reassembles_exact_inventory(self):
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=self.run_command)
+        self.assertIsNone(fetch("joined"))
+        self.running = False
+        self.assertEqual(fetch("joined"), self.payload)
+        self.assertEqual([c[1] for c in self.calls],
+                         ["host", "job-status", "job-status", "job-output", "job-output"])
+
+    def test_wrong_job_and_bad_output_never_resubmit(self):
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=self.run_command)
+        self.assertIsNone(fetch("joined"))
+        self.running = False
+        self.wrong_job = True
+        self.assertIsNone(fetch("joined"))
+        self.wrong_job = False
+        self.bad_digest = True
+        self.assertIsNone(fetch("joined"))
+        self.bad_digest = False
+        self.assertEqual(fetch("joined"), self.payload)
+        self.assertEqual(sum(c[1] == "host" for c in self.calls), 1)
+
+    def test_unknown_submission_is_not_repeated_on_refresh(self):
+        calls = []
+        def timeout(argv, **kwargs):
+            calls.append(argv)
+            raise subprocess.TimeoutExpired(argv, 1)
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=timeout)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            fetch("joined")
+        self.assertIsNone(fetch("joined"))
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

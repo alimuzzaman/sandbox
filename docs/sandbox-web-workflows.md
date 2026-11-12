@@ -133,3 +133,18 @@ deployment-first sequence, verify these browser scenarios before acceptance:
 No tests, builds, imports, syntax checks, browser sessions, host operations or
 deployment were run for this change. Deferred regression coverage must follow
 the repository's execution order after the hold is lifted.
+
+## Lifetime inventory from joined hosts
+
+Joined `host stack list` may return a durable-job acceptance receipt instead of
+the inventory itself. The panel retains that original request and job while it
+is running. Later cache refreshes observe the same job; they do not submit a
+replacement. Only successful terminal output with matching job/request identity,
+complete bounded stdout, byte count and digest becomes a lifetime listing.
+Output pages use base64 so a page boundary cannot corrupt a UTF-8 record.
+
+Unavailable observation keeps lifetimes unknown and protected. Submission
+timeout or an unusable acceptance receipt prevents automatic resubmission in
+that panel process. This in-memory tracking does not reconstruct an original job
+after a panel restart or establish why an older fetch failed. Local server rows
+and remote-only lifetime rows remain part of the combined inventory.

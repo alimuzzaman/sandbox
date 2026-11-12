@@ -69,6 +69,9 @@ def resolve_stack_ref(args, checkout):
 
 
 def dispatch_host_if_selected(args) -> bool:
+    from sandbox.application.server_cli_source_repair import dispatch_if_selected
+    if dispatch_if_selected(args):
+        return True
     try:
         return _dispatch_host_if_selected(args)
     except Exception as error:

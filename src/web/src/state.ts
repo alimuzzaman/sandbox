@@ -3,8 +3,15 @@
 
 import type { AppData, Usage, RemoteInventory, HostingView } from "./types";
 
+export interface Operation {
+  label: string;
+  phase: "submitting" | "unconfirmed" | "observing" | "lost" | "succeeded" | "failed";
+  jobId?: string;
+}
+
 export const store: {
   data: AppData;
+  operations: Record<string, Operation>;
   busy: Record<string, string>;   // instance name -> in-flight action
   usage: Usage | null;
   remote: Record<string, RemoteInventory>;
@@ -19,6 +26,7 @@ export const store: {
     servers: ["apache", "nginx", "litespeed"], domains_ready: false, remotes: [],
   },
   busy: {},
+  operations: {},
   usage: null,
   remote: {},
   remoteBusy: {},

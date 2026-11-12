@@ -24,6 +24,8 @@ def configure_parser(parser):
                                            "trace-owner-status", "trace-owner-record"))
     parser.add_argument("--project-dir")
     parser.add_argument("--remote")
+    parser.add_argument("--server-owned", action="store_true", help="inspect one exact delivery on a joined Tailnet owner")
+    parser.add_argument("--original-job-id", help="server-owned inspect: original native job that admitted the delivery")
     parser.add_argument("--name", metavar="STACK",
                         help="inspect: a recorded hosted stack; reads the delivery scope its hosting record names")
     parser.add_argument("--target", metavar="PROJECT/ENVIRONMENT",
@@ -155,7 +157,48 @@ def _recorded_target_selectors(args):
                    "inspect with --project-dir instead"}}
 
 
+def _server_predispatch(args):
+    if getattr(args, 'server_owned', False) or getattr(args, 'original_job_id', None) is not None:
+        _server_inspect(args)
+        return True
+    return False
+
+
+def _server_inspect(args):
+    """Explicit selection preserves legacy controller-local history semantics."""
+    try:
+        if (args.action != 'inspect' or not getattr(args, 'server_owned', False)
+                or any(getattr(args, key, None) is not None for key in (
+                    'project_dir', 'config_file', 'instance', 'environment', 'label', 'trace_id', 'trace_request_id',
+                    'mutation_id', 'producer', 'parent_request_id', 'publication_id',
+                    'expected_sequence', 'input_json', 'limit', 'cursor'))
+                or getattr(args, 'observe', False)):
+            raise ValueError('invalid exact inspection selectors')
+        from sandbox.application.server_cli_delivery import observe_delivery
+        result = observe_delivery(args.remote, **{key: getattr(args, key, None) for key in
+            ('name', 'target', 'original_job_id', 'operation_id', 'request_id')})
+    except Exception as exc:
+        # No transport bytes, paths, argv, exception text or local fallback.
+        status = getattr(exc, 'code', None)
+        status = status if isinstance(status, str) and status in {'unsupported', 'bounds', 'binding_unavailable', 'binding_mismatch'} else 'unavailable'
+        result = {'schema_version': 1, 'ok': False, 'status': status,
+                  'error': 'Exact server-owned delivery inspection is unavailable.'}
+    if getattr(args, 'json', False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print('Server-owned delivery: ' + result['status'])
+        operation = result.get('operation')
+        if operation is not None:
+            print(operation['operation_id'] + ': ' + operation['delivery_state'] +
+                  ' / execution ' + operation['execution_state'] +
+                  ' / evidence ' + operation['evidence_completeness'])
+    if not result['ok']:
+        raise SystemExit(1)
+
+
 def cmd_delivery(cfg, args):
+    if getattr(args, "server_owned", False) or getattr(args, "original_job_id", None) is not None:
+        return _server_inspect(args)
     trace_mode = args.action != 'inspect' or getattr(args, 'trace_id', None) is not None or getattr(args, 'trace_request_id', None) is not None
     if trace_mode:
         from sandbox.delivery.trace_service import trace_with_factory, format_trace_projection
@@ -204,5 +247,6 @@ register_specs((CommandSpec(
     name="delivery", handler=cmd_delivery, configure=configure_parser,
     owner=__name__, order=207, scope="global", destructive=False,
     predispatch_policy=lambda _args: True,
+    preconfiguration_dispatch=_server_predispatch,
     help="Inspect recorded delivery outcomes without changing owner state",
 ),))

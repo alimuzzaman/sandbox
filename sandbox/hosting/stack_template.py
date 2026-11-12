@@ -20,6 +20,12 @@ TEMPLATE_REQUIRED = "stack_template_requires_stack_up"
 TEMPLATE_INVALID = "stack_template_invalid"
 SLUG_INVALID = "stack_slug_invalid"
 BRANCH_UNAVAILABLE = "stack_branch_unavailable"
+USES_INVALID = "stack_uses_invalid"
+USES_LIMIT = "stack_uses_limit"
+USES_DUPLICATE = "stack_uses_duplicate"
+USES_SELF = "stack_uses_self"
+USES_MISSING = "stack_uses_missing"
+MAX_STACK_USES = 4
 
 STACK_KEY = "stack"
 INSTANCE_KEY = "stack_instance"
@@ -45,7 +51,15 @@ _ALLOWED_PATHS = (
     ("environments", "*", "deploy", "allowed_branches", "*"),
     ("environments", "*", "secrets", "values", "*"),
     ("environments", "*", "secrets", "generated", "*"),
+    ("environments", "*", "share", "hostname"),
+    ("environments", "*", "autologin", "entries", "*", "hostname"),
+    ("environments", "*", "autologin", "entries", "*", "magic_link", "request_origin"),
+    ("environments", "*", "autologin", "entries", "*", "magic_link", "link_origin"),
+    ("environments", "*", "autologin", "entries", "*", "magic_link", "link_pattern"),
+    ("environments", "*", "autologin", "entries", "*", "magic_link", "required_params", "*"),
 )
+_LINK_PATTERN_PATH = ("environments", "*", "autologin", "entries", "*", "magic_link", "link_pattern")
+_REGEX_QUANTIFIER = re.compile(r"[0-9]+(?:,[0-9]*)?")
 # Basic-auth route parameters (``/api/{id}``) are an existing brace syntax that
 # its own validator owns; the template scan leaves exactly that field alone.
 _EXEMPT_PREFIXES = (("environments", "*", "basic_auth", "bypass_routes", "*", "path_template"),)
@@ -72,6 +86,7 @@ class StackTemplate:
     ports: tuple[str, ...]
     raw: dict = field(repr=False)  # the manifest without ``stack:``
     dev_branch: str = DEFAULT_DEV_BRANCH  # spec 077: the repo's dev branch
+    uses: tuple[str, ...] = ()  # direct same-remote stack names (spec 088)
 
     def environment_names(self) -> tuple[str, ...]:
         environments = self.raw.get("environments")
@@ -133,6 +148,8 @@ def _check_allowed_string(value: str, path: tuple, ports: tuple[str, ...]) -> No
         token = match.group(1)
         if token in {"slug", "SLUG", "ref_branch"}:
             continue
+        if _matches(path, _LINK_PATTERN_PATH) and _REGEX_QUANTIFIER.fullmatch(token):
+            continue
         if token.startswith("port:"):
             name = token[len("port:"):]
             if name in ports:
@@ -146,14 +163,25 @@ def _check_allowed_string(value: str, path: tuple, ports: tuple[str, ...]) -> No
         raise StackTemplateError(TEMPLATE_INVALID, f"{_display(path)} contains an unbalanced brace")
 
 
+_ROUTE_KEYS_PATH = ("environments", "*", "share", "route_sign_in")
+_LINKED_KEYS_PATH = ("environments", "*", "share", "linked_access")
+
+
+def _hostname_keys(path: tuple) -> bool:
+    return _matches(path, _ROUTE_KEYS_PATH) or _matches(path, _LINKED_KEYS_PATH)
+
+
 def _scan(node: object, path: tuple, ports: tuple[str, ...]) -> None:
     if _is_exempt(path):
         return
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(key, str) and _BRACE_RE.search(key):
-                raise StackTemplateError(
-                    TEMPLATE_INVALID, f"{_display(path + (key,))}: mapping keys cannot hold placeholders")
+                if _hostname_keys(path):
+                    _check_allowed_string(key, path + (key,), ports)
+                else:
+                    raise StackTemplateError(
+                        TEMPLATE_INVALID, f"{_display(path + (key,))}: mapping keys cannot hold placeholders")
             _scan(value, path + (key,), ports)
         return
     if isinstance(node, list):
@@ -169,7 +197,8 @@ def _scan(node: object, path: tuple, ports: tuple[str, ...]) -> None:
             TEMPLATE_INVALID,
             f"{_display(path)} contains a brace pattern; placeholders are allowed only in "
             "project, host.primary, alias hostnames, deploy.allowed_branches, "
-            "secrets.values values and secrets.generated source names")
+            "secrets.values values, secrets.generated source names, share.hostname and "
+            "approved autologin entry hostname/magic-link fields")
 
 
 def parse_template(manifest: dict) -> StackTemplate:
@@ -181,7 +210,7 @@ def parse_template(manifest: dict) -> StackTemplate:
         raise StackTemplateError(TEMPLATE_INVALID, "a stack template needs a stack: mapping")
     if INSTANCE_KEY in manifest:
         raise StackTemplateError(TEMPLATE_INVALID, "a template cannot carry stack_instance")
-    unknown = set(block) - {"slug", "ports", "dev_branch"}
+    unknown = set(block) - {"slug", "ports", "dev_branch", "uses"}
     if unknown:
         raise StackTemplateError(
             TEMPLATE_INVALID, "unknown stack keys: " + ", ".join(sorted(map(str, unknown))))
@@ -205,13 +234,31 @@ def parse_template(manifest: dict) -> StackTemplate:
     if (not isinstance(dev_branch, str) or not _BRANCH_RE.fullmatch(dev_branch)
             or ".." in dev_branch or dev_branch.endswith(("/", ".lock"))):
         raise StackTemplateError(TEMPLATE_INVALID, "stack.dev_branch must be a branch name")
+    uses = block.get("uses", [])
+    if not isinstance(uses, list) or any(
+            not isinstance(name, str) or not _SAFE_SLUG_RE.fullmatch(name) for name in uses):
+        raise StackTemplateError(USES_INVALID, "stack.uses must be a list of safe stack names")
+    if len(uses) > MAX_STACK_USES:
+        raise StackTemplateError(USES_LIMIT, f"stack.uses accepts at most {MAX_STACK_USES} stacks")
+    if len(set(uses)) != len(uses):
+        raise StackTemplateError(USES_DUPLICATE, "stack.uses names must be unique")
     raw = {key: value for key, value in manifest.items()
            if key != STACK_KEY and not str(key).startswith("_")}
     _scan(raw, (), tuple(ports))
     project = raw.get("project")
     if isinstance(project, str) and "{port:" in project:
         raise StackTemplateError(TEMPLATE_INVALID, "project cannot use {port:...}; ports belong to the project")
-    return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw, dev_branch=dev_branch)
+    return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw, dev_branch=dev_branch, uses=tuple(uses))
+
+
+def validate_uses(template: StackTemplate, slug: str, recorded_names: set[str]) -> None:
+    """Check direct references before effects; callers repeat under their registry lock."""
+    if slug in template.uses:
+        raise StackTemplateError(USES_SELF, "stack.uses cannot reference the stack itself")
+    missing = sorted(set(template.uses) - recorded_names)
+    if missing:
+        raise StackTemplateError(USES_MISSING, "stack.uses names no recorded stack on this remote: "
+                                 + ", ".join(missing))
 
 
 def validate_slug(template: StackTemplate, slug: object) -> str:
@@ -228,22 +275,30 @@ def upper_slug(slug: str) -> str:
     return slug.upper().replace("-", "_")
 
 
-def _substitute(value: str, context: dict[str, str]) -> str:
+def _substitute(value: str, context: dict[str, str], *, regex: bool = False) -> str:
     def replace(match: re.Match) -> str:
         token = match.group(1)
+        if regex and _REGEX_QUANTIFIER.fullmatch(token):
+            return match.group(0)
         if token not in context:
             raise StackTemplateError(TEMPLATE_INVALID, f"no value for placeholder {{{token}}}")
-        return context[token]
+        return re.escape(context[token]) if regex else context[token]
     return _BRACE_RE.sub(replace, value)
 
 
 def _render_node(node: object, path: tuple, context: dict[str, str]) -> object:
     if isinstance(node, dict):
-        return {key: _render_node(value, path + (key,), context) for key, value in node.items()}
+        rendered = {}
+        for key, value in node.items():
+            name = _substitute(key, context) if _hostname_keys(path) else key
+            if name in rendered:
+                raise StackTemplateError(TEMPLATE_INVALID, f"rendered {_display(path)} keys collide")
+            rendered[name] = _render_node(value, path + (key,), context)
+        return rendered
     if isinstance(node, list):
         return [_render_node(item, path + (index,), context) for index, item in enumerate(node)]
     if isinstance(node, str) and _is_allowed(path) and not _is_exempt(path):
-        return _substitute(node, context)
+        return _substitute(node, context, regex=_matches(path, _LINK_PATTERN_PATH))
     return node
 
 

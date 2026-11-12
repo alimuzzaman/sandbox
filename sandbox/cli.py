@@ -1076,7 +1076,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, refresh only the front-door route (`host refresh-front-door`), sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`), or make share links (`host share create|list|revoke`)")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "refresh-front-door", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke", "repair-source"],
         help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, `host tailnet-name add|list|renew|remove`, or `host share create|list|revoke ID|all`; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("tailnet_hostname", nargs="?", default=None, metavar="FQDN",
         help="host tailnet-name add|renew|remove: the full hostname (refused for other host actions)")
@@ -1091,6 +1091,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host tailnet-name add/renew: ACME directory for this call (default: tailnet_names.acme_server)")
     host_p.add_argument("--force", action="store_true",
         help="host tailnet-name renew: reissue even when the certificate is not due")
+    host_p.add_argument('--repair-source', choices=['deployed'], help='repair-source: explicitly use recorded deployed Git objects')
+    host_p.add_argument('--repair-plan-digest', help='repair-source: exact plan digest required for confirmation')
+    host_p.add_argument('--installed-source-repair', help=argparse.SUPPRESS)
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
@@ -1631,6 +1634,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         return
 
     command_spec = COMMAND_SPECS.get(args.cmd)
+    if args.cmd == 'delivery' and _explicit_global_option(raw_argv, '--instance'):
+        die('delivery is scope-selected and does not accept --instance', 2)
     if (command_spec is not None and command_spec.preconfiguration_dispatch is not None
             and command_spec.preconfiguration_dispatch(args)):
         return

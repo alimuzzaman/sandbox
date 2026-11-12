@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -354,8 +355,9 @@ def _start_job(label: str, fn, instance: str | None = None) -> str:
     with _web_jobs_lock:
         if instance is not None:
             _take_claim_locked(instance, label)
-        _web_job_seq[0] += 1
-        job_id = str(_web_job_seq[0])
+        job_id = secrets.token_hex(16)
+        while job_id in _web_jobs:
+            job_id = secrets.token_hex(16)
         _web_jobs[job_id] = job
     stream = _JobStream(job)
 
@@ -406,7 +408,7 @@ def _job_snapshot(job_id: str, offset: int = 0) -> dict | None:
         return None
     with _web_jobs_lock:
         full = job["output"]
-        return {"status": job["status"], "done": job["done"], "ok": job["ok"],
+        return {"job_id": job_id, "status": job["status"], "done": job["done"], "ok": job["ok"],
                 "offset": len(full), "chunk": full[offset:] if offset < len(full) else ""}
 
 
@@ -613,8 +615,9 @@ def _web_dispatch(payload: dict) -> dict:
     if action in ("start-all", "stop-all"):
         with _web_jobs_lock:
             _take_claim_locked("*", action)
-            _web_job_seq[0] += 1
-            job_id = str(_web_job_seq[0])
+            job_id = secrets.token_hex(16)
+            while job_id in _web_jobs:
+                job_id = secrets.token_hex(16)
             job = {"status": f"{action}…", "output": "", "done": False, "ok": None}
             _web_jobs[job_id] = job
 

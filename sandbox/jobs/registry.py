@@ -438,6 +438,60 @@ class JobRepository:
             result.connection.close()
             raise
 
+    @contextmanager
+    def rendered_source_custody(self, roots, original_job_id):
+        """Hold admission/lease writers while proving released source consumers.
+
+        No startup reconciliation, lease release or job/result mutation. This
+        narrowly serves rendered-source repair, not execution or recovery.
+        """
+        validate_job_id(original_job_id)
+        roots = tuple(Path(root).absolute() for root in roots)
+        with self.transaction(immediate=True) as conn:
+            rows = conn.execute('SELECT job_id,project_root,lifecycle,finished_at, '
+                                'CASE WHEN length(result_json)<=65536 THEN result_json ELSE NULL END AS result_json '
+                                'FROM jobs ORDER BY job_id LIMIT 4097').fetchall()
+            for table in ('workspace_leases', 'host_capacity_leases'):
+                if conn.execute('SELECT 1 FROM ' + table + ' l LEFT JOIN jobs j ON j.job_id=l.job_id '
+                                'WHERE j.job_id IS NULL LIMIT 1').fetchone():
+                    raise JobRepositoryError('source lease ownership is unavailable')
+            if len(rows) > 4096:
+                raise JobRepositoryError('source custody inventory exceeds bounds')
+            relevant = []
+            matched_roots = set()
+            for row in rows:
+                if (not isinstance(row['project_root'], str) or len(row['project_root'].encode()) > 4096
+                        or not Path(row['project_root']).is_absolute()):
+                    raise JobRepositoryError('source consumer root is unavailable')
+                path = Path(row['project_root'])
+                matches = [i for i, root in enumerate(roots)
+                           if path == root or root in path.parents or path in root.parents]
+                if not matches:
+                    continue
+                matched_roots.update(matches)
+                if (row['lifecycle'] not in ('succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted')
+                        or not row['finished_at'] or not isinstance(row['result_json'], str)
+                        or len(row['result_json'].encode()) > 65536):
+                    raise JobRepositoryError('source consumer is active or uncertain')
+                stopped = json.loads(row['result_json'])
+                if (stopped.get('owned_work_stopped') is not True or stopped.get('stop_error') is not None
+                        or not isinstance(stopped.get('owned_descendants'), list)
+                        or len(stopped['owned_descendants']) > 1024):
+                    raise JobRepositoryError('source consumer cessation is unproved')
+                if (conn.execute('SELECT 1 FROM workspace_leases WHERE job_id=? LIMIT 1', (row['job_id'],)).fetchone()
+                        or conn.execute('SELECT 1 FROM host_capacity_leases WHERE job_id=? LIMIT 1', (row['job_id'],)).fetchone()):
+                    raise JobRepositoryError('source consumer retains custody')
+                process = conn.execute('SELECT host_boot_id,supervisor_pid,child_pid,child_pgid '
+                                       'FROM process_identities WHERE job_id=?', (row['job_id'],)).fetchone()
+                if process is None:
+                    raise JobRepositoryError('source consumer identity is unavailable')
+                relevant.append({'job_id': row['job_id'], 'process': dict(process),
+                                 'descendants': stopped['owned_descendants']})
+            if (len(matched_roots) != len(roots)
+                    or original_job_id not in {row['job_id'] for row in relevant}):
+                raise JobRepositoryError('original source custody binding is unavailable')
+            yield relevant
+
     def __init__(self, path: str | Path, *, busy_timeout_ms: int = 5_000) -> None:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

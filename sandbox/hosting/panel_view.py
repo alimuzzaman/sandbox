@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from sandbox.hosting import panel_lifetime as pl
 from sandbox.hosting import panel_records as pr
 from sandbox.hosting.tailnet_names import panel as mail_panel
+from sandbox.hosting import stack_registry
 from sandbox.hosting.panel_health import NOT_CHECKED, HealthResult
 
 if TYPE_CHECKING:
@@ -62,6 +63,20 @@ class ApplyView(TypedDict):
     reason: NotRequired[str]
 
 
+class StackPageAccess(TypedDict):
+    uses: list[str]
+    inbox: dict[str, str] | None
+    inbox_reason: str | None
+    revision_status: Literal["verified", "unverified", "not_delivered"]
+    sign_in: SignInAvailability
+
+
+class SignInAvailability(TypedDict):
+    available: bool
+    code: str
+    message: str
+
+
 class StackView(TypedDict):
     key: str
     remote: str
@@ -83,6 +98,7 @@ class StackView(TypedDict):
     compose_project: str
     lifetime: pl.LifetimeView
     servers: list[ServerRow]
+    page_access: NotRequired[StackPageAccess]
 
 
 class TargetView(TypedDict):
@@ -204,10 +220,12 @@ def controller_records(stack_data: dict, host_state: dict,
         entry = hosts.get(key) if isinstance(hosts.get(key), dict) else {}
         hostnames = bounded_hosts(record.get("hostnames") or entry.get("hostnames") or [], key)
         try:
-            last = _controller_apply(last_apply_view(record), None) or {
+            refined = last_apply_view(record)
+            delivered = stack_registry.delivered_commit(record, refined.get("status"))
+            last = _controller_apply(refined, None) or {
                 "status": "applying", "started_at": 0, "finished_at": None, "request_id": None}
             stack = {"slug": record.get("slug"), "ref": record.get("ref"),
-                     "ref_branch": record.get("ref_branch"), "commit": record.get("commit"),
+                     "ref_branch": record.get("ref_branch"), "commit": delivered,
                      "template": record.get("template"), "ports": record.get("ports") or {}}
             out["targets"].append(pr.parse_target_summary({
                 "schema": pr.SCHEMA, "remote": record.get("remote"),
@@ -216,7 +234,7 @@ def controller_records(stack_data: dict, host_state: dict,
                 or f"sandbox-host-{record.get('project')}-{record.get('environment')}",
                 "loopback_port": entry.get("loopback_port"), "healthcheck_path": "/",
                 "routes": [{"hostname": host, "mode": "serve", "primary": False} for host in hostnames],
-                "commit": entry.get("commit") or record.get("commit"), "last_apply": last,
+                "commit": delivered, "last_apply": last,
                 "stack": pr.build_stack_facts(stack, record)}))
         except (ValueError, TypeError, AttributeError) as exc:
             note(f"stack_record_unreadable:{record.get('slug')}:{type(exc).__name__}")

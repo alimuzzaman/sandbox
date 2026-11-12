@@ -8,6 +8,7 @@ from .models import (DeliveryError, canonical_digest, new_operation, now,
                      request_scope, scope_digest, terminal_digest,
                      operation_summary, TERMINAL, append_event)
 from .repository import DeliveryRepository
+from .server_binding import current_binding
 from .service import evaluate_operation, normalize_recovery_projection
 
 
@@ -208,7 +209,8 @@ class HostingAttempt:
             'at': self.operation['started_at'], 'phase': 'admitted',
             'reason': {'code': 'none', 'message': 'The original owner admitted this attempt.'}})
         result = self.repository.reserve_request(self.scope, self.operation['request_id'],
-            self.operation['operation_id'], self.operation['intent_digest'], operation=self.operation)
+            self.operation['operation_id'], self.operation['intent_digest'], operation=self.operation,
+            server_binding=current_binding(self.operation))
         if result['status'] != 'reserved':
             raise RetainedDelivery(result['status'], result['operation_id'], result['operation'])
         self.operation, self.reserved = result['operation'], True

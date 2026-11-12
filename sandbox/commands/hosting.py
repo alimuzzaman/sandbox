@@ -1043,6 +1043,12 @@ def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") ->
         receipt = json.loads(result.stdout)
     except (ValueError, TypeError):
         receipt = None
+    if (result.returncode == 1 and isinstance(receipt, dict)
+            and set(receipt) == {"ok", "status"} and receipt["ok"] is False
+            and receipt["status"] == "not_published"):
+        # This completed invocation did not replace its destination. Earlier
+        # effects and any existing unknown-completion fence remain unchanged.
+        raise hosting.HostingError("runtime file publication refused before replacement")
     if (result.returncode or not isinstance(receipt, dict) or receipt.get("ok") is not True
             or receipt.get("status") not in {"already_current", "published"}):
         if is_owner_target(entry):
@@ -3317,6 +3323,29 @@ def _with_host_effect_lease(validated: dict, remote_name: str, callback):
         return callback(state)
 
 
+@contextmanager
+def _host_share_effects(targets):
+    """Own sorted unique fanout targets; never hold state.lock during effects.
+
+    One mutation port per target avoids the port's nested identity restriction.
+    The caller already owns the original parent attempt lock.
+    """
+    from contextlib import ExitStack
+    repository = RecoveryRepository()
+    with ExitStack() as locks:
+        keys = []
+        for target in sorted(set(targets)):
+            key = hosting.state_key(target.remote, {"project": target.project,
+                                                   "environment": target.environment})
+            keys.append(key)
+            locks.enter_context(repository.target_mutation_port("sync").target_mutation_transaction(key))
+        with repository.state_lock():
+            state = hosting.load_host_state()
+            for key in keys:
+                _assert_no_active_host_operation(state, key)
+        yield state
+
+
 def _refresh_hosting_operation(state: dict, key: str, *, classified: dict,
                                observation: dict, save_state=None) -> None:
     operation = (state["hosts"].get(key) or {}).get("hosting_operation")
@@ -4704,14 +4733,15 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     if not config:
         raise hosting.HostingError("this hosting environment does not declare autologin")
     ttl = config["ttl_seconds"] if ttl_seconds is None else ttl_seconds
-    if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or not 60 <= ttl <= 3600:
         raise hosting.HostingError("--ttl-seconds must be between 60 and 3600")
     key = hosting.state_key(remote_name, validated)
     host_state = state.get("hosts", {}).get(key)
     if not isinstance(host_state, dict):
         raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
     token = secrets.token_urlsafe(32)
-    expires_at = int(time.time()) + ttl
+    issued_at = int(time.time())
+    expires_at = issued_at + ttl
     plugin = hosting.render_autologin_mu_plugin(
         hashlib.sha256(token.encode()).hexdigest(), config["user"], expires_at,
     )
@@ -4724,7 +4754,9 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     target = config["container_path"]
     install = (
         f"set -eu; mkdir -p {shlex.quote(str(__import__('posixpath').dirname(target)))}; "
-        f"cat > {shlex.quote(target)}; chmod 0644 {shlex.quote(target)}"
+        f"temporary=$(mktemp {shlex.quote(target + '.XXXXXX')}); "
+        'trap \'rm -f "$temporary"\' EXIT; '
+        f'cat > "$temporary"; chmod 0644 "$temporary"; mv "$temporary" {shlex.quote(target)}'
     )
     service = shlex.quote(config.get("service") or validated["compose"]["service"])
     _remote_checked(entry, (
@@ -4732,6 +4764,10 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
         f"sh -c {shlex.quote(install)}"
     ), timeout=60)
     _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
+    from sandbox.hosting.autologin import register_script
+    registration = register_script(target, hashlib.sha256(token.encode()).hexdigest(),
+                                   config["user"], issued_at, expires_at)
+    _remote_checked(entry, f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", timeout=60)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
     (save_state or hosting.save_host_state)(state)
     return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
@@ -4792,7 +4828,7 @@ def _operator_terminal():
 
 
 def _site_remote(validated: dict, entry: dict, name: str, verb: str, *extra: str,
-                 input_data: str | None = None) -> dict:
+                 input_data: str | None = None, on_completed=None) -> dict:
     """Run one site verb inside the running login service and read its one-line reply."""
     from sandbox.hosting import login_service as login
     home = remote.resolve_sandbox_home(entry)
@@ -4801,6 +4837,10 @@ def _site_remote(validated: dict, entry: dict, name: str, verb: str, *extra: str
                              f"{runtime_dir}/compose.override.yml", f"{runtime_dir}/environment.env")
     output = _remote_checked(entry, login.site_command(prefix, verb, name, *extra), timeout=60,
                              **({"input_data": input_data} if input_data is not None else {}))
+    # Completion and acceptance differ: a malformed/negative reply can still
+    # follow a completed invocation. Transport failures never reach this signal.
+    if on_completed is not None:
+        on_completed()
     return login.parse_site_reply(output)
 
 
@@ -4820,7 +4860,7 @@ def _mint_site_link(validated: dict, entry: dict, remote_name: str, state: dict,
     except share.ShareRefusal as exc:
         raise login.LoginServiceError(
             "login_link_failed" if exc.code == "share_failed" else exc.code, exc.message) from None
-    return {"link": share.share_url(config["hostname"], minted.link_id, minted.token),
+    return {"link": share.share_url(config["hostname"], minted.token),
             "link_id": minted.link_id, "expires_at": minted.expires_at,
             "uses": uses, "service": name, "hostname": config["hostname"]}
 
@@ -8768,7 +8808,8 @@ def cmd_host(cfg, args) -> None:
     if (args.action not in {"validate", "secrets", "image"}
             and not getattr(args, "remote", None)):
         die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, refresh-front-door, logs, sync, and login-url")
-    if args.action in {"plan", "logs", "status", "diagnose", "refresh-front-door", "retire-delivery"} and (
+    resolved = None
+    if args.action in {"plan", "logs", "status", "diagnose", "refresh-front-door", "retire-delivery", "login-url"} and (
             getattr(args, "target", None) or getattr(args, "name", None)):
         # Spec 074: a recorded stack resolves to its rendered manifest, never
         # the template in the current directory (feedback da5d522e).
@@ -8787,6 +8828,9 @@ def cmd_host(cfg, args) -> None:
         args.project_dir, args.environment = resolved.project_dir, resolved.environment
     try:
         validated = hosting.validate_manifest(args.project_dir or ".", args.environment)
+        if (args.action == "login-url" and resolved is not None
+                and (validated["project"], validated["environment"]) != (resolved.project, resolved.environment)):
+            raise hosting.HostingError("recorded stack manifest no longer matches the selected target")
         # Preserve command provenance separately from the manifest's source root.
         validated['_invocation_root'] = str(Path(args.project_dir or '.').resolve())
     except hosting.HostingError as exc:

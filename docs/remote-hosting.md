@@ -1521,6 +1521,76 @@ environments:
       generated: {PG_PASSWORD: 'XSPEED_HUB_SBX_{SLUG}_PG_PASSWORD'}
 ```
 
+A WordPress-only template can declare direct shared stacks on the same remote:
+
+```yaml
+stack:
+  slug: '^[a-z0-9][a-z0-9-]{0,30}$'
+  ports: [mailpit]
+  uses: [dev]
+```
+
+`stack.uses` defaults to `[]`. It accepts at most four distinct literal stack names,
+using lowercase letters, digits and hyphens (1–63 characters, first character
+alphanumeric). The selected controller must already record each stack on the selected
+remote. Plan and confirm validate references before effects; confirm repeats the check
+under the controller registry lock. Invalid values, over-limit lists, duplicates,
+self-reference and missing references have distinct `stack_uses_*` refusal codes.
+Direct cycles are accepted; no transitive expansion occurs.
+
+The relationship is stored on the controller. `stack list` includes `uses` in JSON
+and text; older records default to empty. Delivery preserves relationships and reapply
+replaces them. `stack down` reports `used_by` without refusing teardown. A relationship
+creates no routes, inbox names, stacks or access grants. Continue provisioning inbox
+names through `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
+sections, recorded inbox links and delivered revision evidence. A controller without
+recorded inbox names shows the supported setup command. One-link teammate access
+and per-click sign-in are separate spec 088 work; this declaration alone does not
+grant access.
+
+For spec 088 one-link access, declare complete per-route/inbox access on parent and
+every direct used stack. See the [worked stack template](login-service.md#worked-stack-template)
+for `route_sign_in`, reserved `$wordpress`, `inbox_sign_in`, capture and direct `uses`.
+Source requires all four capabilities before key/grant effects; source support is
+not proof of installed revision. V2 flat companion records, per-click pools, online
+WordPress claims and schema-2 cleanup descriptors are documented in the
+[access contract](../specs/088-stack-page-access/contracts/access.md), including the
+source-defined attempt/list/revoke and coverage envelopes. Runtime acceptance is
+unverified; source capability constants are not installed revision or capability proof.
+Use the [future acceptance plan](../specs/088-stack-page-access/quickstart.md), which
+confers no apply, migration or teardown authority. Apply resets gate tmpfs; explicitly
+reissue v2 links. Apply resets legacy records too; the legacy reader does not preserve
+them. Retained v1 pages remain readable with WP actions unavailable.
+
+For recorded linked sites, optionally declare anonymous normal-route intent in the
+stack's environment share block. For example, with `example.test` in the existing
+`allowed_host_suffixes` and `wp-{slug}.example.test` recorded as a linked site:
+
+```yaml
+share:
+  hostname: share-{slug}.example.test
+  linked_access:
+    wp-{slug}.example.test: open
+```
+
+`linked_access` defaults to `{}`. It accepts at most 16 exact canonical lowercase DNS
+hostnames covered by `allowed_host_suffixes`, each mapped to literal `open`. URLs,
+tokens, conditions and protected modes are refused. Every declared host must match
+an actual recorded linked row; unused declarations are coverage gaps. A legacy row
+with `access: open` alone remains unknown. To resolve `linked_access_unknown`, declare
+that exact recorded hostname only after confirming its normal route is intended to
+be anonymous. Known Basic Auth, private and other recorded restrictions still refuse.
+Protected linked apps remain unsupported. Linking public WordPress adds its normal
+route only and never adopts admin credentials or adds an admin sign-in.
+
+This declaration records author intent plus known controls, the same boundary used
+for an unmapped own route. It does not measure anonymous usability or detect
+out-of-band application DB/auth changes. The frozen manifest and stack record are
+revalidated before effects; no redeploy proof or access-generation writer is implied.
+Linked rows show their own recorded valid commit/state, otherwise unknown, without
+using the parent revision or claiming verification. Full runtime acceptance and
+independent authentication review remain required before release.
+
 Placeholders: `{slug}`, `{SLUG}` (upper case, `-` becomes `_`), `{port:<name>}` (the
 name must be listed in `stack.ports`) and `{ref_branch}` (the branch `--ref` was
 resolved from; empty for a detached commit). They are allowed only in `project`,
@@ -1528,7 +1598,10 @@ resolved from; empty for a detached commit). They are allowed only in `project`,
 values and `secrets.generated` source names. A placeholder anywhere else, or any
 other brace pattern, is `stack_template_invalid`; the basic-auth route parameter
 syntax (`/api/{id}`) is left to its own validation. `{port:...}` cannot appear in
-`project`. A template is not deployable on its own: `host validate`, `plan`, `apply`
+`project`. Approved login-service paths additionally include share.hostname,
+share.route_sign_in and share.linked_access hostname keys, entry hostnames and magic_link origins/pattern/
+required_params values. Entry names, mapping values and inbox_sign_in stay literal;
+regex replacements are escaped. A template is not deployable on its own: `host validate`, `plan`, `apply`
 and the rest refuse it with `stack_template_requires_stack_up`. To inspect or exec
 into a deployed stack, pass `--target` or `--name` (see `sb host exec` below).
 
@@ -1586,8 +1659,12 @@ Equal content and mode leaves the destination unchanged. The publisher refuses
 unsafe path components, symlinks, nonregular or multiply linked destinations,
 foreign owners, broad writable modes, and changes observed before replacement.
 Replies contain only `published`, `already_current`, `not_published`, or
-`publication_unknown` status, without payloads or content digests. An unusable
-owner reply withholds completion through the existing operation fence.
+`publication_unknown` status, without payloads or content digests. A completed
+process with exit 1 and exactly `{"ok": false, "status": "not_published"}`
+reports a known refusal before destination replacement. This does not assert
+that earlier steps of the apply had no effects or clear an existing completion
+fence. Missing, malformed, contradictory or unknown owner replies withhold
+completion through the existing operation fence.
 
 This publisher requires an installed owner revision containing
 `sandbox/hosting/runtime_file_writer.py`; protocol 25 is unchanged. Source
@@ -2295,6 +2372,48 @@ process and capped at 64 hostnames per round. The page never waits for it: rows 
 never wildcards and never anything a request names. A hostname that is tailnet-only,
 such as a `mail-<slug>` route, reads "unreachable" from anywhere outside the tailnet.
 
+Stack cards link to `/hosting/<remote>/<slug>`. The page lists the stack and its
+direct `stack.uses` references, with shared labels, recorded inbox names and revision
+evidence. Missing references and inbox names show setup guidance. Relationship
+expansion stops after one level.
+
+Templates may use stack placeholders in `share.hostname`, named autologin entry
+hostnames and magic-link `request_origin`, `link_origin`, `link_pattern` and
+`required_params` values. Substitutions in `link_pattern` are regex-escaped literals;
+numeric regex quantifiers are preserved. Other autologin fields still reject
+placeholders. For example, `share-{slug}.example.test` gives each rendered stack its
+own gate hostname. These template changes create no live route until apply.
+
+The controller page's WordPress admin action posts exactly `{remote, stack}` to
+`/api/hosting/sign-in` with the panel's same-origin guard. It resolves the recorded
+rendered manifest and uses the same host writer lock as the CLI. A missing WordPress
+autologin declaration, inaccessible private route or unavailable remote refuses the
+action. Controller panels require the rendered stack manifest. Server panels use
+the separate admitted owner-local target path described in
+[owner-panel sharing](owner-panel-sharing.md), including its installation prerequisites.
+The browser accepts only a successful response with a one-time WordPress fragment
+URL and typed expiry/user metadata. Invalid, failed or unparseable responses never
+navigate the new tab or display returned response details. An unconfirmed response
+does not trigger a retry. This response validation adds no owner-local execution
+authority; the owner-local admission and writer boundary applies separately.
+Unavailable actions show declaration, manifest, private-gate or controller guidance
+on both own and Shared stack sections before a click. The operation repeats these
+checks at mint time. Named CLI login also refuses a manifest whose project or
+environment no longer matches the recorded selection.
+
+WordPress sign-in tokens travel in URL fragments, then the opener submits them by
+POST. Only hashes enter a WordPress database option. Mint and consume serialize on
+a database advisory lock; at most eight unused links remain, and overflow discards
+the oldest. Reinstalling the generated mu-plugin preserves the option. The panel
+opens a new tab for the one-shot no-store result and keeps it out of polling state
+and browser storage. No GET or list operation mints a sign-in.
+Consumption requires an Origin matching WordPress's configured home origin and
+rejects a foreign Fetch Metadata site value. Missing Origin is refused; opening
+the fragment link in a browser supplies the supported same-origin form POST.
+The opener uses `Referrer-Policy: same-origin` so browser form submissions retain
+their Origin while cross-origin requests receive no referrer. The script removes
+the fragment before submitting; request URLs and referrers contain no token.
+
 The host pages count hosted targets apart from Sandbox instances. The host inventory
 (`/inventory` from the control service, and **this-server** in `sb web` on a server) has a
 `hosted_targets` block: one row per target under `runtime/hosts/`, with its stack slug,
@@ -2372,6 +2491,32 @@ The Feature 054 MCP diagnostic is `delivery_inspect(project_dir, remote,
 environment=None, label=None, operation_id=None, request_id=None,
 observe=False, limit=10, cursor=None)`. It shares the CLI serializer and
 returns `ok=true` when the query was serviced, not when delivery succeeded.
+
+`delivery inspect --remote` selects a scope in the executing controller's
+retained history. It does not dispatch inspection to the registered server.
+`--name` and `--target` likewise resolve this controller's hosting records.
+A missing local record therefore does not prove that a server-owned delivery
+is absent. Source publication does not copy that delivery history back.
+
+The existing fixed server CLI job mechanism can execute commands on the owner,
+but returns a durable job acceptance receipt and stages source. It is not the
+synchronous, recorded-only delivery projection promised by this diagnostic.
+The remote host-target inspector also requires successful apply and running
+container evidence, so it cannot supply the scope for interrupted deliveries.
+The separate `delivery inspect --server-owned --remote NAME` path now supplies
+an exact owner-bound read in candidate source. Select one `--name`, `--target` or
+`--original-job-id` and one `--operation-id` or `--request-id`. It requires the
+installed `delivery.inspect-exact.v1` capability and refuses missing retained
+bindings without staging a checkout or submitting a job. See
+[the closed delivery read contract](server-owned-delivery-inspection.md).
+This source change is not installed/runtime acceptance; neither exec recovery nor
+lease release supplies delivery inspection authority.
+
+`host stack repair-source --remote NAME --name STACK --repair-source deployed`
+provides a separate guarded source-only plan/confirm operation. Confirmation needs
+its exact `--repair-plan-digest`; it preserves the manifest and retained orphan,
+and never applies or releases a host lease. See
+[rendered source custody and repair](rendered-checkout-lifetime.md).
 
 `remote service status` checks the selected unit's non-secret ownership marker and
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local
@@ -2587,7 +2732,8 @@ holds one lease per target on the remote,
 operation, so two controllers cannot interleave changes to one target's route and
 runtime. The lease file holds a random token, a random controller id
 (`$SANDBOX_HOME/runtime/hosting/controller-id` on the controller) and the time it was
-taken; nothing secret.
+taken; nothing secret. For server-owner execution, the holder is instead the
+first 32 hexadecimal characters of SHA-256 over `server-cli:<job_id>`.
 
 The lease never expires: an owner that outlived an expiry and kept writing would be
 the interleaving the lease is there to stop. The controller that holds it releases it,
@@ -2595,6 +2741,18 @@ or takes it over on its next operation (an apply that crashed). When another con
 holds it, finish or re-run the operation from that controller. If that controller is
 gone, first check on the remote that nothing of it still runs (no `sb` process for the
 target), then remove the lease file there by hand.
+
+Each server-owner job has a different holder, so starting a fresh job cannot
+take over an earlier job's lease. `host retire-delivery` closes the delivery
+record and its host-state claim; it does not release this separate lease.
+Do not repeat retirement or replay an uncertain apply to clear it. Exact manual
+recovery requires explicit operator approval after binding the lease holder to
+the original job, confirming its terminal delivery and process cessation, and
+checking a complete active-job inventory for competing writers. Hold the target's
+existing physical lease lock, recheck the exact lease identity and content under
+that lock, and remove only that lease. Preserve other leases, lock files and
+uncertain operation evidence. A changed identity or incomplete cessation proof
+refuses recovery; leases never expire automatically.
 
 The on-host stack reaper (spec 077) does not take the lease; it only removes targets
 whose lifetime record has expired. Controllers older than this lease do not take it

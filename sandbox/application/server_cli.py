@@ -138,17 +138,23 @@ def capabilities() -> dict:
         inspection = [INSPECTION_CONTRACT]
     except ServerCLIUnavailable:
         inspection = []
+    from sandbox.application.server_cli_delivery import contract_available as delivery_available, CONTRACT as DELIVERY_CONTRACT
+    if delivery_available():
+        inspection.append(DELIVERY_CONTRACT)
     from sandbox.application.server_cli_exec import exec_contract_available, capture_contract_available, CONTRACT as EXEC_CONTRACT
     from sandbox.application.server_cli_capture import CONTRACT as CAPTURE_CONTRACT
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     from sandbox.workspaces.content import source_content_available
     from sandbox.hosting.server_cli_dispatch import stack_ref_contract_available, STACK_REF_CONTRACT
     from sandbox.commands.preview_server import preview_contract_available, CONTRACT as PREVIEW_CONTRACT
+    from sandbox.application.server_cli_source_repair import contract_available as source_repair_available
+    from sandbox.hosting.source_repair import CONTRACT as SOURCE_REPAIR_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
             'target_metadata': _receiver_routing_metadata(owner),
             'inspection_capabilities': inspection,
+            'source_repair_capabilities': [SOURCE_REPAIR_CONTRACT] if source_repair_available() else [],
             'server_exec_capabilities': [EXEC_CONTRACT] if exec_contract_available() else [],
             'server_exec_capture_capabilities': [CAPTURE_CONTRACT] if capture_contract_available() else [],
             'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +

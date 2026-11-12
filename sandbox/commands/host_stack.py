@@ -118,21 +118,69 @@ def load_template(checkout: Path, relpath: str, commit: str) -> stack_template.S
 
 def _add_worktree(checkout: Path, slug: str, commit: str) -> Path:
     parent = stack_registry.stack_dir(slug) / "source"
+    if (parent.is_symlink() or parent.parent.is_symlink()
+            or parent.parent.parent.resolve() != stack_registry.stacks_dir().resolve()):
+        raise RuntimeError("invalid rendered source directory")
     parent.mkdir(parents=True, exist_ok=True)
     path = parent.resolve() / f"{commit[:12]}-{secrets.token_hex(3)}"
-    _git(checkout, "worktree", "add", "--detach", "--quiet", str(path), commit, timeout=600)
+    # The caller may be a disposable materialized job checkout. Give each
+    # rendered worktree its own object store and administration in Sandbox's
+    # stack directory; neither hardlinks nor alternates may tie it to callers.
+    backing = _worktree_backing(path)
+    if backing.parent.is_symlink():
+        raise RuntimeError("invalid rendered source backing directory")
+    backing.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError("rendered source path already exists")
+    backing.mkdir()  # Exclusive creation: never adopt an existing repository.
+    try:
+        _git(backing, "init", "--bare", "--quiet", "--template=")
+        _git(backing, "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--update-shallow",
+             "--no-recurse-submodules", str(checkout.resolve()),
+             f"{commit}:refs/sandbox/source", timeout=600)
+        if _git(backing, "rev-parse", "--verify", "refs/sandbox/source^{commit}") != commit:
+            raise RuntimeError("rendered source backing commit does not match requested commit")
+        _git(backing, "worktree", "add", "--detach", "--quiet", str(path), commit, timeout=600)
+    except BaseException:
+        # Only this invocation's fresh pair can be removed here. Older pairs
+        # remain available to recorded jobs, including unknown submissions.
+        _remove_worktree(str(checkout), str(path))
+        raise
     return path
+
+
+def _worktree_backing(path: Path) -> Path:
+    return path.parent.parent / "source-git" / (path.name + ".git")
 
 
 def _remove_worktree(checkout: str | None, path: str) -> None:
     target = Path(path)
     root = stack_registry.stacks_dir().resolve()
-    if checkout and Path(checkout).is_dir():
-        _git(Path(checkout), "worktree", "remove", "--force", str(target), check=False, timeout=300)
-    if target.exists() and root in target.resolve().parents:
+    # Bound Git removal as well as filesystem removal to a rendered source.
+    if (target.is_symlink() or target.parent.is_symlink() or target.parent.parent.is_symlink()
+            or target.parent.name != "source"
+            or target.parent.parent.parent.resolve() != root
+            or root not in target.resolve().parents):
+        raise RuntimeError("refusing cleanup outside a rendered stack source")
+    backing = _worktree_backing(target)
+    private = backing.exists() or backing.is_symlink()
+    if private and (backing.is_symlink() or backing.parent.is_symlink()
+                    or not backing.is_dir()):
+        raise RuntimeError("invalid rendered source backing directory")
+    owner = backing if private else Path(checkout) if checkout else None
+    if private and target.exists():
+        common = _git(target, "rev-parse", "--git-common-dir", check=False)
+        if not common or (target / common).resolve() != backing.resolve():
+            raise RuntimeError("rendered source does not belong to its backing repository")
+    if owner and owner.is_dir():
+        _git(owner, "worktree", "remove", "--force", str(target), check=False, timeout=300)
+    if target.exists():
         shutil.rmtree(target, ignore_errors=True)
-    if checkout and Path(checkout).is_dir():
-        _git(Path(checkout), "worktree", "prune", check=False)
+    if private:
+        if not target.exists():
+            shutil.rmtree(backing)
+    elif owner and owner.is_dir():
+        _git(owner, "worktree", "prune", check=False)
 
 
 # ------------------------------------------------------------- remote probe
@@ -541,6 +589,8 @@ def _up(args) -> dict:
 
     def prepare(data: dict) -> tuple[dict | None, dict[str, int], dict]:
         """Checks and port choice shared by plan and confirm; no writes."""
+        stack_template.validate_uses(template, slug, {
+            item["slug"] for item in stack_registry.records_for_remote(data, remote_name)})
         record = data["stacks"].get(stack_registry.record_key(remote_name, slug))
         for other in stack_registry.records_for_slug(data, slug):
             if other.get("remote") != remote_name:
@@ -583,7 +633,7 @@ def _up(args) -> dict:
     def result(mode: str, validated: dict, ports: dict, hostnames: list[str], *, source_root,
                submission, stored: dict, job_id=None, request_id=None, missing=()) -> dict:
         return {"ok": True, "action": "stack-up", "mode": mode, "slug": slug, "remote": remote_name,
-                "project": project, "environment": environment, "ref": ref.ref,
+                "project": project, "environment": environment, "uses": list(template.uses), "ref": ref.ref,
                 "ref_branch": ref.ref_branch, "commit": ref.commit, "hostnames": hostnames,
                 "ports": ports, "manifest": validated["manifest_path"], "source_root": source_root,
                 "template": str(template_path), "submission": submission, "job_id": job_id,
@@ -662,13 +712,16 @@ def _up(args) -> dict:
         earlier = [path for path in (previous or {}).get("worktrees") or [] if path != str(worktree)]
         record: stack_registry.StackRecord = {
             "remote": remote_name, "slug": slug, "project": project, "environment": environment,
+            # Caller context for owner labels and merge sweeps, not the new
+            # worktrees' Git owner. Their private backing paths derive from
+            # the worktrees list and share its retention/cleanup lifetime.
             "template": str(template_path), "checkout": str(checkout), "ref": ref.ref,
             "ref_branch": ref.ref_branch, "hostnames": sorted(hostnames),
             # `commit` stays what an apply last delivered; `sb host apply` moves
             # it to last_apply.commit once this one completes (record_delivery).
             "commit": (stack_registry.delivered_commit(previous, _last_apply_view(previous).get("status"))
                        if previous else None),
-            "ports": ports, "manifest": str(manifest_path),
+            "ports": ports, "uses": list(template.uses), "manifest": str(manifest_path),
             "worktrees": [*earlier, str(worktree)],
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
             # Spec 076: sites `sb deploy --stack` linked to this stack outlive a re-apply.
@@ -697,7 +750,7 @@ def _up(args) -> dict:
         # Earlier worktrees belong to terminal jobs (`up` refuses while one is
         # active); drop them now that the new job owns its own source.
         for path in earlier:
-            _remove_worktree(str(checkout), path)
+            _remove_worktree((previous or {}).get("checkout"), path)
         record["worktrees"] = [str(worktree)]
         registry.put(record)
     if record["canonical"]:
@@ -729,6 +782,8 @@ def _release_fresh_claim(store, claimed: dict, compose_project: str) -> None:
 
 
 def _owner_checkout(record: dict | None) -> Path:
+    # Keep identity lookup on caller context; a private backing repository
+    # deliberately carries no copied user configuration or origin credentials.
     checkout = Path((record or {}).get("checkout") or ".")
     return checkout if checkout.is_dir() else Path.cwd()
 
@@ -758,6 +813,7 @@ def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -
     row["mine"] = bool(local) and (not remote_item or local.get("copy_id") == remote_item.get("copy_id"))
     row["remote_record"] = remote_state
     row["last_apply"] = _last_apply_view(local) if local else None
+    row["uses"] = list(local.get("uses") or []) if row["mine"] else []
     if row["mine"]:
         # The remote record holds the commit its claim was made for; this
         # controller's record holds the one an apply delivered.
@@ -846,6 +902,8 @@ def _down(args) -> dict:
     lock_wait = hosting_cmd._host_apply_lock_wait(args)
     with stack_registry.locked() as registry:
         record = registry.get(remote_name, slug)
+        used_by = sorted(item["slug"] for item in stack_registry.records_for_remote(registry.data, remote_name)
+                         if slug in (item.get("uses") or []))
         caller = _caller(_owner_checkout(record), args)
         store = _store(entry, caller)
         remote_item = _remote_stack(store.list(), slug)
@@ -879,7 +937,7 @@ def _down(args) -> dict:
             registry.delete(remote_name, slug)
     return {"ok": True, "action": "stack-down", "slug": slug, "remote": remote_name,
             "project": project, "environment": environment,
-            "released_ports": (record or {}).get("ports") or (remote_item or {}).get("ports") or {},
+            "used_by": used_by, "released_ports": (record or {}).get("ports") or (remote_item or {}).get("ports") or {},
             "destroy": destroyed, "forced_owner": force and bool(remote_item) and not (
                 str((remote_item.get("owner") or {}).get("label", "")).lower() == caller["label"].lower()),
             "was_reaped": bool(remote_item and remote_item.get("state") == "reaped")}
@@ -1009,6 +1067,7 @@ def _render_text(payload: dict) -> str:
                 lines.append(f"  remote record: {item['remote_record']} (protected until claimed)")
             lines.append(f"  hosts: {', '.join(item.get('hostnames') or [])}")
             lines.append(f"  ports: {ports}")
+            lines.append("  uses: " + (", ".join(item.get("uses") or []) or "none"))
             if last:
                 requested = f", commit {last['commit'][:12]}" if last.get("commit") else ""
                 lines.append(f"  last apply: {last.get('status', 'unknown')} at {last.get('at')} "
@@ -1024,7 +1083,7 @@ def _render_text(payload: dict) -> str:
     if action == "stack-down":
         ports = ", ".join(f"{name}={port}" for name, port in payload["released_ports"].items()) or "none"
         return (f"stack {payload['slug']} torn down ({payload['destroy'].get('state')}); "
-                f"released ports: {ports}")
+                f"released ports: {ports}; used by: {', '.join(payload.get('used_by') or []) or 'none'}")
     if action == "stack-ttl":
         return (f"stack {payload['slug']}: {payload['lifetime']}, expires {_when(payload['expires_at'])}")
     if action == "stack-limits":
@@ -1052,6 +1111,7 @@ def _render_text(payload: dict) -> str:
              f"  lifetime: {payload.get('lifetime')} ({payload.get('lifetime_source')})"
              f"{' canonical' if payload.get('canonical') else ''}, expires {_when(payload.get('expires_at'))}",
              f"  hosts: {', '.join(payload['hostnames'])}",
+             f"  uses: {', '.join(payload.get('uses') or []) or 'none'}",
              f"  ports: {ports}",
              f"  manifest: {payload['manifest']}"]
     if payload["secrets_missing"]:

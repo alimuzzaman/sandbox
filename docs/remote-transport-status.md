@@ -238,8 +238,8 @@ transition to `timed_out`, with cessation evidence recorded after owned work sto
 
 On a joined Tailscale registration, `host plan`, `host status`, `host stack list`,
 `host stack up --plan|--confirm`, the other remote `host stack` actions,
-`host recover`, `host retire-delivery`, `host refresh-front-door`, `host destroy`
-and `host tailnet-name add|list|renew|remove` use the installed retained server CLI.
+`host recover`, `host retire-delivery`, `host refresh-front-door` and `host destroy`
+use the installed retained server CLI.
 Their existing plan/confirmation requirements still apply in the receiver.
 `host plan --name STACK` resolves the server's recorded rendered manifest.
 `host status --target PROJECT/ENVIRONMENT` reads the selected server's record;
@@ -255,17 +255,24 @@ application child; inspect that original child's retained result separately.
 Unknown acceptance or missing output never authorizes a second submission.
 
 These routes select server credentials before controller provider preflight.
-Explicit controller credential options refuse on these joined routes. Tailnet
-names retain the genuine owner target through nginx and remote-program calls;
-they neither serialize it as a grant nor SSH back to the server. Their existing
-broker, per-name leases, state lock and edge lock run on the server. The job gate
-excludes only that same retained executing job and still refuses other active
-jobs or missing job identity. Add/renew use the actual receiver's unique public
-IPv4 interface observation for public exposure checks, and its observed Tailnet
-interface for private binding. A conflicting public override or missing metadata
-refuses. The optional `tailscale_host` retained metadata requires the matching
-protocol-25 receiver update; old installed metadata does not prove support.
-No client or server deployment or runtime acceptance is implied by this source.
+Explicit controller credential options refuse on these joined routes.
+
+`host tailnet-name add|list|renew|remove` is excluded from this owner dispatcher.
+Its controller retains DNS, ACME and broker authority; its existing fixed remote
+runner uses the registered transport. Tailnet transport authentication does not
+move provider credentials or controller-owned records onto the server. Lower-level
+support for a genuine retained owner target does not mean the ordinary command
+selects it. This remains a distinct full-goal authority/coverage gap, not proof
+that tailnet-name works from a credential-free laptop.
+
+Exact delivery reads and rendered-source repair now have separate fixed paths in
+source. `delivery inspect --server-owned --remote NAME` requires one named target
+or original admitted job and one exact operation/request selector. It returns a
+bounded recorded summary synchronously. `host stack repair-source` uses explicit
+plan/confirm and an exact plan digest. Neither path stages caller source or submits
+a durable job. See [server-owned delivery inspection](server-owned-delivery-inspection.md)
+and [rendered checkout lifetime](rendered-checkout-lifetime.md). These are candidate
+source changes, not installed capability or runtime acceptance evidence.
 
 Delivery exposure attempts also recognize this genuine current owner target for
 machine identity and require the same retained remote alias. Other callers keep

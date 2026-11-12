@@ -8,6 +8,7 @@ from .context import control_metadata, target_for_project
 from .models import (DeliveryError, canonical_digest, new_operation, now,
                      request_scope, target_digest, operation_summary)
 from .repository import DeliveryRepository
+from .server_binding import current_binding
 from .service import evaluate_operation, normalize_creation_receipt
 
 
@@ -83,7 +84,8 @@ class ExposureAttempt:
         if self.repository.has_open_operation(scope):
             raise DeliveryError('authority_pending')
         reserved = self.repository.reserve_request(scope, request_id,
-            self.operation['operation_id'], self.operation['intent_digest'], operation=self.operation)
+            self.operation['operation_id'], self.operation['intent_digest'], operation=self.operation,
+            server_binding=current_binding(self.operation))
         if reserved['status'] != 'reserved':
             raise ExposureReplay(reserved)
         self.operation = reserved['operation']

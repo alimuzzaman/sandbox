@@ -11,7 +11,7 @@ import { modal } from "../ui/modal";
 import { toast } from "../ui/toast";
 import { postShare } from "../api";
 import { canShare, refusalHelp, revocableId, shareTerms } from "../ui/sharelabels";
-import type { ShareCreated, ShareList, ShareRefused } from "../types";
+import type { ShareCreated, ShareList, ShareRefused, SharePartial, ShareAttempt, ShareGrant } from "../types";
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
@@ -20,16 +20,24 @@ const when = (epoch: number): string => new Date(epoch * 1000).toLocaleString();
 // Open dialogs. A new dialog replaces the others, except one that shows a
 // minted link: that stays until its owner closes it, so a link is never lost.
 const openDialogs = new Set<HTMLElement>();
+const dialogFocus = new WeakMap<HTMLElement, HTMLElement>();
+// Target identity survives card replacement by the hosting poller. No URLs.
+const pendingShares = new Set<string>();
+const pendingRevokes = new Set<string>();
+const targetKey = (target: { remote: string; stack: string }): string => JSON.stringify([target.remote, target.stack]);
 
 function closeDialog(el: HTMLElement): void {
   el.remove();
   openDialogs.delete(el);
+  const previous = dialogFocus.get(el);
+  if (previous?.isConnected) previous.focus();
 }
 
 /** A dialog on `document.body`, below the confirm modal (z-40 < z-50); returns its body. */
 function dialog(title: string): HTMLElement {
   for (const other of [...openDialogs]) if (!other.dataset.holdsLink) closeDialog(other);
   const el = document.createElement("div");
+  if (document.activeElement instanceof HTMLElement) dialogFocus.set(el, document.activeElement);
   el.className = "fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4";
   el.setAttribute("role", "dialog");
   el.setAttribute("aria-modal", "true");
@@ -41,7 +49,16 @@ function dialog(title: string): HTMLElement {
   el.addEventListener("click", (e) => {
     if (e.target === el || (e.target as HTMLElement).closest("[data-close]")) closeDialog(el);
   });
-  el.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDialog(el); });
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closeDialog(el); }
+    if (e.key === "Tab") {
+      const controls = [...el.querySelectorAll<HTMLElement>("button,input,a[href],[tabindex]")]
+        .filter(control => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length > 0);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
+  });
   document.body.appendChild(el);
   openDialogs.add(el);
   (el.querySelector("[data-close]") as HTMLElement).focus();
@@ -53,11 +70,31 @@ function stackOf(button: HTMLElement): { remote: string; stack: string } | null 
   return canShare(remote) && SLUG.test(stack) ? { remote, stack } : null;
 }
 
-function refusal(body: HTMLElement, result: ShareRefused, remote: string, stack: string): void {
+function refusal(body: HTMLElement, result: ShareRefused | SharePartial, remote: string, stack: string): void {
   const help = refusalHelp(result.code, result.message, remote, stack);
   body.innerHTML = `<div role="alert" class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-900 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-100">
       <div class="font-medium"><code>${esc(result.code)}</code></div><div class="mt-1">${esc(result.message)}</div></div>
-    ${help ? `<p>${esc(help)}</p>` : ""}`;
+    ${help ? `<p>${esc(help)}</p>` : ""}
+    ${"gaps" in result ? (result.gaps || []).map(gap => `<div class="rounded border p-2"><p>${esc(gap.stack)} · ${esc(gap.target)} ${esc(gap.hostname || "")} · ${esc(gap.piece)} · ${esc(gap.code)}</p><p>${esc(gap.fix)}</p></div>`).join("") : ""}
+    ${"phase" in result ? cleanupDetails(result.attempt_id, result.still_live) : ""}`;
+}
+
+function cleanupDetails(attemptId: string | undefined, grants: ShareGrant[]): string {
+  return `<div role="alert"><p>cleanup_pending · ${esc(attemptId || "Attempt identity unavailable")}</p>
+    <p>Grants may remain live. Do not make another share until cleanup is confirmed.</p>
+    ${grants.map(grant => `<p><code>${esc(grant.id)}</code> · ${esc(grant.target)} · entry ${esc(grant.entry)} · expires ${esc(when(grant.expires_at))} · ${esc(grant.status)} · ${esc(grant.reason_code)}</p>`).join("")}
+    <p>Repeat revoke with the original parent link id from Live links. Remaining grant ids above are evidence; cleanup uses the original durable attempt.</p></div>`;
+}
+
+/** Pure decision shared by the dialog and its bounded node regression. */
+export function shareCreationBlocked(result: ShareList): boolean {
+  return !result.ok || result.attempts.some(attempt => !["active", "revoked", "expired"].includes(attempt.phase));
+}
+
+function attemptsTable(attempts: ShareAttempt[]): string {
+  return attempts.map(attempt => `<div class="rounded border p-2"><p><code>${esc(attempt.attempt_id)}</code> · ${esc(attempt.phase)} · parent <code>${esc(attempt.link_id)}</code> · expires ${esc(when(attempt.expires_at))}</p>
+    ${!["revoked", "expired"].includes(attempt.phase) ? `<button type="button" data-revoke="${esc(attempt.link_id)}" class="${theme.button}">Repeat revoke ${esc(attempt.link_id)}</button>` : ""}
+    ${!["active", "revoked", "expired"].includes(attempt.phase) ? cleanupDetails(attempt.attempt_id, attempt.still_live || []) : ""}</div>`).join("");
 }
 
 function copyLink(input: HTMLInputElement, button: HTMLButtonElement, note: HTMLElement): void {
@@ -104,18 +141,57 @@ function showLink(body: HTMLElement, result: ShareCreated): void {
 export async function shareStack(button: HTMLElement): Promise<void> {
   const target = stackOf(button);
   if (!target) return;
+  const key = targetKey(target);
+  if (pendingShares.has(key) || pendingRevokes.has(key)) { toast("A sharing operation is already pending for this stack.", "info"); return; }
+  pendingShares.add(key);
+  updateShareButtons(target);
+  try {
+    await createShare(target);
+  } finally {
+    pendingShares.delete(key);
+    updateShareButtons(target);
+  }
+}
+
+function updateShareButtons(target: { remote: string; stack: string }): void {
+  const key = targetKey(target);
+  const revoking = pendingRevokes.has(key);
+  const pending = revoking || pendingShares.has(key);
+  document.querySelectorAll<HTMLButtonElement>("[data-share-create], [data-share-live]").forEach(button => {
+    if (button.dataset.shareRemote !== target.remote || button.dataset.shareStack !== target.stack) return;
+    button.disabled = pending;
+    if (button.hasAttribute("data-share-create"))
+      button.textContent = revoking ? "Revocation pending…" : pending ? "Sharing pending…" : "Share this stack";
+  });
+}
+
+async function createShare(target: { remote: string; stack: string }): Promise<void> {
+  const checking = dialog(`Share ${target.stack} · ${target.remote}`);
+  checking.innerHTML = `<p role="status">Checking live links before sharing…</p>`;
+  const inventory = await postShare({ action: "list", ...target });
+  // Closing the preflight cancels this UI flow, before any create request.
+  if (!checking.isConnected) return;
+  if (!("attempts" in inventory)) {
+    refusal(checking, inventory, target.remote, target.stack);
+    return;
+  }
+  if (shareCreationBlocked(inventory)) {
+    renderLinks(checking, target, inventory);
+    return;
+  }
+  closeDialog(checking.closest("[role=dialog]") as HTMLElement);
   const ok = await modal({
-    title: `Share stack ${target.stack}?`, okText: "Make link",
+    title: `Share ${target.stack} on ${target.remote}?`, okText: "Make link",
     desc: "This makes a link to the stack's page and its sign-in links, usable without the tailnet " +
       "for 7 days with no use limit, unless you revoke it. The link is shown once.",
   });
   if (!ok) return;
-  let body = dialog(`Share ${target.stack}`);
+  let body = dialog(`Share ${target.stack} · ${target.remote}`);
   body.innerHTML = `<p class="${theme.quiet}" role="status">Making the link…</p>`;
   const result = await postShare({ action: "create", ...target });
   // This dialog was closed or replaced while minting: show the result in a new one,
   // so a minted link is never lost unseen. Another dialog holding a link stays open.
-  if (!body.isConnected) body = dialog(`Share ${target.stack}`);
+  if (!body.isConnected) body = dialog(`Share ${target.stack} · ${target.remote}`);
   if (result.ok) showLink(body, result);
   else refusal(body, result, target.remote, target.stack);
 }
@@ -133,16 +209,23 @@ function linksTable(result: ShareList): string {
       <td class="py-2 pr-2 text-[12px]">${esc(when(row.expires_at))}</td><td></td>
       <td class="py-2 text-right">${revoke(row.id)}</td></tr>`).join("");
   const table = (head: string, rows: string, empty: string) => `<div><div class="${theme.label}">${head}</div>
-    ${rows ? `<table class="mt-1 w-full text-left"><tbody>${rows}</tbody></table>` : `<p class="mt-1 text-[12px] ${theme.quiet}">${empty}</p>`}</div>`;
-  return `<p class="text-[12px] ${theme.quiet}">${esc(result.target)} · entry ${esc(result.entry)}. Ids only: a link itself is never shown again.</p>
-    ${table("Links", links, "No live links.")}${table("Browser sessions", sessions, "No open sessions.")}`;
+    ${rows ? `<div class="overflow-x-auto"><table aria-label="${head}" class="mt-1 w-full text-left"><thead><tr>${["Id", "Expires", "Uses", "Action"].map(label => `<th scope="col" class="py-1 pr-2 text-[11px]">${label}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="mt-1 text-[12px] ${theme.quiet}">${empty}</p>`}</div>`;
+  return `<p class="text-[12px] ${theme.quiet}">${esc(result.target || "Target unavailable")} · entry ${esc(result.entry || "unknown")}. Ids only: a link itself is never shown again.</p>
+    ${!result.ok ? `<p role="alert">Live status is incomplete. Grants may remain live. New sharing is blocked until status and cleanup are confirmed.</p>` : ""}
+    ${result.partial_reasons?.map(reason => `<p>${esc(reason)}</p>`).join("") || ""}
+    ${attemptsTable(result.attempts)}
+    ${table("Links", links, result.ok ? "No live links." : "Live links could not be confirmed.")}${table("Browser sessions", sessions, result.ok ? "No open sessions." : "Browser sessions could not be confirmed.")}`;
 }
 
 async function loadLinks(body: HTMLElement, target: { remote: string; stack: string }): Promise<void> {
   body.innerHTML = `<p class="${theme.quiet}" role="status">Loading…</p>`;
   const result = await postShare({ action: "list", ...target });
   if (!body.isConnected) return;
-  if (!result.ok) { refusal(body, result, target.remote, target.stack); return; }
+  if (!("attempts" in result)) { refusal(body, result, target.remote, target.stack); return; }
+  renderLinks(body, target, result);
+}
+
+function renderLinks(body: HTMLElement, target: { remote: string; stack: string }, result: ShareList): void {
   body.innerHTML = linksTable(result);
   body.querySelectorAll<HTMLButtonElement>("[data-revoke]").forEach(button => {
     button.addEventListener("click", () => void revoke(body, target, button.dataset.revoke || ""));
@@ -151,22 +234,51 @@ async function loadLinks(body: HTMLElement, target: { remote: string; stack: str
 
 async function revoke(body: HTMLElement, target: { remote: string; stack: string }, id: string): Promise<void> {
   if (!revocableId(id)) return;
+  const key = targetKey(target);
+  if (pendingRevokes.has(key) || pendingShares.has(key)) { toast("A sharing operation is already pending for this stack.", "info"); return; }
+  pendingRevokes.add(key);
+  updateShareButtons(target);
+  try {
+    await confirmRevoke(body, target, id);
+  } finally {
+    pendingRevokes.delete(key);
+    updateShareButtons(target);
+  }
+}
+
+async function confirmRevoke(body: HTMLElement, target: { remote: string; stack: string }, id: string): Promise<void> {
   const ok = await modal({
-    title: `Revoke ${id}?`, okText: "Revoke", danger: true,
-    desc: id.startsWith("l-") ? "The link and every browser session it opened stop working now."
-      : "This browser session stops working now. Its link stays live.",
+    title: `Revoke ${id} on ${target.stack} · ${target.remote}?`, okText: "Revoke", danger: true,
+    desc: id.startsWith("l-") ? "Request revocation of this link and its browser sessions. Access may remain live until cleanup is confirmed."
+      : "Request revocation of this browser session. Its link stays live. Wait for the result before repeating the request.",
   });
   if (!ok || !body.isConnected) return;
+  body.innerHTML = `<p role="status">Revoking ${esc(id)}… Wait for the result before repeating this request.</p>`;
   const result = await postShare({ action: "revoke", ...target, id });
+  if (!body.isConnected) body = dialog(`Revocation result · ${target.stack} · ${target.remote}`);
   if (result.ok) toast(`Revoked: ${result.revoked_links} link(s), ${result.revoked_sessions} session(s)`, "ok");
-  else toast(`${result.code}: ${result.message}`, "err");
+  else {
+    if (body.isConnected) {
+      refusal(body, result, target.remote, target.stack);
+      const retry = document.createElement("button");
+      retry.className = theme.button;
+      retry.textContent = `Repeat revoke ${id}`;
+      retry.addEventListener("click", () => void revoke(body, target, id));
+      body.appendChild(retry);
+    }
+    return;
+  }
   if (body.isConnected) await loadLinks(body, target);
 }
 
 export function shareLinks(button: HTMLElement): void {
   const target = stackOf(button);
   if (!target) return;
-  void loadLinks(dialog(`Live links · ${target.stack}`), target);
+  if (pendingRevokes.has(targetKey(target)) || pendingShares.has(targetKey(target))) {
+    toast("A sharing operation is pending. Wait for its result before refreshing live links.", "info");
+    return;
+  }
+  void loadLinks(dialog(`Live links · ${target.stack} · ${target.remote}`), target);
 }
 
 /** The two buttons for a stack card; a server's own record gets the CLI hint instead. */
@@ -174,7 +286,10 @@ export function shareButtons(remote: string, stack: string): string {
   if (!canShare(remote) || !SLUG.test(stack))
     return `<p class="mt-1.5 text-[11px] ${theme.quiet}">Share links are made on the controller: <code>sb host share create --stack ${esc(stack)} --remote &lt;R&gt;</code></p>`;
   const data = `data-share-remote="${esc(remote)}" data-share-stack="${esc(stack)}"`;
+  const key = targetKey({ remote, stack });
+  const revoking = pendingRevokes.has(key);
+  const pending = revoking || pendingShares.has(key);
   return `<div class="mt-2 flex flex-wrap gap-2 sm:justify-end">
-    <button type="button" class="${theme.button}" ${data} onclick="sb.shareStack(this)">Share this stack</button>
-    <button type="button" class="${theme.button}" ${data} onclick="sb.shareLinks(this)">Live links</button></div>`;
+    <button type="button" data-share-create class="${theme.button}" ${data} ${pending ? "disabled" : ""} onclick="sb.shareStack(this)">${revoking ? "Revocation pending…" : pending ? "Sharing pending…" : "Share this stack"}</button>
+    <button type="button" data-share-live class="${theme.button}" ${data} ${pending ? "disabled" : ""} onclick="sb.shareLinks(this)">Live links</button></div>`;
 }

@@ -230,7 +230,8 @@ _SHARE_PATH = "/api/hosting/share"
 _SHARE_HEADER = "X-Sandbox-Panel"
 _SHARE_BODY_MAX = 4096
 _SHARE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
-_SHARE_ID_RE = re.compile(r"[ls]-[0-9a-f]{32}")
+# One link (short id, or an old-form one until it expires: LEGACY(081 short links)) or session.
+_SHARE_ID_RE = re.compile(r"l-[0-9a-f]{12}|[ls]-[0-9a-f]{32}")
 _SHARE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SHARE_KEYS = {"create": frozenset({"action", "remote", "stack"}),
                "list": frozenset({"action", "remote", "stack"}),

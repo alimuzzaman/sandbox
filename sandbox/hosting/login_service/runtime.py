@@ -16,6 +16,8 @@ Security properties worth keeping in mind when changing this file:
 import base64
 import calendar
 import collections
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import html
@@ -71,6 +73,9 @@ HEALTH_TIMEOUT_SECONDS = 3
 HEALTH_CACHE_SECONDS = 30
 SITE_MAX_USES = 20
 SITE_MAX_LINKS = 32
+# Link records kept, spent ones included (their sessions need them) until they expire or
+# are revoked. Every POST /s/ scans them all, so this bounds that unauthenticated work.
+SITE_MAX_RECORDS = 128
 SITE_MAX_SESSIONS = 512
 SITE_ATTEMPTS = 30
 SITE_ATTEMPT_WINDOW_SECONDS = 60
@@ -82,7 +87,14 @@ _TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 _ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _SESSION_EXPIRY = re.compile(r"[0-9]{1,12}")
-_LINK_ID = re.compile(r"l-[0-9a-f]{32}")
+# A share link's public id: `l-` and the first 12 hex of its token hash (spec 081 Story 7).
+# LEGACY(081 short links): links minted before then carry 32 random hex and open at
+# /s/<id>; they last 30 days at most, then this form and its path go (tasks.md T049).
+_SHORT_LINK_ID = re.compile(r"l-[0-9a-f]{12}")
+_LEGACY_LINK_ID = re.compile(r"l-[0-9a-f]{32}")
+_LINK_ID = re.compile(r"l-[0-9a-f]{12}|l-[0-9a-f]{32}")
+# A short link's token: 128 bits, 22 URL-safe characters.
+_SHORT_TOKEN = re.compile(r"[A-Za-z0-9_-]{22}")
 _SITE_SESSION_ID = re.compile(r"s-[0-9a-f]{32}")
 _SCOPE_CHARS = re.compile(r"/[A-Za-z0-9._~!$&'()*+,=:@%/-]*")
 _UNSAFE_RAW = ("%2f", "%5c", "%2e", "%00", "%25", "\\", ";", "//", "#")
@@ -115,10 +127,11 @@ _CONFIRM_PAGE = (
     f"<script>{_CONFIRM_SCRIPT}</script></main></body></html>"
 ).encode()
 _SCRIPT_HASH = base64.b64encode(hashlib.sha256(_CONFIRM_SCRIPT.encode()).digest()).decode()
-# A share link (/s/<id>#<token>) submits itself: link previews never run it, and the
-# token stays in the fragment, so no request line or access log ever holds it.
+# A share link (/s/#<token>, or an old-form /s/<id>#<token>) submits itself: link
+# previews never run it, and the token stays in the fragment, so no request line or
+# access log ever holds it.
 _SITE_SCRIPT = (
-    "(function(){var m=location.hash.match(/^#([A-Za-z0-9_-]{43})$/);"
+    "(function(){var m=location.hash.match(/^#([A-Za-z0-9_-]{22}|[A-Za-z0-9_-]{43})$/);"
     "var f=document.forms[0];history.replaceState(null,'',location.pathname);"
     "if(m){f.elements.token.value=m[1];f.submit();}else{f.hidden=true;"
     "document.getElementById('incomplete').hidden=false;}})();"
@@ -211,6 +224,9 @@ class SiteStore:
             return None
         if not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id):
             return None
+        # A short id is its own hash's prefix, so it names no other link.
+        if _SHORT_LINK_ID.fullmatch(link_id) and link_id[2:] != found[:12]:
+            return None
         if type(issued) is not int or type(expires) is not int:
             return None
         if uses is not None and (type(uses) is not int or not 1 <= uses <= SITE_MAX_USES):
@@ -234,8 +250,23 @@ class SiteStore:
             if record is not None:
                 yield path, record
 
+    def find_short(self, digest):
+        """The short-form link whose token hashes to ``digest``, or None.
+
+        Every stored record is compared, in constant time and without stopping early, so
+        a wrong, unknown, revoked, expired or malformed token costs the same work.
+        """
+        found = None
+        for _, record in self._links():
+            if hmac.compare_digest(record["token_sha256"], digest) and _SHORT_LINK_ID.fullmatch(record["id"]):
+                found = record
+        return found
+
     def live_id(self, link_id):
-        """Whether a live link has this public id (the opener page answers only then)."""
+        """Whether a live old-form link has this id (its opener page answers only then).
+
+        LEGACY(081 short links).
+        """
         return any(record["id"] == link_id and self.is_live(record) for _, record in self._links())
 
     def stack_link_alive(self, link_id):
@@ -386,11 +417,30 @@ class SiteStore:
             return {"ok": False, "code": "site_record_invalid"}
         if self.clock() >= service_ends_at or record["expires_at"] > service_ends_at:
             return {"ok": False, "code": "login_service_expired"}
+        with self._mint_lock():
+            return self._admit(record, stack)
+
+    @contextlib.contextmanager
+    def _mint_lock(self):
+        """One mint at a time per entry, across the separate operator processes, so the
+        live-link and kept-record caps hold under concurrent mints."""
+        descriptor = os.open(self.links.parent / ".mint.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
+    def _admit(self, record, stack):
+        """Count, check and write one link; the caller holds the mint lock."""
         self.prune()
-        if sum(1 for _, item in self._links() if self.is_live(item)) >= SITE_MAX_LINKS:
+        stored = list(self._links())
+        if sum(1 for _, item in stored if self.is_live(item)) >= SITE_MAX_LINKS:
             return {"ok": False, "code": "site_link_limit"}
+        if len(stored) >= SITE_MAX_RECORDS or len(list(self.links.glob("*.json"))) >= SITE_MAX_RECORDS:
+            return {"ok": False, "code": "site_record_limit"}
         target = self.links / f"{record['token_sha256']}.json"
-        if target.exists() or any(item["id"] == record["id"] for _, item in self._links()):
+        if target.exists() or any(item["id"] == record["id"] for _, item in stored):
             return {"ok": False, "code": "site_record_invalid"}
         if stack is not None:
             # Before the link: a live stack link always finds its page.
@@ -399,12 +449,16 @@ class SiteStore:
         return {"ok": True, "id": record["id"], "expires_at": record["expires_at"], "uses": record["uses"]}
 
     def listing(self):
-        """Ids, times, scopes and counts only: never a token, a secret, a key or a hash."""
+        """Ids, times, scopes and counts only: never a token, a secret, a key or a hash.
+
+        Spent links are listed too (``used`` equals ``uses``): they count toward
+        SITE_MAX_RECORDS until they expire, so the owner needs their ids to revoke them.
+        """
         self.prune()
         links = [{"id": record["id"], "kind": record["kind"], "scope": record["scope"],
                   "issued_at": record["issued_at"], "expires_at": record["expires_at"],
                   "uses": record["uses"], "used": self.spent(record)}
-                 for _, record in self._links() if self.is_live(record)]
+                 for _, record in self._links()]
         sessions = [{"id": record["id"], "link": record["link"], "created_at": record["created_at"],
                      "expires_at": record["expires_at"]}
                     for _, record in self._sessions() if self.clock() < record["expires_at"]]
@@ -1014,6 +1068,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if raw_path == "/robots.txt" and self.command in ("GET", "HEAD"):
             self._drain()
             return self._reply(200, ROBOTS_DENY_BODY, [("Content-Type", "text/plain; charset=utf-8")])
+        if raw_path == SHARE_PREFIX:
+            return self._share_open_short(name, entry, store)
         if raw_path.startswith(SHARE_PREFIX):
             return self._share_open(name, entry, store, raw_path[len(SHARE_PREFIX):])
         if unsafe_path(raw_path):
@@ -1033,10 +1089,40 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return self._forward((upstream.hostname, upstream.port), self._site_headers(entry),
                              session["expires_at"], lambda: store.session_alive(session["digest"]))
 
-    def _share_open(self, name, entry, store, link_id):
-        """``/s/<id>``: a page that posts the fragment's token, then the token-for-cookie swap."""
+    def _share_open_short(self, name, entry, store):
+        """``/s/``: a page that posts the fragment's token, then the token-for-cookie swap.
+
+        The page is the same whatever links exist. Past the rate limit, every refusal is
+        one 404 after the same scan of every stored link (spec 081 Story 7, FR-038).
+        """
         gate = self.gate
-        if not _LINK_ID.fullmatch(link_id):
+        if self.command in ("GET", "HEAD"):
+            self._drain()
+            return self._reply(200, _SITE_PAGE, self._site_page_headers())
+        if self.command != "POST":
+            return self._not_found()
+        if not gate.allow_attempt(name):
+            self._drain()
+            return self._fail(429, "rate_limited")
+        token = self._read_token() or ""
+        well_formed = _SHORT_TOKEN.fullmatch(token) is not None
+        # A malformed token is hashed and looked up too, so it costs what a wrong one does.
+        record = store.find_short(hashlib.sha256(token.encode("utf-8", "replace")).hexdigest())
+        # Under Referrer-Policy: no-referrer a browser sends "Origin: null" on its own
+        # form POST. A cross-site post still needs the token, and would only spend a use.
+        origin = self.headers.get("Origin")
+        if (not well_formed or record is None or origin not in (None, "null", f"https://{entry['hostname']}")
+                or not store.is_live(record) or not gate.enabled() or not store.claim(record)):
+            return self._answer_not_found()
+        return self._start_share(name, store, record)
+
+    def _share_open(self, name, entry, store, link_id):
+        """``/s/<id>``: an old-form link's opener page, then the token-for-cookie swap.
+
+        LEGACY(081 short links): kept until the last old-form link expires (tasks.md T049).
+        """
+        gate = self.gate
+        if not _LEGACY_LINK_ID.fullmatch(link_id):
             return self._not_found()
         if self.command in ("GET", "HEAD"):
             self._drain()
@@ -1061,6 +1147,11 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if (record is None or record["id"] != link_id or not store.is_live(record)
                 or not gate.enabled() or not store.claim(record)):
             return self._answer_not_found()
+        return self._start_share(name, store, record)
+
+    def _start_share(self, name, store, record):
+        """A claimed link becomes a session; the cookie keeps this browser's other shares."""
+        gate = self.gate
         started = store.start_session(record, gate.config["session_ttl_seconds"],
                                       gate.config["enabled_until_epoch"])
         if started is None:

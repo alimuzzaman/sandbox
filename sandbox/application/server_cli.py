@@ -149,6 +149,7 @@ def capabilities() -> dict:
     from sandbox.commands.preview_server import preview_contract_available, CONTRACT as PREVIEW_CONTRACT
     from sandbox.application.server_cli_source_repair import contract_available as source_repair_available
     from sandbox.hosting.source_repair import CONTRACT as SOURCE_REPAIR_CONTRACT
+    from sandbox.hosting.publisher_proof import contract_available as publisher_proof_available, CONTRACT as PUBLISHER_PROOF_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
@@ -161,7 +162,8 @@ def capabilities() -> dict:
                 (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
                  and source_content_available() else []) +
                 ([STACK_REF_CONTRACT] if stack_ref_contract_available() else []) +
-                ([PREVIEW_CONTRACT] if preview_contract_available() else [])}
+                ([PREVIEW_CONTRACT] if preview_contract_available() else []) +
+                ([PUBLISHER_PROOF_CONTRACT] if publisher_proof_available() else [])}
 
 
 def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:

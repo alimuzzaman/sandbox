@@ -45,6 +45,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.remote",
     "sandbox.commands.deploy",
     "sandbox.commands.delivery",
+    "sandbox.commands.publisher_proof",
     "sandbox.commands.hosting",
     "sandbox.commands.preview",
     "sandbox.commands.secrets",

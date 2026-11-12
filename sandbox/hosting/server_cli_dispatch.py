@@ -103,22 +103,20 @@ def _dispatch_host_if_selected(args) -> bool:
     remote_name = getattr(args, "remote", None)
     if not original or not remote_name:
         return False
-    # Observations stay on their existing paths. Exec has a separate no-source
-    # contract and result adapter; only fixed apply may stage controller source.
+    # Exec has a separate no-source contract and result adapter. Provider-aware
+    # hosting commands run in the retained owner context before local preflight.
     action = getattr(args, "action", None)
     if action == "exec":
         from sandbox.hosting.server_cli_exec_client import dispatch_exec_if_selected
         return dispatch_exec_if_selected(args)
-    selected_apply = (action == "apply" or
-                      (action == "stack" and getattr(args, "image_action", None) == "up"))
-    if not selected_apply or not getattr(args, "confirm", False) or getattr(args, "plan", False):
-        return False
-    # Explicit credential declarations retain their existing closed contract.
-    # Explicit personal-local is also an execution choice, not a fallback.
-    if getattr(args, "credential_scope", None) is not None or any(
-            getattr(args, field, None) is not None for field in (
-                "credential_project", "credential_source", "credential_source_revision",
-                "credential_profile", "credential_profile_revision")):
+    stack_action = getattr(args, "image_action", None)
+    selected = (action == "plan" or action == "tailnet-name" or
+                (action == "apply" and getattr(args, "confirm", False)) or
+                (action == "stack" and (stack_action == "list" or
+                    (stack_action == "up" and (getattr(args, "plan", False) or
+                                               getattr(args, "confirm", False))) or
+                    (stack_action == "down" and getattr(args, "confirm", False)))))
+    if not selected:
         return False
     args._server_cli_request_id = (getattr(args, "_server_cli_request_id", None)
         or getattr(args, "request_id", None) or "host-cli-" + secrets.token_hex(12))
@@ -140,6 +138,11 @@ def _dispatch_host_if_selected(args) -> bool:
     entry = _remote.get_remote(remote_name)
     if not isinstance(entry, dict) or not entry.get("joined") or entry.get("control_transport") != "tailscale":
         return False
+    if getattr(args, "credential_scope", None) is not None or any(
+            getattr(args, field, None) is not None for field in (
+                "credential_project", "credential_source", "credential_source_revision",
+                "credential_profile", "credential_profile_revision")):
+        raise ValueError("joined hosting requires server-held credentials")
     try:
         from sandbox.application.server_cli import dispatch_server_cli
     except ModuleNotFoundError as exc:
@@ -155,7 +158,7 @@ def _dispatch_host_if_selected(args) -> bool:
         root = Path(project_dir or ".").expanduser().resolve(strict=True)
     argv = list(original)
     source_ref = None
-    if action == 'stack':
+    if action == 'stack' and stack_action == 'up':
         if getattr(args, 'server_cli_stack_ref', None) is not None or any(
                 value.split('=', 1)[0] == '--server-cli-stack-ref' for value in argv):
             raise ValueError('server_cli_stack_ref_reserved')

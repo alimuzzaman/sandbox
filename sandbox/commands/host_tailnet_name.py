@@ -120,10 +120,27 @@ def default_deps(project_dir: str | None):
     from sandbox.hosting.front_door import nginx
     from sandbox.hosting.tailnet_names import remote_program, service, state, verify
     from sandbox.hosting.tailnet_names.broker import Broker
+    from sandbox.hosting.server_cli_target import selected_owner_target
 
     broker = Broker(secret_service_factory(project_dir), acme_root=state.default_root() / "acme")
 
     def active_jobs(remote: str) -> bool:
+        owner = selected_owner_target(remote)
+        if owner is not None:
+            from sandbox.core import _paths
+            from sandbox.jobs.registry import JobRepository
+            context = owner.require_current()
+            repository = JobRepository(_paths.RUNTIME_DIR / "jobs" / "registry.sqlite3")
+            try:
+                jobs = repository.list(active_only=True, limit=2)
+            finally:
+                repository.close()
+            owner.require_current()
+            if not isinstance(jobs, list) or any(not isinstance(row, dict) for row in jobs):
+                raise RuntimeError("job list unavailable")
+            if not any(row.get("job_id") == context.job_id for row in jobs):
+                return True  # Missing own row or other jobs filling the page keeps the gate shut.
+            return any(row.get("job_id") != context.job_id for row in jobs)
         from sandbox.transports.remote_jobs import RemoteJobTransport
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                                        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
@@ -136,12 +153,16 @@ def default_deps(project_dir: str | None):
 
     def jobs_probe(entry) -> dict:
         # The remote program re-checks jobs as the SSH user against this home.
-        return {"home": _remote.resolve_sandbox_home(dict(entry))}
+        from sandbox.hosting.server_cli_target import is_owner_target
+        if is_owner_target(entry):
+            context = entry.require_current()
+            return {"home": entry.sandbox_home(), "exclude_job_id": context.job_id}
+        return {"home": _remote.resolve_sandbox_home(entry)}
 
     return service.Deps(
         remote_call=lambda entry, action, payload: remote_program.call(entry, action, payload),
         preflight=lambda entry, declared, own_file: nginx.preflight(
-            dict(entry), declared=declared, own_file=own_file),
+            entry, declared=declared, own_file=own_file),
         dns=broker.dns,
         issue=broker.issue,
         cached_chain=broker.cached_chain,
@@ -179,16 +200,27 @@ def cmd_host_tailnet_name(args) -> None:
             if action == "add":
                 upstream = models.Upstream.parse(args.upstream)
         from sandbox.core import _remote
-        entry = _remote.get_remote(args.remote)
-        if not isinstance(entry, dict):
+        from sandbox.hosting.server_cli_target import host_target, is_owner_target
+        entry = host_target(args.remote)
+        owner = is_owner_target(entry)
+        if not isinstance(entry, dict) and not owner:
             raise TailnetNameError(REMOTE_UNKNOWN, f"remote {args.remote!r} is not registered")
         front_door.require_capability(entry, front_door.TAILNET_NAMES)
         tailnet_ip = models.tailnet_address(entry.get("tailscale_host"))
         public_ip = None
         if action in ("add", "renew"):
-            ssh_host = _remote.remote_ssh_parts(entry).get("host")
-            public_ip = models.public_address(override=getattr(args, "public_address", None),
-                                              ssh_host=ssh_host)
+            if owner:
+                # Actual receiver interface metadata is bound into the original job.
+                # An override cannot replace its public exposure-check target.
+                supplied = getattr(args, "public_address", None)
+                observed = entry.get("origin_ipv4")
+                if not observed or (supplied is not None and supplied != observed):
+                    raise TailnetNameError(models.PUBLIC_ADDRESS_INVALID,
+                                           "the receiver's unique public IPv4 address is required")
+                public_ip = models.public_address(override=observed, ssh_host=None)
+            else:
+                public_ip = models.public_address(override=getattr(args, "public_address", None),
+                    ssh_host=_remote.remote_ssh_parts(entry).get("host"))
         ctx = service.Context(config, models.RemoteTarget(args.remote, entry, tailnet_ip, public_ip))
         deps = default_deps(getattr(args, "project_dir", None))
         if action == "add":

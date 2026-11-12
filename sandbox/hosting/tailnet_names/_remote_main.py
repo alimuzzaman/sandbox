@@ -462,6 +462,10 @@ def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
     if not (isinstance(home, str) and home.startswith("/") and len(home) < 4096
             and "\x00" not in home and not set(home.split("/")[1:]) & {"", ".", ".."}):
         raise Refusal("request_invalid", "invalid job probe")
+    excluded = probe.get("exclude_job_id")
+    if excluded is not None and (not isinstance(excluded, str) or
+                                 re.fullmatch(r"[0-9a-f]{32}", excluded) is None):
+        raise Refusal("request_invalid", "invalid owner job identity")
     user = environ.get("SUDO_USER") or "root"
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
         raise Refusal("gate_unavailable", "the invoking user could not be determined")
@@ -475,7 +479,7 @@ def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
             or not stat.S_ISREG(registry_st.st_mode):
         raise Refusal("gate_unavailable", "the Sandbox home is not the invoking user's")
     command = ["env", "SANDBOX_HOME=" + home, "SANDBOX_AUTO_UPDATE=0",
-               home + "/sb-src/sb", "job-list", "--active-only", "--limit", "1", "--json"]
+               home + "/sb-src/sb", "job-list", "--active-only", "--limit", "2" if excluded else "1", "--json"]
     if user != "root":
         command = ["runuser", "-u", user, "--"] + command
     rc, out, _err = runner(command, timeout=60)
@@ -485,7 +489,14 @@ def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
         page = None
     if not (isinstance(page, dict) and page.get("ok") is True and isinstance(page.get("jobs"), list)):
         raise Refusal("gate_unavailable", "the remote's durable jobs could not be listed")
-    return bool(page["jobs"])
+    jobs = page["jobs"]
+    if any(not isinstance(row, dict) or not isinstance(row.get("job_id"), str) for row in jobs):
+        raise Refusal("gate_unavailable", "the remote's job identities are unavailable")
+    if excluded is not None:
+        if not any(row["job_id"] == excluded for row in jobs):
+            return True
+        return any(row["job_id"] != excluded for row in jobs)
+    return bool(jobs)
 
 
 # ---------------------------------------------------------------------------

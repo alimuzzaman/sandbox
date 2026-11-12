@@ -791,8 +791,14 @@ class RemoteJobTransport:
                            'server_cli.runtime_revision': capability['runtime_revision'],
                            'server_cli.ownership_marker': capability['ownership_marker'],
                            'server_cli.remote_name': submission.remote_name})
-        routing = validate_target_metadata({key: remote[key] for key in
-            ('origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port') if key in remote and remote[key] is not None})
+        # Interface addresses come from this authenticated receiver observation,
+        # never a stale controller origin or its SSH/Tailnet destination.
+        observed = validate_target_metadata(capability.get('target_metadata', {}))
+        routing = validate_target_metadata({
+            **{key: remote[key] for key in ('front_door', 'mcp_port')
+               if key in remote and remote[key] is not None},
+            **{key: observed[key] for key in ('origin_ipv4', 'origin_ipv6', 'tailscale_host')
+               if key in observed}})
         provenance['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
         submission = replace(submission, execution_policy_provenance=provenance)
         deployed = self._deploy(remote, submission.project_root,

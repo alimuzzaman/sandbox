@@ -204,7 +204,7 @@ def selected_owner_target(remote_name):
     if validate_owner_current(context.owner) != context:
         raise OwnerTargetUnavailable("original server CLI context changed")
     routing = context.target_metadata
-    allowed = {"origin_ipv4", "origin_ipv6", "front_door", "mcp_port"}
+    allowed = {"origin_ipv4", "origin_ipv6", "front_door", "mcp_port", "tailscale_host"}
     if not isinstance(routing, Mapping) or set(routing) - allowed:
         raise OwnerTargetUnavailable("retained target routing metadata is unavailable")
     if routing.get("front_door") not in ("caddy", "nginx"):

@@ -189,3 +189,41 @@ and a short `--reason`.
 ```
 
 Do not use that command as an automatic retry or to bypass a service revision mismatch.
+
+## Joined hosting command results
+
+On a joined Tailscale registration, `host plan`, `host stack list`,
+`host stack up --plan|--confirm`, `host stack down --confirm` and
+`host tailnet-name add|list|renew|remove` use the installed retained server CLI.
+They return the original durable acceptance receipt, not the command result.
+Pass a stable `--request-id`, retain `job_id`, and inspect it with
+`job-status JOB --remote NAME --json` and bounded
+`job-output JOB --remote NAME --stream stdout --json` pages. Concatenate each
+page's `data` using its opaque `cursor` until `has_more` is false after terminal
+status. With `--json`, these host handlers emit their command envelope as one
+JSON line. A successful outer stack-up job only establishes submission of its
+application child; inspect that original child's retained result separately.
+Unknown acceptance or missing output never authorizes a second submission.
+
+These routes select server credentials before controller provider preflight.
+Explicit controller credential options refuse on these joined routes. Tailnet
+names retain the genuine owner target through nginx and remote-program calls;
+they neither serialize it as a grant nor SSH back to the server. Their existing
+broker, per-name leases, state lock and edge lock run on the server. The job gate
+excludes only that same retained executing job and still refuses other active
+jobs or missing job identity. Add/renew use the actual receiver's unique public
+IPv4 interface observation for public exposure checks, and its observed Tailnet
+interface for private binding. A conflicting public override or missing metadata
+refuses. The optional `tailscale_host` retained metadata requires the matching
+protocol-25 receiver update; old installed metadata does not prove support.
+No client or server deployment or runtime acceptance is implied by this source.
+
+Image settlement signing is separate release approval authority. `host image
+settle --remote NAME --settlement-phase sign-approval|sign-forward-approval`
+requires its configured approval public key and SSH signing agent. Those keys
+are not transport login credentials. `install-approval` and
+`install-forward-approval` consume existing signed artifacts instead; all
+signature and target checks remain required. This does not promise that every
+remote-targeted operation needs no additional authority. Public preview
+create/destroy/cleanup still use their existing controller Cloudflare workflow;
+this hosting change does not establish server-provider execution for them.

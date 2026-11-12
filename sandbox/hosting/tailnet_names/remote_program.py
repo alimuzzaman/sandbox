@@ -31,7 +31,7 @@ def call(entry: Mapping, action: str, payload: dict, *, timeout: int = TIMEOUT_S
         from sandbox.hosting.front_door import nginx
         executor = nginx._python_program
     try:
-        data = executor(dict(entry), program_source(), {"action": action, **payload},
+        data = executor(entry, program_source(), {"action": action, **payload},
                         timeout=timeout)
     except FrontDoorError as exc:
         raise TailnetNameError(REMOTE_FAILED, f"the remote program did not answer: {exc}") from exc

@@ -6,10 +6,13 @@
 //   /instance/<name>/console -> instance detail + console drawer open
 //   /host/local              -> local host overview
 //   /usage                   -> agent usage page
-//   /hosting                 -> stacks and hosted sites (read-only)
+//   /hosting                 -> stacks and hosted sites overview
+//   /hosting/<remote>/<project>/<environment> -> one stack or hosted site
 //
 // On hard-refresh/deep-link the Python server serves the app for any non-/api
 // path (SPA fallback), then this router renders the right view.
+
+export type HostingRouteTarget = { remote: string; project: string; environment: string };
 
 export type Route =
   | { page: "home" }
@@ -17,7 +20,7 @@ export type Route =
   | { page: "local-host" }
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
-  | { page: "hosting" }
+  | { page: "hosting"; target?: HostingRouteTarget }
   | { page: "remote"; name: string }
   | { page: "remote-instance"; name: string; instance: string }
   | { page: "notfound" };
@@ -30,6 +33,14 @@ export function parse(pathname: string): Route {
     return { page: "local-host" };
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
   if (parts[0] === "hosting" && parts.length === 1) return { page: "hosting" };
+  if (parts[0] === "hosting" && parts.length === 4) {
+    try {
+      return { page: "hosting", target: {
+        remote: decodeURIComponent(parts[1]!), project: decodeURIComponent(parts[2]!),
+        environment: decodeURIComponent(parts[3]!),
+      } };
+    } catch { return { page: "notfound" }; }
+  }
   if (parts[0] === "remote" && parts[1] && parts.length === 2)
     return { page: "remote", name: decodeURIComponent(parts[1]) };
   if (parts[0] === "remote" && parts[1] && parts[2] === "instance" && parts[3] && parts.length === 4)
@@ -72,11 +83,11 @@ export function instancePath(name: string, console = false): string {
 }
 export const localHostPath = (): string => "/host/local";
 export const hostingPath = (): string => "/hosting";
-// One hosted target's card on /hosting. Server-side rows use "this-server".
+// Server-side rows use "this-server". Anchors remain stable card identifiers.
 export const hostingAnchor = (remote: string, project: string, environment: string): string =>
   `hosting-${remote}/${project}/${environment}`;
 export const hostingTargetPath = (remote: string, project: string, environment: string): string =>
-  `${hostingPath()}#${encodeURIComponent(hostingAnchor(remote, project, environment))}`;
+  `${hostingPath()}/${[remote, project, environment].map(encodeURIComponent).join("/")}`;
 export const remotePath = (name: string): string => `/remote/${encodeURIComponent(name)}`;
 export const remoteInstancePath = (name: string, instance: string): string =>
   `${remotePath(name)}/instance/${encodeURIComponent(instance)}`;
@@ -87,7 +98,8 @@ export function initRouter(): void {
   document.addEventListener("click", (e) => {
     const a = (e.target as HTMLElement)?.closest?.("a[data-link]") as
       HTMLAnchorElement | null;
-    if (!a) return;
+    if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey ||
+        a.hasAttribute("download") || (a.target && a.target !== "_self")) return;
     const href = a.getAttribute("href") || "";
     if (href.startsWith("/")) { e.preventDefault(); navigate(href); }
   });

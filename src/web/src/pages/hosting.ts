@@ -5,7 +5,7 @@
 import { esc } from "../dom";
 import { store } from "../state";
 import { theme } from "../theme";
-import { hostingAnchor, hostingTargetPath } from "../router";
+import { hostingAnchor, hostingPath, hostingTargetPath, type HostingRouteTarget } from "../router";
 import { shareButtons } from "./share";
 import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget, LifetimeRow, LifetimeView } from "../types";
 import {
@@ -140,9 +140,9 @@ function lifetimeLine(view: LifetimeView): string {
 function lifetimesSection(rows: LifetimeRow[]): string {
   if (!rows.length) return "";
   const body = rows.map(row => {
-    const anchor = hostingAnchor(row.source === "this-server" ? "this-server" : row.remote, row.project, row.environment);
+    const path = hostingTargetPath(row.source === "this-server" ? "this-server" : row.remote, row.project, row.environment);
     const name = row.card
-      ? `<a href="#${esc(encodeURIComponent(anchor))}" class="font-medium text-blue-700 hover:underline dark:text-blue-300">${esc(row.name)}</a>`
+      ? `<a data-link href="${esc(path)}" class="font-medium text-blue-700 hover:underline dark:text-blue-300">${esc(row.name)}</a>`
       : `<span class="font-medium">${esc(row.name)}</span>`;
     const sub = [row.ref_branch || "", row.source === "this-server" ? "" : row.remote, row.card ? "" : "no card"]
       .filter(Boolean).join(" · ");
@@ -246,21 +246,42 @@ function targetRow(target: HostingTarget): string {
   </section>`;
 }
 
-export function hostingView(): string {
+function overviewRow(row: HostingStack | HostingTarget): string {
+  const path = hostingTargetPath(row.source === "this-server" ? "this-server" : row.remote, row.project, row.environment);
+  const name = "slug" in row ? row.slug : row.project;
+  return `<a data-link href="${esc(path)}" class="${theme.panel} flex flex-wrap items-center justify-between gap-3 px-5 py-4 hover:border-blue-400">
+    <div class="min-w-0"><div class="font-medium text-blue-700 dark:text-blue-300">${esc(name)}</div>
+    <div class="mt-1 text-[12px] ${theme.quiet}">${esc(row.project)} · ${esc(row.environment)} · ${esc(sourceNote(row.source, row.remote))}</div></div>
+    <div class="text-[12px]">${lifetimeBadge(row.lifetime)} <span class="ml-2 ${theme.quiet}">Open details →</span></div></a>`;
+}
+
+export function hostingView(target?: HostingRouteTarget): string {
   const data = store.hosting;
   const status = store.hostingError ? store.hostingError
     : data ? `Updated ${new Date(data.generated_at * 1000).toLocaleTimeString()}` : "Loading…";
+  const selected = target && data ? [...data.stacks, ...data.targets].find(row =>
+    (row.source === "this-server" ? "this-server" : row.remote) === target.remote &&
+    row.project === target.project && row.environment === target.environment) : undefined;
+  const title = target ? selected && "slug" in selected ? selected.slug : target.project : "Stacks and hosted sites";
+  const back = target ? `<a data-link href="${hostingPath()}" class="text-[12px] text-blue-700 hover:underline dark:text-blue-300">← All stacks and hosted sites</a>` : "";
   const header = `<header class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-      <div><div class="${theme.label}">Hosting</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">Stacks and hosted sites</h1>
+      <div>${back}<div class="${theme.label}">Hosting</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">${esc(title)}</h1>
       <p class="mt-1 text-[13px] ${theme.muted}">Every server created for each stack, with its state, health and the ref it was built from.</p></div>
       <div class="flex items-center gap-3"><div role="status" class="text-[12px] ${store.hostingError ? "text-red-700 dark:text-red-300" : theme.quiet}">${esc(status)}</div>
       <button class="${theme.button}" onclick="sb.refreshHosting()">Refresh</button></div></header>`;
   if (!data) return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">${header}</div></div>`;
   const partial = data.partial_reasons.length ? `<div role="status" class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-[12px] text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">Some records could not be read: ${esc(data.partial_reasons.join(", "))}. Everything else is shown.</div>` : "";
+  if (target) {
+    const card = selected ? "slug" in selected ? stackCard(selected) : targetRow(selected)
+      : `<div role="status" class="${theme.panel} p-8 text-[13px] ${theme.quiet}">${store.hostingError || data.partial_reasons.length
+        ? "This stack could not be loaded from the available records. Refresh to try again."
+        : "Stack or hosted site not found."}</div>`;
+    return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">${header}${partial}${card}</div></div>`;
+  }
   const empty = !data.stacks.length && !data.targets.length
     ? `<div class="${theme.panel} p-8 text-center text-[13px] ${theme.quiet}">No stacks or hosted sites yet. Create one with <code>sb host stack up</code> or <code>sb host apply</code>.</div>` : "";
-  const stacks = data.stacks.length ? `<section class="space-y-4"><div class="flex items-center justify-between"><h2 class="text-[14px] font-semibold">Stacks</h2><span class="text-[11px] ${theme.quiet}">${data.stacks.length} stack${data.stacks.length === 1 ? "" : "s"}</span></div>${data.stacks.map(stackCard).join("")}</section>` : "";
-  const targets = data.targets.length ? `<section class="space-y-4"><div class="flex items-center justify-between"><h2 class="text-[14px] font-semibold">Hosted sites</h2><span class="text-[11px] ${theme.quiet}">projects hosted with <code>sb host apply</code>, without a stack</span></div>${data.targets.map(targetRow).join("")}</section>` : "";
+  const stacks = data.stacks.length ? `<section class="space-y-4"><div class="flex items-center justify-between"><h2 class="text-[14px] font-semibold">Stacks</h2><span class="text-[11px] ${theme.quiet}">${data.stacks.length} stack${data.stacks.length === 1 ? "" : "s"}</span></div>${data.stacks.map(overviewRow).join("")}</section>` : "";
+  const targets = data.targets.length ? `<section class="space-y-4"><div class="flex items-center justify-between"><h2 class="text-[14px] font-semibold">Hosted sites</h2><span class="text-[11px] ${theme.quiet}">projects hosted with <code>sb host apply</code>, without a stack</span></div>${data.targets.map(overviewRow).join("")}</section>` : "";
   const lifetimes = lifetimesSection(data.lifetimes || []);
   return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">${header}${partial}${empty}${lifetimes}${stacks}${targets}</div></div>`;
 }

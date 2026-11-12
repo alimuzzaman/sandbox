@@ -69,7 +69,6 @@ function loadHosting(): Promise<void> {
     } finally {
       hostingInFlight = null;
       renderDetail(false);
-      scrollToHostingAnchor();
     }
     window.clearTimeout(hostingTimer);
     if (currentRoute().page === "hosting" && hostingStillChecking() && hostingFollowUps < 3) {
@@ -79,19 +78,7 @@ function loadHosting(): Promise<void> {
   })();
   return hostingInFlight;
 }
-function refreshHosting(): void { hostingFollowUps = 0; scrolledHash = ""; void loadHosting(); }
-
-// A host page links to one card as /hosting#<anchor>; scroll to it once per visit.
-let scrolledHash = "";
-function scrollToHostingAnchor(): void {
-  if (currentRoute().page !== "hosting" || !location.hash || location.hash === scrolledHash) return;
-  let id = "";
-  try { id = decodeURIComponent(location.hash.slice(1)); } catch { return; }
-  const card = document.getElementById(id);
-  if (!card) return;
-  scrolledHash = location.hash;
-  card.scrollIntoView({ block: "start" });
-}
+function refreshHosting(): void { hostingFollowUps = 0; void loadHosting(); }
 
 async function performRefresh(): Promise<void> {
   if (store.paused) return;

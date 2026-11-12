@@ -871,15 +871,23 @@ def _probe(hostname, probe, upstream, suffixes):
 
 
 _STACK_STYLE = (
-    "body{font:15px/1.5 system-ui,sans-serif;margin:0;padding:24px 16px;color:#1d2433;background:#f7f8fa}"
-    "main{max-width:760px;margin:0 auto}h1{font-size:22px;margin:0 0 4px}"
-    "p{color:#4a5468;margin:0 0 16px}table{width:100%;border-collapse:collapse;background:#fff}"
-    "th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #e3e6ec;word-break:break-all}"
-    "th{font-size:13px;color:#4a5468}.up{color:#137333}.up_login{color:#137333}"
+    "body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:32px 20px;color:#1d2433;background:#f7f8fa}"
+    "main{max-width:1200px;margin:0 auto;border:1px solid #dfe3e8;border-radius:12px;overflow:hidden;background:#fff}"
+    "header,section{padding:20px}header{border-bottom:1px solid #dfe3e8}"
+    ".label,th{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#657084}"
+    "h1{font-size:20px;margin:4px 0}h2{font-size:14px;margin:0 0 12px}"
+    "p{color:#657084;margin:6px 0 0}.servers{overflow-x:auto;padding:8px 12px}"
+    "table{width:100%;border-collapse:collapse;min-width:440px}"
+    "th,td{text-align:left;padding:14px 10px;border-bottom:1px solid #e3e6ec;overflow-wrap:anywhere}"
+    "tbody tr:last-child td{border-bottom:0}.up,.up_login{color:#137333}"
     ".redirect{color:#8a5a00}.client_error,.server_error,.unreachable{color:#b3261e}"
-    "ul{padding-left:20px}li{margin:6px 0}a{color:#1a56c4}"
-    "@media (prefers-color-scheme:dark){body{background:#14171c;color:#e6e9ef}"
-    "table{background:#1c2027}th,p{color:#a7afbe}td,th{border-color:#2c313a}a{color:#8ab4f8}}"
+    ".sign-in{border-top:1px solid #dfe3e8;background:#f8f9fb}"
+    "ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:10px}"
+    "li a{display:inline-block;border:1px solid #cbd2dc;border-radius:8px;padding:8px 12px;text-decoration:none}"
+    "a{color:#1a56c4}a:focus-visible{outline:2px solid #1a56c4;outline-offset:3px}"
+    "@media(prefers-color-scheme:dark){body{background:#0b0b0b;color:#ededed}main{background:#191919}"
+    "main,header,.sign-in,td,th{border-color:#303030}.sign-in{background:#101010}"
+    "th,p,.label{color:#a3a3a3}a{color:#9ac7f2}li a{border-color:#444}.up,.up_login{color:#78dcbc}}"
 )
 _STACK_STYLE_HASH = base64.b64encode(hashlib.sha256(_STACK_STYLE.encode()).digest()).decode()
 _HEALTH_LABELS = {"up": "up", "up_login": "up (sign-in required)", "redirect": "redirects",
@@ -904,11 +912,11 @@ def render_stack_page(record, health, links):
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="robots" content="noindex, nofollow">'
         f"<title>Stack {title}</title><style>{_STACK_STYLE}</style></head><body><main>"
-        f"<h1>Stack {title}</h1>"
+        f'<header><div class="label">Stack</div><h1>{title}</h1>'
         f"<p>Sign-in links work once and expire {SIGN_IN_SECONDS // 60} minutes after this page "
-        "loaded. Reload the page for new ones.</p>"
+        'loaded. Reload the page for new ones.</p></header><div class="servers">'
         "<table><thead><tr><th>Server</th><th>Role</th><th>Health</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table><h2>Sign in</h2><ul>{sign_in}</ul></main></body></html>"
+        f'<tbody>{rows}</tbody></table></div><section class="sign-in"><h2>Sign in</h2><ul>{sign_in}</ul></section></main></body></html>'
     ).encode()
 
 

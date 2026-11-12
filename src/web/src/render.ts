@@ -180,7 +180,7 @@ function detailSignature(route: Route): string {
       store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
-  if (route.page === "hosting") return "hosting:" + store.hostingError + ":" + JSON.stringify(store.hosting);
+  if (route.page === "hosting") return "hosting:" + JSON.stringify(route.target) + ":" + store.hostingError + ":" + JSON.stringify(store.hosting);
   if (route.page === "local-host") {
     const server = thisServer();
     // The server row arrives after the first render; its presence alone must
@@ -204,7 +204,7 @@ function viewForRoute(route: Route): string {
   switch (route.page) {
     case "create": return createView();
     case "usage": return usageView();
-    case "hosting": return hostingView();
+    case "hosting": return hostingView(route.target);
     case "local-host": return localHostView();
     case "remote": return remoteView(route.name, store.remote[route.name]);
     case "remote-instance": return remoteView(route.name, store.remote[route.name], route.instance);

@@ -382,7 +382,7 @@ def collect(identity, runtime):
                         info=os.fstat(fd)
                         if not stat.S_ISREG(info.st_mode) or info.st_uid!=identity['uid'] or info.st_nlink!=1 or info.st_size>65536: fail()
                         with os.fdopen(fd,'r',closefd=False) as handle: text=handle.read(65537)
-                        match=re.fullmatch(r'services:\n  ([A-Za-z0-9][A-Za-z0-9_.-]{0,79}):\n    ports:\n      - "127\.0\.0\.1:([0-9]{1,5}):([0-9]{1,5})"\n',text)
+                        match=re.fullmatch(r'services:\n  ([A-Za-z0-9][A-Za-z0-9_.-]*):\n    ports:\n      - "127\.0\.0\.1:([0-9]{1,5}):([0-9]{1,5})"\n',text)
                         if not match or not all(1<=int(match[i])<=65535 for i in (2,3)): fail()
                     finally:
                         os.close(fd)

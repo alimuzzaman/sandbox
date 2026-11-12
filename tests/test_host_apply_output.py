@@ -186,6 +186,28 @@ class ApplyOutputTests(unittest.TestCase):
         self.assertEqual(destination.read_text(), 'keep this')
         self.assertFalse(targets.owner_effect_unknown(self.entry))
 
+    @unittest.skipUnless(hasattr(os, 'O_PATH') or hasattr(os, 'O_SEARCH'),
+                         'traversal-only directory descriptors are unavailable')
+    @unittest.skipIf(os.geteuid() == 0, 'root bypasses ancestor read permissions')
+    def test_search_only_ancestor_allows_private_scrubbed_log_without_permission_changes(self):
+        ancestor = self.root / 'search-only'
+        destination = ancestor / 'owned'
+        destination.mkdir(parents=True, mode=0o700)
+        log = destination / 'apply.log'
+        ancestor.chmod(0o111)
+        try:
+            self.assertFalse(os.access(ancestor, os.R_OK))
+            receipt = apply_output._run(self.initializer(0), 'initializer_run',
+                str(log), [self.canary], self.environment)
+            self.assertEqual(receipt['status'], 'exited')
+            self.assertEqual(receipt['exit_code'], 0)
+            self.assertIn('public stdout [REDACTED]', receipt['output'])
+            self.assertNotIn(self.canary, log.read_text())
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(ancestor.stat().st_mode & 0o777, 0o111)
+        finally:
+            ancestor.chmod(0o700)
+
     def test_invalid_completion_receipts_retain_each_original_apply_fence(self):
         receipts = (
             (0, '', ''), (0, '{}', ''),

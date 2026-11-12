@@ -133,10 +133,16 @@ def _open_log(path):
     selected = Path(path)
     if not selected.is_absolute() or selected.resolve() != selected:
         raise OutputUnavailable('apply log path is unsafe')
-    parent = os.open(selected.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    # A traversable ancestor need not be listable (for example /home 0711).
+    # Linux O_PATH and POSIX O_SEARCH retain descriptor-relative traversal
+    # without requesting directory read access. O_NOFOLLOW|O_DIRECTORY still
+    # reject a symlink component, and the final file checks remain unchanged.
+    directory_flags = (getattr(os, 'O_PATH', getattr(os, 'O_SEARCH', os.O_RDONLY))
+                       | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent = os.open(selected.anchor, directory_flags)
     try:
         for component in selected.parts[1:-1]:
-            following = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            following = os.open(component, directory_flags, dir_fd=parent)
             os.close(parent)
             parent = following
         descriptor = os.open(selected.name,

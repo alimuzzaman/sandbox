@@ -120,6 +120,10 @@ SDK's original deadline/cancellation guard. A missing/malformed completion
 receipt or post-child log failure fences that same job as unknown, withholds
 rollback and lease retirement, and never replays the initializer. Log files
 must be private, owner-held regular files without symlink or hardlink aliases.
+Directory traversal uses Linux `O_PATH` or POSIX `O_SEARCH` handles where
+available, so search-only ancestors such as `/home` mode `0711` need no read
+permission or permission change. Each component still rejects symlinks, and
+the final log must remain an owner-held `0600` regular file with one link.
 Missing exact-value scope refuses before logged command effects. The output
 scope is an internal negative filter, not a new operator role or grant.
 Generic downstream log redaction cannot repair a previously retained raw value;

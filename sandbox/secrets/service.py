@@ -877,7 +877,7 @@ class SecretService:
         return self._operate("unset", source, (key,), surface, perform)
 
     def copy_to_remote(self, source: str, key: str, request, sink, *,
-                       surface: str = "cli") -> dict:
+                       surface: str = "cli", expected_revision: str | None = None) -> dict:
         """Hand one local value to a remote broker's own ``set`` (spec 073).
 
         Every argument refusal precedes audit intent and any read. The value
@@ -895,9 +895,18 @@ class SecretService:
             raise SecretBrokerError("input_invalid", "remote secret request is invalid")
         if not callable(getattr(sink, "put", None)):
             raise SecretBrokerError("input_invalid", "remote secret sink is invalid")
+        if expected_revision is not None and (
+                not isinstance(expected_revision, str) or not expected_revision.isascii()
+                or len(expected_revision) != 35 or not expected_revision.startswith("r1_")
+                or any(c not in "0123456789abcdef" for c in expected_revision[3:])):
+            raise SecretBrokerError("input_invalid", "source revision is invalid")
 
         def perform(correlation):
-            _, document = self._document(source)
+            safe, document = self._document(source)
+            if expected_revision is not None:
+                current = opaque_revision(load_revision_key(self.revision_key_path), safe.content)
+                if not hmac.compare_digest(expected_revision, current):
+                    raise SecretBrokerError("revision_conflict", "source revision no longer matches")
             record = document.entries.get(key)
             if record is None:
                 raise SecretBrokerError("key_missing", "secret key does not exist")

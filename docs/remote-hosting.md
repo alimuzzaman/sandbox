@@ -1572,6 +1572,28 @@ port in Compose through the value, for example
 `"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
 private `environment.env` file apply passes with `--env-file`.
 
+Runtime text publication sends bytes only on the selected owner's process stdin
+or the registered remote's SSH stdin. A fixed eight-byte length header travels
+on that same private stdin. Short or excess input refuses before publication,
+so EOF from an interrupted transfer cannot publish a partial environment.
+A private sibling stage is fully written
+and fsynced before atomic replacement; the directory is fsynced afterward.
+Equal content and mode leaves the destination unchanged. The publisher refuses
+unsafe path components, symlinks, nonregular or multiply linked destinations,
+foreign owners, broad writable modes, and changes observed before replacement.
+Replies contain only `published`, `already_current`, `not_published`, or
+`publication_unknown` status, without payloads or content digests. An unusable
+owner reply withholds completion through the existing operation fence.
+
+This publisher requires an installed owner revision containing
+`sandbox/hosting/runtime_file_writer.py`; protocol 25 is unchanged. Source
+readiness alone does not prove interrupted owner-path delivery. Before real
+keys, verify the installed revision and exercise that path with synthetic data.
+Caught interruptions clean up their own stage; SIGKILL or host loss can leave a
+private stage and an unknown original operation. Retain its identity and fence
+for recovery. Publication does not compare broker values with running containers
+or authorize secret reconciliation, rotation, or application apply.
+
 Missing generated secrets refuse `up --confirm` with `stack_secrets_missing` unless
 you pass `--generate`, which creates them exactly like `sb host secrets --generate`.
 Missing required secrets always refuse. `up` refuses while the stack's previous apply

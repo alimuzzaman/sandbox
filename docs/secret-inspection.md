@@ -246,6 +246,36 @@ structured, binary, or unsupported. Length is bucketed by default.
 with one selected key. Structured, PEM, and binary formats deny it even when a
 caller requests it.
 
+### Read metadata through a joined server owner
+
+The CLI can submit the same low-disclosure queries to a registered joined
+Tailnet server owner. Each request needs a stable request ID and a finite
+1–1800 second timeout. The command returns the durable acceptance receipt only;
+that receipt is not the metadata result. If acceptance is unknown, inspect the
+original request/job with the same request ID and do not submit a new one.
+
+```bash
+./sb secrets source-info --source SOURCE_ALIAS --remote REMOTE_NAME \
+  --request-id REQUEST_ID --timeout 60 --project-dir LOCAL_SOURCE_PROJECT
+
+./sb secrets inspect --source SOURCE_ALIAS --key SECRET_KEY \
+  --mode metadata --remote REMOTE_NAME --request-id REQUEST_ID --timeout 60 \
+  --project-dir LOCAL_SOURCE_PROJECT
+```
+
+`--project-dir` selects the local source tree staged for the retained request.
+The server resolves that staged source in its retained owner context by default.
+Pass `--target-project-dir /absolute/server/project` only to select an existing
+server project source scope. The client sends no secret values and does not include its
+remote, request-ID, or timeout options in the owner command.
+
+Remote inspection requires at least one exact `--key` and `--mode metadata`.
+Remote source info refuses `--exact-size`; remote inspection refuses masks,
+key listing and exact lengths. Neither route copies a value or invokes a
+secret-use profile. A registered provider source still follows its broker's
+authorization and read rules. Neither route submits an uncommitted local
+recovery change as source content.
+
 ### 3. Validate a reviewed shape
 
 ```bash
@@ -527,7 +557,9 @@ timestamps, extra hard links or broad permissions) and `syntax_unsupported` /
 ./sb secrets copy --source SOURCE_ALIAS --key SECRET_KEY \
   --remote REMOTE_NAME --target-source REMOTE_SOURCE_ALIAS \
   [--as REMOTE_KEY] [--create-only | --replace-only] \
-  [--target-project-dir /absolute/remote/project] --project-dir PROJECT_DIR
+  [--target-project-dir /absolute/remote/project] \
+  [--if-source-revision r1_...] [--if-target-revision r1_...] \
+  --project-dir PROJECT_DIR
 ```
 
 Copy reads one value from a local file source and hands it to the remote host's
@@ -548,6 +580,24 @@ and `--replace-only` refuses an absent key, both with `intent_conflict`.
 By default the remote resolves `REMOTE_SOURCE_ALIAS` in its Sandbox home context:
 its `personal` source and user-globally registered sources. Pass
 `--target-project-dir` to use a remote project's registered sources instead.
+
+Bind a reviewed copy to both sources with `--if-source-revision` and
+`--if-target-revision`. Use each host's own opaque revision from `inspect --mode
+metadata`; revisions from different hosts cannot establish value equality.
+The local revision is checked against the same snapshot used for delivery,
+before handing the value to the sink. The target revision is passed to the
+remote broker's existing `set --if-revision` check, before its equality or
+update decision. A changed source refuses with `revision_conflict`, including
+an equal-value replay against a stale target revision. Inspect the original
+operation before deciding whether to prepare a new plan; do not drop the pins
+to force a retry. `--create-only` still allows an equal no-op and refuses a
+different existing value. This comparison happens after private stdin delivery;
+it does not prove equality with an existing application's runtime environment.
+
+These copy selectors require a client containing the revision-bound copy
+change. They reuse the receiver's existing `set --if-revision` contract and do
+not require a new receiver protocol or a server reinstall. No real delivery is
+authorized by preparing these selectors.
 
 Copy refuses before reading the local value when the source is a provider
 source, a name is invalid, or the remote is unknown (`remote_unknown`) or not

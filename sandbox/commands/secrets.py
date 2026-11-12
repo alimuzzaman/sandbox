@@ -42,6 +42,14 @@ _DISPLAY_SOURCE_FIELDS = (
 )
 
 
+def _add_remote_metadata_options(parser) -> None:
+    parser.add_argument("--remote", help="query metadata through the joined server owner")
+    parser.add_argument("--request-id", help="stable retained request identity")
+    parser.add_argument("--timeout", type=int, help="remote request deadline in seconds (1-1800)")
+    parser.add_argument("--target-project-dir", metavar="REMOTE_PROJECT",
+                        help="existing remote project source scope (default: retained staged source)")
+
+
 def configure_parser(parser) -> None:
     parser.description = "Inspect, use, or update registered secrets with least disclosure"
     actions = parser.add_subparsers(dest="action", required=True)
@@ -55,6 +63,7 @@ def configure_parser(parser) -> None:
     source_info.add_argument("--exact-size", action="store_true")
     source_info.add_argument("--json", action="store_true")
     source_info.add_argument("--project-dir", default=".")
+    _add_remote_metadata_options(source_info)
 
     inspect = actions.add_parser("inspect", help="list keys (default) or inspect bounded metadata")
     inspect.add_argument("--source", required=True)
@@ -63,6 +72,7 @@ def configure_parser(parser) -> None:
     inspect.add_argument("--exact-length", action="store_true")
     inspect.add_argument("--json", action="store_true")
     inspect.add_argument("--project-dir", default=".")
+    _add_remote_metadata_options(inspect)
 
     validate = actions.add_parser("validate", help="run a reviewed offline shape profile")
     validate.add_argument("--source", required=True)
@@ -166,6 +176,10 @@ def configure_parser(parser) -> None:
     copying.add_argument("--target-project-dir", metavar="REMOTE_DIR",
                          help="absolute remote project directory whose registered sources "
                               "resolve --target-source (default: the remote Sandbox home)")
+    copying.add_argument("--if-source-revision",
+                         help="refuse if the local source changed since metadata inspection")
+    copying.add_argument("--if-target-revision",
+                         help="refuse if the remote source changed since metadata inspection")
     copying.add_argument("--json", action="store_true")
     copying.add_argument("--project-dir", default=".")
 
@@ -810,9 +824,11 @@ def _copy(service, args) -> dict:
         remote=args.remote, target_source=args.target_source,
         target_key=args.target_key or args.key, intent=intent,
         target_project_dir=args.target_project_dir,
+        target_revision=getattr(args, "if_target_revision", None),
     )
     sink = _copy_sink(args.remote)
-    return service.copy_to_remote(args.source, args.key, request, sink)
+    return service.copy_to_remote(args.source, args.key, request, sink,
+                                  expected_revision=getattr(args, "if_source_revision", None))
 
 
 def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None) -> int:
@@ -824,6 +840,9 @@ def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None)
         _migrate(args)
         return 0
     try:
+        from sandbox.secrets.remote_metadata import dispatch_remote_metadata
+        if dispatch_remote_metadata(args):
+            return 0
         if args.action == "project-context":
             from sandbox.secrets.service import validate_secret_project_context
             _emit(validate_secret_project_context(args.project_dir), args.json)
@@ -951,5 +970,8 @@ register_specs((CommandSpec(
     name="secrets", handler=_secrets_entrypoint, configure=configure_parser,
     owner=__name__, scope="global", destructive=False,
     # A context check must not migrate state as a side effect of asking.
-    predispatch_policy=lambda args: getattr(args, "action", None) == "project-context",
+    predispatch_policy=lambda args: (
+        getattr(args, "action", None) == "project-context"
+        or (getattr(args, "action", None) in {"source-info", "inspect"}
+            and getattr(args, "remote", None) is not None)),
 ),))

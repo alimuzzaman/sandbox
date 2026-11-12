@@ -1027,35 +1027,28 @@ def _remote_basic_auth_hash(entry: dict, password: str) -> str:
 
 
 def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") -> None:
+    from sandbox.hosting.runtime_file_writer import PROGRAM
+    if mode not in {"0600", "0644"}:
+        raise hosting.HostingError("runtime file mode is invalid")
+    payload = text.encode()
+    if len(payload) > 16 * 1024 * 1024:
+        raise hosting.HostingError("runtime file is too large")
+    frame = len(payload).to_bytes(8, "big") + payload
+    command = shlex.join(["python3", "-c", PROGRAM, path, mode])
     if is_owner_target(entry):
-        if re.fullmatch(r"0?[0-7]{3}", mode) is None:
-            raise hosting.HostingError("owner runtime file mode is invalid")
-        # Text may be the provider/generated environment for the intended
-        # runtime recipient. Never encode those bytes into a command argument.
-        program = "\n".join((
-            "import os,pathlib,shutil,stat,sys",
-            "p=pathlib.Path(sys.argv[1]); mode=int(sys.argv[2],8); os.umask(0o077)",
-            "p.parent.mkdir(parents=True,exist_ok=True)",
-            "fd=os.open(p,os.O_WRONLY|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),mode)",
-            "info=os.fstat(fd)",
-            "if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1:os.close(fd);sys.exit(1)",
-            "os.fchmod(fd,mode); os.ftruncate(fd,0)",
-            "with os.fdopen(fd,'wb') as out:",
-            " shutil.copyfileobj(sys.stdin.buffer,out); out.flush(); os.fsync(out.fileno())",
-        ))
-        result = entry.process(shlex.join(["python3", "-c", program, path, mode]),
-            timeout=30, input_data=text.encode())
-        if result.returncode:
-            raise hosting.HostingError("owner runtime file write failed")
-        return
-    payload = base64.b64encode(text.encode()).decode()
-    parent = str(__import__("posixpath").dirname(path))
-    command = (
-        f"mkdir -p {shlex.quote(parent)} && "
-        f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)} && "
-        f"chmod {mode} {shlex.quote(path)}"
-    )
-    _remote_checked(entry, command)
+        result = entry.process(command, timeout=30, input_data=frame)
+    else:
+        result = remote.ssh_run(entry, command, timeout=30, input_data=frame)
+    try:
+        receipt = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        receipt = None
+    if (result.returncode or not isinstance(receipt, dict) or receipt.get("ok") is not True
+            or receipt.get("status") not in {"already_current", "published"}):
+        if is_owner_target(entry):
+            from sandbox.hosting.server_cli_target import withhold_owner_completion
+            withhold_owner_completion(entry)
+        raise hosting.HostingError("runtime file publication unavailable; preserve the original operation before recovery")
 
 
 def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_path: str) -> str:

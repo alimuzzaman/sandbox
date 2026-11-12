@@ -753,6 +753,9 @@ def control_auth_headers(remote: dict) -> dict | None:
     A registration made with `sb remote join` has no token: the control
     service admits it as a node of its tailnet once the owner allows that.
     """
+    if (remote.get('joined') is True and remote.get('control_access') == 'tailnet'
+            and remote.get('control_transport') == 'tailscale'):
+        return {}
     token = remote.get("bearer_token")
     if isinstance(token, str) and token:
         return {"Authorization": f"Bearer {token}"}
@@ -4905,7 +4908,8 @@ def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18,
     return status
 
 
-def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float = 18) -> dict:
+def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float = 18,
+                                    metadata_only: bool = False) -> dict:
     """Read only the selected Sandbox unit state; never inspect generic argv."""
     record = dict(remote.get("mcp_service") or {})
     expected = record.get("service_name") == REMOTE_MCP_SERVICE
@@ -5019,6 +5023,10 @@ def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float =
         f"{shlex.quote(bind)} {port} {_REMOTE_MCP_ENV}; else echo auth=unknown; fi; "
         if bind and port else "echo auth=unknown; "
     )
+    if metadata_only or (remote.get('joined') is True
+            and remote.get('control_access') == 'tailnet'
+            and remote.get('control_transport') == 'tailscale'):
+        auth_probe = "echo auth=not_probed; "
     legacy_probe = (
         f"if test -r {_MCP_PIDFILE}; then legacy_pid=$(cat {_MCP_PIDFILE} 2>/dev/null || true); "
         "case \"$legacy_pid\" in ''|*[!0-9]*) echo legacy_pidfile=invalid;; "

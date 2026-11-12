@@ -91,6 +91,12 @@ machine identities, the observed existing front door and the selected compatible
 owner unit. Only then does one local registration CAS change the connection.
 It preserves the Linux account, unrelated metadata, credentials and operation
 pins, and never changes the server, SSH policy, ingress or another controller.
+The transient proof record contains no bearer. Joined Tailnet HTTP explicitly
+uses no Authorization header even if a stored legacy bearer remains, and its
+SSH unit probe skips credential-file authentication. Admission is proved by the
+separate tokenless control request. Legacy nonjoined bearer paths are unchanged.
+This transition supports the existing nginx profile or an unassigned profile
+whose front door can be observed; explicit Caddy pins remain unsupported here.
 Malformed/conflicting pins, strict revision drift or unproven observations refuse.
 The option does not apply to `remote add` or other remote actions.
 

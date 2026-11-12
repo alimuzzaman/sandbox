@@ -50,6 +50,9 @@ def adopt_owner_tailnet(name, record, *, request, observe, connect, profile,
     candidate = {**record, 'joined': True, 'control_access': 'tailnet',
         'ssh': user + '@' + host, 'tailscale_host': str(address), 'mcp_port': port,
         'control_url': f'http://{host}:{port}', 'control_identity': machine_pin}
+    # Observation cannot borrow an owner's saved credential. The original
+    # record remains the CAS baseline and its stored credential is preserved.
+    candidate.pop('bearer_token', None)
     deadline = time.monotonic() + 90
 
     def remaining():
@@ -70,7 +73,8 @@ def adopt_owner_tailnet(name, record, *, request, observe, connect, profile,
     evidence.update(profile(observed, evidence, record.get('front_door')))
     status = observe(observed, timeout_seconds=min(15, remaining()))
     if (not isinstance(status, dict) or status.get('ownership') != 'proven'
-            or status.get('authenticated') is not True
+            or status.get('active') is not True or status.get('pid_ownership') != 'proven'
+            or status.get('listener_expected') is not True
             or status.get('probe_state') != 'complete'
             or status.get('installed_runtime_revision') != evidence['mcp_service']['runtime_revision']):
         raise ValueError('the selected Tailnet owner unit is not proven')

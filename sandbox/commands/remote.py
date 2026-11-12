@@ -807,7 +807,9 @@ def _cmd_service(args, as_json: bool) -> None:
                     raise ValueError('Tailnet transport adoption preserves the observed existing front door')
                 from sandbox.remote_runtime.join_owner_transport import adopt_owner_tailnet
                 evidence = adopt_owner_tailnet(name, entry,
-                    request=sr.remote_host_memory_request, observe=sr._remote_mcp_service_status_via_ssh,
+                    request=sr.remote_host_memory_request,
+                    observe=lambda selected, **options: sr._remote_mcp_service_status_via_ssh(
+                        selected, metadata_only=True, **options),
                     connect=lambda selected: _first_ssh_login(selected['ssh'], None),
                     profile=_joined_profile_evidence,
                     adopt_revision=_arg_true(args, 'adopt_compatible_revision'))

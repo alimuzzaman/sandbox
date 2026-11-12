@@ -5028,7 +5028,7 @@ class TestHostingSecrets(unittest.TestCase):
         self.assertNotIn("secret-value", command)
         self.assertNotIn(base64.b64encode(text.encode()).decode(), command)
         self.assertEqual(ssh_run.call_args.kwargs["input_data"], text)
-        self.assertIn("mv -f", command)
+        self.assertIn('mv -fT "$tmp"', command)
 
     def test_renders_declared_public_and_secret_values(self):
         with tempfile.TemporaryDirectory() as directory:

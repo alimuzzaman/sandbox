@@ -1028,7 +1028,7 @@ def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") ->
         f"set -eu; umask 077; mkdir -p {shlex.quote(parent)}; "
         f"tmp=$(mktemp {shlex.quote(path + '.tmp.XXXXXX')}); "
         "trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; "
-        f"chmod {mode} \"$tmp\"; mv -f \"$tmp\" {shlex.quote(path)}; trap - EXIT"
+        f"chmod {mode} \"$tmp\"; mv -fT \"$tmp\" {shlex.quote(path)}; trap - EXIT"
     )
     _remote_checked(entry, command, input_data=text)
 

@@ -371,7 +371,24 @@ def collect(identity, runtime):
                 if environment.is_symlink(): fail()
                 if not environment.is_dir() or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',environment.name): continue
                 path=environment/'summary.json'
-                if not path.exists(): fail()
+                if path.is_symlink(): fail()
+                if not path.exists():
+                    # Pre-panel applies left only this generated primary-port
+                    # override. It reserves a number, never proves ownership.
+                    legacy=environment/'compose.override.yml'
+                    fd=os.open(legacy,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                    try:
+                        import stat
+                        info=os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_uid!=identity['uid'] or info.st_nlink!=1 or info.st_size>65536: fail()
+                        with os.fdopen(fd,'r',closefd=False) as handle: text=handle.read(65537)
+                        match=re.fullmatch(r'services:\n  ([A-Za-z0-9][A-Za-z0-9_.-]{0,79}):\n    ports:\n      - "127\.0\.0\.1:([0-9]{1,5}):([0-9]{1,5})"\n',text)
+                        if not match or not all(1<=int(match[i])<=65535 for i in (2,3)): fail()
+                    finally:
+                        os.close(fd)
+                    reservations.append(dict(project='sandbox-host-'+project.name+'-'+environment.name,port=int(match[2])))
+                    if len(reservations)>ROWS: fail()
+                    continue
                 if path.is_symlink() or path.stat().st_size>65536: fail()
                 record=json.loads(path.read_text(),object_pairs_hook=strict_pairs)
                 if type(record) is not dict or type(record.get('schema')) is not int or record.get('schema')!=1 or record.get('project')!=project.name or record.get('environment')!=environment.name: fail()

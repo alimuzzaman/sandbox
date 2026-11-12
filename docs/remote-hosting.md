@@ -3408,7 +3408,12 @@ and ports alone are insufficient. Unknown or unsupported socket owners refuse
 reuse of that port; Docker NAT without a host socket remains supported.
 Reservations proven to belong to another physical machine do not occupy this
 host's namespace; records without that proof remain conservative reservations.
-Legacy target directories without a readable summary refuse allocation; ordinary
+For a legacy target without a summary, the exact primary-only generated
+`compose.override.yml` format conservatively reserves its port. This bounded read
+requires a regular, single-link, owner-owned file and rejects symlinks, extra
+content and unsupported overrides. It grants no ownership or reassignment
+authority. Missing or malformed summaries with no supported legacy override
+refuse allocation; ordinary
 housekeeping files are not target directories. This does not change named-stack
 port probing.
 

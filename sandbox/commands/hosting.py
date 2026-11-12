@@ -4979,8 +4979,10 @@ def _cmd_host_login_link(validated: dict, entry: dict, args) -> None:
 def _ensure_host_source(entry: dict, home: str, project: str) -> str:
     """Create a remote Git worktree for a hosted Compose project, not a WP plugin."""
     target = f"{home}/deploy-src/hosts/{project}"
+    # Login shells may use umask 002; the owner publication guard
+    # (server_cli_target.push_commits) refuses a group-writable destination.
     command = (
-        f"mkdir -p {shlex.quote(target)}; cd {shlex.quote(target)}; "
+        f"umask 022; mkdir -p {shlex.quote(target)}; cd {shlex.quote(target)}; "
         "if [ ! -d .git ]; then git init -q; git config receive.denyCurrentBranch updateInstead; fi"
     )
     _remote_checked(entry, command, timeout=60)

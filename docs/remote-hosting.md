@@ -1431,7 +1431,11 @@ the Origin CA certificate, and finally the local state entry. The project's depl
 source is shared by its environments and a first apply of another environment
 could be writing it, so destroy never removes it; delete
 `<home>/deploy-src/hosts/<project>` by hand once no environment of the project is
-left. Containers, volumes and networks are selected by the Compose project label,
+left. A server CLI owner apply publishes source only into a deploy-source
+directory owned by the owner with no group or other write; anything else refuses
+with `server_cli_owner_target_unavailable: owner source destination is unsafe`.
+Sandbox creates it under `umask 022`; a directory made earlier by an SSH login with
+umask 002 is `0775` and needs `chmod g-w` on that one directory. Containers, volumes and networks are selected by the Compose project label,
 never through `docker compose down`, so a Compose file elsewhere on the host cannot
 widen what is removed. Images are owned only when they carry the project label and a
 `<compose-name>-` tag. Other labelled images, including one named by `image:` in the

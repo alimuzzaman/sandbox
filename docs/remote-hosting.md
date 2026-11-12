@@ -3419,6 +3419,16 @@ port probing.
 
 A failed partial apply can explicitly replace its conflicting managed port:
 
+For an existing rendered stack, a Tailnet owner CLI may start in a staged
+controller checkout. Its `host apply` submits a nested job bound to the retained
+application worktree while the original parent is live. The reply reports child
+acceptance and its job ID, not delivery success. The child retains the complete
+port-recovery tuple, image receipt, explicit effect options and lock-wait policy;
+all ordinary source, generation, failed-attempt and port checks still run there.
+Canonical empty-overlay fingerprints count as clean without changing their
+stored bytes or replay identities. A real overlay or a mismatched source still
+refuses admission. No existing stack is re-rendered or removed by this handoff.
+
 ```text
 sb host apply --remote REMOTE --project-dir PROJECT --environment ENV --confirm \
   --reallocate-loopback-port OLD --expected-generation N \

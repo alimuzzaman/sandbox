@@ -432,6 +432,7 @@ def local_server_cli_submission_argv(owner: ServerCliOwner, argv, *, project_dir
         '--server-cli-marker', owner.ownership_marker, '--server-cli-origin', context.origin_remote_name,
         '--server-cli-target-metadata', json.dumps(dict(context.target_metadata), sort_keys=True, separators=(',', ':')),
         '--parent-job-id', parent_job_id, '--project-dir', str(Path(project_dir).resolve()),
+        '--exact-project-dir',
         '--request-id', key, '--source-commit', source_commit,
         '--timeout', str(policy.deadline_seconds), '--execution-policy-json', encoded, '--json', '--', *values]
 

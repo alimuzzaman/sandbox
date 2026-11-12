@@ -34,6 +34,7 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
 from sandbox.hosting import edge_cache
+from sandbox.services.source_fingerprint import source_has_changes
 from sandbox.hosting.front_door import refresh as front_door_refresh
 from sandbox.hosting.stack_template import branch_allowed
 from sandbox.hosting.zone_coverage import COVERAGE_NAME_INELIGIBLE, COVERAGE_STORE_UNAVAILABLE, CoverageError, targets
@@ -2959,9 +2960,25 @@ def _durable_host_context(project_dir: str) -> dict:
     return validate_durable_context(project_dir)
 
 
+def _host_apply_argv(validated: dict, remote_name: str, args=None) -> list[str]:
+    """Fixed apply intent shared by guidance and genuine nested submission."""
+    argv = ["host", "apply", "--project-dir",
+            validated.get('manifest_root') or validated['project_root'],
+            "--remote", remote_name, "--environment", validated["environment"], "--confirm"]
+    for name in ("local_images", "reallocate_loopback_port", "expected_generation",
+                 "original_request_id", "lock_wait"):
+        value = getattr(args, name, None)
+        if value is not None:
+            argv.extend(("--" + name.replace('_', '-'), str(value)))
+    for name in ("allow_zone_ssl_change", "purge_edge_cache", "json"):
+        if getattr(args, name, False):
+            argv.append("--" + name.replace('_', '-'))
+    return argv
+
+
 def _host_delivery_guidance(validated: dict, remote_name: str, *,
                             request_id: str | None = None, source_commit: str | None = None,
-                            timeout: int = 900, json_output: bool = False) -> list[str]:
+                            timeout: int = 900, json_output: bool = False, apply_args=None) -> list[str]:
     """A reviewable argv template, never an implicit job submission.
 
     `sb host stack up` submits exactly this argv, with its own request id,
@@ -2980,13 +2997,12 @@ def _host_delivery_guidance(validated: dict, remote_name: str, *,
         request_id = f"deploy-{env_name}-{req_token}"
     from sandbox.hosting.server_cli_target import selected_owner_target
     owner_target = selected_owner_target(remote_name)
+    apply_argv = _host_apply_argv(validated, remote_name, apply_args)
     if owner_target is not None:
         from sandbox.application.server_cli import local_server_cli_submission_argv
         context = owner_target.require_current()
         return local_server_cli_submission_argv(context.owner,
-            ["host", "apply", "--project-dir",
-             validated.get('manifest_root') or validated['project_root'],
-             "--remote", remote_name, "--environment", validated["environment"], "--confirm"],
+            apply_argv,
             project_dir=validated["project_root"], request_id=request_id,
             source_commit=source_commit, timeout_seconds=int(timeout), parent_job_id=context.job_id)
     # Admission binds the job to exactly the source root; without
@@ -2995,12 +3011,38 @@ def _host_delivery_guidance(validated: dict, remote_name: str, *,
     return [executable, "job-start", "--local", "--project-dir", validated["project_root"],
             "--exact-project-dir", "--request-id", request_id, "--source-commit", source_commit,
             "--timeout", str(int(timeout)), *(["--json"] if json_output else []),
-            "--", executable, "host", "apply", "--project-dir",
-            validated.get('manifest_root') or validated['project_root'], "--remote", remote_name, "--environment",
-            validated["environment"], "--confirm"]
+            "--", executable, *apply_argv]
 
 
-def _host_recovery_eligibility(validated: dict, remote_name: str) -> dict:
+def _submit_existing_owner_apply(validated: dict, args) -> bool:
+    """An outer owner CLI is a parent, never application-source authority."""
+    from sandbox.hosting.server_cli_target import selected_owner_target
+    target = selected_owner_target(args.remote)
+    if target is None or not validated.get("stack"):
+        return False
+    context = target.require_current()
+    if Path(context.project_root).resolve() == Path(validated['project_root']).resolve():
+        return False
+    dirty, untracked = remote.capture_uncommitted(validated['project_root'])
+    if dirty or untracked:
+        raise hosting.HostingError('recovery_source_dirty')
+    # Loading the rendered stack already constrained this source to its owned
+    # worktree. Submit while this genuine parent is live; do not replay a
+    # prepare command after that authority has ended.
+    source_commit = _resolve_host_source_commit(validated['project_root'])
+    argv = _host_delivery_guidance(validated, args.remote,
+        request_id=context.request_id, source_commit=source_commit,
+        timeout=900, json_output=True, apply_args=args)
+    from sandbox.commands.host_stack import _submit
+    job_id = _submit(argv)
+    print(json.dumps({"ok": True, "status": "accepted", "job_id": job_id,
+        "request_id": argv[argv.index('--request-id') + 1],
+        "parent_job_id": context.job_id, "source_commit": source_commit,
+        "completion": "pending"}, sort_keys=True))
+    return True
+
+
+def _host_recovery_eligibility(validated: dict, remote_name: str, *, apply_args=None) -> dict:
     from sandbox.delivery.admission import AdmissionError
     from sandbox.delivery.models import now
     from sandbox.resources.context import authenticated_target_identity
@@ -3065,7 +3107,7 @@ def _host_recovery_eligibility(validated: dict, remote_name: str) -> dict:
             'admission_state': 'not_admitted', 'effects_started': False,
             'submission_requirements': {'controller': 'local', 'source': 'clean_application_head',
                                         'request': 'original_replay_safe_id', 'timeout_seconds': 900},
-            'prepare_argv': _host_delivery_guidance(validated, remote_name)}
+            'prepare_argv': _host_delivery_guidance(validated, remote_name, apply_args=apply_args)}
 
 
 def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
@@ -3089,7 +3131,7 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
     except ValueError:
         raise hosting.HostingError("recovery_edge_intent_invalid") from None
     if (not machine_identity or
-            not source_clean or context.get("source_dirty_digest") or
+            not source_clean or source_has_changes(context.get("source_dirty_digest")) or
             context.get("source_commit") != source_commit):
         raise hosting.HostingError("recovery_source_mismatch")
     if source_artifact is not None:
@@ -8804,7 +8846,9 @@ def cmd_host(cfg, args) -> None:
             branch = _validate_apply_source(validated)
         except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
             die(str(exc))
-        eligibility = _host_recovery_eligibility(validated, args.remote)
+        if _submit_existing_owner_apply(validated, args):
+            return
+        eligibility = _host_recovery_eligibility(validated, args.remote, apply_args=args)
         if not eligibility["eligible"]:
             if args.json:
                 print(json.dumps({"ok": False, **eligibility}, sort_keys=True))

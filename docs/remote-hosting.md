@@ -2735,6 +2735,12 @@ install, not backed up or losslessly recoverable.
 
 ### `host_apply_lease_held`
 
+New physical `.lease.lock` anchors are created with owner-only permissions,
+independent of the caller's umask. Existing anchors are not chmodded or replaced
+by normal lease operations. A legacy group-writable anchor can therefore still
+refuse exact exec recovery. Preserve it and obtain an exact operator repair plan;
+do not weaken recovery's permission checks or recreate the lock inode.
+
 Every `sb host apply`, edge-only recovery, `sb host destroy` and `sb host stack down`
 holds one lease per target on the remote,
 `$SANDBOX_HOME/.sandbox/host-apply-<project>-<environment>.lease`, for the whole

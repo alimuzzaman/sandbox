@@ -378,6 +378,9 @@ def configure_artifact_get_parser(parser) -> None:
 
 def configure_reconcile_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--job-id", help="plan recovery of only this original server host-exec lease")
+    parser.add_argument("--confirm", action="store_true", help="retire the exact planned original exec lease")
+    parser.add_argument("--expected-plan", help="sha256 plan binding required with --confirm")
     parser.add_argument("--remote",
                         help="reconcile durable jobs on a provisioned remote controller")
     parser.add_argument("--json", action="store_true")
@@ -979,6 +982,28 @@ def cmd_job_artifact_get(_cfg, args) -> None:
 
 
 def cmd_job_reconcile(_cfg, args) -> None:
+    job_id = getattr(args, "job_id", None)
+    confirm = getattr(args, "confirm", False)
+    expected = getattr(args, "expected_plan", None)
+    if (not job_id and (confirm or expected)) or (job_id and args.limit != 200):
+        raise ValueError("exact exec recovery cannot be combined with global reconciliation options")
+    if job_id:
+        if confirm != bool(expected):
+            raise ValueError("--confirm requires --expected-plan from the exact job recovery plan")
+        if args.remote:
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            argv = ["job-reconcile", "--job-id", job_id]
+            if confirm:
+                argv.extend(["--confirm", "--expected-plan", expected])
+            result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).control(args.remote, argv)
+        else:
+            result = durable_job_dependencies()["job_service"].reconcile_exec_lease(
+                job_id, confirm=confirm, expected_plan=expected)
+        print(json.dumps(result, sort_keys=True))
+        return
     if args.remote:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport

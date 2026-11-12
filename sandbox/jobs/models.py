@@ -110,7 +110,7 @@ _TRANSITIONS = {
     Lifecycle.RUNNING: frozenset({Lifecycle.CANCELLING, Lifecycle.SUCCEEDED,
                                   Lifecycle.FAILED, Lifecycle.TIMED_OUT,
                                   Lifecycle.CANCELLED, Lifecycle.INTERRUPTED}),
-    Lifecycle.CANCELLING: frozenset({Lifecycle.CANCELLED, Lifecycle.FAILED,
+    Lifecycle.CANCELLING: frozenset({Lifecycle.CANCELLED, Lifecycle.TIMED_OUT, Lifecycle.FAILED,
                                      Lifecycle.INTERRUPTED}),
 }
 

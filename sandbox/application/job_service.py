@@ -974,6 +974,11 @@ class JobService:
         age = (now or datetime.now(timezone.utc)) - accepted
         return age > timedelta(seconds=deadline + QUEUE_EXPIRY_GRACE_SECONDS)
 
+    def reconcile_exec_lease(self, job_id: str, *, confirm=False, expected_plan=None) -> dict:
+        from sandbox.application.server_cli_exec_recovery import reconcile_exec_lease
+        return reconcile_exec_lease(self.repository, job_id,
+            confirm=confirm, expected_plan=expected_plan)
+
     def reconcile_startup(self, *, limit: int = 200) -> dict:
         """Reconcile active jobs whose supervisor or child identity is gone.
 

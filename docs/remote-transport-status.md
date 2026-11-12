@@ -192,6 +192,45 @@ Do not use that command as an automatic retry or to bypass a service revision mi
 
 ## Joined hosting command results
 
+### Original host-exec recovery
+
+`host exec` uses one absolute effect deadline, including owner/target admission
+and fresh target checks through cleanup. Its default is 300 seconds. A shorter
+explicit deadline can expire during these checks even for a short child command.
+Private capture cannot be published after cancellation, deadline expiry, changed
+ownership or uncertain cleanup. `server_cli_exec_observation_unavailable` is not
+permission to replay. Read the original job and retained output first. Missing
+capture does not prove the child never ran, and recovery cannot recreate its bytes.
+
+On an installed revision containing exact-job recovery, plan only this original
+server host-exec lease with:
+
+```
+sb job-reconcile --remote NAME --job-id ORIGINAL_JOB --json
+sb job-reconcile --remote NAME --job-id ORIGINAL_JOB --confirm --expected-plan PLAN_DIGEST --json
+```
+
+The second command requires the exact digest returned by the first. This path
+does not run global reconciliation, drain queues, signal processes, replay a job,
+rewrite its terminal result or remove workspace/source fences. It requires the
+original terminal server-exec row, its durable stopped-work proof, the same boot,
+fresh absence of the original process group and every recorded PID, the current
+canonical machine/service owner, and the unchanged public target incarnation.
+Reused PIDs, missing/denied evidence, other active jobs, a foreign lease, target
+drift or changed plan refuse. The original lease holder must match the retained
+job, its acquisition time must fall within that job, and its file identity and
+content digest must still match under the native target and physical lease locks.
+Only that lease is retired after repeated cessation proof; its token is never
+returned. Intent and completion are appended to the original job's events. An
+already absent lease is reported without mutation. An uncertain confirmation
+must be followed by a new plan for the same original job, never manual deletion.
+
+An installed source/runtime revision change is allowed between the original job
+and recovery, while machine/service pins and all public incarnation fields must
+remain identical. A recovery plan is bound to the current installed revision.
+Historical timeout records are preserved. New parent-deadline cancellation can
+transition to `timed_out`, with cessation evidence recorded after owned work stops.
+
 On a joined Tailscale registration, `host plan`, `host status`, `host stack list`,
 `host stack up --plan|--confirm`, the other remote `host stack` actions,
 `host recover`, `host retire-delivery`, `host refresh-front-door`, `host destroy`

@@ -326,24 +326,26 @@ def run_descriptor(path: str | Path) -> int:
         output.finish("stderr")
         integrity = output.complete()
         output_completeness = "complete" if streams_eof else "partial"
+        cessation = json.dumps({"owned_work_stopped": True, "stop_error": None,
+            "owned_descendants": sorted(observed_descendants)})
 
         if timed_out:
             terminal_exit_code = 124 if (return_code is None or return_code == 0) else return_code
             repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=terminal_exit_code,
                 termination_reason="deadline_exceeded", output_completeness=output_completeness,
-                integrity_sha256=integrity)
+                integrity_sha256=integrity, result_json=cessation)
             return 124
         if stall_cancelled:
             terminal_exit_code = 130 if (return_code is None or return_code == 0) else return_code
             repository.transition(job_id, Lifecycle.CANCELLED, exit_code=terminal_exit_code,
                 termination_reason="cancelled_on_stall", output_completeness=output_completeness,
-                integrity_sha256=integrity)
+                integrity_sha256=integrity, result_json=cessation)
             return 130
         if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
             terminal_exit_code = 130 if (return_code is None or return_code == 0) else return_code
             repository.transition(job_id, Lifecycle.CANCELLED, exit_code=terminal_exit_code,
                 termination_reason="cancelled_by_request", output_completeness=output_completeness,
-                integrity_sha256=integrity)
+                integrity_sha256=integrity, result_json=cessation)
             return 130
         # Artifacts describe successful job output. Do not let a missing
         # artifact mask the child command's actual failure (for example a

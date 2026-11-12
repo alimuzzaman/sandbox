@@ -1328,7 +1328,7 @@ while the surrounding site remains behind Basic Auth. The application remains
 responsible for authentication, authorization, rate limiting, and tenant
 isolation on every bypassed route.
 
-### One-time hosted WordPress login URLs
+### Hosted WordPress login URLs
 
 A WordPress hosting environment can opt in to a short-lived admin login link by
 declaring its target MU-plugin path and login user in `sandbox.hosting.yml`:
@@ -1356,6 +1356,38 @@ new link replaces the previous unused link. Treat the returned URL like a passwo
 `service` selects the Compose service that owns the WordPress filesystem; it defaults
 to `compose.service` for stacks where WordPress is also the public service.
 `request_path` selects the public route that reaches WordPress; it defaults to `/`.
+
+For development access that must work repeatedly without expiring, add
+`--permanent` explicitly:
+
+```bash
+./sb host login-url --project-dir /path/to/wordpress --environment development \
+  --remote myvps --confirm --permanent
+```
+
+This mode is available only for native hosted WordPress `autologin`. It cannot be
+combined with `--ttl-seconds`, login-service selectors, email delivery, or share-link
+management. Without this flag, existing one-time links and their lifetime remain
+unchanged. Local development auto-login is also unchanged.
+
+The permanent link carries its key in a URL fragment. The browser removes the
+fragment, then submits the key in a same-origin POST over HTTPS. GET and HEAD
+requests cannot authenticate. JavaScript is required. WordPress must recognize
+its public HTTPS connection (`is_ssl()` must be true). When TLS terminates at a
+reverse proxy, configure WordPress to trust only that proxy; the helper deliberately
+does not trust arbitrary forwarded headers or weaken this check. The installed helper stores
+only the key's hash and configured user. JSON output retains `url`, `expires_at`,
+`one_time` and `user`; permanent links report `expires_at: 0` and `one_time: false`.
+Host state contains no bearer key.
+
+Anyone holding the complete permanent link can sign in as that user until the
+helper is replaced or removed. Keep it private; avoid accounts with more privileges
+than needed. Issuing another native login link, permanent or one-time, replaces
+the helper and revokes the previous link. Removing the installed MU-plugin also
+revokes it. Removing the declaration from the manifest alone does not revoke an
+installed helper. These actions do not log out sessions already established, and
+a permanent link does not extend a WordPress session's lifetime. This security
+change requires human review before release.
 
 For a project that is not WordPress, `autologin` can instead declare a Sandbox login
 service with named entries. See [login-service.md](login-service.md).

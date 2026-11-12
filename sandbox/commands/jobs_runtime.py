@@ -985,10 +985,14 @@ def cmd_job_reconcile(_cfg, args) -> None:
     job_id = getattr(args, "job_id", None)
     confirm = getattr(args, "confirm", False)
     expected = getattr(args, "expected_plan", None)
-    if (not job_id and (confirm or expected)) or (job_id and args.limit != 200):
+    scoped = job_id is not None
+    if (not scoped and (confirm or expected is not None)) or (scoped and args.limit != 200):
         raise ValueError("exact exec recovery cannot be combined with global reconciliation options")
-    if job_id:
-        if confirm != bool(expected):
+    if scoped:
+        from sandbox.jobs.models import validate_job_id
+        validate_job_id(job_id)
+        if (confirm != (expected is not None) or (expected is not None
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", expected) is None)):
             raise ValueError("--confirm requires --expected-plan from the exact job recovery plan")
         if args.remote:
             from sandbox.core import _remote
@@ -1276,7 +1280,9 @@ def _remote_control_predispatch(args) -> bool:
 def _exec_recovery_preconfiguration(args) -> bool:
     # Exact recovery must not enter config migration/writers, even on the
     # selected server where --remote is intentionally absent.
-    if any(getattr(args, name, None) for name in ("job_id", "confirm", "expected_plan")):
+    if (getattr(args, "job_id", None) is not None
+            or getattr(args, "expected_plan", None) is not None
+            or getattr(args, "confirm", False)):
         cmd_job_reconcile({}, args)
         return True
     return False

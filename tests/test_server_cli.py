@@ -150,6 +150,18 @@ class ServerCLIRevisionCacheTest(unittest.TestCase):
         self.assertEqual(cli.read_current_server_owner().runtime_revision, 'e' * 24)
         self.assertEqual(self.hash.call_count, 2)
 
+    def test_an_expired_original_deadline_is_typed_and_keeps_the_unavailable_code(self):
+        from sandbox.application.server_cli_exec import remaining_deadline
+        past = (datetime.now(timezone.utc).replace(microsecond=0)).isoformat()
+        with self.assertRaises(cli.ServerCLIDeadlineExpired) as expired:
+            remaining_deadline(past)
+        self.assertIsInstance(expired.exception, cli.ServerCLIUnavailable)
+        self.assertEqual(expired.exception.code, 'server_cli_capability_unavailable')
+        for invalid in ('not a time', '2026-01-01T00:00:00', '2999-01-01T00:00:00+00:00'):
+            with self.subTest(invalid=invalid), self.assertRaises(cli.ServerCLIUnavailable) as refused:
+                remaining_deadline(invalid)
+            self.assertNotIsInstance(refused.exception, getattr(cli, 'ServerCLIDeadlineExpired', ()))
+
 
 class ServerCLIDispatchTest(unittest.TestCase):
     def dispatch(self, *, capability=None, capability_error=None):

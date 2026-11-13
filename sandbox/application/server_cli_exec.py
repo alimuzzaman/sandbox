@@ -11,8 +11,8 @@ import shlex
 import time
 import base64
 
-from sandbox.application.server_cli import (ServerCLIUnavailable, read_current_server_owner,
-    validate_target_metadata)
+from sandbox.application.server_cli import (ServerCLIUnavailable, ServerCLIDeadlineExpired,
+    read_current_server_owner, validate_target_metadata)
 from sandbox.application.server_cli_targets import inspect_current_server_target
 from sandbox.jobs.anonymous_input import capture_input
 from sandbox.jobs.models import JobSubmission, SourceIdentity, validate_argv
@@ -73,8 +73,10 @@ def remaining_deadline(value):
         if parsed.utcoffset() is None:
             raise ValueError()
         remaining = (parsed - datetime.now(timezone.utc)).total_seconds()
-        if not math.isfinite(remaining) or not 0 < remaining <= 3600:
+        if not math.isfinite(remaining) or remaining > 3600:
             raise ValueError()
+        if remaining <= 0:
+            raise ServerCLIDeadlineExpired('original server exec deadline is expired')
         return remaining
     except (AttributeError, TypeError, ValueError):
         raise ServerCLIUnavailable('original server exec deadline is expired or invalid') from None

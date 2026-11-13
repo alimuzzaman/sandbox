@@ -111,7 +111,10 @@ capture. Just before taking the lease, the job clamps the command's timeout to
 what is left of that deadline less those 25 seconds, so the command gets the
 requested timeout minus the time spent before acceptance. With less than 26
 seconds left it takes no lease and refuses with `host_exec_timeout` (exit 1);
-nothing runs.
+nothing runs. A lease held by another job refuses with `host_target_busy`
+(exit 1), and a deadline that passes inside the job is `host_exec_timeout`
+(exit 124). Only an unknown failure is still `host_exec_transport_failed`
+(exit 255).
 
 Owner exec selects the requested service's unique first running container from
 those verified labels. It executes that exact container ID without asking

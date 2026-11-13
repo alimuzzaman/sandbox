@@ -736,6 +736,38 @@ class ServerSelectionTests(OwnerTargetTests):
         self.assertEqual(ran.call_args.args[1].timeout_seconds, 30)
         self.assertIn("timeout --kill-after=10 30 env", ran.call_args.args[0][-1])
 
+    def test_a_held_lease_is_target_busy_not_a_transport_failure(self):
+        from sandbox.hosting import target_lease
+        held = target_lease.LeaseHeld("another controller holds this target's lease (since unix time 1)")
+        for capture in (False, True):
+            with self.subTest(capture_artifacts=capture):
+                code, output, _, ran, audit = self.run_owner_exec(
+                    seconds_left=300, timeout=30, capture_artifacts=capture, acquire=held)
+                self.assertEqual(code, 1)
+                payload = json.loads(output)
+                self.assertEqual(payload["code"], "host_target_busy")
+                self.assertIn("nothing ran", payload["error"])
+                ran.assert_not_called()
+                self.assertEqual(audit.write.call_args.args[1].code, "host_target_busy")
+
+    def test_a_deadline_expiry_inside_the_scope_is_a_timeout_not_a_transport_failure(self):
+        expired = getattr(sdk, "ServerCLIDeadlineExpired", sdk.ServerCLIUnavailable)
+        for capture in (False, True):
+            with self.subTest(capture_artifacts=capture):
+                code, output, _, _, audit = self.run_owner_exec(seconds_left=300, timeout=30,
+                    capture_artifacts=capture, run=expired("retained server CLI job deadline expired"))
+                self.assertEqual(code, 124)
+                payload = json.loads(output)
+                self.assertEqual(payload["code"], "host_exec_timeout")
+                self.assertIn("before any replay", payload["error"])
+                self.assertEqual(audit.write.call_args.args[1].code, "host_exec_timeout")
+
+    def test_an_unknown_failure_inside_the_scope_stays_a_transport_failure(self):
+        code, output, _, _, _ = self.run_owner_exec(seconds_left=300, timeout=30,
+            run=RuntimeError("synthetic unknown failure"))
+        self.assertEqual(code, 255)
+        self.assertEqual(json.loads(output)["code"], "host_exec_transport_failed")
+
     def test_owner_exec_refuses_a_service_without_a_unique_first_container(self):
         selected = self.selected()
         with self.assertRaises(TargetRefusal):

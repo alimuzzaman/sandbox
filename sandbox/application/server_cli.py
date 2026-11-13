@@ -33,6 +33,10 @@ class ServerCLIUnavailable(RuntimeError):
     code = 'server_cli_capability_unavailable'
 
 
+class ServerCLIDeadlineExpired(ServerCLIUnavailable):
+    """The original job's deadline passed; same code, so callers stay unchanged."""
+
+
 class ServerCLIEffectUnknown(RuntimeError):
     code = 'server_cli_effect_unknown'
     completion_unknown = True
@@ -406,7 +410,7 @@ def _read_server_cli_context() -> ServerCLIContext:
         started = datetime.fromisoformat(row['started_at'].replace('Z', '+00:00'))
         deadline = started + timedelta(seconds=row['deadline_seconds'])
         if datetime.now(timezone.utc) >= deadline:
-            raise ServerCLIUnavailable('retained server CLI job deadline expired')
+            raise ServerCLIDeadlineExpired('retained server CLI job deadline expired')
         owner = _current_owner()
         provenance = json.loads(row.get('execution_policy_provenance_json') or '{}')
         if 'server_cli.absolute_deadline_at' in provenance:

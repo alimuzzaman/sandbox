@@ -158,8 +158,16 @@ def _command(request, entry, prefix):
 
 def _known_failure(exc):
     """(code, message, exit code) for a failure whose cause is known, else None."""
+    from sandbox.application.server_cli import ServerCLIDeadlineExpired
+    from sandbox.hosting import target_lease
     if isinstance(exc, ExecRefusal):
         return exc.code, exc.detail, exc.exit_code
+    if isinstance(exc, target_lease.LeaseHeld):
+        return (target_resolution.TARGET_BUSY, f"{exc}; nothing ran, retry when it finishes",
+                host_exec.EXIT_REFUSAL)
+    if isinstance(exc, ServerCLIDeadlineExpired):
+        return (host_exec.TIMED_OUT, "the original server CLI deadline expired; "
+                "inspect the original job before any replay", host_exec.EXIT_TIMEOUT)
     return None
 
 

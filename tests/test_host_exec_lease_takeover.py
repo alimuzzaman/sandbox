@@ -312,18 +312,22 @@ class SupervisorWrittenRowTests(unittest.TestCase):
             recovery._binding(self.repository, row["job_id"], self.owner)
 
     def test_an_interrupted_exec_is_refused(self):
-        job_id = self.accept()["job_id"]
-        self.repository.transition(job_id, "running")
-        self.repository.put_process_identity(job_id, host_boot_id="boot", supervisor_pid=4241,
-            supervisor_start_identity="supervisor-start", supervisor_nonce_hash="0" * 64,
-            child_pid=4242, child_pgid=4242, child_start_identity="child-start")
-        # The transition status reconciliation makes (job_service.py) when the supervisor is lost.
-        self.repository.transition(job_id, "interrupted", termination_reason="supervisor_missing",
-            output_completeness="partial", result_json=json.dumps(
-                {"reconciled": True, "evidence": ["supervisor_missing"]}, sort_keys=True))
-        body = self.hold(self.repository.snapshot(job_id))
-        self.assertIsNone(self.take())
-        self.assertEqual(self.path.read_text(), body)
+        # The result status reconciliation records (job_service.py) when the
+        # supervisor is lost, then one shaped like a stop proof: the lifecycle
+        # alone refuses it.
+        for result in ({"reconciled": True, "evidence": ["supervisor_missing"]},
+                       {"owned_work_stopped": True, "stop_error": None, "owned_descendants": []}):
+            with self.subTest(result=result):
+                job_id = self.accept()["job_id"]
+                self.repository.transition(job_id, "running")
+                self.repository.put_process_identity(job_id, host_boot_id="boot", supervisor_pid=4241,
+                    supervisor_start_identity="supervisor-start", supervisor_nonce_hash="0" * 64,
+                    child_pid=4242, child_pgid=4242, child_start_identity="child-start")
+                self.repository.transition(job_id, "interrupted", termination_reason="supervisor_missing",
+                    output_completeness="partial", result_json=json.dumps(result, sort_keys=True))
+                body = self.hold(self.repository.snapshot(job_id))
+                self.assertIsNone(self.take())
+                self.assertEqual(self.path.read_text(), body)
 
 
 class LeaseTakeoverAuditTests(unittest.TestCase):

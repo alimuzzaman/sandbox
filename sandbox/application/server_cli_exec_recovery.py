@@ -214,7 +214,9 @@ def _reconcile_exec_lease(repository, job_id, *, confirm=False, expected_plan=No
         return {**result, "status": "retired", "lease_present": False, "requires_confirm": False}
 
 
-ENDED_LIFECYCLES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "interrupted"})
+# Not `interrupted`: reconciliation records that a supervisor was lost, never
+# that the job's work stopped, so its lease stays for removal by hand.
+ENDED_LIFECYCLES = frozenset({"succeeded", "failed", "timed_out", "cancelled"})
 TAKEOVER_LOCK_SECONDS = 5
 _JOB_PAGES = 50
 

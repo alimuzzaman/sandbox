@@ -213,6 +213,49 @@ class ExecClientTests(unittest.TestCase):
         self.assertNotIn("untrusted raw", output.getvalue())
         self.read.assert_not_called()
 
+    def test_server_selector_refusal_is_shown_with_its_code_and_hint(self):
+        from sandbox.application.server_cli_targets import ServerTargetRefused
+        self.args.name, self.args.target = None, "project/dev"
+        for code, hint in (("host_server_target_evidence_unavailable", "classify the target"),
+                           ("host_target_busy", "target busy"),
+                           ("host_target_invalid", "--target")):
+            with self.subTest(code=code):
+                self.observe.side_effect = ServerTargetRefused(code)
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+                    dispatch.dispatch_host_if_selected(self.args)
+                self.assertEqual(caught.exception.code, 1)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["code"], code)
+                self.assertEqual(payload["acceptance"], "not_accepted")
+                self.assertIn(hint, payload["hint"])
+                self.assertIn("no controller fallback", payload["error"])
+                self.assertNotIn("job_id", payload)
+        self.submit.assert_not_called()
+        self.read.assert_not_called()
+        self.legacy_submit.assert_not_called()
+
+    def test_server_selector_refusal_plain_output_names_code_and_hint(self):
+        from sandbox.application.server_cli_targets import ServerTargetRefused
+        self.args.json = False
+        self.observe.side_effect = ServerTargetRefused("host_server_target_evidence_unavailable")
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(SystemExit):
+            dispatch.dispatch_host_if_selected(self.args)
+        self.assertIn("host_server_target_evidence_unavailable:", errors.getvalue())
+        self.assertIn("hint: classify the target", errors.getvalue())
+        self.submit.assert_not_called()
+
+    def test_other_observation_failures_stay_generic_unavailable(self):
+        self.observe.side_effect = sdk.ServerCLIUnavailable("host_target_busy")
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            dispatch.dispatch_host_if_selected(self.args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "server_cli_exec_unavailable")
+        self.assertNotIn("hint", payload)
+        self.submit.assert_not_called()
+
     def test_missing_service_or_ambiguous_target_refuses_before_metadata_or_submission(self):
         for change in ({"service": None}, {"target": "other/dev"}, {"exec_argv": []},
                        {"tailnet_hostname": "unexpected"}, {"image_action": "up"}):

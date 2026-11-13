@@ -34,14 +34,30 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
         "server_cli_exec_acceptance_unknown": "Inspect the original request before any replay; acceptance is unknown.",
         "server_cli_exec_observation_unavailable": "The original server job is retained; inspect it before any replay.",
         "host_exec_usage": "Host exec requires a service, one target or name, and a command after --.",
+        "host_server_target_evidence_unavailable": "The server's records for this target are missing "
+            "or stale, such as no lifetime record; no controller fallback was attempted.",
+        "host_target_busy": "The server target is busy or its last apply did not succeed; "
+            "no controller fallback was attempted.",
+        "host_target_invalid": "The server refused the target selector; no controller fallback was attempted.",
+    }
+    hints = {
+        "host_server_target_evidence_unavailable":
+            "classify the target (sb host classify --remote NAME --target PROJECT/ENVIRONMENT "
+            "--lifetime hosted --confirm), then retry",
+        "host_target_busy": "target busy; retry after its apply or cleanup finishes",
+        "host_target_invalid": "check --target, --name and --environment",
     }
     payload = {"ok": False, "code": code, "acceptance": acceptance,
                "error": messages[code], **_handle(receipt, request_id)}
+    if code in hints:
+        payload["hint"] = hints[code]
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
     else:
         print(f"{code}: {payload['error']} " + " ".join(
             f"{key}={value}" for key, value in _handle(receipt, request_id).items()), file=sys.stderr)
+        if "hint" in payload:
+            print(f"hint: {payload['hint']}", file=sys.stderr)
     raise SystemExit(exit_code)
 
 
@@ -149,7 +165,10 @@ def dispatch_exec_if_selected(args) -> bool:
             environment=getattr(args, "environment", None))
     except host_exec.ExecRefusal:
         _fail(args, "host_exec_usage", request_id, acceptance="not_accepted", exit_code=2)
-    except Exception:
+    except Exception as error:
+        from sandbox.application.server_cli_targets import ServerTargetRefused, TARGET_REFUSAL_CODES
+        if type(error) is ServerTargetRefused and error.code in TARGET_REFUSAL_CODES:
+            _fail(args, error.code, request_id, acceptance="not_accepted")
         _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
 
     from sandbox.application.server_cli_exec import (

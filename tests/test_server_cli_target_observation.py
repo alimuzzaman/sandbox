@@ -54,11 +54,11 @@ class TargetObservationTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(server_cli.ServerCLIUnavailable):
                 targets.validate_target_snapshot({**snapshot(), **change}, owner=OWNER, origin_remote_name='box')
 
-    def observe(self, response):
+    def observe(self, response, returncode=0):
         record = {'joined': True, 'provisioned': True, 'control_transport': 'tailscale',
             'control_identity': {'schema_version': 1, 'target_identity': OWNER.target_identity},
             'mcp_service': {'ownership_marker': OWNER.ownership_marker, 'runtime_revision': OWNER.runtime_revision}}
-        self.ssh = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps(response), stderr=''))
+        self.ssh = mock.Mock(return_value=SimpleNamespace(returncode=returncode, stdout=json.dumps(response), stderr=''))
         with mock.patch.object(_remote, 'get_remote', return_value=record), \
                 mock.patch.object(_remote, 'ssh_run', self.ssh), \
                 mock.patch.object(_remote, 'remote_sb_path', return_value=OWNER.executable), \
@@ -81,6 +81,34 @@ class TargetObservationTests(unittest.TestCase):
         for change in ({'name': 'another'}, {'origin_remote_name': 'other'}, {'actor': 'owner'}):
             with self.subTest(change=change), self.assertRaises(server_cli.ServerCLIUnavailable):
                 self.observe({'ok': True, **snapshot(), **change})
+
+    def test_server_typed_selector_refusal_keeps_its_code(self):
+        # The installed handler prints this envelope and exits 1 on a TargetRefusal.
+        for code in ('host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid'):
+            with self.subTest(code=code), self.assertRaises(targets.ServerTargetRefused) as caught:
+                self.observe({'schema_version': 1, 'ok': False, 'code': code,
+                              'error': 'owner target metadata is unavailable; no job was accepted'}, returncode=1)
+            self.assertEqual(caught.exception.code, code)
+            self.assertIsInstance(caught.exception, server_cli.ServerCLIUnavailable)
+
+    def test_other_server_failures_stay_generic(self):
+        for response in ({'schema_version': 1, 'ok': False, 'code': 'server_cli_capability_unavailable'},
+                         {'schema_version': 1, 'ok': False, 'code': 'host_exec_unknown_service'},
+                         {'schema_version': 1, 'ok': False}):
+            with self.subTest(response=response), self.assertRaises(Exception) as caught:
+                self.observe(response, returncode=1)
+            self.assertNotIsInstance(caught.exception, targets.ServerTargetRefused)
+
+    def test_existing_capability_handler_reports_selector_refusal_code(self):
+        from sandbox.hosting.target_resolution import TargetRefusal
+        args = SimpleNamespace(inspect_host_target=True, origin_remote_name='box',
+                               target='project/dev', name=None, environment=None)
+        output = io.StringIO()
+        with mock.patch.object(targets, 'inspect_current_server_target',
+                side_effect=TargetRefusal('host_server_target_evidence_unavailable', 'missing')), \
+                redirect_stdout(output), self.assertRaises(SystemExit):
+            job_policy.cmd_job_capabilities(None, args)
+        self.assertEqual(json.loads(output.getvalue())['code'], 'host_server_target_evidence_unavailable')
 
     def test_existing_capability_handler_registers_readonly_inspection_without_config(self):
         args = SimpleNamespace(inspect_host_target=True, origin_remote_name='box',

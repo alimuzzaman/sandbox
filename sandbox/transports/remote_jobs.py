@@ -32,6 +32,9 @@ class RemoteJobTransportError(RuntimeError):
 
     code = "remote_job_transport_error"
     retryable = True
+    # The failed command's own typed ``code`` when its JSON carried a safe one.
+    # Callers match it against a closed set; it is never shown verbatim.
+    remote_code: str | None = None
 
     def __init__(self, message: str = "", *, retryable: bool | None = None,
                  detail: dict | None = None) -> None:
@@ -1153,8 +1156,12 @@ class RemoteJobTransport:
         )
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not _control_succeeded(payload):
-            raise RemoteJobTransportError(
+            error = RemoteJobTransportError(
                 f"remote job control operation failed: {_error_detail(payload, result)}")
+            code = (payload or {}).get("code")
+            if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+                error.remote_code = code
+            raise error
         return payload
 
     def status(self, remote_name: str, job_id: str, *, timeout: int = 25) -> dict:

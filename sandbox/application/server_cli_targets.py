@@ -7,6 +7,18 @@ import time
 from sandbox.application.server_cli import ServerCLIUnavailable
 
 CONTRACT = 'host.target-inspect.v1'
+# Typed selector refusals the installed inspector reports. Any other failure
+# stays the generic unavailable error.
+TARGET_REFUSAL_CODES = frozenset({
+    'host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid'})
+
+
+class ServerTargetRefused(ServerCLIUnavailable):
+    """The server refused the selector with one known code; nothing was accepted."""
+
+    def __init__(self, code):
+        super().__init__('installed owner target observation was refused')
+        self.code = code
 
 
 def installed_inspector():
@@ -90,7 +102,13 @@ def observe_server_cli_target(remote_name, *, target=None, name=None, environmen
     transport = RemoteJobTransport(deploy=None, ssh_run=_remote.ssh_run,
         remote_lookup=lambda selected: record if selected == remote_name else None,
         remote_sb_path=_remote.remote_sb_path)
-    result = transport.control(remote_name, argv, timeout=remaining())
+    from sandbox.transports.remote_jobs import RemoteJobTransportError
+    try:
+        result = transport.control(remote_name, argv, timeout=remaining())
+    except RemoteJobTransportError as error:
+        if error.remote_code in TARGET_REFUSAL_CODES:
+            raise ServerTargetRefused(error.remote_code) from None
+        raise
     if not isinstance(result, dict) or result.get('ok') is not True:
         raise ServerCLIUnavailable('installed owner target observation is unavailable')
     snapshot = {key: value for key, value in result.items() if key != 'ok'}

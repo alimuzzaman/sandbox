@@ -74,6 +74,7 @@ Remove any other route to the capture service when the gate goes live.
 | `enabled_until` holds through a request | Rechecked before a token is claimed and before the redirect; a websocket tunnel ends at that time or at its session expiry, whichever is first |
 | The capture service is in this Compose project and reachable | Manifest parsing, apply preflight, and service startup |
 | Any capture credential stays in this service's environment | Rendered override |
+| Each `deploy.derived_environment` key with `pushed_commit_sha` reaches `sandbox-login` from the apply's environment file, so apply and `sb host status` prove its revision like every other running service. A key starting `SANDBOX_LOGIN_` is refused | Rendered override and manifest parsing |
 | `sandbox-login` publishes only its managed `127.0.0.1:<port + 3000>` mapping. The capture service publishes only on `127.0.0.1` or `::1`, and never uses host networking | Apply preflight (`login_port_published`, `capture_port_published`) |
 | No Sandbox route targets the capture service | Manifest parsing |
 | A left-on service is visible | `sb host status` lists each entry and the expiry |

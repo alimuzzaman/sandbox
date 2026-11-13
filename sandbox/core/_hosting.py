@@ -787,6 +787,8 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         login_declaration = login_service.parse_declaration(
             env.get("autologin"), routes=routes, compose=compose, secrets=secrets,
             share=env.get("share"))
+        if login_declaration:
+            login_service.revision_keys(_pushed_revision_keys(deploy))
     except login_service.LoginServiceError as exc:
         raise HostingError(str(exc)) from None
     if login_service.is_private(login_declaration) and (env.get("cloudflare") or {}).get("proxied"):
@@ -1051,9 +1053,17 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     # Spec 081: the gate publishes its own managed loopback port, and the front
     # door sends every gate hostname there; the application keeps its port.
     from sandbox.hosting.owner_share_record import target_digest
+    # The gate is a background service, so delivery checks it for the pushed
+    # revision like every other one; it gets the keys the same way they do.
     return rendered + login_service.render_service(
         declaration, gate_port=login_service.gate_loopback_port(loopback_port),
-        target_digest=target_digest(validated))
+        target_digest=target_digest(validated),
+        source_revision_keys=_pushed_revision_keys(validated["deploy"]))
+
+
+def _pushed_revision_keys(deploy: dict) -> list[str]:
+    return sorted(key for key, provider in deploy.get("derived_environment", {}).items()
+                  if provider == "pushed_commit_sha")
 
 
 def resolve_environment(validated: dict, source_values: dict[str, str],

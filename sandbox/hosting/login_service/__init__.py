@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SERVICE_NAME = "sandbox-login"
+# The gate reads its settings from SANDBOX_LOGIN_* variables (runtime.py).
+RESERVED_ENVIRONMENT_PREFIX = "SANDBOX_LOGIN_"
+_REVISION_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 STATE_KEY = "login_default_email"
 LINK_PARAMETER = "sandbox_autologin"
 RECORD_SCHEMA = "sandbox.login-token.v1"
@@ -598,12 +601,33 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def render_service(declaration: dict, gate_port: int | None = None, *, target_digest: str | None = None) -> str:
+def revision_keys(keys) -> tuple[str, ...]:
+    """The declared ``pushed_commit_sha`` keys the gate carries, sorted.
+
+    Delivery proves every running service, this one included, holds the pushed
+    commit under each key. ``SANDBOX_LOGIN_*`` names are the gate's own settings,
+    so a manifest key there would replace them; it is refused.
+    """
+    result = tuple(sorted(keys))
+    for key in result:
+        if not isinstance(key, str) or not _REVISION_KEY_RE.fullmatch(key):
+            raise _invalid("source revision keys must be environment variable names")
+        if key.upper().startswith(RESERVED_ENVIRONMENT_PREFIX):
+            raise _invalid(f"deploy.derived_environment key {key} uses the {RESERVED_ENVIRONMENT_PREFIX} "
+                           f"prefix reserved for {SERVICE_NAME}")
+    return result
+
+
+def render_service(declaration: dict, gate_port: int | None = None, *, target_digest: str | None = None,
+                   source_revision_keys=()) -> str:
     """Render the Compose service block; it joins the override's ``services:``.
 
     With ``gate_port`` the service publishes on that loopback port only, so the front
-    door can send gate hostnames straight to it (spec 081).
+    door can send gate hostnames straight to it (spec 081). Each of
+    ``source_revision_keys`` is passed by reference from the apply's environment
+    file, the same value the application's own services receive.
     """
+    keys = revision_keys(source_revision_keys)
     source = _runtime_source()
     config = _b64(json.dumps(runtime_config(declaration, target_digest=target_digest), sort_keys=True, separators=(",", ":")).encode())
     probe = f"import urllib.request as u;u.urlopen('http://127.0.0.1:{HEALTH_PORT}/healthz',timeout=3)"
@@ -628,6 +652,7 @@ def render_service(declaration: dict, gate_port: int | None = None, *, target_di
         f'      SANDBOX_LOGIN_CONFIG: "{config}"',
         *([f'      SANDBOX_LOGIN_CAPTURE_CREDENTIAL: "${{{capture["credential_secret"]}}}"']
           if capture and capture["credential_secret"] else []),
+        *(f'      {key}: "${{{key}}}"' for key in keys),
         f"    command: {json.dumps(['python3', '-c', _LOADER, source])}",
         "    healthcheck:",
         f"      test: {json.dumps(['CMD', 'python3', '-c', probe])}",

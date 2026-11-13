@@ -95,7 +95,8 @@ class _Runtime:
         patcher.start()
         test.addCleanup(patcher.stop)
 
-    def checkout(self, template: str = TEMPLATE, *, name: str = "hub", subdir: str = ".") -> Path:
+    def checkout(self, template: str = TEMPLATE, *, name: str = "hub", subdir: str = ".",
+                 compose: str = COMPOSE) -> Path:
         """A committed checkout with the template and its compose file in ``subdir``."""
         root = self.base / name
         root.mkdir()
@@ -103,7 +104,7 @@ class _Runtime:
         folder = root / subdir
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "sandbox.hosting.yml").write_text(template)
-        (folder / "compose.yml").write_text(COMPOSE)
+        (folder / "compose.yml").write_text(compose)
         _git(root, "add", "-A")
         _git(root, "commit", "--quiet", "-m", "init")
         _git(root, "branch", "stack/demo")
@@ -490,6 +491,156 @@ class RenderedManifestTests(unittest.TestCase):
         ports = json.loads(result.stdout)["services"]["mailpit"]["ports"]
         self.assertEqual(str(ports[0]["published"]), "18142")
         self.assertEqual(ports[0]["host_ip"], "127.0.0.1")
+
+
+def _gated_template(*, gated: bool = True) -> str:
+    """TEMPLATE plus a declared pushed-revision key, with or without the share gate."""
+    import datetime
+    import yaml
+    document = _yaml(TEMPLATE)
+    env = document["environments"]["sandbox"]
+    env["deploy"]["derived_environment"] = {"APP_SOURCE_REVISION": "pushed_commit_sha"}
+    if gated:
+        env["host"]["aliases"].append({"hostname": "share-{slug}.example.test", "mode": "serve"})
+        env["share"] = {"hostname": "share-{slug}.example.test", "private": False,
+                        "image": "python:3.13-alpine@sha256:" + "b" * 64,
+                        "enabled_until": (datetime.date.today()
+                                          + datetime.timedelta(days=5)).isoformat(),
+                        "session_ttl_seconds": 3600,
+                        "allowed_host_suffixes": ["example.test"]}
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+def _revision_compose(*, web_revision: bool = True) -> str:
+    """The application forwards the declared key on each of its own services."""
+    web = "    environment:\n      APP_SOURCE_REVISION: ${APP_SOURCE_REVISION:?}\n" if web_revision else ""
+    return ("services:\n  web:\n    image: nginx:alpine\n" + web +
+            "  mailpit:\n    image: axllent/mailpit\n"
+            "    environment:\n      APP_SOURCE_REVISION: ${APP_SOURCE_REVISION:?}\n")
+
+
+class GatedStackSourceRevisionTests(unittest.TestCase):
+    """The managed gate must pass the same pushed-revision proof as every service."""
+
+    def setUp(self):
+        self.runtime = _Runtime(self)
+
+    def _validated(self, *, gated: bool = True, web_revision: bool = True,
+                   template: str | None = None) -> dict:
+        import yaml
+        template = template or _gated_template(gated=gated)
+        hub = self.runtime.checkout(template, compose=_revision_compose(web_revision=web_revision))
+        ref = StackRef(ref="stack/demo", commit=_git(hub, "rev-parse", "HEAD"), ref_branch="stack/demo")
+        worktree = self.runtime.runtime / "stacks" / "demo" / "source" / "wt"
+        worktree.parent.mkdir(parents=True)
+        _git(hub, "worktree", "add", "--detach", "--quiet", str(worktree), ref.commit)
+        rendered = stack_template.render(stack_template.parse_template(_yaml(template)), slug="demo",
+                                         ref=ref, ports={"mailpit": 18142}, source_root=worktree,
+                                         template_path=hub / "sandbox.hosting.yml")
+        target = self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml"
+        target.write_text(yaml.safe_dump(rendered, sort_keys=False))
+        self.worktree = worktree
+        return hosting.validate_manifest(target)
+
+    def _observe(self, validated: dict, revision: str) -> dict:
+        """What the observer reads: each running container's environment after Compose."""
+        import re
+        import yaml
+        environment = hosting.resolve_environment(
+            validated, {"XSPEED_HUB_SBX_DEMO_PG_PASSWORD": "synthetic-value"}, revision)
+        services = {}
+        for document in (yaml.safe_load((self.worktree / "compose.yml").read_text()),
+                         yaml.safe_load(hosting.compose_override(validated, 18000))):
+            for name, config in (document.get("services") or {}).items():
+                services.setdefault(name, {}).update((config or {}).get("environment") or {})
+        variable = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-?][^}]*)?\}")
+        names = [validated["compose"]["service"], *validated["compose"]["background_services"]]
+        checks = []
+        for name in names:
+            for key in sorted(k for k, p in validated["deploy"]["derived_environment"].items()
+                              if p == "pushed_commit_sha"):
+                raw = services.get(name, {}).get(key)
+                value = variable.sub(lambda m: environment.get(m.group(1), ""), raw) if raw else None
+                checks.append({"service": name, "key": key,
+                               "observed": value if value and re.fullmatch(r"[0-9a-f]{40}", value) else None})
+        return {"complete": True, "configured_services": names,
+                "rows": [{"Service": name, "State": "running", "Health": "healthy"} for name in names],
+                "revision_checks": checks, "phases": []}
+
+    def _classify(self, validated: dict, revision: str = COMMIT) -> dict:
+        classified = hosting_cmd._classify_host_observation(
+            validated, self._observe(validated, revision), revision)
+        classified["exact_ready"] = hosting_cmd._host_observation_is_exact_ready(
+            validated, classified, revision)
+        return classified
+
+    def test_gated_stack_gate_carries_the_revision_and_classifies_ready(self):
+        import yaml
+        validated = self._validated()
+        self.assertIn("sandbox-login", validated["compose"]["background_services"])
+        gate = yaml.safe_load(hosting.compose_override(validated, 18000))["services"]["sandbox-login"]
+        self.assertEqual(gate["environment"]["APP_SOURCE_REVISION"], "${APP_SOURCE_REVISION}")
+        classified = self._classify(validated)
+        self.assertEqual(classified["source_revision"]["state"], "ready")
+        self.assertIn({"service": "sandbox-login", "key": "APP_SOURCE_REVISION",
+                       "provider": "pushed_commit_sha", "expected": COMMIT, "state": "match"},
+                      classified["source_revision"]["checks"])
+        self.assertTrue(classified["exact_ready"])
+
+    def test_gate_is_not_ready_on_a_stale_revision(self):
+        validated = self._validated()
+        observation = self._observe(validated, "c" * 40)
+        classified = hosting_cmd._classify_host_observation(validated, observation, COMMIT)
+        self.assertEqual(classified["source_revision"]["state"], "degraded")
+        self.assertFalse(hosting_cmd._host_observation_is_exact_ready(validated, classified, COMMIT))
+
+    def test_user_service_missing_the_revision_still_fails_readiness(self):
+        classified = self._classify(self._validated(web_revision=False))
+        states = {(item["service"], item["state"]) for item in classified["source_revision"]["checks"]}
+        self.assertIn(("web", "missing"), states)
+        self.assertIn(("sandbox-login", "match"), states)
+        self.assertEqual(classified["source_revision"]["state"], "degraded")
+        self.assertFalse(classified["exact_ready"])
+
+    def test_non_gated_stack_render_is_unchanged(self):
+        validated = self._validated(gated=False)
+        self.assertEqual(validated["compose"]["background_services"], ["mailpit"])
+        self.assertEqual(hosting.compose_override(validated, 18000),
+                         'services:\n  web:\n    ports:\n      - "127.0.0.1:18000:80"\n')
+        classified = self._classify(validated)
+        self.assertEqual({item["service"] for item in classified["source_revision"]["checks"]},
+                         {"web", "mailpit"})
+        self.assertTrue(classified["exact_ready"])
+
+    def test_revision_key_cannot_replace_the_gate_settings(self):
+        import yaml
+        document = _yaml(_gated_template())
+        document["environments"]["sandbox"]["deploy"]["derived_environment"] = {
+            "SANDBOX_LOGIN_CONFIG": "pushed_commit_sha"}
+        with self.assertRaisesRegex(hosting.HostingError, "reserved for sandbox-login"):
+            self._validated(template=yaml.safe_dump(document, sort_keys=False))
+
+    def test_rendered_gate_interpolates_the_revision_from_the_env_file(self):
+        validated = self._validated()
+        env_path = self.runtime.base / "environment.env"
+        env_path.write_text(hosting.render_env_file(
+            validated, {"XSPEED_HUB_SBX_DEMO_PG_PASSWORD": "synthetic-value"}, COMMIT))
+        override = self.runtime.base / "compose.override.yml"
+        override.write_text(hosting.compose_override(validated, 18000))
+        docker = shutil.which("docker")
+        if not docker:
+            self.skipTest("docker is not installed; rendered environment asserted elsewhere")
+        result = run_test_process(
+            (docker, "compose", "-p", "stackcheck", "--env-file", str(env_path),
+             "-f", str(self.worktree / "compose.yml"), "-f", str(override),
+             "config", "--format", "json"),
+            env={"HOME": str(self.runtime.base), "PATH": os.path.dirname(docker)},
+            capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            self.skipTest("docker compose config is unavailable here")
+        services = json.loads(result.stdout)["services"]
+        for name in ("web", "mailpit", "sandbox-login"):
+            self.assertEqual(services[name]["environment"]["APP_SOURCE_REVISION"], COMMIT)
 
 
 class StackCommandTests(unittest.TestCase):

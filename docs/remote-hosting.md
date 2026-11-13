@@ -816,6 +816,13 @@ The mapping key cannot overlap `secrets.values`, `secrets.required`, or
 the same mapping metadata, never the rendered environment or secret values. An invalid
 push result fails before the remote checkout is reset or Compose is started.
 
+Apply reports ready only when every primary and background service runs with the
+pushed commit under each `pushed_commit_sha` key, so forward the key on each of
+those services in your Compose file (for example
+`APP_SOURCE_REVISION: ${APP_SOURCE_REVISION:?}`). A service that lacks it keeps
+the target out of ready. Sandbox forwards the keys itself to the managed
+`sandbox-login` gate (see [login-service.md](login-service.md)).
+
 Use `compose.background_services` for declared long-lived workers that must be built,
 recreated, and started with the web service. Keep one-shot migration/setup jobs in
 `compose.init_services`; each service name must be unique across the three fields.

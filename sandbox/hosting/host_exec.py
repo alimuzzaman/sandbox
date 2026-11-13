@@ -27,6 +27,10 @@ TIMEOUT_DEFAULT = 300
 TIMEOUT_MIN = 1
 TIMEOUT_MAX = 3600
 KILL_AFTER_SECONDS = 10
+# A server job's time after its command: the kill grace, then releasing the
+# target lease and publishing the capture before the job deadline.
+SERVER_RELEASE_SECONDS = 15
+SERVER_POST_COMMAND_SECONDS = KILL_AFTER_SECONDS + SERVER_RELEASE_SECONDS
 LOCAL_GRACE_SECONDS = 30
 CAPTURE_LIMIT = 1 << 20
 

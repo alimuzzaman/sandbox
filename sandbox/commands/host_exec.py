@@ -7,8 +7,10 @@ import subprocess
 import sys
 import time
 from contextlib import ExitStack, contextmanager
+import dataclasses
 import datetime
 import hashlib
+import math
 
 import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
@@ -125,12 +127,52 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
     return request, entry, prefix
 
 
+def _fit_deadline(request, deadline_at):
+    """Never take the lease without time to run, kill and release it by the deadline."""
+    remaining = (datetime.datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+                 - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    budget = math.floor(remaining) - host_exec.SERVER_POST_COMMAND_SECONDS
+    if budget < host_exec.TIMEOUT_MIN:
+        raise ExecRefusal(host_exec.TIMED_OUT,
+                          f"the original server CLI deadline leaves {max(0, math.floor(remaining))}s, "
+                          f"less than the {host_exec.SERVER_POST_COMMAND_SECONDS + host_exec.TIMEOUT_MIN}s "
+                          "needed to run the command and release the target; nothing ran")
+    if budget >= request.timeout_seconds:
+        return request
+    return dataclasses.replace(request, timeout_seconds=budget)
+
+
+def _command(request, entry, prefix):
+    """The argv and process options for one run of ``request``."""
+    command = (shlex.join(["timeout", f"--kill-after={host_exec.KILL_AFTER_SECONDS}",
+                           str(request.timeout_seconds), "env"]) +
+               " " + prefix + " " + shlex.join(request.argv) if request.owner_selection is not None else
+               host_exec.remote_command(prefix, request))
+    if is_owner_target(entry):
+        from sandbox.application.server_cli import owner_command_args, owner_environment
+        context = entry.require_current()
+        return (owner_command_args(context.owner, command),
+                {"env": owner_environment(context.owner), "cwd": context.owner.home})
+    return remote.ssh_command_args(entry, command, multiplex=False), {}
+
+
+def _known_failure(exc):
+    """(code, message, exit code) for a failure whose cause is known, else None."""
+    if isinstance(exc, ExecRefusal):
+        return exc.code, exc.detail, exc.exit_code
+    return None
+
+
 @contextmanager
 def _execution_scope(request, entry):
-    """Native alias locks plus the existing physical target lease, held once."""
+    """Native alias locks plus the existing physical target lease, held once.
+
+    Yields the request to run. On the owner path its timeout is clamped so the
+    command, its kill grace and the lease release all fit the job deadline.
+    """
     selected = request.owner_selection
     if selected is None:
-        yield
+        yield request
         return
     from sandbox.hosting.server_target_selection import OwnerExecSelection
     from sandbox.hosting.recovery.repository import RecoveryRepository
@@ -148,6 +190,7 @@ def _execution_scope(request, entry):
             held.enter_context(repository.effect_lock(key, timeout_seconds=0))
         selected.require_current()
         context = entry.require_current()
+        request = _fit_deadline(request, context.deadline_at)
         # One job cannot take over another live job's physical lease merely
         # because both execute as the same shared Linux owner.
         owner = hashlib.sha256(("server-cli-exec:" + context.job_id).encode()).hexdigest()[:32]
@@ -155,7 +198,7 @@ def _execution_scope(request, entry):
             target_lease.lease_path(entry.sandbox_home(), selected.target.project,
                                     selected.target.environment), owner)
         selected.require_current()
-        yield
+        yield request
         selected.require_current()
     # Native context exit can fail. Retain the physical fence in that case;
     # neither clean child exit nor a successful inner check proves cleanup.
@@ -192,17 +235,7 @@ def cmd_host_exec(args) -> None:
             from sandbox.application.server_cli_capture import prepare_server_cli_capture
             request.owner_selection.require_current()
             custody = prepare_server_cli_capture()
-        command = (shlex.join(["timeout", "--kill-after=10", str(request.timeout_seconds), "env"]) +
-                   " " + prefix + " " + shlex.join(request.argv) if request.owner_selection is not None else
-                   host_exec.remote_command(prefix, request))
-        process_options = {}
-        if is_owner_target(entry):
-            from sandbox.application.server_cli import owner_command_args, owner_environment
-            context = entry.require_current()
-            ssh_argv = owner_command_args(context.owner, command)
-            process_options = {"env": owner_environment(context.owner), "cwd": context.owner.home}
-        else:
-            ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
+        ssh_argv, process_options = _command(request, entry, prefix)
         audit = host_exec.AuditLog()
         setup_complete = True
     except ExecRefusal as exc:
@@ -225,10 +258,14 @@ def cmd_host_exec(args) -> None:
         if not setup_complete and custody is not None:
             custody.close()
     audit_failed = False
+    failure = None
     started = time.monotonic()
     with audit, _capture_lifetime(custody):
         try:
-            with _execution_scope(request, entry):
+            with _execution_scope(request, entry) as scoped:
+                if scoped is not request:
+                    request = scoped
+                    ssh_argv, process_options = _command(request, entry, prefix)
                 outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source(),
                                         **process_options)
                 if request.owner_selection is not None and outcome.code in {
@@ -247,11 +284,16 @@ def cmd_host_exec(args) -> None:
                 exit_code=130, code=host_exec.INTERRUPTED,
                 duration_ms=int((time.monotonic() - started) * 1000))
         except Exception as exc:  # never leave a run unaudited or exit 0
-            outcome = host_exec.ExecOutcome(
-                exit_code=host_exec.EXIT_TRANSPORT, code=host_exec.TRANSPORT_FAILED,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                stderr=f"host exec failed locally: {type(exc).__name__}\n".encode()
-                if request.capture else b"")
+            failure = _known_failure(exc)
+            if failure is not None:
+                outcome = host_exec.ExecOutcome(exit_code=failure[2], code=failure[0],
+                    duration_ms=int((time.monotonic() - started) * 1000))
+            else:
+                outcome = host_exec.ExecOutcome(
+                    exit_code=host_exec.EXIT_TRANSPORT, code=host_exec.TRANSPORT_FAILED,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    stderr=f"host exec failed locally: {type(exc).__name__}\n".encode()
+                    if request.capture else b"")
         try:
             audit.write(request, outcome)
         except OSError as exc:
@@ -259,6 +301,8 @@ def cmd_host_exec(args) -> None:
             audit_failed = True
             print(f"sb host exec: warning: audit record not written: {exc.strerror or exc}",
                   file=sys.stderr)
+    if failure is not None:
+        _refuse(failure[0], failure[1], as_json=as_json, exit_code=failure[2])
     if artifact_capture:
         if capture_metadata is None:
             _refuse("host_exec_capture_unavailable",

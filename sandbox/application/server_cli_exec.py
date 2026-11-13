@@ -233,7 +233,12 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             or not isinstance(service, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', service) is None):
         raise ServerCLIUnavailable('server exec request is invalid')
     values = _exec_argv(argv)
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+    # The server clamps the command to what is left after its kill grace and
+    # lease release, so reserve those here: the command keeps the requested
+    # timeout less only the time spent before acceptance.
+    from sandbox.hosting.host_exec import SERVER_POST_COMMAND_SECONDS
+    deadline = datetime.now(timezone.utc) + timedelta(
+        seconds=min(timeout_seconds + SERVER_POST_COMMAND_SECONDS, 3600))
     def remaining():
         return remaining_deadline(deadline.isoformat())
     identity = authenticated_target_identity(remote_name, budget_seconds=min(15, remaining()))

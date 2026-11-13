@@ -610,8 +610,8 @@ class ServerSelectionTests(OwnerTargetTests):
         actual_scope = host_exec._execution_scope
         @contextmanager
         def scope(request, entry):
-            with actual_scope(request, entry):
-                yield
+            with actual_scope(request, entry) as scoped:
+                yield scoped
             events.append("scope_exited")
         def run(*args, **kwargs):
             events.append("run")
@@ -645,8 +645,8 @@ class ServerSelectionTests(OwnerTargetTests):
         args = Namespace(remote="box", name="named", target=None, environment=None,
             exec_argv=["synthetic"], service="web", timeout=30, json=True, exec_capture_artifacts=True)
         @contextmanager
-        def failed_cleanup(*args):
-            yield
+        def failed_cleanup(request, entry):
+            yield request
             raise RuntimeError("synthetic cleanup uncertainty")
         custody = Mock()
         audit = Mock()
@@ -667,6 +667,74 @@ class ServerSelectionTests(OwnerTargetTests):
         self.assertNotIn("synthetic private output", output.getvalue())
         custody.publish.assert_not_called()
         custody.close.assert_called_once()
+
+    def run_owner_exec(self, *, seconds_left, timeout=300, capture_artifacts=False, acquire=None, run=None):
+        """cmd_host_exec on the owner path; returns (exit, output, acquire mock, run mock, audit)."""
+        from sandbox.commands import host_exec
+        from sandbox.hosting import target_lease
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        self.bind_original_selector()
+        self.context = replace(self.context, deadline_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=seconds_left)).isoformat())
+        self.current.return_value = self.context
+        self.selected_context.return_value = self.context
+        self.entry = targets.selected_owner_target("box")
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["true"], service="web", timeout=timeout, json=True,
+            exec_capture_artifacts=capture_artifacts)
+        audit = Mock()
+        audit.__enter__ = Mock(return_value=audit)
+        audit.__exit__ = Mock(return_value=False)
+        repository = RecoveryRepository(self.home / "hosts.json", self.home / "native-locks")
+        output = io.StringIO()
+        code = 0
+        with patch("sandbox.hosting.target_lease.acquire", side_effect=acquire,
+                   wraps=None if acquire else target_lease.acquire) as acquired, \
+                patch.object(host_exec.host_exec, "run", side_effect=run or (
+                    lambda *a, **k: host_exec.host_exec.ExecOutcome(0, "ok", 1))) as ran, \
+                patch.object(host_exec.host_exec, "AuditLog", return_value=audit), \
+                patch.object(sdk, "owner_command_args", side_effect=lambda owner, command: ["sh", "-c", command]), \
+                patch.object(sdk, "owner_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                patch("sandbox.application.server_cli_capture.prepare_server_cli_capture", return_value=Mock()), \
+                patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                redirect_stdout(output):
+            try:
+                host_exec.cmd_host_exec(args)
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, output.getvalue(), acquired, ran, audit
+
+    def test_owner_exec_without_time_to_release_refuses_before_taking_the_lease(self):
+        from sandbox.hosting import target_lease
+        code, output, acquired, ran, audit = self.run_owner_exec(seconds_left=20, timeout=30)
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["code"], "host_exec_timeout")
+        self.assertIn("nothing ran", payload["error"])
+        acquired.assert_not_called()
+        ran.assert_not_called()
+        self.assertFalse(any(" acquire" in call.args[1] for call in self.process.call_args_list))
+        self.assertFalse(Path(target_lease.lease_path(str(self.home), "project", "dev")).exists())
+        audit.write.assert_called_once()
+
+    def test_owner_exec_clamps_the_command_timeout_to_the_time_left(self):
+        from sandbox.hosting import host_exec as exec_policy
+        code, output, acquired, ran, _ = self.run_owner_exec(seconds_left=100, timeout=300)
+        self.assertEqual(code, 0)
+        acquired.assert_called_once()
+        request = ran.call_args.args[1]
+        argv = shlex.split(ran.call_args.args[0][-1])
+        self.assertEqual(argv[:2], ["timeout", "--kill-after=10"])
+        self.assertEqual(int(argv[2]), request.timeout_seconds)
+        self.assertLessEqual(request.timeout_seconds + exec_policy.SERVER_POST_COMMAND_SECONDS, 100)
+        self.assertGreaterEqual(request.timeout_seconds, 100 - exec_policy.SERVER_POST_COMMAND_SECONDS - 3)
+        self.assertEqual(json.loads(output)["code"], "ok")
+
+    def test_owner_exec_keeps_a_timeout_that_already_fits(self):
+        code, _, acquired, ran, _ = self.run_owner_exec(seconds_left=300, timeout=30)
+        self.assertEqual(code, 0)
+        self.assertEqual(ran.call_args.args[1].timeout_seconds, 30)
+        self.assertIn("timeout --kill-after=10 30 env", ran.call_args.args[0][-1])
 
     def test_owner_exec_refuses_a_service_without_a_unique_first_container(self):
         selected = self.selected()

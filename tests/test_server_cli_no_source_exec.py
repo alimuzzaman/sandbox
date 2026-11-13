@@ -166,6 +166,16 @@ class NoSourceClientTests(unittest.TestCase):
         self.assertIn('PubkeyAuthentication=no', argv)
         self.assertIn('--server-cli-exec-selector', argv[-1])
 
+    def test_client_deadline_reserves_the_server_kill_grace_and_lease_release(self):
+        started = datetime.now(timezone.utc)
+        self.invoke()
+        parts = shlex.split(self.calls[0][0][-1])
+        selected = json.loads(parts[parts.index('--server-cli-exec-selector') + 1])
+        reserved = (datetime.fromisoformat(selected['deadline_at']) - started).total_seconds()
+        # timeout_seconds=30, plus the 10 s kill grace and 15 s lease release.
+        self.assertGreaterEqual(reserved, 55)
+        self.assertLess(reserved, 60)
+
     def test_unknown_acceptance_is_not_replayed_or_misreported_as_refused(self):
         with self.assertRaises(execute.ServerCLIExecAcceptanceUnknown) as failure:
             self.invoke(payload={})

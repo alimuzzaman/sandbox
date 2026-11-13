@@ -74,7 +74,8 @@ Remove any other route to the capture service when the gate goes live.
 | `enabled_until` holds through a request | Rechecked before a token is claimed and before the redirect; a websocket tunnel ends at that time or at its session expiry, whichever is first |
 | The capture service is in this Compose project and reachable | Manifest parsing, apply preflight, and service startup |
 | Any capture credential stays in this service's environment | Rendered override |
-| Each `deploy.derived_environment` key with `pushed_commit_sha` reaches `sandbox-login` from the apply's environment file, so apply and `sb host status` prove its revision like every other running service. A key starting `SANDBOX_LOGIN_` is refused | Rendered override and manifest parsing |
+| `sandbox-login` is the gate Sandbox renders, never a service from the project's Compose files | Manifest parsing refuses the name in `compose.*`; apply preflight refuses a Compose file that defines it (`login_service_user_defined`) before any build or `up` |
+| The gate does not carry the application's revision. Apply and `sb host status` check every `pushed_commit_sha` key on the application's primary and background services only; the gate is checked for running and healthy, and its render does not change with the commit, so a push does not recreate it | Delivery observer and classifier |
 | `sandbox-login` publishes only its managed `127.0.0.1:<port + 3000>` mapping. The capture service publishes only on `127.0.0.1` or `::1`, and never uses host networking | Apply preflight (`login_port_published`, `capture_port_published`) |
 | No Sandbox route targets the capture service | Manifest parsing |
 | A left-on service is visible | `sb host status` lists each entry and the expiry |
@@ -625,6 +626,9 @@ hostname to `sandbox-login:8080` is no longer needed.
   prompt in front of the gate hostname.
 - Apply preflight refuses an upstream that publishes a port beyond `127.0.0.1` or `::1`
   (`upstream_port_published`) or is missing from the project (`upstream_not_in_project`).
+- Apply preflight reads the project's own Compose files without Sandbox's override and
+  refuses one that defines `sandbox-login` (`login_service_user_defined`). Remove that
+  service; Sandbox renders it.
 
 ### Minting, listing and revoking
 
@@ -671,7 +675,7 @@ run `host apply`).
   `/run/sandbox-login/sites/<entry>/` on the service tmpfs, mode 0600, named by SHA-256
   hash or link id. The gate never stores a token or a session secret. They survive a
   process restart and end when the container is recreated, as on every apply that
-  changes the service.
+  changes the service. A new application commit alone does not change it.
 - **Opening.** A live link with a use left sets `__Host-sandbox_share`. The cookie is
   host-only, `Path=/`, `Secure`, `HttpOnly` and `SameSite=Lax`, with `Max-Age` set to
   the latest remaining session. It holds up to 8 session secrets, so one browser can

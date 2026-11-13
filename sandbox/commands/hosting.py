@@ -1072,12 +1072,14 @@ def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") ->
             "preserve the original operation before recovery")
 
 
-def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_path: str) -> str:
+def _compose_prefix(validated: dict, source_dir: str, override_path: str | None, env_path: str) -> str:
+    """Compose with the target's files; ``override_path=None`` reads the user's files alone."""
     parts = [f"SANDBOX_HOST_ENV_FILE={env_path}", "docker", "compose", "--env-file", env_path,
              "-p", hosting.compose_project_name(validated)]
     for file_name in validated["compose"]["files"]:
         parts.extend(["-f", str(__import__("pathlib").Path(source_dir) / file_name)])
-    parts.extend(["-f", override_path])
+    if override_path is not None:
+        parts.extend(["-f", override_path])
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -1888,8 +1890,12 @@ def _assert_login_service_applicable(validated: dict) -> None:
 
 
 def _preflight_login_service(entry: dict, prefix: str, validated: dict,
-                             loopback_port: int | None = None) -> None:
-    """Refuse an apply when the capture service or login service publishes a port."""
+                             loopback_port: int | None = None, *, user_prefix: str) -> None:
+    """Refuse an apply when the capture service or login service publishes a port.
+
+    ``user_prefix`` reads the target's own Compose files without Sandbox's override,
+    so a user-defined ``sandbox-login`` service is refused before Compose runs.
+    """
     from sandbox.hosting import login_service as login
     declaration = validated["login_service"]
     capture = (declaration.get("capture") or {}).get("service")
@@ -1898,7 +1904,7 @@ def _preflight_login_service(entry: dict, prefix: str, validated: dict,
         login.check_preflight(_remote_checked(
             entry, login.preflight_command(
                 prefix, capture, login.preflight_upstreams(declaration, validated["compose"]["service"]),
-                gate_port),
+                gate_port, user_prefix=user_prefix),
             timeout=75))
     except login.LoginServiceError as exc:
         raise hosting.HostingError(str(exc)) from None
@@ -2121,7 +2127,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         )
     prefix = _compose_prefix(validated, source_dir, override, env_file)
     if validated.get("login_service"):
-        _preflight_login_service(entry, prefix, validated, runtime.get("loopback_port"))
+        _preflight_login_service(entry, prefix, validated, runtime.get("loopback_port"),
+                                 user_prefix=_compose_prefix(validated, source_dir, None, env_file))
     runtime_services = [
         shlex.quote(validated["compose"]["service"]),
         *(shlex.quote(service) for service in validated["compose"].get("background_services", [])),
@@ -2506,8 +2513,7 @@ def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
             or isinstance(transport_grace_seconds, bool)
             or not 0 <= transport_grace_seconds <= 5):
         raise ValueError("host observation transport grace must be between 0 and 5 seconds")
-    services = [validated["compose"]["service"],
-                *validated["compose"].get("background_services", [])]
+    services = hosting.source_revision_services(validated)
     revision_keys = sorted(
         key for key, provider in validated["deploy"].get("derived_environment", {}).items()
         if provider == "pushed_commit_sha"
@@ -2627,7 +2633,7 @@ def _classify_host_observation(validated: dict, observation: dict,
         checks.append(item)
     expected_pairs = {
         (service, key)
-        for service in services
+        for service in hosting.source_revision_services(validated)
         for key, provider in validated["deploy"].get("derived_environment", {}).items()
         if provider == "pushed_commit_sha"
     }
@@ -3473,8 +3479,7 @@ def _source_revision_evidence_ready(validated: dict, classified: dict,
                                     revision: str) -> bool:
     expected = {
         (service, key)
-        for service in [validated["compose"]["service"],
-                        *validated["compose"].get("background_services", [])]
+        for service in hosting.source_revision_services(validated)
         for key, provider in validated["deploy"].get("derived_environment", {}).items()
         if provider == "pushed_commit_sha"
     }

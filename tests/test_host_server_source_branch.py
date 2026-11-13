@@ -106,13 +106,46 @@ class SourceBranchTests(unittest.TestCase):
                 transport.control.return_value = caps
                 transport.submit_server_cli.return_value = {'ok': True, 'job_id': 'd' * 32}
                 call = lambda: sdk.dispatch_server_cli('box', ['host', 'apply'], project_dir=str(self.client),
-                    request_id='original', source_branch_bound=True)
+                    request_id='original', source_branch_bound=True, nested_apply=True)
                 if accepted:
                     self.assertEqual(call(), {'ok': True, 'job_id': 'd' * 32})
                 else:
                     with self.assertRaises(sdk.ServerCLIUnavailable):
                         call()
                     transport.submit_server_cli.assert_not_called()
+
+    def test_bound_recover_needs_only_the_branch_contract(self):
+        from sandbox.core import _remote
+        record = {'joined': True, 'control_transport': 'tailscale',
+            'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
+        caps = {'schema_version': 1, 'target_identity': 'c' * 24, 'ownership_marker': 'a' * 24,
+            'runtime_revision': 'b' * 24,
+            'capabilities': [sdk.CONTRACT, 'job.acceptance-receipt.v1', 'job.source-content.v1'],
+            'server_cli_apply_capabilities': [dispatch.SOURCE_BRANCH_CONTRACT]}
+        for command, nested, accepted in ((['host', 'recover'], False, True),
+                                          (['host', 'apply'], True, False)):
+            with self.subTest(command=command), patch.object(_remote, 'get_remote', return_value=record), \
+                    patch('sandbox.resources.context.authenticated_target_identity', return_value={'target_identity': 'c' * 24}), \
+                    patch('sandbox.transports.remote_jobs.RemoteJobTransport') as factory:
+                transport = factory.return_value
+                transport.control.return_value = caps
+                transport.submit_server_cli.return_value = {'ok': True, 'job_id': 'd' * 32}
+                call = lambda: sdk.dispatch_server_cli('box', command, project_dir=str(self.client),
+                    request_id='original', source_branch_bound=True, nested_apply=nested)
+                if accepted:
+                    self.assertEqual(call(), {'ok': True, 'job_id': 'd' * 32})
+                else:
+                    with self.assertRaises(sdk.ServerCLIUnavailable):
+                        call()
+                    transport.submit_server_cli.assert_not_called()
+
+    def test_dispatch_requires_nested_apply_only_for_apply(self):
+        for action, expected in (('apply', True), ('recover', None)):
+            args = self.arguments(action=action)
+            args._server_cli_argv = ('host', action, *args._server_cli_argv[2:])
+            submit = self.submit(args)
+            self.assertIs(submit.call_args.kwargs['source_branch_bound'], True)
+            self.assertIs(submit.call_args.kwargs.get('nested_apply'), expected)
 
     def test_contract_is_advertised_outside_the_strict_job_capability_list(self):
         owner = sdk.ServerCliOwner(os.geteuid(), '/synthetic', '/synthetic/sandbox',

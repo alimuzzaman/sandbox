@@ -309,7 +309,8 @@ def _dispatch_host_if_selected(args) -> bool:
     receipt = dispatch_server_cli(remote_name, argv, project_dir=str(root),
         request_id=request_id, timeout_seconds=getattr(args, "timeout", None) or 900,
         **({'source_ref': source_ref} if source_ref is not None else {}),
-        **({'source_branch_bound': True} if source_branch_bound else {}))
+        **({'source_branch_bound': True} if source_branch_bound else {}),
+        **({'nested_apply': True} if source_branch_bound and action == 'apply' else {}))
     # The adapter returns the retained original receipt, including unknown
     # acceptance. Never reinterpret it as execution or delivery success.
     if not isinstance(receipt, dict):

@@ -595,7 +595,7 @@ class FixedServerCLI:
 def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
                         request_id: str, timeout_seconds: int = 900,
                         source_ref: str | None = None, required_capabilities: tuple[str, ...] = (),
-                        source_branch_bound: bool = False) -> dict:
+                        source_branch_bound: bool = False, nested_apply: bool = False) -> dict:
     """Submit before controller host/CI/provider-secret preflight.
 
     Returns the original remote durable acceptance receipt; never retries an
@@ -668,11 +668,15 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
         required.add(STACK_REF_CONTRACT)
     from sandbox.hosting.server_cli_dispatch import SOURCE_BRANCH_CONTRACT, NESTED_APPLY_CONTRACT
     apply_capabilities = observed.get('server_cli_apply_capabilities', [])
-    if source_branch_bound is not False and (source_branch_bound is not True
-            or not isinstance(apply_capabilities, list)
+    # Both bound commands need the branch contract; only `host apply` also
+    # needs the nested durable child (recover keeps its own admission path).
+    if (type(source_branch_bound) is not bool or type(nested_apply) is not bool
+            or (nested_apply and not source_branch_bound)):
+        raise ValueError('invalid server CLI source binding requirements')
+    if source_branch_bound and (not isinstance(apply_capabilities, list)
             or SOURCE_BRANCH_CONTRACT not in apply_capabilities
-            or NESTED_APPLY_CONTRACT not in apply_capabilities):
-        raise ServerCLIUnavailable('installed server CLI cannot admit source-bound project-dir apply')
+            or (nested_apply and NESTED_APPLY_CONTRACT not in apply_capabilities)):
+        raise ServerCLIUnavailable('installed server CLI cannot admit this source-bound command')
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
             or observed.get('target_identity') != identity['target_identity']
             or observed.get('runtime_revision') != (entry.get('mcp_service') or {}).get('runtime_revision')

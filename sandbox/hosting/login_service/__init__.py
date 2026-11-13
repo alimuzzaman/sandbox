@@ -11,6 +11,7 @@ import json
 import re
 import shlex
 import urllib.parse
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,7 +42,9 @@ SITE_STATE_TMPFS_SIZE = "8m"
 SHARE_ENTRY = "share"
 DEFAULT_SHARE_SESSION_SECONDS = 43200
 GATE_PORT_OFFSET = 3000
-_LOADER = "import base64,sys;exec(compile(base64.b64decode(sys.argv[1]),'login_service','exec'))"
+# The runtime travels as one argv string, and Linux caps a single argument at
+# 128 KiB (MAX_ARG_STRLEN). Compressed, it stays far below that.
+_LOADER = "import base64,sys,zlib;exec(compile(zlib.decompress(base64.b64decode(sys.argv[1])),'login_service','exec'))"
 
 _ENTRY_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PINNED_IMAGE = re.compile(r"[a-z0-9][a-z0-9./_:-]*@sha256:[0-9a-f]{64}")
@@ -624,7 +627,7 @@ def render_service(declaration: dict, gate_port: int | None = None, *, target_di
 
 
 def _runtime_source() -> str:
-    return _b64(Path(__file__).with_name("runtime.py").read_bytes())
+    return _b64(zlib.compress(Path(__file__).with_name("runtime.py").read_bytes(), 9))
 
 
 def preflight_upstreams(declaration: dict, primary: str) -> list[str]:

@@ -258,8 +258,12 @@ def _ended_exec_job(repository, holder, target):
             row = repository.snapshot(listed["job_id"])
             stopped = json.loads(row.get("result_json") or "{}")
             proof = json.loads(row.get("execution_policy_provenance_json") or "{}")
+            process = row.get("process") or {}
+            # The same job, cessation and identity checks as ``_binding``.
             if (row.get("job_id") != listed["job_id"] or row.get("kind") != "server-cli"
                     or row.get("target_kind") != "local"
+                    or row.get("parent_job_id") is not None or repository.children(listed["job_id"])
+                    or not process.get("supervisor_start_identity") or not process.get("child_start_identity")
                     or row.get("lifecycle") not in ENDED_LIFECYCLES
                     or stopped.get("owned_work_stopped") is not True
                     or stopped.get("stop_error") is not None

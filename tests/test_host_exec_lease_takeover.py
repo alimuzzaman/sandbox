@@ -35,7 +35,10 @@ def job(job_id=ENDED, *, lifecycle="timed_out", stopped=True, target="project/de
             "result_json": json.dumps({"owned_work_stopped": stopped, "stop_error": None,
                                        "owned_descendants": []}) if ended else None,
             "execution_policy_provenance_json": json.dumps({"server_cli.exec_target": target}),
-            "process": {"child_pid": 4242, "supervisor_pid": 4241, "child_pgid": 4242}}
+            "parent_job_id": None,
+            "process": {"child_pid": 4242, "supervisor_pid": 4241, "child_pgid": 4242,
+                        "supervisor_start_identity": "supervisor-start",
+                        "child_start_identity": "child-start"}}
 
 
 class Registry:
@@ -44,6 +47,9 @@ class Registry:
 
     def list(self, *, kind, limit, cursor_job_id=None):
         return [dict(row) for row in self.rows.values() if row["kind"] == kind][:limit]
+
+    def children(self, job_id):
+        return [dict(row) for row in self.rows.values() if row.get("parent_job_id") == job_id]
 
     def snapshot(self, job_id):
         return dict(self.rows[job_id])
@@ -128,6 +134,21 @@ class TakeOverEndedExecLeaseTests(unittest.TestCase):
         other = job()
         other["target_kind"] = "remote"
         self.assert_refused(Registry(other), body)
+
+    def test_a_nested_or_parent_job_or_one_without_start_identities_is_refused(self):
+        body = self.hold(recovery.exec_lease_owner(ENDED))
+        nested = job()
+        nested["parent_job_id"] = "8" * 32
+        self.assert_refused(Registry(nested), body)
+        child = job("7" * 32, lifecycle="running")
+        child["parent_job_id"] = ENDED
+        self.assert_refused(Registry(job(), child), body)
+        for key in ("supervisor_start_identity", "child_start_identity"):
+            with self.subTest(missing=key):
+                row = job()
+                row["process"] = {**row["process"], key: None}
+                self.assert_refused(Registry(row), body)
+        self.ceased.assert_not_called()
 
     def test_a_lease_taken_outside_the_jobs_run_is_refused(self):
         body = self.hold(recovery.exec_lease_owner(ENDED), since=int(NOW.timestamp()) + 600)

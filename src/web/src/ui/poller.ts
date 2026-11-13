@@ -19,10 +19,8 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 export const ACTION_REQUEST_TIMEOUT_MS = 15 * 60_000;
 
 // A timed-out action may still be running on the server, so do not call it failed.
-export function actionFailureText(error: unknown): string {
-  return String(error).includes("request timed out")
-    ? "No answer after 15 minutes. It may still be running: check the instance before retrying."
-    : "request failed: " + error;
+export function actionFailureText(_error: unknown): string {
+  return "Outcome unconfirmed. The request may have been accepted. No resubmission is available here; inspect the original activity or use supported instance observation.";
 }
 
 // A request that never settles counts as a failure; a late answer is ignored.
@@ -39,9 +37,11 @@ export function startPoll<T extends PollSnapshot>(
   intervalMs: number,
   handlers: PollHandlers<T>,
   timeoutMs: number = REQUEST_TIMEOUT_MS,
+  maxSnapshots: number = 150,
 ): void {
   let offset = 0;
   let failures = 0;
+  let snapshots = 0;
 
   const tick = async (): Promise<void> => {
     let snapshot: T;
@@ -66,6 +66,8 @@ export function startPoll<T extends PollSnapshot>(
       handlers.onDone(snapshot);
       return;
     }
+    snapshots += 1;
+    if (snapshots >= maxSnapshots) { handlers.onLost(); return; }
     setTimeout(tick, intervalMs);
   };
 

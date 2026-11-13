@@ -65,7 +65,7 @@ Short API source reads confirm derived l-12hex id, same preallocated MintedLink,
 final page in same mint and duplicate refusal rather than idempotent replay. Historical
 fetch/check results above retain provenance and do not describe current remote state.
 
-Current task provider: PERSONAL Codex GPT-6.1-Sol high only, no helpers or runtime runs.
+Historical design provider: personal Codex Sol high. Current work is Codex Office Sol high; bounded checks use Office Luna high, with no runtime runs authorized.
 Source mechanism is authorized; independent authentication review and owner sign-off
 remain required before release. No live authority is sought or implied by this design.
 
@@ -122,3 +122,11 @@ not measure anonymous application usability or detect out-of-band DB/auth change
 Existing frozen manifest/stack-record revalidation under effect leases remains the
 source consistency boundary. Definitions were added without execution; prior goals,
 check states, reviews and runtime acceptance requirements remain unchanged.
+
+## Reconciliation decision, 2026-11-13
+
+Use the owner-sharing closure from origin/latest cbda71e. Preserve its completed-
+transport callback and unknown-operation fences. Do not infer original completion
+from a missing gate id after a crash. The owner approved panel admission plus current
+applied agent_mint; fixed verbs and exact running bindings still gate every effect.
+Paused 090 source is excluded. Broad independent review and runtime proof remain open.

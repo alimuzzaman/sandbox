@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import numbers
+import time
 from typing import Callable, Mapping
 
 from .models import HEX24, HEX64, HistoryWindow, RemoteSwapState, bounded, parse_utc
@@ -75,11 +76,15 @@ RAW_RESULT_KEYS=frozenset({"stdout","stderr","output","source_path","processes",
 
 def validate_response(response, *, marker, revision, action):
     envelope_fields={"resource_schema","host_memory_schema","transport","service","result"}
-    if not isinstance(response,dict) or set(response)!=envelope_fields or response.get("resource_schema")!=1:
+    if (not isinstance(response,dict) or set(response)!=envelope_fields
+            or type(response.get("resource_schema")) is not int or response['resource_schema']!=1):
         raise RemoteProtocolError("remote_swap_protocol_mismatch","resource protocol is unavailable")
-    if response.get("host_memory_schema")!=1 or response.get("transport")!="control":
+    if (type(response.get("host_memory_schema")) is not int or response['host_memory_schema']!=1
+            or response.get("transport")!="control"):
         raise RemoteProtocolError("remote_swap_protocol_mismatch","host-memory protocol is unavailable")
-    service=response.get("service") or {}
+    service=response.get("service")
+    if not isinstance(service,dict):
+        raise RemoteProtocolError("remote_service_ownership_unknown","service identity is invalid")
     if service.get("ownership_marker")!=marker: raise RemoteProtocolError("remote_service_ownership_unknown","service ownership does not match")
     if service.get("runtime_revision")!=revision: raise RemoteProtocolError("remote_runtime_revision_mismatch","runtime revision does not match")
     result=response.get("result")
@@ -104,9 +109,11 @@ class HostMemoryRemote:
     def __init__(self, remote_name, remote_record, request:Callable):
         self.name=remote_name; self.record=remote_record; self.request=request
         service=remote_record.get("mcp_service") or {}
+        if not isinstance(service, dict):
+            raise RemoteProtocolError('remote_service_ownership_unknown', 'registered service identity is invalid')
         self.marker=service.get("ownership_marker",""); self.revision=service.get("runtime_revision","")
-        if not HEX24.fullmatch(self.marker): raise RemoteProtocolError("remote_service_ownership_unknown","remote service ownership is unavailable")
-        if not HEX24.fullmatch(self.revision): raise RemoteProtocolError("remote_runtime_revision_mismatch","remote runtime revision is unavailable")
+        if not isinstance(self.marker,str) or not HEX24.fullmatch(self.marker): raise RemoteProtocolError("remote_service_ownership_unknown","remote service ownership is unavailable")
+        if not isinstance(self.revision,str) or not HEX24.fullmatch(self.revision): raise RemoteProtocolError("remote_runtime_revision_mismatch","remote runtime revision is unavailable")
         self.target_identity = None
         if "control_identity" in remote_record:
             pin = remote_record["control_identity"]
@@ -119,7 +126,24 @@ class HostMemoryRemote:
 
     def call(self, action, **fields):
         payload=validate_request({"action":action,"remote_name":self.name,**fields})
+        if self.target_identity is not None and action != 'host_memory_status':
+            # A history response carries no machine identity. An apply plan
+            # binds its target on the server, but must also match OUR saved pin.
+            if action == 'host_memory_apply' and payload['plan']['target_identity'] != self.target_identity:
+                raise RemoteProtocolError('remote_target_identity_mismatch', 'plan belongs to a different registered machine')
+            deadline = time.monotonic() + payload['budget_seconds']
+            self._exchange({'action':'host_memory_status', 'remote_name':self.name,
+                            'budget_seconds':payload['budget_seconds']})
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RemoteProtocolError('remote_budget_exhausted', 'machine validation exhausted the operation budget')
+            payload = {**payload, 'budget_seconds':remaining}
+        return self._exchange(payload)
+
+    def _exchange(self, payload):
+        action = payload['action']
         try: response=self.request(self.record,payload)
+        except RemoteProtocolError: raise
         except Exception as exc: raise RemoteProtocolError("remote_unreachable","remote control endpoint is unreachable") from exc
         result = validate_response(response,marker=self.marker,revision=self.revision,
                                    action=action)

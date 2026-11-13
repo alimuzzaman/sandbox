@@ -193,6 +193,18 @@ class RecoveryRepository:
             return {**result, "state": "unsupported", "reason": "legacy_authority"}
         if request_id is not None and operation.get("request_id") != request_id:
             return result
+        admission = self._delivery_admission(operation, request_id)
+        if admission is None:
+            return {**result, "state": "unsupported", "reason": "legacy_authority"}
+        return {**result, "state": "known", "reason": None, "admission": admission}
+
+    def _delivery_admission(self, operation, request_id=None):
+        from .models import canonical_digest
+        if (not isinstance(operation, dict) or operation.get("schema_version") != 1
+                or operation.get("accepted_before_effects") is not True):
+            return None
+        if request_id is not None and operation.get("request_id") != request_id:
+            return None
         if (len(json.dumps(operation, ensure_ascii=True).encode()) > MAX_RECEIPT_BYTES
                 or operation.get("digest") != canonical_digest({
                     key: value for key, value in operation.items() if key != "digest"})):
@@ -257,7 +269,73 @@ class RecoveryRepository:
             admission['source']['artifact'] = artifact
         if 'invocation_root_digest' in operation:
             admission['invocation_root_digest'] = operation['invocation_root_digest']
-        return {**result, "state": "known", "reason": None, "admission": admission}
+        return admission
+
+    def read_exact_delivery_admission(self, target_key, *, budget, require_idle=False):
+        """Read only one recorded admission, without recovery/history projection.
+
+        Conversion selects the authoritative owner document. No file scan,
+        migration, target lock creation or runtime/source validation occurs.
+        """
+        parts = target_key.split('/')
+        if len(parts) != 3 or not all(self._valid_id(item) for item in parts):
+            raise ValueError('owner_binding_invalid')
+        def bounded_json(path, maximum):
+            budget.check()
+            fd = self._open_owned_file(path, create=False, label='delivery binding')
+            with os.fdopen(fd, 'rb') as handle:
+                if os.fstat(handle.fileno()).st_size > maximum:
+                    raise ValueError('owner_record_oversized')
+                raw = handle.read(maximum + 1)
+            budget.check()
+            if len(raw) > maximum:
+                raise ValueError('owner_record_oversized')
+            value = json.loads(raw)
+            budget.check()
+            return value
+        conversion_path = self.partition.conversion_path
+        conversion = (bounded_json(conversion_path, 1024 * 1024)
+                      if conversion_path.exists() or conversion_path.is_symlink()
+                      else {'version': 1, 'remotes': {}})
+        if (type(conversion) is not dict or type(conversion.get('version')) is not int
+                or conversion['version'] != 1 or type(conversion.get('remotes')) is not dict):
+            raise ValueError('owner_record_invalid')
+        selected = conversion['remotes'].get(parts[0])
+        state = selected.get('state') if isinstance(selected, dict) else None
+        if selected is not None and state not in (layout.CONVERTED, layout.IN_PROGRESS):
+            raise ValueError('owner_record_invalid')
+        if state == layout.IN_PROGRESS:
+            raise ValueError('owner_binding_unavailable')
+        if state == layout.CONVERTED:
+            path = self.partition.path_for(target_key)
+            if not path.exists() and not path.is_symlink():
+                return None
+            value = bounded_json(path, 2 * 1024 * 1024)
+            if (not isinstance(value, dict) or value.get('version') != 2
+                    or value.get('state_key') != target_key):
+                raise ValueError('owner_record_invalid')
+            record = value.get('record')
+        else:
+            if not self.state_path.exists() and not self.state_path.is_symlink():
+                return None
+            record = self._read_bounded_legacy(budget)['hosts'].get(target_key)
+        budget.check()
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            raise ValueError('owner_record_invalid')
+        if require_idle:
+            from sandbox.hosting.host_exec import busy_reason
+            if busy_reason(record, None) is not None:
+                raise ValueError('owner_source_custody_unavailable')
+        operation = record.get('hosting_operation')
+        if operation is None:
+            return None
+        admission = self._delivery_admission(operation)
+        budget.check()
+        if admission is not None and admission['target'] != dict(zip(('remote', 'project', 'environment'), parts)):
+            raise ValueError('owner_binding_invalid')
+        return admission
 
     def read_committed_admission(self, target_key: str, expected_digest: str,
                                  request_id: str | None = None) -> dict:

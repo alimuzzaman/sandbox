@@ -16,12 +16,15 @@ Anything that is not a record the store accepts is "unclassified, protected"
 """
 from __future__ import annotations
 
+import base64
 import json
+import hashlib
 import os
 import re
 import subprocess
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Literal, Mapping, TypedDict
@@ -254,16 +257,106 @@ _REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
 def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
                        timeout: float = FETCH_TIMEOUT_SECONDS) -> Callable[[str], object]:
-    """A fetch function that runs this checkout's ``sb host stack list --remote R --json``."""
+    """Read inventory, retaining an accepted job across cache refreshes."""
+    pending: dict[str, tuple[str, str | None]] = {}
+    lock = threading.Lock()
 
     def fetch(remote: str) -> object:
+        if not isinstance(remote, str) or not _REMOTE_RE.fullmatch(remote):
+            return None
+        deadline = time.monotonic() + timeout
         env = {**os.environ, "SANDBOX_AUTO_UPDATE": "0"}
-        result = run([str(entry), "host", "stack", "list", "--remote", remote, "--json"],
-                     capture_output=True, text=True, timeout=timeout, env=env, check=False,
-                     stdin=subprocess.DEVNULL)
-        text = (result.stdout or "")[-MAX_LIST_BYTES:]
-        lines = [line for line in text.splitlines() if line.strip().startswith("{")]
-        return json.loads(lines[-1]) if lines else None
+
+        def command(argv):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("lifetime observation deadline")
+            result = run([str(entry), *argv, "--remote", remote, "--json"],
+                         capture_output=True, text=True, timeout=remaining, env=env,
+                         check=False, stdin=subprocess.DEVNULL)
+            text = result.stdout or ""
+            if result.returncode or len(text.encode()) > MAX_LIST_BYTES:
+                return None
+            lines = [line for line in text.splitlines() if line.strip().startswith("{")]
+            return json.loads(lines[-1]) if lines else None
+
+        with lock:
+            original = pending.get(remote)
+            if original is None:
+                if len(pending) >= MAX_REMOTES:
+                    return None
+                original = ("panel-lifetime-" + uuid.uuid4().hex, None)
+                pending[remote] = original  # Unknown acceptance must not resubmit.
+                submit = True
+            else:
+                submit = False
+        request_id, job_id = original
+
+        def release_observation():
+            with lock:
+                current = pending.get(remote)
+                if current is not None and current[0] == request_id:
+                    pending.pop(remote, None)
+
+        if submit:
+            payload = command(["host", "stack", "list", "--request-id", request_id])
+            if isinstance(payload, dict) and isinstance(payload.get("stacks"), list):
+                release_observation()
+                return payload
+            if (not isinstance(payload, dict) or payload.get("ok") is not True
+                    or payload.get("status") != "accepted"
+                    or payload.get("request_id") != request_id
+                    or not isinstance(payload.get("job_id"), str)
+                    or re.fullmatch(r"[0-9a-f]{16}|[0-9a-f]{32}", payload["job_id"]) is None):
+                return None
+            job_id = payload["job_id"]
+            with lock:
+                pending[remote] = (request_id, job_id)
+        if job_id is None:
+            return None
+        status = command(["job-status", job_id])
+        if (not isinstance(status, dict) or status.get("ok") is not True
+                or status.get("job_id") != job_id or status.get("request_id") != request_id):
+            return None
+        if status.get("lifecycle") != "succeeded":
+            if status.get("lifecycle") in {"failed", "timed_out", "cancelled", "interrupted"}:
+                release_observation()
+            return None
+        if status.get("exit_code") != 0 or status.get("output_completeness") != "complete":
+            return None
+        streams = status.get("output")
+        stdout = [s for s in streams if isinstance(s, dict) and s.get("stream") == "stdout"] if isinstance(streams, list) else []
+        if (len(stdout) != 1 or stdout[0].get("available") is not True
+                or stdout[0].get("complete") != 1
+                or type(stdout[0].get("bytes_stored")) is not int
+                or not 0 < stdout[0]["bytes_stored"] <= MAX_LIST_BYTES):
+            return None
+        chunks, cursor, seen = [], None, set()
+        for _ in range(32):
+            args = ["job-output", job_id, "--stream", "stdout", "--encoding", "base64", "--max-bytes", "262144"]
+            args += ["--cursor", cursor] if cursor else ["--offset", "0"]
+            page = command(args)
+            if (not isinstance(page, dict) or page.get("ok") is not True
+                    or page.get("job_id") != job_id or page.get("stream") != "stdout"
+                    or page.get("encoding") != "base64" or not isinstance(page.get("data"), str)
+                    or type(page.get("has_more")) is not bool):
+                return None
+            chunks.append(base64.b64decode(page["data"], validate=True))
+            if sum(len(chunk) for chunk in chunks) > MAX_LIST_BYTES:
+                return None
+            if not page["has_more"]:
+                text = b"".join(chunks)
+                if (len(text) != stdout[0]["bytes_stored"]
+                        or hashlib.sha256(text).hexdigest() != stdout[0].get("sha256")):
+                    return None
+                payload = json.loads(text)
+                release_observation()
+                return payload
+            cursor = page.get("cursor")
+            if not isinstance(cursor, str) or not cursor or len(cursor) > 8192 or cursor in seen:
+                return None
+            seen.add(cursor)
+        return None
     return fetch
 
 

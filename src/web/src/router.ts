@@ -92,10 +92,11 @@ export function initRouter(): void {
   window.addEventListener("popstate", () => onChange(currentRoute()));
   // Intercept in-app links marked data-link for client-side navigation.
   document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     const a = (e.target as HTMLElement)?.closest?.("a[data-link]") as
       HTMLAnchorElement | null;
-    if (!a) return;
+    if (!a || a.hasAttribute("download") || (a.target && a.target !== "_self")) return;
     const href = a.getAttribute("href") || "";
-    if (href.startsWith("/")) { e.preventDefault(); navigate(href); }
+    if (href.startsWith("/") && !href.startsWith("//")) { e.preventDefault(); navigate(href); }
   });
 }

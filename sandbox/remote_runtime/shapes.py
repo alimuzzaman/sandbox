@@ -61,6 +61,13 @@ RUNTIME_PRODUCERS = (
 # Controller-side transports plus the programs they execute on the remote,
 # then the runtime-side response producers.
 SHAPE_SOURCES = (
+    "sandbox/application/server_cli.py",
+    "sandbox/application/server_cli_exec.py",
+    "sandbox/application/server_cli_capture.py",
+    "sandbox/application/server_cli_targets.py",
+    "sandbox/jobs/acceptance.py",
+    "sandbox/core/remote_materialization.py",
+    "sandbox/workspaces/content.py",
     "sandbox/transports/remote_local_images.py",
     "sandbox/resources/storage_floor.py",
     "sandbox/transports/remote_hosting_activation.py",

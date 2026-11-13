@@ -559,6 +559,21 @@ _WEB_PAGE = """<!doctype html>
   .bg-accent { box-shadow: 0 1px 2px rgba(37,99,235,.35), inset 0 1px 0 rgba(255,255,255,.12); }
 
   /* sidebar rows: tighter, app-like selection */
+  #navToggle, #navBackdrop { display: none; }
+  @media (max-width: 767px) {
+    #navToggle { display: block; flex: none; padding: .25rem .5rem; border: 1px solid currentColor; border-radius: .25rem; }
+    #appTitle { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    #appSidebar { display: none; position: fixed; top: 2.25rem; bottom: 0; left: 0;
+      width: min(20rem, 90vw); z-index: 50; background: #f5f5f5; }
+    body.nav-open #appSidebar { display: flex; }
+    body.nav-open #navBackdrop { display: block; position: fixed; inset: 2.25rem 0 0;
+      z-index: 45; background: #0006; }
+    #appTitlebar > span { display: none; }
+    #appContent > footer { height: auto; min-height: 3rem; flex-wrap: wrap; padding: .5rem .75rem; }
+  }
+  @media (max-width: 767px) and (prefers-color-scheme: dark) {
+    #appSidebar { background: #0a0a0a; }
+  }
   #list button { border-radius: 7px; }
   summary::-webkit-details-marker { display: none; }
   .host-icon { width: 1.75rem; height: 1.75rem; }
@@ -578,19 +593,21 @@ _WEB_PAGE = """<!doctype html>
 <body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark antialiased h-screen overflow-hidden flex flex-col">
 
 <!-- Desktop title bar (window chrome) -->
-<div class="h-9 shrink-0 flex items-center px-3.5 gap-2 border-b border-brd dark:border-brd-dark
+<div id="appTitlebar" class="h-9 shrink-0 flex items-center px-3.5 gap-2 border-b border-brd dark:border-brd-dark
      bg-neutral-100/80 dark:bg-neutral-900/80 backdrop-blur select-none">
+  <button id="navToggle" type="button" aria-controls="appSidebar" aria-expanded="false">Menu</button>
   <span class="w-3 h-3 rounded-full" style="background:#ff5f57"></span>
   <span class="w-3 h-3 rounded-full" style="background:#febc2e"></span>
   <span class="w-3 h-3 rounded-full" style="background:#28c840"></span>
-  <div class="flex-1 text-center text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
+  <div id="appTitle" class="flex-1 text-center text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
     Sandbox — WordPress dev environments</div>
   <span class="w-12"></span>
 </div>
 
 <div class="flex flex-1 min-h-0">
   <!-- Sidebar: instance list (Local-style) -->
-  <aside class="w-60 shrink-0 border-r border-brd dark:border-brd-dark
+  <button id="navBackdrop" type="button" tabindex="-1" aria-label="Close navigation"></button>
+  <aside id="appSidebar" aria-label="Sandbox navigation" class="w-60 shrink-0 border-r border-brd dark:border-brd-dark
                 bg-neutral-100/60 dark:bg-neutral-950 flex flex-col">
     <div id="hostSelectorSlot" class="border-b border-brd px-2 py-1.5 dark:border-brd-dark"></div>
     <div class="flex items-center px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
@@ -622,7 +639,7 @@ _WEB_PAGE = """<!doctype html>
   </aside>
 
   <!-- Detail panel -->
-  <div class="flex-1 flex flex-col min-w-0">
+  <div id="appContent" class="flex-1 flex flex-col min-w-0">
     <main id="detail" class="flex-1 overflow-auto"></main>
     <!-- Footer bar -->
     <footer class="h-12 shrink-0 border-t border-brd dark:border-brd-dark
@@ -640,16 +657,16 @@ _WEB_PAGE = """<!doctype html>
   </div>
 
   <!-- Console: right-side drawer, slides in. Width animates 0 → 26rem. -->
-  <div id="console" class="shrink-0 w-0 overflow-hidden border-l border-neutral-800
+  <div id="console" role="region" aria-label="Activity and terminal" class="fixed inset-y-0 right-0 z-40 max-w-full sm:static sm:z-auto shrink-0 w-0 overflow-hidden border-l border-neutral-800
        bg-neutral-950 flex flex-col transition-[width] duration-300 ease-out">
-    <div class="w-[26rem] flex flex-col h-full">
+    <div class="w-[26rem] max-w-full flex flex-col h-full">
       <div class="h-14 px-4 flex items-center gap-2 border-b border-neutral-800 shrink-0">
         <span id="conDot" class="w-2 h-2 rounded-full bg-neutral-500"></span>
-        <span id="conTitle" class="text-neutral-200 text-[13px] font-medium truncate flex-1">Activity</span>
-        <button id="conClose" class="text-neutral-500 hover:text-neutral-200 text-[18px] leading-none">×</button>
+        <span id="conTitle" role="status" class="text-neutral-200 text-[13px] font-medium truncate flex-1">Activity</span>
+        <button id="conClose" aria-label="Close activity" class="text-neutral-500 hover:text-neutral-200 text-[18px] leading-none">×</button>
       </div>
       <pre id="conBody" class="flex-1 overflow-auto px-4 py-3 text-[11.5px] leading-relaxed
-        font-mono text-neutral-300 whitespace-pre-wrap"></pre>
+        font-mono text-neutral-300 whitespace-pre-wrap break-words"></pre>
       <!-- Interactive terminal input (runs in the selected instance's container) -->
       <div id="conInputRow" class="hidden shrink-0 border-t border-neutral-800 flex items-center gap-1.5 px-3 py-2">
         <span class="text-emerald-400 font-mono text-[12px]">›</span>
@@ -662,7 +679,7 @@ _WEB_PAGE = """<!doctype html>
 </div>
 
 <!-- Modal -->
-<div id="modal" class="hidden fixed inset-0 z-50 flex items-center justify-center
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle" aria-describedby="mDesc" class="hidden fixed inset-0 z-50 flex items-center justify-center
      bg-black/40 backdrop-blur-sm p-4">
   <div class="bg-app dark:bg-card-dark border border-brd dark:border-brd-dark rounded-lg
        shadow-xl w-full max-w-md p-5 flex flex-col gap-3.5 max-h-[85vh]">

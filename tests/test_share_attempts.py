@@ -80,6 +80,7 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.repo.prepare(plan)
         self.repo.begin_mint(plan.id, gid)  # MUST precede key installation too.
         self.repo.transition(plan.id, "cleanup_pending")
+        self.repo.confirm_original_settled(plan.id, gid)
         self.repo.update_grant(plan.id, gid, "revoked")
         self.repo.update_grant(plan.id, gid, "revoked")
         saved = self.restart().read(plan.id)
@@ -113,6 +114,7 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.repo.prepare(plan)
         self.repo.begin_mint(plan.id, plan.grants[0].id)
         self.repo.transition(plan.id, "cleanup_pending")
+        self.repo.confirm_original_settled(plan.id, plan.grants[0].id)
         self.repo.update_grant(plan.id, plan.grants[0].id, "revoked")
         self.repo.expire(now=999)
         self.assertEqual(self.repo.read(plan.id).phase, "cleanup_pending")
@@ -133,7 +135,7 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.repo.prepare(self.wordpress_plan())
         path = next(self.root.glob("*.json"))
         original = json.loads(path.read_text())
-        self.assertEqual(original["version"], 2)
+        self.assertEqual(original["version"], 3)
         self.assertEqual(self.cleanup.gate_origin, "https://share.example.com")
         variants = []
         for field in ("token", "token_sha256", "key", "email", "url", "manifest", "command", "origin"):
@@ -171,6 +173,34 @@ class AttemptRepositoryTests(unittest.TestCase):
             path.write_text(json.dumps(bad))
             with self.subTest(bad=bad), self.assertRaises(AttemptError):
                 self.restart().list()
+
+    def test_original_settlement_survives_restart_without_inferring_it_from_revoke(self):
+        plan = self.wordpress_plan()
+        self.repo.prepare(plan)
+        self.repo.begin_mint(plan.id, plan.grants[0].id)
+        with self.assertRaises(AttemptError):
+            self.repo.update_grant(plan.id, plan.grants[0].id, "revoked")
+        self.assertFalse(self.restart().read(plan.id).grants[0].original_settled)
+        self.repo.confirm_original_settled(plan.id, plan.grants[0].id)
+        self.assertTrue(self.restart().read(plan.id).grants[0].original_settled)
+
+    def test_legacy_v2_revoke_bit_never_promotes_settlement_on_read_or_save(self):
+        plan = self.wordpress_plan()
+        self.repo.prepare(plan)
+        self.repo.begin_mint(plan.id, plan.grants[0].id)
+        path = next(self.root.glob("*.json"))
+        document = json.loads(path.read_text())
+        document["version"] = 2
+        document["attempts"][0]["grants"][0]["gate_revoked"] = True
+        for grant in document["attempts"][0]["grants"]:
+            del grant["original_settled"]
+        path.write_text(json.dumps(document))
+        saved = self.restart().read(plan.id)
+        self.assertFalse(saved.grants[0].gate_revoked)
+        self.assertFalse(saved.grants[0].original_settled)
+        self.repo.transition(plan.id, "cleanup_pending")
+        self.assertFalse(self.restart().read(plan.id).grants[0].original_settled)
+        self.assertEqual(json.loads(path.read_text())["version"], 3)
 
     def test_preallocation_survives_interrupted_mint_and_restart(self):
         self.repo.prepare(self.plan)
@@ -214,6 +244,7 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.repo.transition(self.plan.id, "cleanup_pending")
         self.repo.transition(self.plan.id, "cleanup_pending")
         self.assertEqual(self.repo.prepare(self.plan), self.repo.read(self.plan.id))
+        self.repo.confirm_original_settled(self.plan.id, self.plan.grants[0].id)
         for grant in self.plan.grants:
             self.repo.update_grant(self.plan.id, grant.id, "revoked")
             self.repo.update_grant(self.plan.id, grant.id, "revoked")

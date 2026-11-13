@@ -623,6 +623,14 @@ class RuntimeService:
         )
 
     def invoke(self, request: OperationRequest) -> OperationResult | OperationError:
+        if request.operation in {'ensure', 'apply', 'destroy', 'start', 'stop',
+                                 'resume', 'suspend', 'ownership_repair'}:
+            from sandbox.project_registry.lifecycle import lifecycle_writer
+            with lifecycle_writer():
+                return self._invoke_coordinated(request)
+        return self._invoke_coordinated(request)
+
+    def _invoke_coordinated(self, request: OperationRequest) -> OperationResult | OperationError:
         try:
             config_file = request.arguments.get("config_file")
             if config_file is None:

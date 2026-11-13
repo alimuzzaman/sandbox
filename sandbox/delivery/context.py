@@ -71,6 +71,12 @@ def registered_host_digest(entry, remote_name, home=None):
 
 def registration_digest(entry, remote_name, home=None):
     """Digest the nonsecret fields of the remote as it is registered now."""
+    from sandbox.hosting.server_cli_target import is_owner_target
+    if is_owner_target(entry):
+        if (entry.remote_name != remote_name or
+                (home is not None and str(home).rstrip('/') != entry.sandbox_home().rstrip('/'))):
+            raise ValueError('binding_mismatch')
+        return entry.identity_digest()
     ssh = _remote.remote_ssh_parts(entry)
     control_url = entry.get('control_url')
     if isinstance(control_url, str):
@@ -176,10 +182,12 @@ def build_delivery_service():
 
     def current_entry(target):
         from sandbox.resources.context import authenticated_target_identity
-        entry = _remote.get_remote(target['remote_name'])
-        if not isinstance(entry, dict):
+        from sandbox.hosting.server_cli_target import host_target, is_owner_target
+        entry = host_target(target['remote_name'])
+        if not isinstance(entry, dict) and not is_owner_target(entry):
             raise ValueError('target_unavailable')
-        identity = authenticated_target_identity(target['remote_name'])['target_identity']
+        identity = (entry.require_current().target_identity if is_owner_target(entry)
+                    else authenticated_target_identity(target['remote_name'])['target_identity'])
         if target['machine_identity'] is not None and target['machine_identity'] != identity:
             raise ValueError('binding_mismatch')
         if (target['registered_host_digest'] is not None and

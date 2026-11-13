@@ -34,6 +34,17 @@ def _emit_json_line(payload: dict) -> None:
     print(encoded, flush=True)
 
 
+def _server_cli_ancestor_refusal(args, reason='parent_cancelled_or_unavailable'):
+    message = ('the original server CLI ancestor no longer permits new admission; '
+               'this attempt will not launch a new child. Retain the request and inspect the ledger for any earlier receipt')
+    if getattr(args, 'json', False):
+        _emit_json_line({'ok': False, 'status': 'refused', 'code': 'server_cli_ancestor_refused',
+            'reason': reason, 'request_id': getattr(args, 'request_id', None),
+            'acceptance': 'not_started_by_this_attempt', 'receipt_lookup_required': True, 'error': message})
+        raise SystemExit(1)
+    _die('server_cli_ancestor_refused: ' + message)
+
+
 def _remote_job_transport_failure(exc, args, operation: str) -> None:
     """Render one bounded remote-job error instead of a traceback.
 
@@ -194,6 +205,15 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--project-identity",
                         help="canonical project identity supplied by a detached controller")
     parser.add_argument("--kind", default="exec", help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli', action='store_true',
+                        help='run the fixed installed host CLI as a retained local job')
+    parser.add_argument('--server-cli-target', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-revision', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-marker', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-origin', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-target-metadata', help=argparse.SUPPRESS)
+    parser.add_argument('--server-cli-exec-selector', help=argparse.SUPPRESS)
+    parser.add_argument('--parent-job-id', help=argparse.SUPPRESS)
     parser.add_argument("--materialization-source-root", help=argparse.SUPPRESS)
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
@@ -216,6 +236,7 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--execution-policy-json", help=argparse.SUPPRESS)
     parser.add_argument("--request-id")
     parser.add_argument("--source-identity")
+    parser.add_argument('--source-content-digest', help=argparse.SUPPRESS)
     parser.add_argument("--source-commit")
     parser.add_argument("--source-dirty-digest")
     parser.add_argument("--wait", action="store_true")
@@ -357,6 +378,9 @@ def configure_artifact_get_parser(parser) -> None:
 
 def configure_reconcile_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--job-id", help="plan recovery of only this original server host-exec lease")
+    parser.add_argument("--confirm", action="store_true", help="retire the exact planned original exec lease")
+    parser.add_argument("--expected-plan", help="sha256 plan binding required with --confirm")
     parser.add_argument("--remote",
                         help="reconcile durable jobs on a provisioned remote controller")
     parser.add_argument("--json", action="store_true")
@@ -424,11 +448,39 @@ def _require_local_executable(command, project_root: str, cwd_relative: str,
     _die(f"{payload['code']}: {payload['error']}")
 
 def cmd_job_start(_cfg, args) -> None:
+    if getattr(args, 'server_cli_exec_selector', None) is not None:
+        from sandbox.application.server_cli_exec import receive_server_cli_exec
+        from sandbox.application.server_cli import ServerCLIUnavailable
+        from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
+        try:
+            accepted = receive_server_cli_exec(args, stdin_fd=__import__('sys').stdin.fileno())
+        except (ServerCLIUnavailable, AnonymousInputUnavailable):
+            _emit_json_line({'ok': False, 'code': 'server_cli_exec_unavailable',
+                'status': 'refused', 'error': 'fixed server exec could not be admitted; no job was accepted'})
+            raise SystemExit(1)
+        _emit_json_line(accepted)
+        return
     command = list(getattr(args, "command", ()) or ())
     if command[:1] == ["--"]:
         command = command[1:]
     if not command:
         _die("usage: ./sb job-start [target options] -- <argv...>")
+    server_cli = bool(getattr(args, 'server_cli', False))
+    if server_cli:
+        from sandbox.application.server_cli import capabilities, fixed_argv, validate_target_metadata
+        cap = capabilities()
+        from sandbox.core._remote import validate_remote_name
+        origin_remote_name = validate_remote_name(getattr(args, 'server_cli_origin', None))
+        routing = validate_target_metadata(json.loads(getattr(args, 'server_cli_target_metadata', '{}')))
+        if (getattr(args, 'remote', None) or not getattr(args, 'local', False)
+                or getattr(args, 'server_cli_target', None) != cap['target_identity']
+                or getattr(args, 'server_cli_revision', None) != cap['runtime_revision']
+                or getattr(args, 'server_cli_marker', None) != cap['ownership_marker']
+                or not getattr(args, 'request_id', None)):
+            _die('server_cli_capability_unavailable: fixed server CLI binding is missing or changed')
+        command = list(fixed_argv(command))
+    elif getattr(args, 'kind', None) == 'server-cli':
+        _die('server_cli_capability_unavailable: use the fixed server CLI contract')
     dependencies = durable_job_dependencies()
     try:
         target = dependencies["target_service"].resolve(TargetRequest(
@@ -444,20 +496,44 @@ def cmd_job_start(_cfg, args) -> None:
         raise_registration_refusal(exc)
         _die(f"{exc.code}: {exc}")
     policy = _resolved_execution_policy(target, args)
+    parent_job_id = getattr(args, 'parent_job_id', None)
+    if parent_job_id and not server_cli:
+        _die('parent-job-id requires the fixed server CLI contract')
+    if server_cli:
+        expected = dict(policy.provenance or {})
+        expected.update({'server_cli.target_identity': cap['target_identity'],
+                         'server_cli.runtime_revision': cap['runtime_revision'],
+                         'server_cli.ownership_marker': cap['ownership_marker'],
+                         'server_cli.remote_name': origin_remote_name})
+        expected['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
+        if parent_job_id:
+            from sandbox.application.server_cli import validate_nested_parent
+            from sandbox.application.server_cli import ServerCLIUnavailable
+            try:
+                expected['server_cli.parent_deadline_at'] = validate_nested_parent(parent_job_id,
+                    target_identity=cap['target_identity'], marker=cap['ownership_marker'],
+                    revision=cap['runtime_revision'], origin_remote_name=origin_remote_name,
+                    timeout_seconds=policy.deadline_seconds)
+            except ServerCLIUnavailable:
+                _server_cli_ancestor_refusal(args)
+        from dataclasses import replace
+        policy = replace(policy, provenance=expected)
     source = SourceIdentity(
         getattr(args, "source_identity", None)
         or _source_identity(target.project_root).identity,
         getattr(args, "source_commit", None),
         getattr(args, "source_dirty_digest", None),
+        getattr(args, "source_content_digest", None),
     )
     project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))
     submission = JobSubmission(
-        kind=getattr(args, "kind", "exec"), project_root=target.project_root,
+        kind='server-cli' if server_cli else getattr(args, "kind", "exec"), project_root=target.project_root,
         project_identity=project_identity,
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
         argv=tuple(command), deadline_seconds=policy.deadline_seconds, source=source,
-        request_id=getattr(args, "request_id", None), execution_profile=policy.execution_profile, output_profile=output_profile,
+        request_id=getattr(args, "request_id", None), parent_job_id=parent_job_id,
+        execution_profile=policy.execution_profile, output_profile=output_profile,
         output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
                                    .get(output_profile)),
         deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
@@ -483,8 +559,11 @@ def cmd_job_start(_cfg, args) -> None:
                                   getattr(args, "cwd_relative", ".") or ".",
                                   as_json=bool(getattr(args, "json", False)))
         from sandbox.workspaces.repository import WorkspaceIndexError
+        from sandbox.jobs.server_cli_lineage import ServerCliLineageError
         try:
             accepted = dependencies["job_service"].submit(submission)
+        except ServerCliLineageError as exc:
+            _server_cli_ancestor_refusal(args, exc.reason)
         except WorkspaceIndexError as exc:
             # A workspace ownership refusal is a typed outcome, not a crash:
             # over SSH a traceback becomes an unreadable transport error.
@@ -903,6 +982,32 @@ def cmd_job_artifact_get(_cfg, args) -> None:
 
 
 def cmd_job_reconcile(_cfg, args) -> None:
+    job_id = getattr(args, "job_id", None)
+    confirm = getattr(args, "confirm", False)
+    expected = getattr(args, "expected_plan", None)
+    scoped = job_id is not None
+    if (not scoped and (confirm or expected is not None)) or (scoped and args.limit != 200):
+        raise ValueError("exact exec recovery cannot be combined with global reconciliation options")
+    if scoped:
+        from sandbox.jobs.models import validate_job_id
+        validate_job_id(job_id)
+        if (confirm != (expected is not None) or (expected is not None
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", expected) is None)):
+            raise ValueError("--confirm requires --expected-plan from the exact job recovery plan")
+        if args.remote:
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            argv = ["job-reconcile", "--job-id", job_id]
+            if confirm:
+                argv.extend(["--confirm", "--expected-plan", expected])
+            result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).control(args.remote, argv)
+        else:
+            from sandbox.application.server_cli_exec_recovery import reconcile_exec_lease
+            result = reconcile_exec_lease(job_id, confirm=confirm, expected_plan=expected)
+        print(json.dumps(result, sort_keys=True))
+        return
     if args.remote:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -1172,6 +1277,17 @@ def _remote_control_predispatch(args) -> bool:
     return bool(getattr(args, "remote", None))
 
 
+def _exec_recovery_preconfiguration(args) -> bool:
+    # Exact recovery must not enter config migration/writers, even on the
+    # selected server where --remote is intentionally absent.
+    if (getattr(args, "job_id", None) is not None
+            or getattr(args, "expected_plan", None) is not None
+            or getattr(args, "confirm", False)):
+        cmd_job_reconcile({}, args)
+        return True
+    return False
+
+
 register_specs((
     CommandSpec("job-start", cmd_job_start, configure=configure_start_parser, owner=__name__, scope="global"),
     CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
@@ -1183,7 +1299,7 @@ register_specs((
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
-    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch, preconfiguration_dispatch=_exec_recovery_preconfiguration),
     CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

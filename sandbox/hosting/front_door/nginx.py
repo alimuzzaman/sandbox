@@ -587,6 +587,8 @@ out["config_valid"] = rc == 0
 out["config_test_tail"] = [l[-200:] for l in text.splitlines()[-4:]]
 rc, dump = run([nginx, "-T"], timeout=30)
 out["includes_conf_d"] = bool(re.search(r"^\\s*include\\s+" + re.escape(CONF_DIR) + r"/\\*\\.conf\\s*;", dump, re.M))
+if payload.get("profile_only") is True:
+    print(json.dumps(out)); sys.exit(0)
 pairs = parse_server_names(dump) if rc == 0 else []
 declared = payload.get("declared") or []
 own = payload.get("own_file")
@@ -642,12 +644,14 @@ print(json.dumps(out, sort_keys=True))
 
 
 def probe(entry: dict, *, declared: list[str] | None = None,
-          own_file: str | None = None) -> dict:
+          own_file: str | None = None, profile_only: bool = False,
+          timeout: float = 90) -> dict:
     program = _PROBE_PROGRAM % {
         "conf_dir": CONF_DIR, "prefix": FILE_PREFIX, "shared": _SHARED_SOURCE,
         "marker_path": MARKER_PATH, "overdue": RENEWAL_OVERDUE_DAYS,
     }
-    return _python_program(entry, program, {"declared": declared or [], "own_file": own_file})
+    return _python_program(entry, program, {"declared": declared or [], "own_file": own_file,
+        **({'profile_only': True} if profile_only else {})}, timeout=timeout)
 
 
 def foreign_listeners(facts: dict) -> list[dict]:

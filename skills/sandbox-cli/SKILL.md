@@ -5,6 +5,15 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+For joined Tailnet controllers, use [Tailnet-only operations](../../docs/tailnet-only-operations.md)
+before onboarding, changing an existing registration, interpreting asynchronous
+owner-command receipts, or diagnosing a supposed SSH/provider-key requirement.
+Keep the original remote request/job and exact client pin. Supported owner paths
+use server authority without a laptop bearer/key or SSH fallback. Provider and
+destructive commands retain their own authorization; secret delivery remains a
+separate contract. Older legacy-path recipes below do not override this joined
+execution contract.
+
 CLI progress masks credential option values. Treat command output as sensitive until
 you check it; do not copy credential material into feedback or chat.
 
@@ -520,7 +529,7 @@ before protected effects.
 - `sb host stack list --remote R` and `sb host stack down --name <slug> --remote R --confirm` (existing destroy, then ports released).
 - Spec 077 lifetimes: every stack is `temporary` (default, 14d TTL, `--ttl 36h|14d|2w`), `hosted` (`--lifetime hosted`, only the one canonical stack of the template's `stack.dev_branch`, default `dev`) or `permanent`. The remote record (`$SANDBOX_HOME/runtime/target-lifetimes/<compose_project>.json`) is authoritative; no record means protected. `up` claims the name on the remote first: another owner's or copy's name is `stack_slug_taken`, never taken over; `--copy <id>` targets your own copy from another machine; no `--name` generates `<branch>-<owner>-<n>`. `sb host stack ttl|sweep|reap|limits` and `sb host classify --target <project>/<env> --lifetime L|--unclassify --confirm`; `down`/`ttl` on another owner's stack need `--force-owner`. Server cleanup reaps expired or merged temporary stacks (nginx only, manifest first); `stack down` finishes a reaped stack's DNS and controller state.
 - Stack ports come from 18100-18199 per remote and persist until `down`. Every apply refuses a hostname another project holds on the remote (`hostname_owned_by_other_project`). `allowed_branches` accepts globs (`feat/*`).
-- `sb host exec --remote R --target <project>/<env> | --name <slug> --service S [--timeout 1..3600] [--json] -- ARGV`: one argv in a running service of a target this controller recorded (`docker compose exec -T` with apply's own Compose files, as the service's user; no user flag). stdin passes straight through and is never logged, audited or echoed; `sb` exits with the command's status (`--json`: `ok` only on exit 0). Busy targets (apply, recovery, stack job in flight) are refused with `host_target_busy`, never waited for. Default timeout 300 s. Audit: `$SANDBOX_HOME/runtime/host-exec/audit.jsonl`.
+- `sb host exec --remote R --target <project>/<env> | --name <slug> --service S [--timeout 1..3600] [--json] -- ARGV`: one command in a running hosted service. Joined Tailnet execution selects the target on the server without local hosting history, transfers bounded stdin privately and returns verified stdout/stderr bytes plus the command exit code. JSON is a text projection; retained private artifacts preserve exact bytes. The legacy controller path uses `docker compose exec -T` with its recorded Compose files. Busy or uncertain targets refuse; keep the original job/lease and use supported recovery. Default timeout 300 s. See [Tailnet-only operations](../../docs/tailnet-only-operations.md) for receipt handling and coverage limits.
 - `sb host logs|status|diagnose --remote R --target <project>/<env>` (or `--name <slug>`) reads a recorded stack's rendered manifest, so it works from a template checkout.
 - `sb host tailnet-name add FQDN --remote R --upstream HOST:PORT [--replace-upstream] [--json]` (nginx front door only): DNS-only Cloudflare A record to the remote's tailnet IPv4, a DNS-01 certificate from `lego` on the controller (key made on the remote), and a block bound only to the tailnet IP, installed under the edge lock with `nginx -t` and reload, then verified over the tailnet and refused publicly (a timeout is inconclusive, any certificate valid for the name is exposure). Refuses busy remotes or a name another run holds (`tailnet_name_busy`), records it cannot fully own (`tailnet_name_dns_conflict`), files it did not write (`tailnet_name_unmanaged`), zones no longer configured (`tailnet_name_zone_not_allowed`) and an unpinned `lego` (`tailnet_name_acme_client_untrusted`; set `lego_sha256` to trust one). Every step reruns safely; an interrupted activation is settled with test and reload. `list` shows upstream and expiry, `renew FQDN|--all [--force]` reissues within 30 days, `remove` drops block, cert, then the recorded DNS record. Config: `tailnet_names` in `sandbox.local.yml` (zones, broker source/key for the token, `acme_email`). The token reaches only broker children. A proxied app that checks Host needs its own allow-list.
 
@@ -528,10 +537,7 @@ before protected effects.
 
 - Declare `share: {hostname: <served alias>, private: true, agent_mint: true, image, enabled_until, allowed_host_suffixes}` on the environment. Sandbox routes that hostname to the gate; `private` makes every other hostname answer 404. No edge config. See `docs/login-service.md#sharing-a-private-site-share-links`.
 - Make a link: `sb host share create --remote R --project-dir . [--path /folder/|/page.html] [--ttl 7d] [--uses N] --json`. A link reads `https://<gate>/s/#<22-character token>`; its id (`link_id`, for list and revoke) is `l-` and 12 hex. A short gate hostname such as `s.<zone>` is fine: the hostname is not a secret. Old `/s/l-<32 hex>#...` links work until they expire. With `agent_mint: true` the result's `link` is the only copy: give it to the person, never write it to a file, note, log or commit. Without it the link goes to the owner's terminal only (`terminal_required` for agents); ask the owner to run it.
-- `--stack <slug>` requests stack-page access with direct declared uses. Before execution read `docs/login-service.md#the-stack-page` for the worked manifest, route/inbox coverage and exact source contract. Source support is awaiting checks/review/runtime acceptance. Require installed `stack-page-v2`, `stack-signin-pool-v1`, `wordpress-claim-v1`, `companion-status-v1` before any key/grant effects; source declarations are not installed proof.
-- V2 GET/HEAD are read-only; declared same-origin/CSRF POST clicks issue independently, with eight pending hashes per logical entry. Companion navigation uses an authenticated non-consuming metadata probe and existing child grant, never remint. Keep one-shot tokens out of DOM/storage/query/audit. WP claim callback needs token hash on wire; audit excludes it.
-- Retained v1 pages are readable only while their tmpfs records remain; WP action is explicitly unavailable. Apply resets tmpfs links, sessions, stack pages, and pools, including legacy records; the legacy reader does not preserve them. Reissue v2 only after owner-approved apply. Source capability constants are not installed capability or revision proof. Unknown mint acceptance retains schema-2 attempts and original ids; repeated revoke handles gate and WP cleanup independently. Runtime identity must be independently observed, not inferred from stored descriptor/copy-id/fingerprint. See `docs/login-service.md#the-stack-page` for source-defined attempt/list/revoke/coverage fields and the stack-list `ok:false` exit-status caveat; use `specs/088-stack-page-access/quickstart.md` for future acceptance, not runtime authority.
-- Magic-link capture serializes mailbox snapshot, application request, and polling with a bounded process-local lock; contention returns `capture_busy` (503), while token-pool operations use a separate lock. Real Hub token coexistence/replacement policy remains UNVERIFIED.
+- `--stack <slug>` makes a stack-page link (hostnames, health, fresh WordPress and QA sign-in links). The stack target's manifest needs the `share` block.
 - `sb host share list|revoke ID|all ...` (MCP: `host_share_create`, `host_share_list`, `host_share_revoke`). Never run `create` inside `sb job-start`: it refuses (`job_output_refused`).
 - The `sb web` Hosting page has "Share this stack" and "Live links" on each controller stack card: the same `create`/`list`/`revoke` as an agent (needs `agent_mint: true`), with the link shown once in the browser. Do not script the panel's share route; use the CLI or MCP.
 - The owner views a private site through its loopback port (`sb host status`), with `tailscale serve` or `ssh -L`.
@@ -1058,12 +1064,3 @@ When verifying server configuration changes:
    after warming, and origin pass-through after revert.
 3. Compare target and control instances before and after every mutation to prove
    the control instance remains 100% unchanged.
-
-### Direct shared stack declarations (spec 088)
-
-`stack.uses: [dev]` declares up to four existing same-remote stacks recorded by this
-controller. Plan/confirm refuse invalid, duplicate, self or missing names before
-effects. `stack list` returns direct uses; `stack down` reports dependents without
-blocking teardown. It creates no resources or grants. The panel/shared-access work
-is separate and must not be inferred as ready from template parsing support. See
-`docs/remote-hosting.md` for syntax and `specs/088-stack-page-access/plan.md` for readiness.

@@ -56,6 +56,7 @@ class _Gate(unittest.TestCase):
             "enabled_until_epoch": int(self.now) + 40 * 86400,
             "session_ttl_seconds": 43200,
             "capture": None,
+            "panel_share": {"agent_mint": True},
             "allowed_host_suffixes": ["dev.example.test"],
             "entries": {
                 "share": {"mode": "site_gate", "requires_email": False, "hostname": GATE,
@@ -445,6 +446,15 @@ class StackPageTests(_Gate):
         response, _ = self.open(token)
         self.assertEqual(response.getheader("Location"), share.STACK_PAGE_PATH)
         return response.getheader("Set-Cookie").split(";", 1)[0], link_id
+
+    def test_running_applied_opt_out_refuses_stack_mint_before_any_record(self):
+        self.config["panel_share"]["agent_mint"] = False
+        request = share.LinkRequest("share", "stack", share.STACK_PAGE_PATH, 300, None)
+        minted = share.mint(request, now=self.now, ends_at=self.config["enabled_until_epoch"])
+        reply = self.manage("mint", "share", stdin=json.dumps({
+            "link": share.link_record(request, minted), "stack": None}))
+        self.assertEqual(reply, {"ok": False, "code": "agent_mint_not_enabled"})
+        self.assertEqual(self.manage("list", "share")["links"], [])
 
     @staticmethod
     def _fake_probe(host, probe, _upstream, suffixes):

@@ -35,8 +35,16 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
 
 MAX_AGGREGATE_RESULT_BYTES = 262_144
+SOURCE_CONTENT_VERSION = 1
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
+
+
+def _require_measured_materialization(submission):
+    if (submission.materialization_source_root is not None
+            and submission.source.content_digest is None
+            and submission.retry_of_job_id is None):
+        raise ValueError('measured_source_contract_required')
 
 
 def _launch_failure(stage: str, exc: BaseException) -> dict:
@@ -70,7 +78,7 @@ def _parse_retention_timestamp(ts: Any) -> datetime | None:
 
 
 class JobServiceProtocol(Protocol):
-    def submit(self, submission): ...
+    def submit(self, submission, *, anonymous_input=None): ...
     def get(self, job_id: str, *, reconcile: bool = True): ...
     def list(self, query): ...
     def read_output(self, job_id: str, query): ...
@@ -92,7 +100,30 @@ class JobService:
     # Per thread, so a drain in one thread never silences another's.
     _drain_local: Any = field(default_factory=threading.local, repr=False, compare=False)
 
-    def submit(self, submission: JobSubmission):
+    def submit(self, submission: JobSubmission, *, anonymous_input=None):
+        input_binding = None
+        input_proof = submission.execution_policy_provenance or {}
+        if anonymous_input is not None:
+            from sandbox.jobs.anonymous_input import AnonymousJobInput, AnonymousInputUnavailable
+            if (type(anonymous_input) is not AnonymousJobInput or submission.kind != 'server-cli'
+                    or submission.depends_on or submission.sync_relationship_id is not None):
+                raise AnonymousInputUnavailable('anonymous input requires a fixed independent server CLI job')
+            anonymous_input.fileno()
+            input_binding = dict(anonymous_input.binding)
+            if (input_proof.get('server_cli.stdin_sha256') != input_binding['sha256']
+                    or input_proof.get('server_cli.stdin_size') != str(input_binding['size'])):
+                raise AnonymousInputUnavailable('original job does not bind this anonymous input')
+        elif any(key.startswith('server_cli.stdin_') for key in input_proof):
+            from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
+            raise AnonymousInputUnavailable('original stdin must be held before job acceptance')
+        if submission.kind == 'server-cli':
+            from sandbox.application.server_cli import installed_cli, FixedServerCLI, ServerCLIUnavailable
+            if submission.target_kind != 'local' or submission.argv[0] != str(installed_cli()):
+                raise ValueError('server CLI requires the fixed installed local executable')
+            component = self.components.get('server_cli')
+            if component is None or type(component.component) is not FixedServerCLI:
+                raise ServerCLIUnavailable('fixed installed CLI component is not assembled')
+            component.component.environment(submission)
         pending_sync = False
         request_digest = submission.canonical_digest()
         if submission.sync_relationship_id is not None:
@@ -114,13 +145,17 @@ class JobService:
                 hasattr(self.workspace_registry, "submission_guard"))
             else nullcontext()
         )
-        with guard:
+        from sandbox.workspaces.content import checkout_guard, verify_content
+        content_guard = (checkout_guard(submission.project_root)
+                         if submission.source.content_digest is not None else nullcontext())
+        with content_guard, guard:
             replay = (
                 None if submission.sync_relationship_id is not None
                 else self.repository.replay(submission)
             )
             if replay is not None:
                 return self._accepted(replay, replay=True)
+            _require_measured_materialization(submission)
             # Workspace validation/materialization and durable acceptance share
             # the same controller lock as terminal deletion. A checkout cannot
             # disappear between these two commits.
@@ -157,6 +192,9 @@ class JobService:
                             workspace_authority_digest = mount_res["mount_identity_digest"]
                     except Exception:
                         pass
+            if submission.source.content_digest is not None:
+                verify_content(submission.project_root, submission.source.content_digest,
+                               expected_commit=submission.source.commit)
             row, replay = self.repository.accept(
 
                 submission, workspace_id=workspace_id,
@@ -185,6 +223,8 @@ class JobService:
                 self.sync_gateway.pin_job(row, submission)
             stage = "descriptor"
             descriptor = self._descriptor(row, submission)
+            if input_binding is not None:
+                descriptor['anonymous_input'] = input_binding
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
             stage = "scheduling"
             dependency_state, dependency_reason = self._dependency_state(row)
@@ -206,6 +246,11 @@ class JobService:
                                        submission.workspace_mode == "isolated"),
                     )
                 except WorkspaceBusy as busy:
+                    if input_binding is not None:
+                        row = self.repository.transition(row['job_id'], Lifecycle.FAILED,
+                            termination_reason='anonymous_stdin_capacity_unavailable')
+                        self._finalize_terminal_workspace(row['job_id'])
+                        return self._accepted(row, replay=False)
                     queue = self.scheduler.queue_details(row)
                     row = self.repository.transition(
                         row["job_id"], Lifecycle.QUEUED,
@@ -215,7 +260,10 @@ class JobService:
                     row["_queue_details"] = queue
                     return self._accepted(row, replay=False)
             stage = "supervisor_spawn"
-            self._launch(descriptor_path)
+            if anonymous_input is None:
+                self._launch(descriptor_path)
+            else:
+                self._launch(descriptor_path, anonymous_input=anonymous_input)
         except BaseException as exc:
             if self.scheduler is not None:
                 self.scheduler.release(row["job_id"])
@@ -254,11 +302,18 @@ class JobService:
 
     def _descriptor(self, row: dict, submission: JobSubmission) -> dict:
         nonce = os.urandom(32)
+        environment = None
+        if submission.kind == 'server-cli':
+            from sandbox.application.server_cli import FixedServerCLI, ServerCLIUnavailable
+            component = self.components.get('server_cli')
+            if component is None or type(component.component) is not FixedServerCLI:
+                raise ServerCLIUnavailable('fixed installed CLI component is not assembled')
+            environment = component.component.environment(submission)
         # Runtime selection is part of the immutable submission decision.  A
         # supervisor must never reinterpret a managed job as host-executable
         # after a config/import/registry failure.
         execution_runtime = "host"
-        if self.runtime_selector is not None:
+        if self.runtime_selector is not None and submission.kind != 'server-cli':
             execution_runtime = (
                 "managed_native" if self.runtime_selector(
                     row["project_root"], label="default",
@@ -275,14 +330,20 @@ class JobService:
                 "deadline_seconds": row["deadline_seconds"],
                 "cancel_grace_seconds": row.get("cancel_grace_seconds", 20),
                 "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
-                "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
+                "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": environment,
                 "execution_runtime": execution_runtime,
+                "server_cli_deadline_at": ((submission.execution_policy_provenance or {}).get('server_cli.absolute_deadline_at')
+                    if submission.kind == 'server-cli' else None),
+                "server_cli_parent": ({'job_id': submission.parent_job_id,
+                    'deadline_at': submission.execution_policy_provenance['server_cli.parent_deadline_at']}
+                    if submission.kind == 'server-cli' and submission.parent_job_id else None),
                 "artifact_paths": list(submission.artifact_paths),
                 "workspace_cleanup": cleanup_context,
                 # Fixed, non-secret identity only. The supervisor injects these
                 # exact values without copying or enumerating its environment.
                 "authoritative_context": {
                     "job_id": row["job_id"],
+                    "execution_kind": row['kind'],
                     "request_id": row.get("request_id"),
                     "project_identity": row.get("project_identity"),
                     "project_root_digest": "sha256:" + hashlib.sha256(
@@ -297,9 +358,12 @@ class JobService:
                     "source_access": submission.source_access,
                 } if submission.sync_relationship_id is not None else None)}
 
-    def _launch(self, descriptor_path: Path) -> None:
+    def _launch(self, descriptor_path: Path, *, anonymous_input=None) -> None:
         if self.launcher:
-            self.launcher(descriptor_path)
+            if anonymous_input is None:
+                self.launcher(descriptor_path)
+            else:
+                self.launcher(descriptor_path, anonymous_input=anonymous_input)
             return
         # The CLI can be invoked through an absolute path over SSH, where the
         # caller's cwd is not the staged Sandbox checkout.  The detached child
@@ -307,7 +371,8 @@ class JobService:
         # resolve reliably after the parent exits.
         package_root = Path(__file__).resolve().parents[2]
         process = subprocess.Popen([sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if anonymous_input is None else anonymous_input.fileno(),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             cwd=package_root, start_new_session=True, close_fds=True)
         # This is intentionally a fire-and-forget control-plane process: its
         # durable descriptor and registry own lifecycle after acceptance. Avoid
@@ -331,7 +396,12 @@ class JobService:
         }
         if not isinstance(source["identity"], str) or not source["identity"]:
             raise RuntimeError("supervisor_acceptance_missing_source_identity")
-        source["dirty"] = bool(source["dirty_digest"])
+        from sandbox.services.source_fingerprint import source_has_changes
+        source["dirty"] = source_has_changes(source["dirty_digest"])
+        from sandbox.jobs.acceptance import retained_content_digest
+        measured = retained_content_digest(row)
+        if measured is not None:
+            source['content_digest'] = measured
         result = {"ok": True, "job_id": job_id, "status": "accepted", "kind": row["kind"],
                 "target": {"kind": row["target_kind"], "remote": row["remote_name"]},
                 "workspace": row["workspace_label"], "output_profile": row["output_profile"],
@@ -350,6 +420,8 @@ class JobService:
                 },
                 "cleanup_policy": row["cleanup_policy"],
                 "idempotent_replay": replay}
+        from sandbox.jobs.acceptance import retained_acceptance_fields
+        result.update(retained_acceptance_fields(row))
         if row.get("sync_relationship_id") is not None:
             result["generation"] = {
                 "relationship_id": row["sync_relationship_id"],
@@ -367,6 +439,8 @@ class JobService:
         return result
 
     def _is_aggregate(self, snapshot: dict) -> bool:
+        if snapshot.get('kind') == 'server-cli':
+            return False  # It retains its own supervisor even when it submits children.
         return snapshot.get("kind") in {"matrix", "plan"} or bool(
             self.repository.children(snapshot["job_id"]))
 
@@ -585,6 +659,9 @@ class JobService:
                 "generation_id": snapshot.get("sync_generation_id"),
                 "source_access": snapshot.get("source_access"),
             }
+        if snapshot.get('kind') == 'server-cli':
+            snapshot['child_jobs'] = [{'job_id': child['job_id'], 'lifecycle': child['lifecycle'],
+                'request_id': child.get('request_id')} for child in self.repository.children(job_id)]
         return snapshot
 
     def _submission_from_snapshot(self, job_id: str) -> JobSubmission:
@@ -603,7 +680,7 @@ class JobService:
             deadline_seconds=canonical["deadline_seconds"],
             source=SourceIdentity(
                 source["identity"], source.get("commit"),
-                source.get("dirty_digest"),
+                source.get("dirty_digest"), source.get('content_digest'),
             ),
             request_id=canonical.get("request_id"),
             parent_job_id=canonical.get("parent_job_id"),
@@ -1168,6 +1245,36 @@ class JobService:
 
     def cancel(self, job_id: str, *, force: bool = False):
         snapshot = self.repository.snapshot(job_id)
+        server_children = []
+        if snapshot.get('kind') == 'server-cli':
+            self.repository.server_cli_ancestry(job_id)  # refuse corrupt/cyclic parent links before traversal
+            self.repository.request_server_cli_cancellation(job_id)
+            pending = list(self.repository.children(job_id))
+            seen = {job_id}
+            while pending:
+                child = pending.pop(0)
+                if child['job_id'] in seen:
+                    raise RuntimeError('job_descendant_cycle')
+                seen.add(child['job_id'])
+                if child['lifecycle'] in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}:
+                    # A completed process is not signalled. Its active children
+                    # still belong to the original cancellation authority.
+                    pending.extend(self.repository.children(child['job_id']))
+                    continue
+                if child['lifecycle'] not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}:
+                    try:
+                        server_children.append(self.cancel(child['job_id'], force=force))
+                    except RuntimeError as exc:
+                        if str(exc) != 'already_terminal':
+                            raise
+                        # The listed child can finish before recursive cancel
+                        # reads it. Only a fresh positive terminal observation
+                        # permits continuing to the parent's own live process.
+                        current = self.repository.snapshot(child['job_id'])
+                        if (current.get('job_id') != child['job_id'] or current.get('lifecycle')
+                                not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}):
+                            raise
+                        server_children.append(current)
         if self._is_aggregate(snapshot):
             children = self.repository.children(job_id)
             cancelled = []
@@ -1179,6 +1286,8 @@ class JobService:
                     cancelled.append(self.cancel(child["job_id"], force=force))
             return self._get_parent(self.repository.snapshot(job_id)) | {"cancelled_children": cancelled}
         if snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            if server_children:
+                return {**snapshot, 'cancelled_children': server_children}
             raise RuntimeError("already_terminal")
         process = snapshot.get("process") or {}
         if not process.get("child_pid") or not process.get("child_pgid"):
@@ -1224,9 +1333,9 @@ class JobService:
                 raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
-        # Verify before publishing cancellation intent.  Publishing it first lets the
-        # supervisor classify a concurrently reaped child as cancelled, rather than
-        # racing from ``failed`` back to ``cancelling`` after signal delivery.
+        # Verify before the process-lifecycle transition and signal. The earlier
+        # server-CLI lineage fence blocks admission/effects; it makes no claim
+        # that this process was signalled or that owned work has stopped.
         if not verify_owned_process_identity(identity):
             raise RuntimeError("process_identity_mismatch")
         if snapshot["lifecycle"] != Lifecycle.CANCELLING.value:
@@ -1271,12 +1380,33 @@ class JobService:
             raise RuntimeError("metrics_unavailable")
         return {"ok": True, "job_id": job_id, "samples": read(self.storage, job_id, limit=limit)}
 
+    def _capture_read_completion(self, job_id: str) -> tuple:
+        """Observe retained completion, not the running publication interval."""
+        from sandbox.jobs.artifacts import ArtifactError
+        rows = self.repository.server_cli_ancestry(job_id)
+        if (not rows or rows[0]['job_id'] != job_id or rows[0]['kind'] != 'server-cli'
+                or rows[0]['lifecycle'] not in {'succeeded', 'failed'}
+                or any(row.get('server_cli_cancel_requested') is not False
+                       or row['lifecycle'] in {'cancelling', 'cancelled', 'timed_out', 'interrupted'}
+                       for row in rows)):
+            raise ArtifactError('private capture completion is unavailable')
+        return tuple((row['job_id'], row['parent_job_id'], row['lifecycle'],
+                      row['server_cli_cancel_requested']) for row in rows)
+
     def get_artifact(self, job_id: str, artifact_id: str, *, offset: int = 0, max_bytes: int = 1_048_576) -> bytes:
         query = ArtifactQuery(artifact_id=artifact_id, offset=offset, max_bytes=max_bytes, encoding="bytes")
         for artifact in self.list_artifacts(job_id):
             if artifact["artifact_id"] == artifact_id:
                 if artifact.get("status", "available") != "available":
                     raise RuntimeError("artifact_unavailable")
+                from sandbox.jobs.artifacts import ArtifactError, PRIVATE_CAPTURE_KIND, read_private_capture
+                if artifact.get('kind') == PRIVATE_CAPTURE_KIND:
+                    completed = self._capture_read_completion(job_id)
+                    content = read_private_capture(self.storage, job_id, artifact,
+                        offset=query.offset, max_bytes=query.max_bytes)
+                    if self._capture_read_completion(job_id) != completed:
+                        raise ArtifactError('private capture completion changed while reading')
+                    return content
                 path = self.storage.job_dir(job_id) / artifact["stored_relative_path"]
                 with path.open("rb") as handle:
                     handle.seek(query.offset)
@@ -1300,7 +1430,7 @@ class JobService:
                 remote_name=canonical.get("remote_name"), workspace_label=canonical["workspace_label"],
                 workspace_mode=canonical["workspace_mode"], argv=tuple(canonical["argv"]),
                 deadline_seconds=canonical["deadline_seconds"],
-                source=SourceIdentity(source["identity"], source.get("commit"), source.get("dirty_digest")),
+                source=SourceIdentity(source["identity"], source.get("commit"), source.get("dirty_digest"), source.get('content_digest')),
                 request_id=request_id, retry_of_job_id=job_id,
                 # Standalone jobs remain standalone. CI/matrix children retain
                 # their actual parent, never a guessed root/self relationship.
@@ -1361,6 +1491,10 @@ class JobService:
                 metrics: bool = True) -> dict:
         import shutil
         state = self.repository.get(job_id)
+        if state.get('kind') == 'server-cli' and any(
+                child['lifecycle'] not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}
+                for child in self.repository.children(job_id)):
+            raise RuntimeError('nested_job_cleanup_protected')
         if state["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             raise RuntimeError("active_job_protected")
         directory = self.storage.job_dir(job_id)
@@ -1576,6 +1710,20 @@ class JobService:
         }
 
     def submit_matrix(self, submissions: list[JobSubmission], *, allow_project_variants: bool = False) -> dict:
+        from contextlib import ExitStack
+        from sandbox.workspaces.content import checkout_guard, verify_content
+        for item in submissions:
+            _require_measured_materialization(item)
+        with ExitStack() as stack:
+            roots = sorted({item.project_root for item in submissions if item.source.content_digest is not None})
+            for root in roots:
+                stack.enter_context(checkout_guard(root))
+            for item in submissions:
+                if item.source.content_digest is not None:
+                    verify_content(item.project_root, item.source.content_digest, expected_commit=item.source.commit)
+            return self._submit_matrix_bound(submissions, allow_project_variants=allow_project_variants)
+
+    def _submit_matrix_bound(self, submissions, *, allow_project_variants):
         if not submissions:
             raise ValueError("matrix requires at least one child submission")
         first = submissions[0]
@@ -1603,7 +1751,7 @@ class JobService:
             if submission.workspace_mode != "isolated":
                 raise ValueError("matrix children require isolated workspaces")
             accepted.append(self.submit(replace(submission, parent_job_id=parent_row["job_id"])))
-        return {"ok": True, "status": "accepted", "kind": "matrix", "parent_job_id": parent_row["job_id"],
+        return {**self._accepted(parent_row, replay=False), "kind": "matrix", "parent_job_id": parent_row["job_id"],
                 "children": accepted, "summary": {"submitted": len(accepted)}}
 
     @staticmethod

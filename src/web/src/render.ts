@@ -7,12 +7,13 @@ import { currentRoute, hostContext, instancePath, remoteInstancePath, type Route
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
 import { hostsView, localHostView, sidebarHostSelector } from "./pages/hosts";
-import { createView } from "./pages/create";
+import { createView, captureCreateDraft, initCreateView } from "./pages/create";
 import { remoteView } from "./pages/remote";
 import { hostingView } from "./pages/hosting";
 import { stackView } from "./pages/stack";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
 import { hostedCountText, showBulkActions } from "./ui/hostlabels";
+import { activityView } from "./ui/console";
 import type { Instance } from "./types";
 
 // The instance whose row is highlighted / whose console the term targets.
@@ -85,10 +86,12 @@ const groupLabel = (label: string): string =>
 
 function remoteItems(host: string): string {
   const data = store.remote[host];
-  if (!data) return `<div class="px-3 py-3 text-[11px] text-neutral-400">${store.remoteBusy[host] ? "Loading remote inventory…" : "Remote inventory not loaded"}</div>`;
+  if (!data) return `<div class="px-3 py-3 text-[11px] text-neutral-400">${store.remoteBusy[host] ? "Loading remote inventory…" : "Remote inventory unavailable. Open the host to refresh."}</div>`;
   const rows = data.instances?.rows || [];
-  return rows.length ? rows.map(row => remoteListItem(host, row.name, row.running)).join("")
-    : `<div class="px-3 py-3 text-[11px] text-neutral-400">No remote instances reported</div>`;
+  const warning = !data.ok || data.evidence_status !== "complete"
+    ? '<div class="px-3 py-2 text-[11px] text-amber-600">Inventory is incomplete; missing rows do not prove absence.</div>' : "";
+  return warning + (rows.length ? rows.map(row => remoteListItem(host, row.name, row.running)).join("")
+    : `<div class="px-3 py-3 text-[11px] text-neutral-400">${warning ? "No instance rows available" : "No remote instances reported"}</div>`);
 }
 
 function setLocalActionState(local: boolean): void {
@@ -222,11 +225,26 @@ function viewForRoute(route: Route): string {
 
 export function renderDetail(force: boolean): void {
   const route = currentRoute();
-  const sig = detailSignature(route);
+  const sig = detailSignature(route) + store.sync.error + JSON.stringify(store.operations);
   if (!force && sig === detailSig) return;
   if (!force && userIsInteracting()) return;
   detailSig = sig;
-  $("detail").innerHTML = viewForRoute(route);
+  captureCreateDraft();
+  const focused = document.activeElement as HTMLInputElement | null;
+  const focusId = focused?.id;
+  const selection = focusId === "createProject" || focusId === "createLabel"
+    ? [focused?.selectionStart ?? null, focused?.selectionEnd ?? null] : null;
+  const inventoryWarning = store.sync.error && ["instance", "local-host", "create"].includes(route.page)
+    ? '<p role="status" class="m-4 text-[12px] text-amber-600">Local inventory could not be refreshed. Existing rows may be stale; an empty list does not confirm there are no instances.</p>' : "";
+  $("detail").innerHTML = activityView() + inventoryWarning + viewForRoute(route);
+  if (route.page === "create") {
+    initCreateView();
+    if (selection && focusId) {
+      const replacement = document.getElementById(focusId) as HTMLInputElement | null;
+      replacement?.focus();
+      replacement?.setSelectionRange(selection[0] ?? null, selection[1] ?? null);
+    }
+  }
 }
 
 // Full render (on navigation / explicit action).

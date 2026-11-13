@@ -69,6 +69,7 @@ class ExecRequest:
     argv: tuple[str, ...]
     timeout_seconds: int = TIMEOUT_DEFAULT
     capture: bool = False
+    owner_selection: object = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple) or not self.argv or not all(
@@ -202,12 +203,14 @@ class _BoundedBuffer:
         self.limit = limit
         self.data = bytearray()
         self.truncated = False
+        self.complete = False
 
     def drain(self, pipe) -> None:
         try:
             while True:
                 chunk = pipe.read(64 * 1024)
                 if not chunk:
+                    self.complete = True
                     return
                 room = self.limit - len(self.data)
                 if room > 0:
@@ -244,7 +247,8 @@ def classify(returncode: int, elapsed: float, timeout_seconds: int, *,
     return returncode, OK if returncode == 0 else FAILED
 
 
-def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotonic) -> ExecOutcome:
+def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotonic,
+        env=None, cwd=None) -> ExecOutcome:
     """Run one SSH child; stream or capture its output; never read stdin."""
     capture = request.capture
     started = clock()
@@ -253,6 +257,7 @@ def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotoni
             ssh_argv, stdin=stdin,
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
+            env=env, cwd=cwd,
         )
     except OSError as exc:
         message = f"could not start ssh: {exc.strerror or exc}\n".encode()
@@ -289,7 +294,17 @@ def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotoni
     else:
         exit_code, code = classify(returncode, elapsed, request.timeout_seconds,
                                    locally_killed=locally_killed)
+        if request.owner_selection is not None and returncode == 255 and not locally_killed:
+            # This path has a genuine local owner process, not an SSH transport.
+            # Preserve a known command exit 255 as failure with capturable bytes.
+            code = FAILED
     out, err = (buffers + [_BoundedBuffer(0), _BoundedBuffer(0)])[:2]
+    if capture and (any(thread.is_alive() for thread in threads)
+                    or any(not buffer.complete for buffer in buffers)):
+        # Child exit does not prove capture EOF: a descendant may still own a
+        # pipe or a reader may have failed. Preserve the existing unknown fence
+        # rather than publish a mutable/partial byte artifact as complete.
+        exit_code, code = EXIT_TRANSPORT, WATCHDOG_EXPIRED
     return ExecOutcome(
         exit_code=exit_code, code=code, duration_ms=int(elapsed * 1000),
         stdout=bytes(out.data), stderr=bytes(err.data),

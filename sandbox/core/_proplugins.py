@@ -231,7 +231,7 @@ def _rsync_argv(remote: dict, store: Path, destination: str) -> list[str]:
     for pattern in EXCLUDES:
         argv.extend(["--exclude", pattern])
     argv.extend(["-e", sr.git_ssh_command(remote)])
-    target = sr.remote_ssh_parts(remote)["target"]
+    target = sr.remote_ssh_transport_parts(remote)["target"]
     argv.extend([f"{store}/", f"{target}:{destination}/"])
     return argv
 

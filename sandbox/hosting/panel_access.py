@@ -39,10 +39,18 @@ def _sign_in_manifest(remote_name: str, slug: str, **recorded):
     return validated
 
 
-def sign_in_availability(stack, stack_data, host_state) -> panel_view.SignInAvailability:
+def sign_in_availability(stack, stack_data, host_state, *, server_records=None) -> panel_view.SignInAvailability:
     if stack['source'] != 'controller':
+        for summary in (server_records or {}).get('targets', []):
+            if ((summary['project'], summary['environment']) == (stack['project'], stack['environment'])
+                    and summary.get('owner_share') and summary['last_apply']['status'] == 'succeeded'):
+                facts = summary['owner_share']['validated']
+                if (facts.get('autologin') and facts['login_service']['share'].get('agent_mint') is True
+                        and not facts['login_service']['share'].get('private')):
+                    return {'available': True, 'code': 'sign_in_available',
+                            'message': 'Sign in to WordPress admin'}
         return {'available': False, 'code': 'sign_in_controller_required',
-                'message': 'Open this stack on its controller panel to sign in. This server has no recorded controller manifest.'}
+                'message': 'This stack needs current applied owner-sharing and WordPress sign-in declarations.'}
     try:
         _sign_in_manifest(stack['remote'], stack['slug'], registry=stack_data, state=host_state)
         return {'available': True, 'code': 'sign_in_available', 'message': 'Sign in to WordPress admin'}
@@ -76,7 +84,7 @@ def inbox_names(remote: str) -> dict[int, str]:
     return names
 
 
-def enrich(view: panel_view.HostingView, stack_data: dict, host_state: dict) -> None:
+def enrich(view: panel_view.HostingView, stack_data: dict, host_state: dict, *, server_records=None) -> None:
     """Add bounded direct relationships and safe access metadata to the polling view."""
     records = stack_data.get("stacks") or {}
     hosts = host_state.get("hosts") or {}
@@ -84,28 +92,45 @@ def enrich(view: panel_view.HostingView, stack_data: dict, host_state: dict) -> 
     for stack in view["stacks"]:
         remote, slug = stack["remote"], stack["slug"]
         record = (records.get(f"{remote}/{slug}") or {}) if stack["source"] == "controller" else {}
+        if stack["source"] == "this-server":
+            for summary in (server_records or {}).get("targets", []):
+                if (summary["project"], summary["environment"]) == (stack["project"], stack["environment"]):
+                    record = summary.get("owner_share") or {}
+                    break
         uses = record.get("uses") or []
         uses = [name for name in uses[:4] if isinstance(name, str) and _SLUG.fullmatch(name)] \
             if isinstance(uses, list) else []
-        if remote not in names_by_remote:
-            try:
-                names_by_remote[remote] = inbox_names(remote)
-            except (TailnetNameError, OSError, ValueError):
-                names_by_remote[remote] = {}
-                view["partial_reasons"].append(f"inbox_names_unavailable:{remote}")
         port = stack["mailpit_port"]
-        name = names_by_remote[remote].get(port) if port else None
+        inbox = None
         reason = None
-        if not name:
-            reason = (f"No inbox address recorded. Run sb host tailnet-name add --remote {remote} "
-                      f"<inbox-name> --upstream 127.0.0.1:{port}."
-                      if port else "This stack declares no mailpit port.")
+        if stack["source"] == "this-server":
+            # Reuse the bounded, verified server inventory. Controller ACME
+            # state is not present on a hosted panel and must not be recreated.
+            access = stack["mail_access"]
+            if access["status"] == "ready":
+                inbox = {"hostname": urlsplit(access["url"]).hostname, "url": access["url"]}
+            else:
+                reason = "Managed inbox access is unavailable: " + access["reason"]
+        else:
+            if remote not in names_by_remote:
+                try:
+                    names_by_remote[remote] = inbox_names(remote)
+                except (TailnetNameError, OSError, ValueError):
+                    names_by_remote[remote] = {}
+                    view["partial_reasons"].append(f"inbox_names_unavailable:{remote}")
+            name = names_by_remote[remote].get(port) if port else None
+            if name:
+                inbox = {"hostname": name, "url": f"https://{name}"}
+            else:
+                reason = (f"No inbox address recorded. Run sb host tailnet-name add --remote {remote} "
+                          f"<inbox-name> --upstream 127.0.0.1:{port}."
+                          if port else "This stack declares no mailpit port.")
         evidence = "verified" if stack["last_apply"]["status"] == "succeeded" else "unverified"
         if stack["source"] == "controller":
             entry = hosts.get(f"{remote}/{stack['project']}/{stack['environment']}") or {}
             evidence = "verified" if entry.get("observed_runtime_revision") == stack["commit"] else "unverified"
         if not stack["commit"]:
             evidence = "not_delivered"
-        stack["page_access"] = {"uses": uses, "inbox": {"hostname": name, "url": f"https://{name}"}
-                                if name else None, "inbox_reason": reason, "revision_status": evidence,
-                                "sign_in": sign_in_availability(stack, stack_data, host_state)}
+        stack["page_access"] = {"uses": uses, "inbox": inbox, "inbox_reason": reason, "revision_status": evidence,
+                                "sign_in": sign_in_availability(stack, stack_data, host_state,
+                                                                server_records=server_records)}

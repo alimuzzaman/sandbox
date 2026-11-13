@@ -15,6 +15,7 @@ from typing import Any, Callable
 from sandbox.jobs.models import (normalize_output_page_bytes,
                                  normalize_output_wait_seconds, validate_ack_job_id)
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
+from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT, deployed_source, require_retained_acceptance
 
 
 _CREDENTIAL_ARGV_REFUSAL = (
@@ -463,7 +464,7 @@ def _require_submission_ack(payload: object, *, aggregate: bool = False,
         for child in children:
             if not isinstance(child, dict):
                 raise ValueError("remote acceptance acknowledgement has invalid child")
-            validate_ack_job_id(child.get("job_id"), label="child job id")
+            _require_submission_ack(child)
     else:
         validate_ack_job_id(payload.get("job_id"))
     status = payload.get("status")
@@ -545,13 +546,21 @@ def refresh_with_self_heal(run: Callable[[str], object], refresh: str, sb: str,
 
 
 def workspace_refresh_command(source_path: str, workspace_path: str, *,
-                              sandbox_root: str | None = None) -> str:
+                              sandbox_root: str | None = None, source_proof=None,
+                              request_id=None, project_identity=None) -> str:
     """Render the shared materializer with shell-safe argument quoting."""
     argv = [
         "python3", "-m", "sandbox.workspaces.checkout", "materialize",
         "--source", source_path, "--workspace", workspace_path,
         "--label", "remote",
     ]
+    if source_proof is not None:
+        argv.extend(['--source-content-digest', source_proof['content_digest'],
+                     '--source-identity', source_proof['identity'], '--source-commit', source_proof['commit']])
+        if request_id:
+            argv.extend(['--request-id', request_id])
+        if project_identity:
+            argv.extend(['--project-identity', project_identity])
     if sandbox_root is not None:
         argv[:0] = ["env", f"PYTHONPATH={sandbox_root}"]
     return shlex.join(argv)
@@ -616,10 +625,31 @@ class RemoteJobTransport:
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("remote is not provisioned")
         capabilities = remote.get("capabilities")
-        required = {"job.exec", "job.execution-policy.v1"}
-        if not isinstance(capabilities, (list, tuple, set)) or not required.issubset(capabilities):
+        required = {"job.exec", "job.execution-policy.v1", ACCEPTANCE_CONTRACT}
+        if remote.get('joined') is True:
+            from sandbox.remote_runtime.execution_capabilities import adopt_execution_capabilities
+            remote = adopt_execution_capabilities(name, remote,
+                lambda argv: self.control(name, argv, timeout=15))
+            capabilities = remote.get('capabilities')
+        if (not isinstance(capabilities, (list, tuple, set))
+                or any(not isinstance(value, str) for value in capabilities)
+                or not required.issubset(capabilities)):
             raise RemoteJobTransportError(
-                "remote does not support job.execution-policy.v1; reprovision or update the remote before submitting jobs")
+                "remote does not support the required execution-policy and retained acceptance contracts; "
+                "update the selected remote before submitting jobs")
+        if 'job.source-content.v1' not in capabilities:
+            observed = self.control(name, ['job-capabilities'], timeout=15)
+            service = remote.get('mcp_service') or {}
+            if (not isinstance(observed, dict) or observed.get('ok') is not True
+                    or type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
+                    or not isinstance(observed.get('capabilities'), list)
+                    or any(not isinstance(value, str) for value in observed.get('capabilities', ()))
+                    or 'job.source-content.v1' not in observed.get('capabilities', ())
+                    or any(not isinstance(service.get(field), str)
+                           or re.fullmatch(r'[0-9a-f]{24}', service[field]) is None
+                           or observed.get(field) != service[field]
+                           for field in ('ownership_marker', 'runtime_revision'))):
+                raise RemoteJobTransportError('installed measured-source capability is unavailable; no job submitted', retryable=False)
         return remote
 
     def _deploy(self, remote: dict, project_root: str,
@@ -707,6 +737,7 @@ class RemoteJobTransport:
             try:
                 accepted = redact_structure(self.sync_submit(remote, submission))
                 _require_submission_ack(accepted)
+                require_retained_acceptance(accepted, request_id=submission.request_id)
                 generation = accepted.get("generation")
                 projection = accepted.get("projection")
                 expected_projection = {
@@ -733,12 +764,45 @@ class RemoteJobTransport:
                 "output_profile", "source", "deadline", "execution_policy",
                 "cleanup_policy", "idempotent_replay", "generation",
                 "projection", "queue", "lifecycle", "termination_reason",
+                "acceptance_contract", "request_id", "request_digest",
             )
             return {key: accepted[key] for key in allowed if key in accepted}
         deployed = self._deploy(
             remote, submission.project_root,
             deployment_timeout=submission.deadline_seconds,
         )
+        self._validate_deployment(deployed)
+        return self._submit_deployed(remote, deployed, submission)
+
+    def submit_server_cli(self, submission, remote: dict, capability: dict) -> dict:
+        """Use the installed fixed CLI contract, without project instance ensure."""
+        from dataclasses import replace
+        from sandbox.application.server_cli import KIND, CONTRACT, validate_target_metadata
+        capabilities = capability.get('capabilities')
+        if (submission.kind != KIND or submission.target_kind != 'remote'
+                or remote.get('joined') is not True or remote.get('control_transport') != 'tailscale'
+                or not isinstance(capabilities, (list, tuple, set))
+                or any(not isinstance(value, str) for value in capabilities)
+                or not {CONTRACT, ACCEPTANCE_CONTRACT, 'job.source-content.v1'}.issubset(capabilities)):
+            raise RemoteJobTransportError('installed server CLI capability is unavailable', retryable=False)
+        require_safe_argv(submission.argv)
+        provenance = dict(submission.execution_policy_provenance or {})
+        provenance.update({'server_cli.target_identity': capability['target_identity'],
+                           'server_cli.runtime_revision': capability['runtime_revision'],
+                           'server_cli.ownership_marker': capability['ownership_marker'],
+                           'server_cli.remote_name': submission.remote_name})
+        # Interface addresses come from this authenticated receiver observation,
+        # never a stale controller origin or its SSH/Tailnet destination.
+        observed = validate_target_metadata(capability.get('target_metadata', {}))
+        routing = validate_target_metadata({
+            **{key: remote[key] for key in ('front_door', 'mcp_port')
+               if key in remote and remote[key] is not None},
+            **{key: observed[key] for key in ('origin_ipv4', 'origin_ipv6', 'tailscale_host')
+               if key in observed}})
+        provenance['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
+        submission = replace(submission, execution_policy_provenance=provenance)
+        deployed = self._deploy(remote, submission.project_root,
+                                deployment_timeout=submission.deadline_seconds)
         self._validate_deployment(deployed)
         return self._submit_deployed(remote, deployed, submission)
 
@@ -775,8 +839,10 @@ class RemoteJobTransport:
         )
         self._validate_deployment(deployed)
         plan = []
+        expected_source = deployed_source(deployed)
         for item in submissions:
-            workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label)
+            workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label,
+                source_proof=deployed, request_id=item.request_id, project_identity=item.project_identity)
             argv = list(item.argv)
             # Matrix coordinators execute their explicit child argv on the
             # VPS. Match single-job submission and bind nested Sandbox CLI
@@ -807,25 +873,39 @@ class RemoteJobTransport:
                  "depends_on": list(item.depends_on), "failure_policy": item.failure_policy,
                  "compatibility_differences": list(item.compatibility_differences),
                  "artifact_paths": list(item.artifact_paths),
-                 "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
-                            "dirty_digest": deployed.get("dirty_digest")}})
+                 "source": {key: expected_source[key] for key in ('identity', 'commit', 'dirty_digest', 'content_digest')}})
         encoded = base64.b64encode(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).decode()
         args = ["job-matrix", "--local", "--project-dir", deployed["target_path"],
                 "--project-identity", first.project_identity,
                 "--timeout", str(max(item.deadline_seconds for item in submissions)),
                 "--output-profile", first.output_profile, "--spec-json", encoded, "--json"]
-        result = self._run(remote, self._remote_command(remote, args), timeout=30)
+        unknown = {'acceptance': 'unknown', 'request_count': len(submissions),
+            'requests': [{'request_id': item.request_id, 'workspace': item.workspace_label}
+                         for item in submissions[:32]], 'truncated': len(submissions) > 32}
+        try:
+            result = self._run(remote, self._remote_command(remote, args), timeout=30)
+        except RemoteJobTransportError:
+            raise RemoteJobTransportError('remote matrix acceptance response is unavailable',
+                retryable=False, detail=unknown) from None
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
             raise RemoteJobTransportError(
-                f"remote matrix acceptance failed: {_error_detail(payload, result)}")
-        # Matrix controllers predating the explicit status field remain readable;
-        # identity and successful acknowledgement are still mandatory. New
-        # controllers include status=accepted, just like job-start.
+                f"remote matrix acceptance failed: {_error_detail(payload, result)}",
+                retryable=False, detail=unknown)
         try:
-            if payload.get("status") is not None and payload.get("status") != "accepted":
-                raise ValueError("remote acceptance acknowledgement is missing status=accepted")
-            _require_submission_ack({**payload, "status": "accepted"}, aggregate=True,
+            require_retained_acceptance(payload, request_id=None, source=expected_source)
+            children = payload.get('children')
+            if (not isinstance(children, list) or len(children) != len(submissions)
+                    or any(not isinstance(child, dict) or not isinstance(child.get('workspace'), str)
+                           for child in children)):
+                raise ValueError('remote matrix acceptance children are invalid')
+            by_workspace = {child.get('workspace'): child for child in children}
+            if len(by_workspace) != len(children) or set(by_workspace) != {item.workspace_label for item in submissions}:
+                raise ValueError('remote matrix acceptance workspaces are mismatched')
+            ordered = [by_workspace[item.workspace_label] for item in submissions]
+            for item, child in zip(submissions, ordered):
+                require_retained_acceptance(child, request_id=item.request_id, source=expected_source)
+            _require_submission_ack({**payload, 'children': ordered}, aggregate=True,
                                     expected_policy=[{
                                         "profile": item.execution_profile,
                                         "deadline_seconds": item.deadline_seconds,
@@ -838,14 +918,14 @@ class RemoteJobTransport:
                                         "provenance": dict(item.execution_policy_provenance or {}),
                                     } for item in submissions])
         except ValueError as exc:
-            raise RemoteJobTransportError(f"remote matrix acceptance failed: {exc}") from exc
+            raise RemoteJobTransportError(f"remote matrix acceptance failed: {exc}",
+                retryable=False, detail=unknown) from exc
         return {**payload, "target": {"kind": "remote", "remote": first.remote_name,
                                         "workspace": first.workspace_label},
-                "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
-                 "dirty": bool(deployed.get("dirty")), "dirty_digest": deployed.get("dirty_digest")},
                 "workspace_path": deployed["target_path"]}
 
-    def _prepare_workspace(self, remote: dict, source_path: str, label: str) -> str:
+    def _prepare_workspace(self, remote: dict, source_path: str, label: str, *,
+                           source_proof=None, request_id=None, project_identity=None) -> str:
         suffix = hashlib.sha256(label.encode()).hexdigest()[:14]
         # Project resolution derives a slug from the deployed workspace name;
         # use hyphens so the copied path remains a valid project root.
@@ -855,6 +935,7 @@ class RemoteJobTransport:
         sandbox_root = str(PurePosixPath(self.remote_sb_path(remote)).parent)
         command = workspace_refresh_command(
             source_path, workspace_path, sandbox_root=sandbox_root,
+            source_proof=source_proof, request_id=request_id, project_identity=project_identity,
         )
         result, repaired = refresh_with_self_heal(
             lambda text: self._run(
@@ -887,11 +968,23 @@ class RemoteJobTransport:
             value = deployed.get(key)
             if not isinstance(value, str) or not value.strip():
                 raise RemoteJobTransportError(f"remote deployment metadata is missing {key}")
+        try:
+            deployed_source(deployed)
+        except ValueError:
+            raise RemoteJobTransportError('remote deployment source metadata is inconsistent', retryable=False) from None
+        if (not isinstance(deployed.get('content_digest'), str)
+                or re.fullmatch(r'sha256:[0-9a-f]{64}', deployed['content_digest']) is None):
+            raise RemoteJobTransportError('remote deployment lacks measured source content', retryable=False)
+        if (not isinstance(deployed.get('commit'), str)
+                or re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', deployed['commit']) is None):
+            raise RemoteJobTransportError('remote deployment lacks an exact source commit', retryable=False)
 
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
-        workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
+        expected_source = deployed_source(deployed)
+        workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label,
+            source_proof=deployed, request_id=submission.request_id, project_identity=submission.project_identity)
         args = ["job-start", "--local", "--project-dir", workspace_path,
                 "--kind", submission.kind,
                 "--materialization-source-root", deployed["target_path"],
@@ -899,7 +992,8 @@ class RemoteJobTransport:
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
                 "--cwd-relative", submission.cwd_relative,
                 "--output-profile", submission.output_profile, "--profile", submission.execution_profile,
-                "--source-identity", deployed["identity"]]
+                "--source-identity", expected_source["identity"]]
+        args += ['--source-content-digest', deployed['content_digest']]
         policy = {
             "execution_profile": submission.execution_profile,
             "deadline_seconds": submission.deadline_seconds,
@@ -911,19 +1005,32 @@ class RemoteJobTransport:
             "cleanup_policy": submission.cleanup_policy,
             "provenance": dict(submission.execution_policy_provenance or {}),
         }
+        if submission.kind == 'server-cli':
+            # Version1 execution policy has a closed six-key provenance shape.
+            # Target/alias binding travels through explicit validated server
+            # flags and is added to the canonical retained submission there.
+            policy['provenance'] = {key: value for key, value in policy['provenance'].items()
+                                    if not key.startswith('server_cli.')}
         encoded_policy = base64.b64encode(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).decode()
         args += ["--execution-policy-json", encoded_policy]
         # The deployed checkout is the source of truth for detached execution.
         # Never let a caller's pre-deploy metadata overwrite the exact tree
         # identity that was just staged on the controller.
-        if deployed.get("commit") is not None:
-            args += ["--source-commit", str(deployed["commit"])]
-        if deployed.get("dirty_digest") is not None:
-            args += ["--source-dirty-digest", str(deployed["dirty_digest"])]
+        if expected_source['commit'] is not None:
+            args += ["--source-commit", expected_source['commit']]
+        if expected_source['dirty_digest'] is not None:
+            args += ["--source-dirty-digest", expected_source['dirty_digest']]
         if submission.request_id:
             args += ["--request-id", submission.request_id]
         argv = list(submission.argv)
-        if submission.kind == "runtime-exec":
+        if submission.kind == 'server-cli':
+            provenance = submission.execution_policy_provenance or {}
+            args += ['--server-cli', '--server-cli-target', provenance['server_cli.target_identity'],
+                     '--server-cli-revision', provenance['server_cli.runtime_revision'],
+                     '--server-cli-marker', provenance['server_cli.ownership_marker'],
+                     '--server-cli-origin', provenance['server_cli.remote_name'],
+                     '--server-cli-target-metadata', provenance['server_cli.target_metadata']]
+        elif submission.kind == "runtime-exec":
             # Generic Compose commands belong in the selected remote project
             # instance, not in the VPS host environment.  The outer durable
             # job owns all output and deadline handling while this controller
@@ -962,11 +1069,17 @@ class RemoteJobTransport:
             ))
             argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]
-        result = self._run(remote, self._remote_command(remote, args), timeout=30)
+        unknown = {'acceptance': 'unknown', 'request_id': submission.request_id}
+        try:
+            result = self._run(remote, self._remote_command(remote, args), timeout=30)
+        except RemoteJobTransportError:
+            raise RemoteJobTransportError('remote job acceptance response is unavailable',
+                retryable=False, detail=unknown) from None
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
             raise RemoteJobTransportError(
-                f"remote job acceptance failed: {_error_detail(payload, result)}")
+                f"remote job acceptance failed: {_error_detail(payload, result)}",
+                retryable=False, detail=unknown)
         try:
             _require_submission_ack(payload, expected_policy={
                 "profile": submission.execution_profile,
@@ -979,12 +1092,12 @@ class RemoteJobTransport:
                 "cleanup_policy": submission.cleanup_policy,
                 "provenance": dict(submission.execution_policy_provenance or {}),
             })
+            require_retained_acceptance(payload, request_id=submission.request_id, source=expected_source)
         except ValueError as exc:
-            raise RemoteJobTransportError(f"remote job acceptance failed: {exc}") from exc
+            raise RemoteJobTransportError(f"remote job acceptance failed: {exc}", retryable=False,
+                detail={'acceptance': 'unknown', 'request_id': submission.request_id}) from exc
         return {**payload, "target": {"kind": "remote", "remote": submission.remote_name,
                                         "workspace": submission.workspace_label},
-                "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
-                 "dirty": bool(deployed.get("dirty")), "dirty_digest": deployed.get("dirty_digest")},
                 "deadline": payload.get("deadline", {"seconds": submission.deadline_seconds,
                                                        "source": submission.deadline_source}),
                 "workspace_path": workspace_path}

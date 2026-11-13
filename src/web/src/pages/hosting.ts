@@ -7,6 +7,7 @@ import { store } from "../state";
 import { theme } from "../theme";
 import { hostingAnchor, hostingTargetPath, stackPath } from "../router";
 import { shareButtons } from "./share";
+import { stackSignInAction } from "../ui/stack-signin";
 import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget, LifetimeRow, LifetimeView } from "../types";
 import {
   applyLabel, compareLifetimes, expiryTone, lifetimeLabel, reapLabel, timeLeft, CPU_LABEL, CPU_TITLE, type Tone,
@@ -214,6 +215,27 @@ export function hostedTargetsSection(remote: string, hosted: HostedTargets | und
   return `<section>${head}<div class="overflow-x-auto ${theme.panel}"><table class="w-full min-w-[880px] text-left"><thead><tr>${labels.map(([label, title]) => `<th scope="col" ${title ? `title="${esc(title)}"` : ""} class="p-3 ${theme.label}">${esc(label)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div><p class="mt-2 text-[11px] ${theme.quiet}">${esc(CPU_TITLE)}</p></section>`;
 }
 
+const MAIL_UNAVAILABLE: Record<Extract<HostingStack["mail_access"], { status: "unavailable" }>["reason"], string> = {
+  no_port: "No Mailpit port recorded.",
+  not_same_server: "Inbox access is available only from the panel on the hosting server.",
+  inventory_unavailable: "Managed inbox access records are unavailable.",
+  inventory_partial: "Managed inbox access records are incomplete or unmanaged.",
+  not_found: "No managed tailnet name matches this Mailpit port.",
+  not_ready: "The matching name has missing, expired or changed proxy/certificate records.",
+  ambiguous: "Multiple managed names match this Mailpit port.",
+};
+
+function mailAccess(stack: HostingStack): string {
+  const access = stack.mail_access;
+  if (!access) return `<span class="${theme.quiet}">Inbox access records unavailable.</span>`;
+  const upstream = access.upstream ? `<code>${esc(access.upstream)}</code>` : "";
+  if (access.status === "ready") {
+    return `<a href="${esc(access.url)}" target="_blank" rel="noopener noreferrer" class="font-medium text-blue-700 hover:underline dark:text-blue-300">Open inbox</a>
+      <div class="mt-0.5 text-[11px] ${theme.quiet}">Tailnet HTTPS · ${upstream}</div>`;
+  }
+  return `${upstream}<div class="mt-0.5 text-[11px] ${theme.quiet}">${esc(MAIL_UNAVAILABLE[access.reason])}</div>`;
+}
+
 export function stackCard(stack: HostingStack): string {
   const otherPorts = Object.entries(stack.ports).filter(([name]) => name !== "mailpit")
     .map(([name, port]) => `${name} ${port}`).join(", ");
@@ -222,13 +244,13 @@ export function stackCard(stack: HostingStack): string {
       <div class="min-w-0"><div class="${theme.label}">Stack</div>
         <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold"><a data-link class="hover:underline" href="${esc(stackPath(stack.source === "this-server" ? "this-server" : stack.remote, stack.slug))}">${esc(stack.slug)}</a></h2>
         <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(stack.project)} · ${esc(stack.environment)} · ${esc(sourceNote(stack.source, stack.remote))}</p></div>
-      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}${shareButtons(stack.remote, stack.slug)}</div>
+      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}${shareButtons(stack.remote, stack.slug)}${stackSignInAction(stack)}</div>
     </header>
     <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.", stack.page_access)}</div>
     <dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">
       ${field("Ref", `${esc(stack.ref_branch || stack.ref || "detached")}<div class="mt-0.5">${stack.page_access && stack.page_access.revision_status !== "verified" ? esc(stack.page_access.revision_status === "not_delivered" ? "not delivered" : "unverified") : `<code class="text-[11px]" title="${esc(stack.commit)}">${esc(short(stack.commit))}</code>`}</div>`)}
       ${field("Template", stack.template ? `<code class="text-[11px]">${esc(stack.template)}</code>` : `<span class="${theme.quiet}">unknown</span>`)}
-      ${field("Mailpit", stack.page_access ? (stack.page_access.inbox ? `<a href="${esc(stack.page_access.inbox.url)}" target="_blank" rel="noopener noreferrer" class="text-blue-700 hover:underline dark:text-blue-300">Open inbox</a>` : `<span class="${theme.quiet}">${esc(stack.page_access.inbox_reason || "No inbox address recorded.")}</span>`) : stack.mailpit_port ? `<code>127.0.0.1:${esc(stack.mailpit_port)}</code><div class="mt-0.5 text-[11px] ${theme.quiet}">loopback only, on the server</div>` : `<span class="${theme.quiet}">no mailpit port</span>`)}
+      ${field("Mailpit", mailAccess(stack))}
       ${field("Created", `${esc(when(stack.created_at))}${stack.ttl_expires_at ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">expires ${esc(when(stack.ttl_expires_at))}</div>` : ""}`)}
       ${otherPorts || stack.loopback_port ? field("Ports", `${stack.loopback_port ? `app <code>127.0.0.1:${esc(stack.loopback_port)}</code>` : ""}${otherPorts ? `<div class="mt-0.5">${esc(otherPorts)}</div>` : ""}`) : ""}
     </dl>

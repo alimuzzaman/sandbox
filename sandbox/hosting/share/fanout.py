@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import posixpath
 import re
 import shlex
 import time
@@ -17,7 +16,7 @@ from pathlib import Path
 
 from sandbox.hosting import login_service as login
 from sandbox.hosting.share import ShareRefusal
-from sandbox.hosting.share import attempts as ledger, stack_page
+from sandbox.hosting.share import attempts as ledger, stack_page, controller
 
 CAPABILITIES = frozenset({"stack-page-v2", "stack-signin-pool-v1", "wordpress-claim-v1", "companion-status-v1"})
 
@@ -37,6 +36,7 @@ class PlannedGrant:
     page: dict
     cleanup: ledger.CleanupDescriptor
     request: object
+    runtime: controller.BoundRuntime
 
 
 def root() -> Path:
@@ -111,7 +111,7 @@ def audit_grant(grant, op, *, outcome, code=None, found=None):
            expires_at=grant.expires_at)
 
 
-def observe(entry, compose, wordpress):
+def inspect_services(entry, compose, wordpress):
     """Authoritative bounded read of BOTH services through hosting's observer.
 
     Full immutable container ids are required. A restart retaining the same
@@ -153,7 +153,13 @@ def observe(entry, compose, wordpress):
             or any(not full.startswith(short) for (_, full), short in zip(ids, short_ids))):
         raise ShareRefusal("share_runtime_unknown", "immutable runtime identities changed")
     digest = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest()
-    return ledger.RuntimeIdentity("runtime_fingerprint", digest)
+    by_service = dict(ids)
+    return controller.Services(ledger.RuntimeIdentity("runtime_fingerprint", digest),
+                               by_service["sandbox-login"], by_service.get(wordpress.service) if wordpress else None)
+
+
+def observe(entry, compose, wordpress):
+    return inspect_services(entry, compose, wordpress).identity
 
 
 def descriptor(found, minted, page):
@@ -172,15 +178,20 @@ def descriptor(found, minted, page):
                                     observe(found.entry, compose, wordpress), compose, wordpress)
 
 
-def cleanup(repo, attempt):
+def cleanup(repo, attempt, *, settled_originals=frozenset(), ownership=None, require_opt_in=False):
     """Caller holds parent and every target lease. Parent first; never abort siblings."""
     import sandbox.core._remote as remote
-    from sandbox.commands.hosting import _remote_checked
-    reasons, counts = {}, {"revoked_links": 0, "revoked_sessions": 0, "revoked_keys": 0}
     repo.expire(now=int(time.time()))
     attempt = repo.read(attempt.id)
+    reasons, counts = {}, {"revoked_links": 0, "revoked_sessions": 0, "revoked_keys": 0}
     if attempt.phase in ("revoked", "expired"):
         return {"ok": True, **summary(attempt), **counts}
+    if ownership is None:
+        if any(grant.disposition in ("live", "unknown") for grant in attempt.grants):
+            with controller.hold(attempt.target_order) as physical:
+                return cleanup(repo, attempt, settled_originals=settled_originals, ownership=physical,
+                               require_opt_in=require_opt_in)
+        ownership = controller.Ownership()  # Planned-only attempts have no remote effects.
     # Prepared and active phases require unchanged planned/live grants. Enter
     # cleanup before persisting any per-grant acknowledgement.
     repo.transition(attempt.id, "revoking" if attempt.phase in ("active", "cleanup_pending") else "cleanup_pending")
@@ -189,26 +200,38 @@ def cleanup(repo, attempt):
     for grant in attempt.grants:
         if grant.disposition == "planned":
             repo.update_grant(attempt.id, grant.id, "revoked")
-            if grant.cleanup.wordpress:
+            if grant.cleanup and grant.cleanup.wordpress:
                 repo.confirm_wordpress_removed(attempt.id, grant.id)
     attempt = repo.read(attempt.id)
     for grant in attempt.grants:
         if grant.disposition not in ("live", "unknown"):
             continue
+        if grant.disposition == "unknown" and grant.id in settled_originals and not grant.original_settled:
+            repo.confirm_original_settled(attempt.id, grant.id)
+            grant = replace(grant, original_settled=True)
+        if (grant.disposition == "unknown" and not grant.original_settled
+                and grant.id not in settled_originals):
+            # An absence probe cannot stop an earlier timed-out exec from
+            # writing later. Only this invocation's completion proof permits
+            # compensation; a reloaded unknown remains pending until expiry.
+            # Legacy schema-2 revoke bits do not establish original completion.
+            reasons[grant.id] = "mint_completion_unknown"
+            ownership.uncertain.add(grant.target)
+            continue
         try:
             entry = remote.get_remote(grant.target.remote)
             if not entry or grant.cleanup is None:
                 raise ShareRefusal("share_runtime_unknown", "original runtime unavailable")
-            identity = observe(entry, grant.cleanup.compose, grant.cleanup.wordpress)
-            safe = repo.cleanup_for(attempt.id, grant.id, identity)
+            runtime = controller.bind(grant.target, entry, grant.cleanup, ownership)
+            if require_opt_in:
+                runtime.require_enabled(grant.entry)
+            safe = repo.cleanup_for(attempt.id, grant.id, runtime.services.identity)
         except Exception:
             reasons[grant.id] = "original_runtime_unproven"
             continue
         if not grant.gate_revoked:
             try:
-                output = _remote_checked(entry, login.site_command(compose_prefix(safe.compose),
-                    "revoke", grant.entry, grant.id), timeout=60)
-                reply = login.parse_site_reply(output)
+                reply = runtime.manage("revoke", grant.entry, grant.id)
                 for key in ("revoked_links", "revoked_sessions"):
                     if type(reply.get(key)) is not int or reply[key] < 0:
                         raise ValueError("invalid revoke confirmation")
@@ -216,7 +239,10 @@ def cleanup(repo, attempt):
                 repo.update_grant(attempt.id, grant.id, "revoked")
             except login.LoginServiceError as exc:
                 if exc.code == "site_link_unknown":
-                    repo.update_grant(attempt.id, grant.id, "revoked")
+                    try:
+                        repo.update_grant(attempt.id, grant.id, "revoked")
+                    except Exception:
+                        reasons[grant.id] = "gate_cleanup_unknown"
                 else:
                     reasons[grant.id] = "gate_cleanup_unknown"
             except Exception:
@@ -224,12 +250,7 @@ def cleanup(repo, attempt):
         # WP cleanup is required even when the gate reports authoritative absence.
         if safe.wordpress and not grant.wordpress_revoked:
             try:
-                wp = safe.wordpress
-                path = posixpath.join(stack_page.key_directory(wp.container_path),
-                    f"{stack_page.KEY_FILE_PREFIX}{wp.expires_at}-{wp.key_id}.php")
-                script = f"rm -f -- {shlex.quote(path)} && test ! -e {shlex.quote(path)} && echo sandbox-key-absent"
-                output = _remote_checked(entry, compose_prefix(safe.compose) + " exec -T " +
-                    shlex.quote(wp.service) + " sh -c " + shlex.quote(script), timeout=60)
+                output = runtime.remove_wordpress()
                 if str(output).strip() != "sandbox-key-absent":
                     raise ValueError("unconfirmed key removal")
                 repo.confirm_wordpress_removed(attempt.id, grant.id)
@@ -251,14 +272,14 @@ def cleanup(repo, attempt):
     return {"ok": True, **summary(repo.read(attempt.id)), **counts}
 
 
-def revoke_attempt(attempt):
+def revoke_attempt(attempt, *, require_opt_in=False):
     from sandbox.commands.hosting import _host_share_effects
     repo = repository(attempt.parent)
     with repo.locked():
         current = repo.read(attempt.id)
         try:
             with _host_share_effects(current.target_order):
-                return cleanup(repo, current)
+                return cleanup(repo, current, require_opt_in=require_opt_in)
         except Exception:
             # Persistence/lease/transport failures cannot turn cleanup into success.
             if current.phase in ("revoked", "expired"):
@@ -276,7 +297,7 @@ def revoke_attempt(attempt):
             return pending(current)
 
 
-def create(found, request, *, email=None, requested_entry=None):
+def create(found, request, *, email=None, requested_entry=None, require_opt_in=False):
     from sandbox.commands import host_share as command
     from sandbox.commands.hosting import _host_share_effects
     from sandbox.hosting import stack_registry
@@ -288,7 +309,7 @@ def create(found, request, *, email=None, requested_entry=None):
         for previous in repo.list():
             if previous.phase not in ("active", "revoked", "expired"):
                 with _host_share_effects(previous.target_order):
-                    result = cleanup(repo, previous)
+                    result = cleanup(repo, previous, require_opt_in=require_opt_in)
                 if not result["ok"]:
                     return result
         members, gaps = [found], []
@@ -381,7 +402,8 @@ def create(found, request, *, email=None, requested_entry=None):
         if gaps:
             raise CoverageRefusal(gaps)
         request = requests[target(found)]
-        with _host_share_effects(tuple(sorted({target(member) for member in members}))) as frozen:
+        targets = tuple(sorted({target(member) for member in members}))
+        with _host_share_effects(targets) as frozen, controller.hold(targets) as physical:
             registry = stack_registry.read().get("stacks", {})
             for member in members:
                 original_host, original_stack = snapshots[target(member)]
@@ -401,23 +423,38 @@ def create(found, request, *, email=None, requested_entry=None):
                 "title": page["title"], "hosts": page["hosts"], "notes": page["notes"]}
                 for member, context, link, page in zip(members[1:], contexts[1:], minted[1:], pages[1:])]
             pages = (stack_page.build_v2(contexts[0], sign_in=sign_ins[(found.remote, contexts[0].slug)], companions=children), *pages[1:])
-            plan = tuple(PlannedGrant(member, context, link, stack_page.with_key(page, link.link_id),
-                         descriptor(member, link, page), requests[target(member)]) for member, context, link, page in zip(members, contexts, minted, pages))
+            plan = []
+            for member, context, link, page in zip(members, contexts, minted, pages):
+                safe = descriptor(member, link, page)
+                runtime = controller.bind(target(member), member.entry, safe, physical)
+                runtime.require_applied(member, requests[target(member)].entry)
+                plan.append(PlannedGrant(member, context, link, stack_page.with_key(page, link.link_id),
+                                        safe, requests[target(member)], runtime))
+            plan = tuple(plan)
             for row in plan:
                 stack_page.gate_record(row.page, row.request.entry, row.minted.link_id)
             attempt = ledger.Attempt("a-" + uuid.uuid4().hex, parent, now, int(end), "prepared", tuple(
                 ledger.Grant(target(row.found), row.request.entry, row.minted.link_id, row.minted.expires_at,
                              cleanup=row.cleanup) for row in plan))
             repo.prepare(attempt)
+            settled_originals = set()
             try:
                 for row in (*plan[1:], plan[0]):
                     repo.begin_mint(attempt.id, row.minted.link_id)
+                    settled_originals.add(row.minted.link_id)  # No effect started yet.
                     # Re-prove container identity immediately before the first external effect.
                     repo.cleanup_for(attempt.id, row.minted.link_id,
                                      observe(row.found.entry, row.cleanup.compose, row.cleanup.wordpress))
-                    stack_page.install_wordpress_key(row.found, row.page, row.minted.expires_at)
+                    settled_originals.discard(row.minted.link_id)
+                    stack_page.install_wordpress_key(row.found, row.page, row.minted.expires_at, runtime=row.runtime)
+                    settled_originals.add(row.minted.link_id)
+                    settled_originals.discard(row.minted.link_id)
+                    def completed(grant_id=row.minted.link_id):
+                        settled_originals.add(grant_id)
+                        repo.confirm_original_settled(attempt.id, grant_id)
                     _, reply = command.mint_link(row.found.validated, row.found.entry, row.request,
-                                                 minted=row.minted, stack_record=row.page)
+                                                 minted=row.minted, stack_record=row.page,
+                                                 on_completed=completed, runtime=row.runtime)
                     if (reply.get("ok") is not True or reply.get("id") != row.minted.link_id
                             or type(reply.get("expires_at")) is not int or reply["expires_at"] != row.minted.expires_at
                             or type(reply.get("uses")) is not type(request.uses)
@@ -426,12 +463,15 @@ def create(found, request, *, email=None, requested_entry=None):
                     repo.update_grant(attempt.id, row.minted.link_id, "live")
                     audit_grant(next(g for g in attempt.grants if g.id == row.minted.link_id),
                                 "create", outcome="ok", found=row.found)
+                for row in plan:
+                    row.runtime.require_applied(row.found, row.request.entry)
                 repo.transition(attempt.id, "active")
             except Exception:
                 for grant in attempt.grants:
                     audit_grant(grant, "create", outcome="refused", code="share_mint_unknown")
                 try:
-                    result = cleanup(repo, repo.read(attempt.id))
+                    result = cleanup(repo, repo.read(attempt.id), settled_originals=settled_originals,
+                                     ownership=physical)
                 except Exception:
                     # No URL is returned if acceptance or durable cleanup cannot be saved.
                     # Conservatively expose the original ids, including planned rows.

@@ -9,40 +9,6 @@ Use the lowest-disclosure operation that can finish the task. Never open or
 search a secret source directly, request that a secret be pasted into chat, put a
 secret in an argument, or export a secret into the parent shell.
 
-## Hosting server scope, disabled groundwork
-
-For `host` requests, omitted or explicit `--credential-scope personal-local`
-keeps existing local and remote behavior. Server scope requires explicit
-`--remote` and `--credential-project`, `--credential-source`,
-`--credential-source-revision`, `--credential-profile`, and
-`--credential-profile-revision`. Use only nonsecret bounded identifiers.
-Never put a provider value in these options or infer server scope from refs.
-
-`host validate` checks ordinary nonsecret required/generated mappings only.
-Its `server_credentials_static_validated` result exits zero with availability
-`unverified` and execution `disabled`; it establishes no registration, presence,
-provider validity or authority. Inline `secrets.values` refuses without echo.
-`host secrets` returns `server_credentials_inventory_unavailable`, inventory
-`unavailable`, exit 2, without metadata or key inspection. All other server
-execution, including stack plans and generation, returns
-`server_credentials_unsupported`, exit 2, before local keys or startup state.
-Malformed or mixed selection returns `server_credentials_invalid_selection`,
-exit 2. These fixed codes appear in JSON and text.
-
-Stop at these source results. Never fall back to personal keys, source-info,
-metadata probes, dummy values, self-SSH, self-remote or `--here` to satisfy a
-server request. Source evidence confers no credential authority. Future
-owner/broker dispatch is PROPOSED/UNAVAILABLE; no admitted loader, grant, ledger,
-executor or transport is enabled. Keep the current layout and existing generic
-secret-run escalation guards. All admitted operators retain current owner and
-approved sudo rights; consumer profiles do not restrict membership.
-
-See the [source contract](../../specs/086-shared-server-secret-use/contracts/source-groundwork.md)
-and [proposed integration contract](../../specs/086-shared-server-secret-use/contracts/future-owner-broker.md).
-The [README](../../README.md#server-credential-selection-disabled-source-groundwork)
-records syntax and source revision evidence. No installed capability or current
-provider availability is claimed.
-
 ## Decision order
 
 Stop as soon as the task is satisfied:

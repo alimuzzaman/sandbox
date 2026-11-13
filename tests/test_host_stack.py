@@ -708,8 +708,9 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(validated["project_root"], str(source_root))
         self.assertEqual(job[job.index("--project-dir") + 1], validated["project_root"])
         self.assertIn("--exact-project-dir", job)
-        self.assertEqual(child[child.index("--project-dir") + 1], str(manifest_root))
-        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["template"], template)
+        self.assertEqual(Path(child[child.index("--project-dir") + 1]).resolve(), manifest_root.resolve())
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["template"],
+                         str(Path(template).resolve()))
 
     def test_record_commit_moves_only_when_its_apply_proves_delivery(self):
         """Feedback 20153592: `stack list` must not run ahead of the server."""
@@ -749,7 +750,8 @@ class StackCommandTests(unittest.TestCase):
             tree = _git(self.hub, "rev-parse", "HEAD^{tree}")
             newer = _git(self.hub, "commit-tree", tree, "-p", self.head, "-m", "next")
             _git(self.hub, "update-ref", "refs/heads/stack/demo", newer)
-            with patch.object(host_stack, "_submit", return_value="job-2"):
+            with patch.object(host_stack, "_submit", return_value="job-2"), \
+                    patch.object(host_stack, "job_view", return_value={"lifecycle": "succeeded"}):
                 again = host_stack._up(self.args("up", confirm=True))
             self.assertEqual(again["commit"], newer)
             record = stack_registry.read()["stacks"]["r/demo"]
@@ -843,7 +845,7 @@ class StackCommandTests(unittest.TestCase):
                 host_stack._up(self.args("up", confirm=True))
         record = stack_registry.read()["stacks"]["r/demo"]
         self.assertEqual(record["commit"], self.head)
-        self.assertEqual(record["last_apply"]["status"], "submission_failed")
+        self.assertEqual(record["last_apply"]["status"], "refused")
 
     def test_up_refused_while_previous_job_is_active(self):
         with patch.object(host_stack, "_submit", return_value="job-1"):
@@ -859,7 +861,7 @@ class StackCommandTests(unittest.TestCase):
                 self.assertRaises(host_stack.StackCommandError):
             host_stack._up(self.args("up", confirm=True))
         record = stack_registry.read()["stacks"]["r/demo"]
-        self.assertEqual(record["last_apply"]["status"], "submission_failed")
+        self.assertEqual(record["last_apply"]["status"], "refused")
         self.assertIn("mailpit", record["ports"])
 
     def test_hostname_owned_by_other_project_refuses_before_any_change(self):
@@ -886,6 +888,7 @@ class StackCommandTests(unittest.TestCase):
         write.assert_called_once_with("XSPEED_HUB_SBX_DEMO_PG_PASSWORD", "generated")
 
     def test_list_and_down(self):
+        self.enterContext(patch.object(host_stack, "job_view", return_value={"lifecycle": "succeeded"}))
         with patch.object(host_stack, "_submit", return_value="job-1"):
             created = host_stack._up(self.args("up", confirm=True))
         listed = host_stack._list(self.args("list"))

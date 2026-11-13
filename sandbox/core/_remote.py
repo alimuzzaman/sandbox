@@ -51,6 +51,7 @@ import urllib.request
 import subprocess
 import sys
 import time
+import threading
 import selectors
 import tarfile
 import fcntl
@@ -299,7 +300,11 @@ def validate_remote_name(name: str) -> str:
     return name
 
 
-def get_remote(name: str) -> dict | None:
+_JOIN_ADOPTION_STATE = threading.local()
+_REGISTRATION_LOCK_STATE = threading.local()
+
+
+def get_remote(name: str, *, budget_seconds: float = 15, adopt_joined: bool = True) -> dict | None:
     entry = _remote_block().get(name)
     if not isinstance(entry, dict):
         return entry
@@ -309,7 +314,29 @@ def get_remote(name: str) -> dict | None:
     copy = dict(entry)
     if isinstance(name, str) and _NAME_RE.fullmatch(name):
         copy["_remote_name"] = name
+    if adopt_joined and not getattr(_JOIN_ADOPTION_STATE, 'active', False):
+        from sandbox.remote_runtime.join_adoption import needs_adoption, adopt_missing
+        if needs_adoption(copy):
+            _JOIN_ADOPTION_STATE.active = True
+            try:
+                return adopt_missing(name, copy, budget_seconds=budget_seconds)
+            finally:
+                _JOIN_ADOPTION_STATE.active = False
     return copy
+
+
+def get_execution_remote(name: str, record: dict | None = None) -> dict | None:
+    """Ordinary joined job selection observes actual installed CLI contracts."""
+    record = get_remote(name) if record is None else record
+    if not isinstance(record, dict) or record.get('joined') is not True:
+        return record
+    from sandbox.transports.remote_jobs import RemoteJobTransport
+    from sandbox.remote_runtime.execution_capabilities import adopt_execution_capabilities
+    transport = RemoteJobTransport(deploy=deploy_exact_working_tree, ssh_run=ssh_run,
+        remote_lookup=lambda selected: record if selected == name else None,
+        remote_sb_path=remote_sb_path)
+    return adopt_execution_capabilities(name, record,
+        lambda argv: transport.control(name, argv, timeout=15))
 
 
 class RemoteRegistrationBusy(TimeoutError):
@@ -411,6 +438,17 @@ def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 
     """
     if name is not None:
         name = validate_remote_name(name)
+    held = getattr(_REGISTRATION_LOCK_STATE, 'held', None)
+    if held is None or getattr(_REGISTRATION_LOCK_STATE, 'pid', None) != os.getpid():
+        held = _REGISTRATION_LOCK_STATE.held = set()
+        _REGISTRATION_LOCK_STATE.pid = os.getpid()
+    if name in held or None in held:
+        # Automatic CAS adoption can be reached under an existing authority
+        # reader lock. The same thread already owns its OS lock descriptor.
+        yield
+        return
+    if name is None and held:
+        raise RemoteRegistrationBusy(None)  # Never upgrade a named/shared lock.
     directory = _registration_lock_directory()
     deadline = time.monotonic() + timeout_seconds
     registry = _open_registration_lock(directory / "registry.lock")
@@ -421,7 +459,11 @@ def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 
                 raise RemoteRegistrationBusy(_read_registration_holder(registry))
             acquired.append(registry)
             _write_registration_holder(registry, None)
-            yield
+            held.add(name)
+            try:
+                yield
+            finally:
+                held.remove(name)
             return
         if not _flock_until(registry, fcntl.LOCK_SH, deadline):
             raise RemoteRegistrationBusy(_read_registration_holder(registry))
@@ -433,7 +475,11 @@ def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 
                 raise RemoteRegistrationBusy(_read_registration_holder(own))
             acquired.append(own)
             _write_registration_holder(own, name)
-            yield
+            held.add(name)
+            try:
+                yield
+            finally:
+                held.remove(name)
         finally:
             os.close(own)
     finally:
@@ -462,14 +508,15 @@ def _registry_write_lock(timeout_seconds: float = 30):
         os.close(descriptor)
 
 
-def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
+def resolve_source_ref(project_root: str | Path, source_ref: str, *, require_clean: bool = True) -> str:
     """Resolve a named ref to one full commit before any remote mutation.
 
-    Immutable deploys intentionally reject every local dirty layer.  The
-    caller can therefore prove that the transferred source is exactly the
-    resolved commit and that a failed resolution never contacted the remote.
+    Ordinary immutable deploys reject local dirty layers. Committed stack
+    templates instead deliberately exclude those layers from publication.
     """
     root = Path(project_root).resolve()
+    if type(require_clean) is not bool:
+        raise ValueError('source ref cleanliness policy must be explicit')
     if not isinstance(source_ref, str) or not source_ref.strip() or "\x00" in source_ref:
         raise ValueError("source_ref is invalid")
     requested = source_ref.strip()
@@ -480,12 +527,13 @@ def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
     commit = (resolved.stdout or "").strip().lower()
     if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("source_ref could not be resolved to a full commit")
-    diff_text, untracked = capture_uncommitted(root)
-    if diff_text.strip() or untracked:
-        raise ValueError(
-            "source_ref requires a clean working tree; immutable source was not combined "
-            "with local changes"
-        )
+    if require_clean:
+        diff_text, untracked = capture_uncommitted(root)
+        if diff_text.strip() or untracked:
+            raise ValueError(
+                "source_ref requires a clean working tree; immutable source was not combined "
+                "with local changes"
+            )
     return commit
 
 
@@ -515,6 +563,7 @@ def deploy_exact_working_tree(
     required_subnets: int = 1,
     remote_name: str | None = None,
     push_timeout: int | None = None,
+    committed_only: bool = False,
 ) -> dict:
     """Deploy committed, modified, and untracked project state once.
 
@@ -523,6 +572,8 @@ def deploy_exact_working_tree(
     job to prove which exact working tree it was accepted against.
     """
     root = Path(project_root).resolve()
+    if type(committed_only) is not bool or (committed_only and source_ref is None):
+        raise ValueError('committed-only publication requires an explicit source ref')
     push_timeout = normalize_remote_push_timeout(
         REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS if push_timeout is None else push_timeout
     )
@@ -544,7 +595,8 @@ def deploy_exact_working_tree(
         )
         if network_capacity.get("ok") is not True:
             raise NetworkCapacityAdmissionError(network_capacity)
-    resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
+    resolved_source = (resolve_source_ref(root, source_ref,
+        **({'require_clean': False} if committed_only else {})) if source_ref is not None else None)
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
     overlay = snapshot_dirty_overlay(root, diff_text, untracked)
     # Source and artifact limits are validated locally before admission. The
@@ -584,14 +636,17 @@ def deploy_exact_working_tree(
         push_timeout=push_timeout,
         allow_detached=True,
     )
+    content_receipt = {}
     applied = update_target_to(
         remote, target, pushed_sha,
         project_root=root if resolved_source is None else None,
         diff_text=diff_text, untracked=untracked, overlay_snapshot=overlay,
+        content_receipt=content_receipt,
     )
     dirty = overlay["digest"]
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
+            "content_digest": content_receipt['content_digest'],
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
             "uncommitted_files_applied": applied,
             "network_capacity": network_capacity,
@@ -660,9 +715,10 @@ def put_remote(name: str, _lock_timeout: float = 30, *, _expected=_ANY_REMOTE, *
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's
     idempotency expectation, applied to registration too)."""
+    deadline = time.monotonic() + _lock_timeout
     with registered_remote_lock(registration_lock_name(name),
                                 timeout_seconds=_lock_timeout), \
-            _registry_write_lock():
+            _registry_write_lock(timeout_seconds=max(0, deadline - time.monotonic())):
         block = _remote_block()
         if _expected is not _ANY_REMOTE:
             expected = ({k: v for k, v in _expected.items() if k != "_remote_name"}
@@ -697,6 +753,9 @@ def control_auth_headers(remote: dict) -> dict | None:
     A registration made with `sb remote join` has no token: the control
     service admits it as a node of its tailnet once the owner allows that.
     """
+    if (remote.get('joined') is True and remote.get('control_access') == 'tailnet'
+            and remote.get('control_transport') == 'tailscale'):
+        return {}
     token = remote.get("bearer_token")
     if isinstance(token, str) and token:
         return {"Authorization": f"Bearer {token}"}
@@ -833,19 +892,73 @@ def _ssh_connection_options(multiplex: bool = True) -> list[str]:
     ]
     if multiplex:
         control_path = _ssh_control_dir() / "cm-%C"
-        options.extend([
-            "-o", "ControlMaster=auto",
-            "-o", f"ControlPersist={_CONTROL_PERSIST_SECONDS}",
-            "-o", f"ControlPath={control_path}",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3",
-        ])
+        # %C expands to40hex; OpenSSH binds a temporary master path with a
+        # dot+16-character suffix before publishing the socket. Count bytes
+        # and the terminating NUL before launching ANY remote command.
+        limit = 108 if sys.platform.startswith('linux') else 104
+        expanded = str(control_path).replace('%C', '0' * 40)
+        if len(os.fsencode(expanded)) + 17 + 1 > limit:
+            options.extend(['-o', 'ControlMaster=no', '-o', 'ControlPath=none'])
+        else:
+            options.extend([
+                "-o", "ControlMaster=auto",
+                "-o", f"ControlPersist={_CONTROL_PERSIST_SECONDS}",
+                "-o", f"ControlPath={control_path}",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+            ])
     return options
 
 
-def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) -> list[str]:
+def _ssh_transport_parts(remote_or_target):
     parts = remote_ssh_parts(remote_or_target)
-    args = ["ssh", *_ssh_connection_options(multiplex)]
+    # Tailnet HTTP control on an existing owner registration does not imply
+    # that its separately provisioned SSH server supports Tailscale SSH.
+    tailnet = isinstance(remote_or_target, dict) and remote_or_target.get('joined') is True
+    if not tailnet:
+        return parts, False
+    if remote_or_target.get('control_transport') != 'tailscale':
+        raise ValueError('tailnet_ssh_target_unavailable: joined transport cannot fall back to ordinary SSH')
+    address = remote_or_target.get('tailscale_host')
+    if not isinstance(address, str):
+        raise ValueError('tailnet_ssh_target_unavailable: a verified Tailnet address is required')
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        raise ValueError('tailnet_ssh_target_unavailable: a verified Tailnet address is required') from None
+    networks = (ipaddress.ip_network('100.64.0.0/10'), ipaddress.ip_network('fd7a:115c:a1e0::/48'))
+    if not any(parsed.version == network.version and parsed in network for network in networks):
+        raise ValueError('tailnet_ssh_target_unavailable: public SSH fallback is disabled')
+    user = parts['target'].rpartition('@')[0]
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]*[$]?', user) or parts['port'] not in (None, 22):
+        raise ValueError('tailnet_ssh_target_unavailable: Tailscale SSH requires the selected Linux user on port22')
+    host = str(parsed)
+    target = user + '@' + (f'[{host}]' if parsed.version == 6 else host)
+    return {'target': target, 'host': host, 'port': None}, True
+
+
+def _ssh_transport_options(tailnet, multiplex):
+    options = _ssh_connection_options(False if tailnet else multiplex)
+    if tailnet:
+        # OpenSSH to a Tailnet address reaches the Tailscale SSH server. Ignore
+        # client config/keys and force a fresh policy evaluation per command;
+        # never reuse a master authenticated before a local Tailnet switch.
+        options = ['-F', '/dev/null', *options,
+            '-o', 'IdentityAgent=none', '-o', 'IdentitiesOnly=yes', '-o', 'PubkeyAuthentication=no',
+            '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no',
+            '-o', 'PreferredAuthentications=none', '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
+            '-o', 'ControlMaster=no', '-o', 'ControlPath=none']
+    return options
+
+
+def remote_ssh_transport_parts(remote_or_target) -> dict:
+    """Resolved SSH endpoint for operands paired with the shared transport."""
+    return _ssh_transport_parts(remote_or_target)[0]
+
+
+def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) -> list[str]:
+    parts, tailnet = _ssh_transport_parts(remote_or_target)
+    args = ["ssh", *_ssh_transport_options(tailnet, multiplex)]
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     args.extend([parts["target"], command])
@@ -854,8 +967,8 @@ def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) 
 
 def scp_command_args(remote_or_target, local_path: str, remote_path: str,
                      *, multiplex: bool = True) -> list[str]:
-    parts = remote_ssh_parts(remote_or_target)
-    args = ["scp", *_ssh_connection_options(multiplex)]
+    parts, tailnet = _ssh_transport_parts(remote_or_target)
+    args = ["scp", *_ssh_transport_options(tailnet, multiplex)]
     if parts["port"]:
         args.extend(["-P", str(parts["port"])])
     args.extend([local_path, f"{parts['target']}:{remote_path}"])
@@ -864,15 +977,17 @@ def scp_command_args(remote_or_target, local_path: str, remote_path: str,
 
 def git_ssh_command(remote_or_target, *, multiplex: bool = True) -> str:
     """Shell-safe SSH command for Git's direct VPS transport."""
-    parts = remote_ssh_parts(remote_or_target)
-    args = ["ssh", *_ssh_connection_options(multiplex)]
+    parts, tailnet = _ssh_transport_parts(remote_or_target)
+    args = ["ssh", *_ssh_transport_options(tailnet, multiplex)]
+    if tailnet:
+        args.extend(['-o', 'HostName=' + parts['host']])
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     return shlex.join(args)
 
 
 def git_ssh_url(remote: dict, path: str) -> str:
-    parts = remote_ssh_parts(remote)
+    parts, _tailnet = _ssh_transport_parts(remote)
     push_path = path if path.startswith("/") else f"/{path}"
     if parts["port"]:
         return f"ssh://{parts['target']}:{parts['port']}{push_path}"
@@ -893,6 +1008,18 @@ def ssh_run(remote: dict, command: str, timeout: int = 30,
     return ssh_process(remote, command, input_data=input_data, timeout=timeout)
 
 
+def _owner_host_target(target):
+    # The module name is only an import filter, never authority. The sibling
+    # adapter's exact issued type and current retained process proof are required.
+    if type(target).__module__ != 'sandbox.hosting.server_cli_target':
+        return None
+    from sandbox.hosting.server_cli_target import OwnerHostTarget, require_owner_target
+    if type(target) is not OwnerHostTarget:
+        raise ValueError('an exact current owner host target is required')
+    require_owner_target(target)
+    return target
+
+
 def ssh_run_bounded(remote_or_target, command: str, *, timeout: int = 30,
                     max_output: int = 65_536,
                     terminate_on_output_limit: bool = True):
@@ -904,6 +1031,12 @@ def ssh_run_bounded(remote_or_target, command: str, *, timeout: int = 30,
     completion unknown.
     """
     from sandbox.services.process import BoundedProcessRunner
+    owner = _owner_host_target(remote_or_target)
+    if owner is not None:
+        if not callable(getattr(owner, 'process_bounded', None)):
+            raise RuntimeError('owner local bounded-output process adapter is unavailable')
+        return owner.process_bounded(command, timeout=timeout, max_output=max_output,
+                                     terminate_on_output_limit=terminate_on_output_limit)
 
     multiplex = True
     try:
@@ -928,6 +1061,9 @@ def ssh_stream(remote_or_target, command: str, *, timeout: int = 30,
     the same SSH argument and multiplexing policy as ``ssh_process`` and never
     retries an ambiguous command.
     """
+    owner = _owner_host_target(remote_or_target)
+    if owner is not None:
+        return owner.stream(command, timeout=timeout, on_line=on_line)
     # Long builds get their own connection. A shared ControlMaster is reused
     # by every concurrent `sb` call to the host, and when it drops, each
     # session riding it exits 255 even if the remote command finished.
@@ -1043,6 +1179,9 @@ def ssh_process(remote_or_target, command: str, *, input_data=None,
     control socket. It is intentionally a single command/session API; callers
     still get an isolated remote shell and normal SSH exit status.
     """
+    owner = _owner_host_target(remote_or_target)
+    if owner is not None:
+        return owner.process(command, timeout=timeout, input_data=input_data)
     multiplex = True
     try:
         _ensure_ssh_control_dir()
@@ -1103,7 +1242,7 @@ def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
     """
     started = time.monotonic()
     try:
-        parts = remote_ssh_parts(remote)
+        parts, tailnet = _ssh_transport_parts(remote)
     except (OSError, TypeError, ValueError):
         return {"reachable": False, "state": "invalid_target", "latency_ms": None}
     args = [
@@ -1116,6 +1255,10 @@ def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     args.extend([parts["target"], "true"])
+    if tailnet:
+        args = ssh_command_args(remote, 'true', multiplex=False)
+        args = [f'ConnectTimeout={REMOTE_REACHABILITY_CONNECT_TIMEOUT_SECONDS}'
+                if arg == 'ConnectTimeout=10' else arg for arg in args]
     try:
         res = subprocess.run(
             args, capture_output=True, text=True,
@@ -1201,7 +1344,7 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
         import urllib.error
         import urllib.request
         request = urllib.request.Request(endpoint, headers={
-            "Authorization": f"Bearer {token}",
+            **control_auth_headers(remote),
             "Accept": "application/json, text/event-stream",
         })
         try:
@@ -1336,6 +1479,9 @@ def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
     resolved once via SSH rather than left as a literal shell variable,
     since a git push URL needs a real path, not something only a remote
     shell would expand."""
+    owner = _owner_host_target(remote)
+    if owner is not None:
+        return validate_remote_sandbox_home(owner.sandbox_home())
     timeout = normalize_remote_push_timeout(timeout)
     try:
         res = ssh_run(
@@ -1428,9 +1574,8 @@ def ensure_deploy_repo(remote: dict, project_root, *, sandbox_home: str | None =
                        home_timeout: int = 15) -> str:
     """Lazily create the deploy-target git repo on first deploy to this remote
     (NOT during `provision`, which is machine-level, not project-level). Safe
-    to call every deploy -- a no-op if the repo already exists. Sets
-    receive.denyCurrentBranch=updateInstead so a push directly updates the
-    checked-out working tree, no bare-repo indirection needed. Returns the
+    to call every deploy. Pushes update Git objects/refs only. Working tree
+    publication belongs exclusively to update_target_to's source lease. Returns the
     resolved absolute path (see deploy_target_path)."""
     target = deploy_target_path(
         remote, project_root, sandbox_home=sandbox_home,
@@ -1440,8 +1585,8 @@ def ensure_deploy_repo(remote: dict, project_root, *, sandbox_home: str | None =
     cmd = (
         f"mkdir -p {quoted_target} && "
         f"cd {quoted_target} && "
-        f"if [ ! -d .git ]; then git init -q && "
-        f"git config receive.denyCurrentBranch updateInstead; fi"
+        f"if [ ! -d .git ]; then git init -q; fi && "
+        f"git config receive.denyCurrentBranch ignore"
     )
     res = ssh_run(remote, cmd, timeout=30)
     if res.returncode != 0:
@@ -1717,14 +1862,7 @@ def _validate_hostname(hostname: str, what: str) -> str:
     return hostname
 
 
-def _caddy_proxy_command(
-    hostname: str,
-    port: int,
-    conf_prefix: str,
-    *,
-    reject_managed_host: bool = False,
-    robots: str = "deny",
-) -> str:
+def _caddy_proxy_site(hostname: str, port: int, robots: str = "deny", incarnation=None) -> str:
     # Preview and control routes are publicly resolvable (a real DNS record on a
     # real zone) but are throwaway staging surfaces, often carrying an autologin
     # URL — nothing here should ever reach a search index. So /robots.txt is
@@ -1746,7 +1884,24 @@ def _caddy_proxy_command(
     proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
     body = (f"{noindex}{robots_block}    handle {{\n    {proxy}    }}\n"
             if robots_block else proxy)
-    site_q = shlex.quote(f"{hostname} {{\n{body}}}\n")
+    binding = ''
+    if incarnation is not None:
+        if not isinstance(incarnation, str) or re.fullmatch(r'inc_[0-9a-f]{32}', incarnation) is None:
+            raise ValueError('instance_incarnation_required')
+        binding = f'# Sandbox preview incarnation {incarnation}\n'
+    return f"{binding}{hostname} {{\n{body}}}\n"
+
+
+def _caddy_proxy_command(
+    hostname: str,
+    port: int,
+    conf_prefix: str,
+    *,
+    reject_managed_host: bool = False,
+    robots: str = "deny",
+    incarnation=None,
+) -> str:
+    site_q = shlex.quote(_caddy_proxy_site(hostname, port, robots, incarnation))
     file_q = shlex.quote(f"/etc/caddy/conf.d/{conf_prefix}-{hostname}.caddy")
     managed_host_guard = ""
     if reject_managed_host:
@@ -1787,7 +1942,25 @@ def _require_front_door(remote: dict, capability: str) -> str:
     return require_capability(remote, capability)
 
 
-def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
+def _instance_route_command(domain: str, command: str) -> str:
+    lock = f'/etc/caddy/conf.d/.sandbox-instance-{domain}.lock'
+    return ('if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO=sudo; fi; '
+            '$SUDO install -d -m 0755 /etc/caddy/conf.d; '
+            f'$SUDO flock {shlex.quote(lock)} sh -c {shlex.quote(command)}')
+
+
+def verify_instance_https_route(remote, domain: str, port: int, *, incarnation=None) -> None:
+    _require_front_door(remote, 'instance_routes')
+    domain = _validate_hostname(domain, 'remote instance domain')
+    digest = hashlib.sha256(_caddy_proxy_site(domain, port, incarnation=incarnation).encode()).hexdigest()
+    path = f'/etc/caddy/conf.d/sandbox-instance-{domain}.caddy'
+    command = f'test "$(sha256sum {shlex.quote(path)} | cut -d " " -f 1)" = {digest}'
+    result = ssh_run(remote, _instance_route_command(domain, command), timeout=30)
+    if result.returncode:
+        raise RuntimeError('preview_route_custody_mismatch')
+
+
+def configure_instance_https_route(remote: dict, domain: str, port: int, *, incarnation=None) -> None:
     """Route a preview hostname through Caddy unless permanent hosting owns it."""
     _require_front_door(remote, "instance_routes")
     domain = _validate_hostname(domain, "remote instance domain")
@@ -1796,8 +1969,9 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
         port,
         "sandbox-instance",
         reject_managed_host=True,
+        incarnation=incarnation,
     )
-    res = ssh_run(remote, cmd, timeout=120)
+    res = ssh_run(remote, _instance_route_command(domain, cmd), timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure remote instance HTTPS route: "
@@ -1805,19 +1979,25 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
         )
 
 
-def remove_instance_https_route(remote: dict, domain: str) -> None:
+def remove_instance_https_route(remote: dict, domain: str, *, expected_port=None, incarnation=None) -> None:
     """Remove only Sandbox's Caddy fragment for one public instance route."""
     _require_front_door(remote, "instance_routes")
     domain = _validate_hostname(domain, "remote instance domain")
     path = f"/etc/caddy/conf.d/sandbox-instance-{domain}.caddy"
+    guard = ''
+    if expected_port is not None:
+        if type(expected_port) is not int or not 1 <= expected_port <= 65535:
+            raise ValueError('invalid remote instance port')
+        digest = hashlib.sha256(_caddy_proxy_site(domain, expected_port, incarnation=incarnation).encode()).hexdigest()
+        guard = f'test "$(sha256sum {shlex.quote(path)} | cut -d " " -f 1)" = {digest}; '
     cmd = (
         "set -e; "
         "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
-        f"$SUDO rm -f {shlex.quote(path)}; "
+        f"{guard}$SUDO rm -f {shlex.quote(path)}; "
         "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
         "$SUDO systemctl reload caddy"
     )
-    res = ssh_run(remote, cmd, timeout=120)
+    res = ssh_run(remote, _instance_route_command(domain, cmd), timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not remove remote instance HTTPS route: "
@@ -1862,12 +2042,17 @@ def instance_route_hosts(remote: dict, port: int) -> list[str]:
     return hosts
 
 
-def delete_remote_instance(remote: dict, instance_name: str) -> None:
+def delete_remote_instance(remote: dict, instance_name: str, *,
+                           creation_context=None, expected_incarnation=None) -> None:
     """Delete precisely one named remote Sandbox instance and its Docker data."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,30}", instance_name or ""):
         raise ValueError("invalid remote Sandbox instance name")
     sb = remote_sb_path(remote)
-    res = ssh_run(remote, f"{shlex.quote(sb)} instance delete {shlex.quote(instance_name)} --yes", timeout=300)
+    if (creation_context is None) != (expected_incarnation is None):
+        raise ValueError('conditional_instance_delete_requires_context_and_incarnation')
+    conditional = _creation_transport_args(creation_context, expected_incarnation)
+    # Older receivers reject the required options; never retry by name.
+    res = ssh_run(remote, f"{shlex.quote(sb)} instance delete {shlex.quote(instance_name)} --yes --local" + conditional, timeout=300)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not delete remote Sandbox instance: "
@@ -2189,7 +2374,8 @@ def push_commits(
     env = git_environment(overrides={"GIT_SSH_COMMAND": git_ssh})
     try:
         res = subprocess.run(
-            ["git", "push", push_url, source_spec],
+            ["git", "push", "--receive-pack=git -c receive.denyCurrentBranch=ignore receive-pack",
+             push_url, source_spec],
             cwd=str(push_cwd), env=env, capture_output=True, text=True,
             timeout=push_timeout, check=False,
         )
@@ -2209,31 +2395,36 @@ def push_commits(
 
 @contextmanager
 def _remote_materialization_lock(remote: dict, target_path: str):
-    """Serialize exact source mutation with workspace materialization."""
-    from sandbox.workspaces.checkout import materialization_lock_name
+    """Retain physical exclusion whenever remote cessation is unproven."""
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
 
-    parent = posixpath.dirname(target_path.rstrip("/"))
-    lock_path = posixpath.join(parent, materialization_lock_name(target_path))
-    acquired = ssh_run(
-        remote, f"mkdir -- {shlex.quote(lock_path)}", timeout=10,
-    )
-    if acquired.returncode != 0:
-        raise RuntimeError("remote source materialization lock is busy")
-    failed = False
+    lease = RemoteMaterializationLease(remote, target_path, ssh_run).acquire()
     try:
-        yield
-    except BaseException:
-        failed = True
-        raise
+        yield lease
     finally:
-        released = ssh_run(
-            remote, f"rmdir -- {shlex.quote(lock_path)}", timeout=10,
-        )
-        if released.returncode != 0 and not failed:
-            raise RuntimeError("remote source materialization lock release failed")
+        # Local exceptions before dispatch and positively completed remote
+        # failures can release. Transport loss never sends an unlock command.
+        if not lease.unknown:
+            lease.release()
 
 
-def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
+def inspect_remote_materialization(remote, target_path: str, operation_id: str):
+    """Read one original lease receipt without replay or source mutation."""
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
+    return RemoteMaterializationLease(
+        remote, target_path, ssh_run, operation_id=operation_id,
+    ).inspect()
+
+
+def reconcile_remote_materialization(remote, target_path: str, operation_id: str):
+    """Explicitly release a positively completed original operation only."""
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
+    return RemoteMaterializationLease(
+        remote, target_path, ssh_run, operation_id=operation_id,
+    ).reconcile()
+
+
+def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str, *, lease) -> None:
     """Reset the VPS working tree to the just-pushed commit BEFORE applying
     the uncommitted layer -- this is what makes each deploy REPLACE rather
     than stack (spec FR-007): any diff a previous deploy applied is wiped
@@ -2249,23 +2440,20 @@ def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
     touched, since those were never part of the deploy in the first place."""
     reset = (
         f"cd {shlex.quote(target_path)} && "
+        # Keep the worktree's HEAD independent of refs updated by concurrent
+        # receive-pack. Only this leased publisher changes its checkout HEAD.
+        f"git update-ref --no-deref HEAD {shlex.quote(sha)} && "
         f"git reset --hard {shlex.quote(sha)} && git clean -fd"
     )
     # Bound the stateful reset on the VPS as well as in the local SSH client.
-    # If the client disconnects, the remote supervisor still terminates the
-    # reset instead of leaving an unbounded git process behind.  The client
-    # budget includes the remote kill grace period and connection overhead.
+    # The coordinator separately waits for all descendants. GNU timeout alone
+    # is not cessation proof; a lost client retains the original exclusion.
     cmd = (
         "exec timeout --signal=TERM "
         f"--kill-after={REMOTE_RESET_KILL_GRACE_SECONDS}s "
         f"{REMOTE_RESET_TIMEOUT_SECONDS}s sh -c {shlex.quote(reset)}"
     )
-    try:
-        res = ssh_run(remote, cmd, timeout=REMOTE_RESET_CLIENT_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"remote reset timed out after {REMOTE_RESET_TIMEOUT_SECONDS}s"
-        ) from exc
+    res = lease.run(cmd, timeout=REMOTE_RESET_CLIENT_TIMEOUT_SECONDS)
     if res.returncode == 124:
         raise RuntimeError(
             f"remote reset timed out after {REMOTE_RESET_TIMEOUT_SECONDS}s"
@@ -2278,8 +2466,8 @@ def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
 
 
 def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
-    with _remote_materialization_lock(remote, target_path):
-        _reset_target_to_unlocked(remote, target_path, sha)
+    with _remote_materialization_lock(remote, target_path) as lease:
+        _reset_target_to_unlocked(remote, target_path, sha, lease=lease)
 
 
 def capture_uncommitted(project_root) -> tuple[str, list[str]]:
@@ -2427,13 +2615,8 @@ def snapshot_dirty_overlay(project_root, diff_text: str, untracked: list[str],
             archive.addfile(info, io.BytesIO(content))
             files += 1
     archive_bytes = archive_buffer.getvalue() if files else b""
-    digest = hashlib.sha256(b"sandbox-dirty-overlay-v2\0")
-    for relative in sorted(deleted):
-        encoded = relative.encode("utf-8", "surrogateescape")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    digest.update(hashlib.sha256(archive_bytes).digest())
-    value = digest.hexdigest()
+    from sandbox.services.source_fingerprint import dirty_overlay_fingerprint
+    value = dirty_overlay_fingerprint(deleted, archive_bytes)
     return {"identity": f"sha256:{value}", "digest": value,
             "archive": archive_bytes, "deleted": sorted(deleted), "files": files}
 
@@ -2555,7 +2738,7 @@ def validate_deploy_include_paths(project_root, paths) -> list[str]:
 def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str],
                        include_paths: list[str] | None = None,
-                       overlay_snapshot: dict | None = None) -> int:
+                       overlay_snapshot: dict | None = None, *, lease) -> int:
     """Apply one immutable overlay artifact, never rereading source bytes."""
     snapshot = overlay_snapshot or snapshot_dirty_overlay(
         project_root, diff_text, untracked, include_paths,
@@ -2567,7 +2750,7 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
             f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
             for relpath in deleted
         ]
-        rm_res = ssh_run_batch(remote, commands, timeout=30)
+        rm_res = lease.run(" && ".join(commands), timeout=30)
         if rm_res.returncode != 0:
             raise RuntimeError(
                 "could not remove deleted files on remote: "
@@ -2580,8 +2763,8 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
             f"mkdir -p -- {shlex.quote(target_path)} && "
             f"tar -xf - -C {shlex.quote(target_path)}"
         )
-        copy_res = ssh_run(remote, extract, timeout=120,
-                           input_data=archive)
+        extract = "exec timeout --signal=TERM --kill-after=15s 90s sh -c " + shlex.quote(extract)
+        copy_res = lease.run(extract, timeout=120, input_data=archive)
         if copy_res.returncode != 0:
             raise RuntimeError(
                 "could not transfer dirty files: "
@@ -2595,10 +2778,10 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
                       diff_text: str, untracked: list[str],
                       include_paths: list[str] | None = None,
                       overlay_snapshot: dict | None = None) -> int:
-    with _remote_materialization_lock(remote, target_path):
+    with _remote_materialization_lock(remote, target_path) as lease:
         return _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text, untracked,
-            include_paths, overlay_snapshot,
+            include_paths, overlay_snapshot, lease=lease,
         )
 
 
@@ -2606,16 +2789,17 @@ def update_target_to(remote: dict, target_path: str, sha: str, *,
                      project_root=None, diff_text: str = "",
                      untracked: list[str] | None = None,
                      include_paths: list[str] | None = None,
-                     overlay_snapshot: dict | None = None) -> int:
+                     overlay_snapshot: dict | None = None,
+                     content_receipt: dict | None = None) -> int:
     """Reset and publish one dirty overlay under one source lock."""
-    with _remote_materialization_lock(remote, target_path):
-        _reset_target_to_unlocked(remote, target_path, sha)
-        if project_root is None:
-            return 0
-        return _apply_uncommitted_unlocked(
+    with _remote_materialization_lock(remote, target_path) as lease:
+        _reset_target_to_unlocked(remote, target_path, sha, lease=lease)
+        applied = 0 if project_root is None else _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text,
-            list(untracked or ()), include_paths, overlay_snapshot,
-        )
+            list(untracked or ()), include_paths, overlay_snapshot, lease=lease)
+        if content_receipt is not None:
+            content_receipt['content_digest'] = lease.measure(target_path)
+        return applied
 
 
 DEFAULT_MCP_PORT = 9174
@@ -2658,8 +2842,9 @@ else:
  result=libc.renamex_np(os.fsencode(source),os.fsencode(target),2 if flag==2 else 4)
 if result:
  error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
+print('exchanged' if flag==2 else 'installed',flush=True)
 fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
-print('exchanged' if flag==2 else 'installed')'''
+'''
 _REMOTE_SOURCE_ROLLBACK_PROGRAM = r'''import ctypes,os,sys
 mode,source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
 flag=2 if mode=='exchanged' else 1
@@ -2867,6 +3052,17 @@ class _OriginHTTPSHandler(urllib.request.HTTPSHandler):
                             req, context=self._context)
 
 
+class _ControlNoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        return None
+
+
+def _control_primary_open(request, timeout):
+    """One selected endpoint, without ambient proxies or redirected evidence."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _ControlNoRedirects())
+    return opener.open(request, timeout=timeout)
+
+
 def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     """Open a control request; survive a control host that stops resolving.
 
@@ -2875,26 +3071,40 @@ def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     ``origin_ipv4``, connect to that address instead: TLS is still verified
     for the control hostname, so this cannot reach a different server. With no
     recorded origin the error names the hostname that failed to resolve.
+    Primary requests always exclude proxies and redirects. The legacy direct
+    argument remains accepted; joined/Tailscale requests never retry an origin.
     """
     parsed = urlsplit(request.full_url)
+    if remote.get('joined') is True:
+        try:
+            address = ipaddress.ip_address(remote.get('tailscale_host'))
+        except (ValueError, TypeError):
+            raise urllib.error.URLError('joined control requires a numeric Tailnet address') from None
+        networks = (ipaddress.ip_network('100.64.0.0/10'), ipaddress.ip_network('fd7a:115c:a1e0::/48'))
+        if (remote.get('control_transport') != 'tailscale'
+                or remote.get('control_access') != 'tailnet'
+                or not any(address.version == net.version and address in net for net in networks)
+                or parsed.scheme not in {'http', 'https'}
+                or parsed.hostname != str(address)
+                or parsed.username is not None or parsed.password is not None
+                or request.has_header('Authorization')):
+            raise urllib.error.URLError('joined control refuses public routing or bearer authentication')
+    if request.has_proxy() or request.host != parsed.netloc or getattr(request, '_tunnel_host', None):
+        raise urllib.error.URLError('proxy host routing is not permitted for control requests')
     try:
-        if direct:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            return opener.open(request, timeout=timeout)
-        return urllib.request.urlopen(request, timeout=timeout)
+        return _control_primary_open(request, timeout)
     except urllib.error.URLError as exc:
         if not isinstance(exc.reason, socket.gaierror):
             raise
-        if request.host != parsed.netloc:
-            # The request went through a proxy; that proxy's name is what failed.
-            raise urllib.error.URLError(
-                f"proxy host {request.host} for control host {parsed.hostname} does not "
-                "resolve in DNS") from exc
         origin = remote.get("origin_ipv4")
         try:
             origin = str(ipaddress.IPv4Address(origin)) if origin else None
         except ValueError:
             origin = None
+        if remote.get('joined') is True or remote.get('control_transport') == 'tailscale':
+            raise urllib.error.URLError(
+                f"control host {parsed.hostname} does not resolve in DNS; restore its "
+                "selected Tailnet name or address") from exc
         if parsed.scheme != "https" or origin is None:
             raise urllib.error.URLError(
                 f"control host {parsed.hostname} does not resolve in DNS; restore its "
@@ -2922,7 +3132,7 @@ def _dns_detail(exc: BaseException) -> str:
     return ""
 
 
-def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
+def _remote_control_request(remote: dict, path: str, *, timeout: float = 10,
                             payload: dict | None = None) -> dict:
     """Call one authenticated, bounded remote-control HTTP endpoint."""
     base = remote.get("control_url")
@@ -2945,7 +3155,7 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
     request = urllib.request.Request(base.rstrip("/") + path, data=data, headers=headers,
                                      method="POST" if data is not None else "GET")
     try:
-        with _control_urlopen(remote, request, timeout=max(int(timeout), 1)) as response:
+        with _control_urlopen(remote, request, timeout=max(float(timeout), 0.001)) as response:
             if response.status != 200:
                 raise RuntimeError(f"remote control returned HTTP {response.status}")
             raw = response.read(4 * 1024 * 1024 + 1)
@@ -2970,7 +3180,7 @@ def remote_resource_request(remote: dict, payload: dict, *, timeout: int) -> dic
     return result
 
 
-def remote_host_memory_request(remote: dict, payload: dict) -> dict:
+def remote_host_memory_request(remote: dict, payload: dict, *, timeout_seconds=None) -> dict:
     """Send one strict host-memory action over authenticated control only."""
     from sandbox.resources.host_memory.remote import validate_request
 
@@ -2979,6 +3189,11 @@ def remote_host_memory_request(remote: dict, payload: dict) -> dict:
     if isinstance(budget, bool) or not isinstance(budget, (int, float)):
         raise ValueError("host-memory budget is invalid")
     timeout = min(max(int(budget) + 5, 5), 305)
+    if timeout_seconds is not None:
+        if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+                or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            raise ValueError('host-memory transport deadline is invalid')
+        timeout = min(float(budget), timeout_seconds)
     return _remote_control_request(
         remote, "/resources", timeout=timeout, payload=request,
     )
@@ -4670,7 +4885,8 @@ def _record_controller_hint(remote: dict, revision, source: str) -> None:
         pass
 
 
-def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = None) -> dict:
+def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = None,
+                                      timeout_seconds=None) -> dict:
     """The service status a remote effect is gated on (spec 061).
 
     Identical to :func:`remote_mcp_service_status` unless strict mode is
@@ -4680,17 +4896,75 @@ def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = N
     """
     from sandbox.remote_runtime.verdict import strict_requested
 
-    status = remote_mcp_service_status(remote)
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError('runtime compatibility observation budget expired')
+        return value
+    def observe():
+        return (remote_mcp_service_status(remote, _refresh_revision_cache=False) if timeout_seconds is None
+                else remote_mcp_service_status(remote, timeout_seconds=remaining(), _refresh_revision_cache=False))
+    status = observe()
     if not strict_requested():
         return status
     from sandbox.core._paths import ROOT
-    from sandbox.remote_runtime.pins import purpose_for, strict_gate
+    from sandbox.remote_runtime.pins import PinStore, purpose_for, strict_gate
     command = " ".join(["sb", *[arg for arg in sys.argv[1:3] if not arg.startswith("-")]])
+    kwargs = {}
+    if deadline is not None:
+        def bounded_ssh(selected, command, *, timeout):
+            return ssh_run(selected, command, timeout=min(timeout, remaining()))
+        kwargs['store'] = PinStore(remote, ssh_run=bounded_ssh)
     return strict_gate(remote, status, purpose=purpose or purpose_for(command, str(ROOT)),
-                       recheck=lambda: remote_mcp_service_status(remote))
+                       recheck=observe, **kwargs)
 
 
-def remote_mcp_service_status(remote: dict) -> dict:
+def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18,
+                              _refresh_revision_cache: bool = True) -> dict:
+    """Keep live Tailnet admission distinct from SSH unit/credential metadata."""
+    from sandbox.remote_runtime.join_adoption import joined
+    if not joined(remote):
+        return _remote_mcp_service_status_via_ssh(remote, timeout_seconds=timeout_seconds)
+    from sandbox.remote_runtime.join_identity import discover_join_identity
+    from sandbox.resources.host_memory.remote import RemoteProtocolError
+    deadline = time.monotonic() + timeout_seconds
+    admission = {'state': 'unavailable', 'method': 'tailnet', 'code': 'joined_metadata_unavailable'}
+    def request(selected, payload):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('control observation budget expired')
+        return remote_host_memory_request(selected, payload, timeout_seconds=min(5, remaining))
+    try:
+        discover_join_identity(remote.get('_remote_name') or 'joined', remote, request,
+                               budget_seconds=min(5, timeout_seconds),
+                               allow_revision_cache=not _refresh_revision_cache)
+        admission = {'state': 'admitted', 'method': 'tailnet', 'code': None}
+    except RemoteProtocolError as exc:
+        if (exc.code != 'remote_runtime_revision_mismatch'
+                or not remote.get('_remote_name')):
+            raise
+        from sandbox.remote_runtime.join_revision import reconnect_join_record
+        available = deadline - time.monotonic()
+        if available <= 0:
+            raise RemoteProtocolError('remote_budget_exhausted', 'service revision observation exhausted its budget')
+        remote = reconnect_join_record(remote['_remote_name'], remote,
+            budget_seconds=available)
+        admission = {'state': 'admitted', 'method': 'tailnet', 'code': None}
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        if 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
+            admission = {'state': 'denied', 'method': 'tailnet', 'code': 'remote_access_denied'}
+    remaining = max(0, deadline - time.monotonic())
+    status = _remote_mcp_service_status_via_ssh(remote, timeout_seconds=remaining)
+    status['control_admission'] = admission
+    status.setdefault('ssh_access', {'state': 'unavailable', 'transport': 'tailscale'})
+    status['authenticated'] = True if admission['state'] == 'admitted' else (False if admission['state'] == 'denied' else None)
+    status['auth_state'] = {'admitted': 'ok', 'denied': 'failed', 'unavailable': 'unknown'}[admission['state']]
+    return status
+
+
+def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float = 18,
+                                    metadata_only: bool = False) -> dict:
     """Read only the selected Sandbox unit state; never inspect generic argv."""
     record = dict(remote.get("mcp_service") or {})
     expected = record.get("service_name") == REMOTE_MCP_SERVICE
@@ -4700,9 +4974,12 @@ def remote_mcp_service_status(remote: dict) -> dict:
     port = record.get("port") if isinstance(record.get("port"), int) else 0
     local_revision = _remote_mcp_runtime_revision()
     local_revision_valid = _REMOTE_MCP_REVISION_RE.fullmatch(local_revision) is not None
+    ssh_admission = 'unavailable'
 
     def unavailable(error: str) -> dict:
         return {
+            **({'ssh_access': {'state': ssh_admission, 'transport': 'tailscale'}}
+               if remote.get('control_transport') == 'tailscale' else {}),
             "installed": False, "enabled": False, "active": False,
             "linger": False, "ownership": "unknown",
             "service_name": REMOTE_MCP_SERVICE if expected else None,
@@ -4801,6 +5078,10 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"{shlex.quote(bind)} {port} {_REMOTE_MCP_ENV}; else echo auth=unknown; fi; "
         if bind and port else "echo auth=unknown; "
     )
+    if metadata_only or (remote.get('joined') is True
+            and remote.get('control_access') == 'tailnet'
+            and remote.get('control_transport') == 'tailscale'):
+        auth_probe = "echo auth=not_probed; "
     legacy_probe = (
         f"if test -r {_MCP_PIDFILE}; then legacy_pid=$(cat {_MCP_PIDFILE} 2>/dev/null || true); "
         "case \"$legacy_pid\" in ''|*[!0-9]*) echo legacy_pidfile=invalid;; "
@@ -4858,13 +5139,19 @@ def remote_mcp_service_status(remote: dict) -> dict:
         + listener_probe + auth_probe + legacy_probe
     )
     try:
-        res = ssh_run(remote, command, timeout=18)
+        if timeout_seconds <= 0:
+            return unavailable('remote_service_probe_timeout')
+        res = ssh_run(remote, command, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         return unavailable("remote_service_probe_timeout")
     except (OSError, subprocess.SubprocessError):
         return unavailable("remote_service_probe_transport_failed")
     if getattr(res, "returncode", 1) != 0:
+        diagnostic = (getattr(res, 'stderr', '') or '').lower()
+        if remote.get('control_transport') == 'tailscale' and ('tailnet policy does not permit' in diagnostic or 'permission denied' in diagnostic):
+            ssh_admission = 'denied'
         return unavailable("remote_service_probe_transport_failed")
+    ssh_admission = 'admitted'
     if not (getattr(res, "stdout", "") or "").strip():
         return unavailable("remote_service_probe_output_missing")
     values: dict[str, str] = {}
@@ -4914,6 +5201,8 @@ def remote_mcp_service_status(remote: dict) -> dict:
     else:
         revision_state = "unavailable"
     return {
+        **({'ssh_access': {'state': ssh_admission, 'transport': 'tailscale'}}
+           if remote.get('control_transport') == 'tailscale' else {}),
         "installed": installed, "enabled": enabled, "active": active,
         "linger": linger, "ownership": ownership,
         "service_name": REMOTE_MCP_SERVICE if expected else None,
@@ -4939,7 +5228,8 @@ def remote_mcp_service_status(remote: dict) -> dict:
 
 
 def remote_mcp_service_plan(remote: dict, bind: str, port: int,
-                            public_url: str | None = None, *, observed: dict | None = None) -> dict:
+                            public_url: str | None = None, *, observed: dict | None = None,
+                            preserve_credentials: bool = False) -> dict:
     """Build a no-write migration plan with no secret-bearing fields."""
     public_url = _validate_remote_mcp_public_url(public_url)
     record = remote_mcp_service_record(bind, port, public_url)
@@ -4949,19 +5239,20 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
         "steps": [
             "prepare the staged Sandbox CLI and MCP virtual environments",
             "refresh and verify the owner-scoped measured image staging helper",
-            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            ("preserve existing owner-only remote credential file" if preserve_credentials else
+             "write owner-only remote credential file"), "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
         "legacy_pidfile_detected": bool((observed or {}).get("legacy_pidfile") == "present"),
     }
 
 
-def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
+def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | None,
                                public_url: str | None = None, *, confirm: bool = False,
                                legacy_pidfile: bool = False,
                                source_revision: str | None = None,
                                staged_source: dict | None = None,
-                               acknowledged_pins=()) -> dict:
+                               acknowledged_pins=(), preserve_credentials: bool = False) -> dict:
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
@@ -4971,13 +5262,24 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     held by the remote install process itself until it exits. Every installer
     path (migrate, ``remote up``, provision) comes through here.
     """
+    if remote.get('joined') is True:
+        if (remote.get('control_transport') != 'tailscale' or remote.get('control_access') != 'tailnet'
+                or bind != remote.get('tailscale_host') or public_url is not None):
+            raise ValueError('joined service lifecycle cannot replace the selected Tailnet transport')
+        preserve_credentials, token = True, None
+    if preserve_credentials and not (remote.get('joined') is True
+            and remote.get('control_transport') == 'tailscale' and remote.get('control_access') == 'tailnet'):
+        raise ValueError('preserving credentials requires the joined Tailnet owner path')
+    if preserve_credentials and legacy_pidfile:
+        raise RuntimeError('owner_service_credential_preservation_unavailable: legacy process requires a separate lifecycle repair')
     if not confirm:
         return remote_mcp_service_plan(
             remote, bind, port, public_url,
-            observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
-    if not isinstance(token, str) or not token:
+            observed={"legacy_pidfile": "present"} if legacy_pidfile else None,
+            preserve_credentials=preserve_credentials)
+    if not preserve_credentials and (not isinstance(token, str) or not token):
         raise ValueError("remote MCP token is required")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+    if not preserve_credentials and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise ValueError("remote MCP token has unsafe characters")
     if not isinstance(source_revision, str) \
             or _REMOTE_SOURCE_REVISION_RE.fullmatch(source_revision) is None:
@@ -4999,6 +5301,12 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
             or staged_source.get("receipt") != expected_receipt):
         raise ValueError("staged Sandbox source authority is unavailable or invalid")
     record = remote_mcp_service_record(bind, port, public_url)
+    if preserve_credentials and (remote.get('mcp_service') or {}).get('ownership_marker') != record['ownership_marker']:
+        raise RuntimeError('remote_service_ownership_unknown: existing service marker cannot be replaced')
+    observed_revision = (remote.get('mcp_service') or {}).get('runtime_revision')
+    if preserve_credentials and (not isinstance(observed_revision, str)
+                                or _REMOTE_MCP_REVISION_RE.fullmatch(observed_revision) is None):
+        raise RuntimeError('owner_service_identity_unavailable: existing unit revision is unavailable')
     if record["runtime_revision"] != staged_source["runtime_revision"]:
         raise ValueError("staged Sandbox runtime record revision does not match exact source")
     plan = {
@@ -5006,7 +5314,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "steps": [
             "prepare the staged Sandbox CLI and MCP virtual environments",
             "refresh and verify the owner-scoped measured image staging helper",
-            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            ("preserve existing owner-only remote credential file" if preserve_credentials else
+             "write owner-only remote credential file"), "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
         "legacy_pidfile_detected": legacy_pidfile,
@@ -5057,12 +5366,25 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     )
     normalize_program = _REMOTE_HOME_NORMALIZE_PROGRAM
     stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
+    credential_preflight = (
+        'grep -Fqx ' + shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + observed_revision)
+        + ' "$unit_path"; '
+        'test -f "$env_path" && test ! -L "$env_path" && '
+        'test "$(stat -c \'%u:%a\' "$env_path")" = "$(id -u):600" || exit 43; '
+    ) if preserve_credentials else ''
+    credential_write = '' if preserve_credentials else (
+        "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
+        "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
+        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; env_tmp=''; "
+    )
     command = (
-        "set -eu; umask 077; IFS= read -r sandbox_remote_mcp_token; "
+        "set -eu; umask 077; "
+        + ('' if preserve_credentials else 'IFS= read -r sandbox_remote_mcp_token; ') +
         "mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
         "python3 -c " + shlex.quote(normalize_program) + " \"$HOME/sandbox\" </dev/null; "
         f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
         + unit_ownership_preflight +
+        credential_preflight +
         "backup=$HOME/.sandbox/mcp-remote-backup-$$; mkdir -p \"$backup\"; "
         "early_cleanup() { rm -rf -- \"$backup\" && test ! -e \"$backup\" || exit 44; }; "
         "trap early_cleanup EXIT; chmod 700 \"$backup\"; "
@@ -5073,21 +5395,21 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "loaded:inactive:|not-found:inactive:) :;; *) exit 1;; esac; "
         + legacy_preflight +
         f"stage_root={stage_root}; source_stage=\"$stage_root/tree\"; runtime=$HOME/sandbox/sb-src; "
-        "test -d \"$stage_root\" && test ! -L \"$stage_root\" && test -d \"$source_stage\" && test ! -L \"$source_stage\"; "
+        "test -d \"$stage_root\" && test ! -L \"$stage_root\" && test -d \"$source_stage\" && test ! -L \"$source_stage\" || exit 1; "
         "test \"$(stat -c '%u:%a' \"$stage_root\")\" = \"$(id -u):700\"; "
         "test \"$(stat -c '%u:%a' \"$source_stage\")\" = \"$(id -u):700\"; "
-        "test -f \"$source_stage/sb\" && test ! -L \"$source_stage/sb\"; "
+        "test -f \"$source_stage/sb\" && test ! -L \"$source_stage/sb\" || exit 1; "
         "test -f \"$source_stage/scripts/provision_image_stage_helper.py\" && "
-        "test ! -L \"$source_stage/scripts/provision_image_stage_helper.py\"; "
+        "test ! -L \"$source_stage/scripts/provision_image_stage_helper.py\" || exit 1; "
         "if test -e \"$runtime\"; then test -d \"$runtime\" && test ! -L \"$runtime\" && "
-        "test \"$(stat -c '%u' \"$runtime\")\" = \"$(id -u)\"; "
+        "test \"$(stat -c '%u' \"$runtime\")\" = \"$(id -u)\" || exit 1; "
         "else test ! -L \"$runtime\"; fi; "
         "test ! -L \"$stage_root/receipt.json\"; "
         "test \"$(stat -c '%u:%a' \"$stage_root/receipt.json\")\" = \"$(id -u):600\"; "
         "test \"$(cat -- \"$stage_root/receipt.json\")\" = " + shlex.quote(expected_receipt) + "; "
         "activate_source() { python3 -c " + shlex.quote(_REMOTE_SOURCE_ACTIVATE_PROGRAM)
         + " \"$source_stage\" \"$runtime\" </dev/null; }; "
-        "source_mode=''; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
+        "source_mode=''; source_attempted=0; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
         "restore_file() { saved=$1; target=$2; tmp=$(mktemp \"$target.rollback.XXXXXX\") || return 1; "
         "cp \"$saved\" \"$tmp\" && chmod 600 \"$tmp\" && mv \"$tmp\" \"$target\" || "
         "{ rm -f -- \"$tmp\"; return 1; }; }; "
@@ -5097,29 +5419,25 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "if test \"$had_unit\" = 1; then restore_file \"$backup/unit\" \"$unit_path\" || failed=1; else rm -f \"$unit_path\" || failed=1; fi; "
         "if test \"$had_env\" = 1; then restore_file \"$backup/env\" \"$env_path\" || failed=1; else rm -f \"$env_path\" || failed=1; fi; "
         "systemctl --user daemon-reload || failed=1; "
-        "if test -n \"$source_mode\"; then python3 -c " + shlex.quote(_REMOTE_SOURCE_ROLLBACK_PROGRAM)
-        + " \"$source_mode\" \"$source_stage\" \"$runtime\" </dev/null || failed=1; fi; "
-        f"if test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
-        "if test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
+        "case \"$source_mode\" in exchanged|installed) python3 -c " + shlex.quote(_REMOTE_SOURCE_ROLLBACK_PROGRAM)
+        + " \"$source_mode\" \"$source_stage\" \"$runtime\" </dev/null || failed=1;; "
+        "'') if test \"$source_attempted\" = 1; then failed=1; fi;; *) failed=1;; esac; "
+        f"if test \"$failed\" = 0 && test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
+        "if test \"$failed\" = 0 && test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
+        f"if test \"$failed\" != 0; then systemctl --user stop {REMOTE_MCP_SERVICE} || failed=1; fi; "
         "if test -n \"$unit_tmp\"; then rm -f -- \"$unit_tmp\" || failed=1; fi; "
         "if test -n \"$env_tmp\"; then rm -f -- \"$env_tmp\" || failed=1; fi; "
-        "rm -rf -- \"$backup\" || failed=1; test ! -e \"$backup\" || failed=1; "
+        "if test \"$failed\" = 0; then rm -rf -- \"$backup\" || failed=1; test ! -e \"$backup\" || failed=1; fi; "
         "test \"$failed\" = 0; }; "
         "on_exit() { status=$?; trap - EXIT; rollback || exit 44; exit \"$status\"; }; "
-        "trap on_exit EXIT; source_mode=$(activate_source); "
+        "trap on_exit EXIT; source_attempted=1; source_mode=$(activate_source); "
+        "case \"$source_mode\" in exchanged|installed) :;; *) exit 1;; esac; "
         + runtime_preflight +
         "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
         + unit + "UNIT\n"
         "chmod 600 \"$unit_tmp\"; mv \"$unit_tmp\" \"$unit_path\"; unit_tmp=''; "
-        "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
-        "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
-        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; env_tmp=''; "
+        + credential_write +
         "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; legacy_stopped=1; fi; "
-        # Initialize genuine owner-layout identity under the same supported
-        # lifecycle transaction; discovery itself must never create authority.
-        f'"$runtime/sb" installation initialize --home "$HOME/sandbox" '
-        f'--layout owner --ownership-marker {shlex.quote(record["ownership_marker"])} '
-        '--confirm --json >/dev/null; '
         "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\"; then "
         "exit 1; fi; "
         # A first install has no loaded unit to reset.  Keep reset narrowly
@@ -5147,7 +5465,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     except PinError as exc:
         raise RuntimeError(f"{exc.code}: {exc}") from None
     try:
-        res = ssh_run(remote, gated, timeout=300, input_data=token + "\n")
+        res = ssh_run(remote, gated, timeout=300,
+                      input_data=None if preserve_credentials else token + "\n")
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("timed out installing the remote MCP service") from exc
     if res.returncode != 0:

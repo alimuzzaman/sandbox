@@ -57,8 +57,16 @@ Attempt: id, original parent target/stack, created_at/expires_at, phase, parent 
 and at most four companion grants. Grant: original remote/project/environment identity,
 entry/id/expiry/disposition, safe gate hostname/origin, runtime incarnation/fingerprint,
 and bounded WP cleanup descriptor with declared service/container plugin path and kid.
-Ledger envelope is EXACT `{version:2,attempts:[...]}`; v1 refuses, no migration.
-Grant adds `cleanup`, `gate_revoked`, `wordpress_revoked`. Cleanup EXACT
+Ledger writes EXACT `{version:3,attempts:[...]}` with per-grant boolean
+original_settled. Version 2 remains readable, assigning false to that new field
+regardless of any gate_revoked bit; writing an updated record preserves that false.
+Legacy terminal grants with cleanup descriptors are reopened as unknown, their
+unproven acknowledgements cleared, and their attempt retained as cleanup_pending.
+Terminal rows without descriptors have zero-effect provenance from v2 begin_mint
+requiring a descriptor. New v3 revocation requires original settlement or proven
+planned-only zero effects; only protocol expiry discharges an unproven capability.
+Version 1 still refuses. No remote state migration runs automatically.
+Grant adds `cleanup`, `gate_revoked`, `wordpress_revoked`, `original_settled`. Cleanup EXACT
 `{gate_hostname,identity,compose,wordpress}`; identity EXACT `{kind,value}`, copy_id
 8 lowercase hex or runtime_fingerprint 64 lowercase hex. Compose EXACT
 `{project_name,files,override_path,env_path}` retains fully joined original files in
@@ -72,7 +80,13 @@ Missing proof, missing original files or replacement retains cleanup_pending.
 `cleanup_for` checks equality but does not probe remote runtime. Gate revoke and
 `confirm_wordpress_removed` are separate facts. Global `list_recorded` and
 `find_recorded_parent_link` support recovery before live parent resolution.
-Late controller serialization/result fields remain pending consolidation.
+Controller serialization/result fields are consolidated in contracts/access.md.
+A reloaded unknown grant remains fenced: absence cannot prove a late writer stopped.
+Only original completion proof or unused-capability expiry resolves that uncertainty.
+Only the original completed-transport callback writes original_settled for an unknown
+grant. A saved gate revoke, legacy record or absence probe cannot set it. A validated
+live receipt also implies completion. Persist this independently before compensation
+so failed WP removal can resume without weakening legacy unknown fences.
 
 Phases prepared → minting → active; mint failure → cleanup_pending; active → revoking;
 cleanup resolves revoked/expired only with evidence. Per-grant planned → unknown BEFORE
@@ -100,3 +114,8 @@ probe consumes nothing. Cookies remain host-only and authority stays grant-scope
 Short ids derive from their token hash, and the SAME preallocated MintedLink is
 passed to mint_link. There is no reservation/attach/idempotent-mint state. Unknown
 acceptance goes to cleanup by original id. Apply tmpfs loss is not grant survival.
+
+Controller effects also hold sorted physical target_lease ownership with fresh
+per-operation owners. Unknown transport retains the physical lease even when link
+expiry discharges unused authentication capability: expiry does not stop a writer.
+Gate/WP effects use immutable full container ids; Compose is observation only.

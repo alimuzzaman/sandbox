@@ -58,3 +58,33 @@ client concurrently drains stdout and stderr into separate 64-KiB caps and
 terminates locally on overflow. Overflow and timeout report unknown completion
 instead of parsing a partial document. Raw tracebacks are omitted. Human output
 keeps the primary typed message, while `--json` retains the full safe envelope.
+
+### Conditional instance deletion
+
+`sb instance delete NAME --local --yes --creation-context-json JSON
+--expected-incarnation inc_…` is the preview teardown port. Both conditional
+options are mandatory together. The receiver checks the original creation-request
+ledger and receipt against the current canonical project/label/name/incarnation,
+requires a succeeded `created` relation, and refuses mismatch before teardown.
+It does not mint new receipts or accept a name/label as proof. Installed parsers
+without these options fail closed; the caller never retries without them.
+
+The host-wide instance lifecycle guard orders before project and registry locks.
+It covers the full WordPress ensure operation, native/generic runtime
+ensure/apply/destroy/start/stop/resume/suspend/ownership-repair, explicit CLI
+deletion, project-lock callers, and canonical
+registry put/remove (including the MCP recreate pending-record transition).
+Nested calls retain one reentrant process/thread guard. Independent lifecycle
+writers on this host consequently serialize. Inventory keeps its existing read
+path. CLI deletion bypasses automatic migration and generated-runtime rewrites;
+configuration is read inside the guard and owner comparison precedes effects.
+Preview teardown separately retains unknown outcomes before dispatch, and does
+not authorize another attempt from a timeout or process-disappearance observation.
+No concurrency/runtime checks were run for this source-only change.
+
+Generic Compose status/logs/exec do not persist their captured owner record.
+Successful logs/exec therefore cannot resurrect an old incarnation/receipt after
+a concurrent replacement. Runtime-changing start/stop/resume/suspend and ownership
+repair join ensure/apply/destroy under the full shared writer guard before the
+record read, through effects and any final registry update. Long-running ordinary
+logs/exec do not hold the host lifecycle guard merely to capture output.

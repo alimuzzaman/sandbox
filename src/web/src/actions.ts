@@ -6,7 +6,7 @@ import { store } from "./state";
 import { postAction, fetchSnapshots, fetchUsage } from "./api";
 import { toast } from "./ui/toast";
 import { modal } from "./ui/modal";
-import { pollJob } from "./ui/console";
+import { pollJob, showActionResult } from "./ui/console";
 import { busyHolder, withTimeout, ACTION_REQUEST_TIMEOUT_MS, actionFailureText } from "./ui/poller";
 
 // main.ts injects these to avoid circular imports.
@@ -23,46 +23,52 @@ const ACTION_LABELS: Record<string, (n: string) => string> = {
   "stop-all": () => "Stopping all sites",
 };
 
+// One local instance identity owns all its mutations. Creation takes the bulk
+// guard because the browser cannot resolve directory aliases or infer a root
+// identity from a label. This deliberately serializes creation within this page.
 export async function act(instance: string, action: string,
                           extra: Record<string, unknown> = {}): Promise<void> {
-  const holder = busyHolder(store.busy, instance);
-  if (holder !== null) { toast(`${instance} is busy: ${holder}`, "info"); return; }
-  store.busy[instance] = action;
+  const key = action === "create" ? "*" : instance;
+  const holder = busyHolder(store.busy, key);
+  if (holder !== null) { toast(`Action still guarded: ${holder}. Open activity for its status.`, "info"); return; }
+  const label = ACTION_LABELS[action]?.(instance) || cap(action) + " " + instance;
+  store.busy[key] = action;
+  const operation = { label, phase: "submitting" as const };
+  store.operations[key] = operation;
   render();
-  let r;
-  try {
-    r = await withTimeout(postAction(Object.assign({ instance, action }, extra)), ACTION_REQUEST_TIMEOUT_MS);
-  } catch (e) {
-    delete store.busy[instance]; toast(actionFailureText(e), "err"); render(); return;
-  }
-  if (r.job_id) {
-    const lbl = ACTION_LABELS[action] ? ACTION_LABELS[action](instance) : cap(action) + " " + instance;
-    toast(action.replace("-", " ") + " started…", "info");
-    pollJob(r.job_id, instance, lbl);
-  } else {
-    delete store.busy[instance];
-    if (r.ok) toast(cap(action) + " " + instance + " ✓", "ok");
-    else toast((r.output || "failed").split("\n")[0], "err");
-    await refresh();
+  // Retain a late receipt even after the UI's observation deadline. No replay.
+  const request = postAction({ ...extra, instance, action });
+  const accept = (r: import("./types").ActionResult): void => {
+    if (!r || typeof r !== "object") throw new Error("Invalid action response");
+    if (typeof r.job_id === "string" && /^(?:[0-9a-f]{32}|[1-9][0-9]{0,19})$/.test(r.job_id) && r.ok === true) {
+      store.operations[key] = { label, phase: "observing", jobId: r.job_id };
+      pollJob(r.job_id, key, label);
+    } else if (typeof r.ok === "boolean" && r.job_id === undefined &&
+               typeof r.output === "string" && !(action === "create" && r.ok)) {
+      delete store.busy[key];
+      store.operations[key] = { label, phase: r.ok ? "succeeded" : "failed" };
+      showActionResult(label, r.output, r.ok);
+      toast(r.ok ? label + ": completed" : (r.output || "Action refused").split("\n")[0], r.ok ? "ok" : "err");
+      void refresh();
+    } else throw new Error("Invalid action receipt");
+    render();
+  };
+  let timedOut = false;
+  void request.then(r => { if (timedOut) { try { accept(r); } catch { /* keep unconfirmed */ } } }, () => {});
+  try { accept(await withTimeout(request, ACTION_REQUEST_TIMEOUT_MS)); }
+  catch {
+    timedOut = true;
+    store.operations[key] = { label, phase: "unconfirmed" };
+    store.busy[key] = "outcome unconfirmed";
+    toast(actionFailureText(null), "err");
+    render();
   }
 }
 
-// Ops/terminal actions: always stream into the console panel.
+// Operations share the instance guard, including commands that may mutate it.
 export async function op(name: string, action: string,
                          extra: Record<string, unknown> = {}): Promise<void> {
-  let r;
-  try { r = await postAction(Object.assign({ instance: name, action }, extra)); }
-  catch (e) { toast("request failed: " + e, "err"); return; }
-  if (r.job_id) {
-    const titles: Record<string, string> = {
-      logs: "Logs", status: "Status", doctor: "Doctor", update: "Updating plugins",
-      snapshot: "Snapshot", restore: "Restoring", seed: "Importing content", xdebug: "Xdebug",
-      install: "Installing " + (extra.slug || "plugin"), wp: "wp " + (extra.args || ""),
-    };
-    pollJob(r.job_id, null, (titles[action] || cap(action)) + " — " + name);
-  } else {
-    toast((r.output || "failed").split("\n")[0], "err");
-  }
+  await act(name, action, extra);
 }
 
 export async function doFocus(name: string, slug: string): Promise<void> {
@@ -76,20 +82,7 @@ export async function doFocus(name: string, slug: string): Promise<void> {
 export async function doServer(name: string, server: string): Promise<void> {
   const cur = store.data.instances.find((i) => i.name === name);
   if (!server || (cur && cur.server === server)) return;
-  const holder = busyHolder(store.busy, name);
-  if (holder !== null) { toast(`${name} is busy: ${holder}`, "info"); return; }
-  store.busy[name] = "server";
-  render();
-  let r;
-  try { r = await withTimeout(postAction({ instance: name, action: "server", server }), ACTION_REQUEST_TIMEOUT_MS); }
-  catch (e) { delete store.busy[name]; render(); toast(actionFailureText(e), "err"); return; }
-  if (r.job_id) {
-    toast("switching " + name + " → " + server + "…", "info");
-    pollJob(r.job_id, name, "Switching " + name + " → " + server);
-  } else {
-    delete store.busy[name]; render();
-    toast((r.output || "failed").split("\n")[0], "err");
-  }
+  await act(name, "server", { server });
 }
 
 export async function doDelete(name: string): Promise<void> {

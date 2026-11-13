@@ -1,9 +1,9 @@
 # Access contracts
 
-Current design, reconciled 2026-11-11 by PERSONAL Codex GPT-6.1-Sol high.
-These are implementation targets, not installed capabilities. Historical reviews keep
-original provenance. Full US1–US6 acceptance, independent authentication review and
-owner sign-off remain required before release.
+Source contract reconciled against cbda71e on 2026-11-13 through Spec Kit plan.
+Historical reviews retain their original provenance. The owner approved the access
+model and panel admission policy. Fresh broad authentication review, full US1–US6
+runtime acceptance and release sign-off remain required. Source is not installed proof.
 
 ## Template and complete coverage
 
@@ -98,10 +98,15 @@ The existing share-link.v2 exact keys and retained legacy link/session readers s
 unchanged. Mint companions first and parent last with its final private page.
 
 Acquire per-original-parent attempt lock, then sorted unique target EFFECT locks by
-remote/project/environment. Never nest host writer callbacks or shared state.lock.
+remote/project/environment, then the real physical apply target leases in the same
+stable order. Fresh operation owners cannot be taken over by another operation
+from this controller. Never nest host writer callbacks or shared state.lock.
 Use short owned registry/state snapshots and revalidate identity/declarations before
 effects. If target set changes, release and recompute, never extend locks out of order.
-No remote call under shared state.lock.
+No remote call under shared state.lock. Unknown transport retains physical ownership
+for coordinated recovery; later requests and authentication expiry cannot release it.
+Bind full immutable gate/WP container ids and original cleanup paths to the held target;
+execute fixed effects against those ids, never a replacement Compose service name.
 
 Persist/fsync attempt and bounded original safe gate/runtime identity plus WordPress
 cleanup descriptor BEFORE unknown-before-keyinstall/mint. Do not persist entire
@@ -109,13 +114,16 @@ manifests, tokens, token hashes, signing keys, emails or companion URLs. Mark un
 before the first external effect, then live only on exact confirmed reply. Persist
 active before returning the one-shot parent URL. On uncertainty, reconcile/list/revoke
 original ids; never remint. Failed persistence before effects means zero effects.
-Cleanup all live/unknown grants on failure. Load durable attempts for list/revoke even
+Cleanup live or proven-settled original grants on failure. Unsettled unknown grants
+remain fenced, including legacy gate_revoked=true records. Version-3 durable
+original_settled is written only after the original transport completes; version-2
+loads default false without inferring proof from gate absence/revocation. Load durable attempts for list/revoke even
 when parent state/manifest is gone. Gate absence and key cleanup are separate facts;
 retain unknown and keycleanup-incomplete states. Never guess destructively at a new
 runtime with an old slug. Next create cleans incomplete attempts or refuses.
-Attempt storage is an exact version-2 `{version,attempts}` envelope, bounded to 1 MiB
+Attempt storage writes an exact version-3 `{version,attempts}` envelope, with conservative version-2 reads, bounded to 1 MiB
 and 256 records. Each attempt has `id,parent,created_at,expires_at,phase,grants`; each
-grant has `target,entry,id,expires_at,disposition,cleanup,gate_revoked,wordpress_revoked`.
+grant has `target,entry,id,expires_at,disposition,cleanup,gate_revoked,wordpress_revoked,original_settled`.
 The cleanup descriptor is the closed `gate_hostname,identity,compose,wordpress` shape;
 it stores paths/identity only, never config contents or credentials. Persisted terminal
 phases are `revoked`/`expired`; incomplete phases include `prepared`, `minting`,
@@ -188,8 +196,15 @@ child before key/grant effects; no partial or silently truncated page is success
 
 Before key installation or grant effects require ALL FOUR installed capabilities:
 `stack-page-v2`, `stack-signin-pool-v1`, `wordpress-claim-v1`, `companion-status-v1`.
-`site capabilities ENTRY` returns EXACT `{ok:true,capabilities:[...],stack_schemas:
-["sandbox.share-stack.v1","sandbox.share-stack.v2"],link_schemas:["sandbox.share-link.v2"]}`.
+`site capabilities ENTRY` returns `{ok:true,capabilities:[...],config_digest,
+panel_access_digest,panel_target_digest,panel_agent_mint,stack_schemas:["sandbox.share-stack.v1",
+"sandbox.share-stack.v2"],link_schemas:["sandbox.share-link.v2"]}`.
+Controller stack issuance also requires owner-panel-gate-v1, exact running runtime
+source, and all three digests matching the selected normalized policy/target. Recheck
+under physical ownership before effects and before returning the parent URL. A local
+unapplied enable or stale enable after another controller disabled minting refuses
+before key/grant effects. The gate itself also refuses stack mint when its running
+panel_share.agent_mint is false.
 The source branch's capability response is not installed support or revision proof.
 Installed controller/gate revision and capability evidence must be observed through a
 supported lifecycle/status command; that exact command and target remain UNKNOWN until
@@ -295,11 +310,18 @@ panel Host/Origin/JSON/body/header guards. One-shot no-store result
 `{ok,url,expires_at,one_time,user}` never enters polling. Blank tab opens on click,
 navigates on success and closes on safe failure. Recorded CLI target selection for
 `sb host login-url --remote R --name S --confirm` never falls back to cwd. No list/GET
-mints; server-only panel lacks controller mint authority.
+mints. Server-local panels use the fixed owner-local grant rather than controller
+history. Existing panel admission plus current applied agent_mint is the approved
+policy, with no named-person attribution. Exact running bindings, original process
+fences, writer serialization and token custody are specified in
+[owner-panel-sharing.md](../../../docs/owner-panel-sharing.md). Paused 090 authority
+is excluded.
 
 Audit allowlist remains explicit; adding attempt_id requires docs/tests/allowlist
-change. No arbitrary exception payload. Controller list/revoke/error envelopes and late wire fields remain pending owner
-consolidation; do not invent fields from earlier proposals. Source types alone are not proof.
+change. No arbitrary exception payload. Current controller list/revoke/error envelopes
+are documented in [login-service.md](../../../docs/login-service.md#the-stack-page).
+Unknown original completion remains cleanup_pending, even after an absence probe;
+repeated requests do not authorize a replacement writer or mint. Source types alone are not proof.
 Public changes need owning docs/tests and revision evidence before supported lifecycle
 upgrade and independent installed-revision observation. See ../quickstart.md for the
 reviewable acceptance plan. No deployment or live authority is conferred here.
@@ -308,3 +330,27 @@ reviewable acceptance plan. No deployment or live authority is conferred here.
 
 See the complete [hosting manifest example](../../../docs/login-service.md#worked-stack-template).
 It includes `route_sign_in`, `$wordpress`, `inbox_sign_in` and direct `uses`.
+
+## Review reconciliation, 2026-11-13
+
+Fresh broad source review R1 found legacy settlement, controller applied-policy and
+physical-lease blockers, plus entry-TTL and route-control defects. Source remediation
+adds share/controller.py, separately versioned settlement, authoritative entry TTL
+clamping, and action controls for mapped route rows. R1 remains NOT SAFE; a fresh
+review of these changes is required. No passing runtime or release verdict is implied.
+
+Controller panel revocation also requires current applied opt-in. Original durable
+recovery checks the exact bound running gate panel_agent_mint capability; it never
+infers policy from a missing manifest. Current legacy link/session revocation is
+physically leased and bound to immutable services, with per-id WP cleanup. Ordinary
+CLI operator cleanup retains its existing ability to revoke after opt-out.
+
+Legacy v2 revoked/expired grants with cleanup descriptors are normalized to unknown
+with unproven gate/key acknowledgements cleared, and their attempt becomes
+cleanup_pending. This includes fully terminal and mixed attempts. Saving as v3 does
+not erase that uncertainty. Protocol expiry can discharge unused capability; it
+cannot release an unknown physical writer lease. V2 terminal rows without any cleanup
+descriptor are proven zero-effect because v2 begin_mint required that descriptor.
+New v3 terminal revocation requires settlement proof; planned-only local closure
+records zero-effect settlement, while unknown execution cannot acquire it from a
+revoke/key absence. Fresh R3 review is required; R2 remains NOT SAFE until closure.

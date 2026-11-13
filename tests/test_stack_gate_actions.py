@@ -59,8 +59,13 @@ class StackActionsTests(StackPageTests):
                             body=json.dumps({"action": action, "csrf": csrf, **changes}), headers=headers)
 
     def test_capability_wire_and_safe_builder(self):
-        self.assertEqual(self.manage("capabilities", "share"), {
-            "ok": True, "capabilities": ["stack-page-v2", "stack-signin-pool-v1", "wordpress-claim-v1", "companion-status-v1"],
+        reply = self.manage("capabilities", "share")
+        self.assertEqual(reply, {
+            "ok": True, "capabilities": ["stack-page-v2", "stack-signin-pool-v1", "wordpress-claim-v1", "companion-status-v1", "owner-panel-gate-v1"],
+            "config_digest": hashlib.sha256(json.dumps(self.config, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            "panel_access_digest": self.config.get("panel_access_digest"),
+            "panel_target_digest": self.config.get("panel_target_digest"),
+            "panel_agent_mint": True,
             "stack_schemas": [runtime.STACK_SCHEMA, runtime.STACK_SCHEMA_V2],
             "link_schemas": [runtime.SITE_LINK_SCHEMA]})
         self.assertIn("capabilities share", login.site_command("compose", "capabilities", "share"))
@@ -117,6 +122,24 @@ class StackActionsTests(StackPageTests):
             self.assertIsNotNone(gate.pooled_record("qa", hashlib.sha256(token.encode()).hexdigest()))
         self.now += 601
         self.assertIsNone(gate.pooled_record("qa", hashlib.sha256(tokens[-1].encode()).hexdigest()))
+
+    def test_entry_shorter_ttl_bounds_per_click_token_consumption(self):
+        self.config["entries"]["qa"]["ttl_seconds"] = 60
+        cookie, _, _ = self.v2()
+        token = self.action(cookie)
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        record = self.public.gate.pooled_record("qa", digest)
+        self.assertLessEqual(record["expires_at"], int(self.now) + 60)
+        self.now += 61
+        self.assertFalse(self.public.gate.claim_pending("qa", record))
+
+    def test_mapped_route_renders_its_action_instead_of_anonymous_anchor(self):
+        cookie, _, _ = self.v2()
+        response, body = self.view(cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn(('data-action="qa">' + HUB).encode(), body)
+        self.assertNotIn(('href="https://' + HUB + '/"').encode(), body)
+        self.assertFalse(self.public.gate.is_live("qa"))
 
     def wp_request(self, cookie):
         response, body = self.post_action(cookie, "$wordpress")

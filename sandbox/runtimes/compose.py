@@ -404,6 +404,14 @@ class ComposeAdapter:
         return float(value)
 
     def invoke(self, request: OperationRequest) -> OperationResult:
+        if request.operation in {'ensure', 'apply', 'destroy', 'start', 'stop',
+                                 'resume', 'suspend', 'ownership_repair'}:
+            from sandbox.project_registry.lifecycle import lifecycle_writer
+            with lifecycle_writer():
+                return self._invoke_coordinated(request)
+        return self._invoke_coordinated(request)
+
+    def _invoke_coordinated(self, request: OperationRequest) -> OperationResult:
         refusal = self._remote_only_refusal(request)
         if refusal is not None:
             return refusal
@@ -744,11 +752,12 @@ class ComposeAdapter:
             if domain:
                 self.dependencies.proxy.remove(str(domain))
             self._artifact_dir(runtime_id).mkdir(parents=True, exist_ok=True)
-        else:
+        elif op in {"apply", "start", "stop", "resume", "suspend"}:
+            # These operations hold lifecycle_writer from before the record read.
+            # Observations/exec must never restore an old incarnation or receipt.
             stored = {key: value for key, value in data.items() if key != "root"}
             self.registry.registry_put(descriptor["root"], **stored)
         if op == "exec":
-            # The registry retains its existing short diagnostic tail; callers
-            # need the bounded process output, including its beginning.
+            # Callers need bounded process output, including its beginning.
             data["output"] = _bounded_exec_output(result.stdout)
         return OperationResult(True, op, descriptor["root"], "compose", data)

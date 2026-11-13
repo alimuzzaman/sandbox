@@ -27,12 +27,22 @@ class StackPageMetadataTests(unittest.TestCase):
 
     def test_missing_inbox_has_guidance_and_no_broken_url(self):
         view = self.view()
+        view["stacks"][0]["source"] = "controller"
         with patch.object(panel_access, "inbox_names", return_value={}):
             panel_access.enrich(view, {}, {})
         access = view["stacks"][0]["page_access"]
         self.assertIsNone(access["inbox"])
         self.assertIn("18142", access["inbox_reason"])
         self.assertIn("sb host tailnet-name add", access["inbox_reason"])
+
+    def test_server_missing_inbox_inventory_never_uses_controller_fallback(self):
+        view = self.view()
+        with patch.object(panel_access, "inbox_names") as controller_names:
+            panel_access.enrich(view, {}, {})
+        access = view["stacks"][0]["page_access"]
+        self.assertIsNone(access["inbox"])
+        self.assertIn("inventory_unavailable", access["inbox_reason"])
+        controller_names.assert_not_called()
 
     def test_controller_revision_needs_runtime_evidence(self):
         for observed, expected in ((None, "unverified"), (COMMIT, "verified")):

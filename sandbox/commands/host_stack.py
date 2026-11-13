@@ -24,6 +24,7 @@ from sandbox.core._config import ensure_pyyaml
 from sandbox.hosting import hostname_ownership, stack_registry, stack_template
 from sandbox.hosting.lifetime import client as lifetime_client, hoststore, naming
 from sandbox.hosting.stack_template import StackRef, StackTemplateError
+from sandbox.hosting.server_cli_target import host_target, is_owner_target
 
 CONFIRMATION_REQUIRED = "stack_confirmation_required"
 REF_UNRESOLVED = "stack_ref_unresolved"
@@ -31,6 +32,7 @@ SLUG_IN_USE = "stack_slug_in_use"
 APPLY_IN_PROGRESS = "stack_apply_in_progress"
 NOT_FOUND = "stack_not_found"
 SUBMISSION_FAILED = "stack_submission_failed"
+SUBMISSION_UNKNOWN = "stack_submission_unknown"
 DESTROY_FAILED = "stack_destroy_failed"
 PROBE_UNAVAILABLE = "stack_port_probe_unavailable"
 SECRETS_MISSING = "stack_secrets_missing"
@@ -116,21 +118,69 @@ def load_template(checkout: Path, relpath: str, commit: str) -> stack_template.S
 
 def _add_worktree(checkout: Path, slug: str, commit: str) -> Path:
     parent = stack_registry.stack_dir(slug) / "source"
+    if (parent.is_symlink() or parent.parent.is_symlink()
+            or parent.parent.parent.resolve() != stack_registry.stacks_dir().resolve()):
+        raise RuntimeError("invalid rendered source directory")
     parent.mkdir(parents=True, exist_ok=True)
     path = parent.resolve() / f"{commit[:12]}-{secrets.token_hex(3)}"
-    _git(checkout, "worktree", "add", "--detach", "--quiet", str(path), commit, timeout=600)
+    # The caller may be a disposable materialized job checkout. Give each
+    # rendered worktree its own object store and administration in Sandbox's
+    # stack directory; neither hardlinks nor alternates may tie it to callers.
+    backing = _worktree_backing(path)
+    if backing.parent.is_symlink():
+        raise RuntimeError("invalid rendered source backing directory")
+    backing.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError("rendered source path already exists")
+    backing.mkdir()  # Exclusive creation: never adopt an existing repository.
+    try:
+        _git(backing, "init", "--bare", "--quiet", "--template=")
+        _git(backing, "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--update-shallow",
+             "--no-recurse-submodules", str(checkout.resolve()),
+             f"{commit}:refs/sandbox/source", timeout=600)
+        if _git(backing, "rev-parse", "--verify", "refs/sandbox/source^{commit}") != commit:
+            raise RuntimeError("rendered source backing commit does not match requested commit")
+        _git(backing, "worktree", "add", "--detach", "--quiet", str(path), commit, timeout=600)
+    except BaseException:
+        # Only this invocation's fresh pair can be removed here. Older pairs
+        # remain available to recorded jobs, including unknown submissions.
+        _remove_worktree(str(checkout), str(path))
+        raise
     return path
+
+
+def _worktree_backing(path: Path) -> Path:
+    return path.parent.parent / "source-git" / (path.name + ".git")
 
 
 def _remove_worktree(checkout: str | None, path: str) -> None:
     target = Path(path)
     root = stack_registry.stacks_dir().resolve()
-    if checkout and Path(checkout).is_dir():
-        _git(Path(checkout), "worktree", "remove", "--force", str(target), check=False, timeout=300)
-    if target.exists() and root in target.resolve().parents:
+    # Bound Git removal as well as filesystem removal to a rendered source.
+    if (target.is_symlink() or target.parent.is_symlink() or target.parent.parent.is_symlink()
+            or target.parent.name != "source"
+            or target.parent.parent.parent.resolve() != root
+            or root not in target.resolve().parents):
+        raise RuntimeError("refusing cleanup outside a rendered stack source")
+    backing = _worktree_backing(target)
+    private = backing.exists() or backing.is_symlink()
+    if private and (backing.is_symlink() or backing.parent.is_symlink()
+                    or not backing.is_dir()):
+        raise RuntimeError("invalid rendered source backing directory")
+    owner = backing if private else Path(checkout) if checkout else None
+    if private and target.exists():
+        common = _git(target, "rev-parse", "--git-common-dir", check=False)
+        if not common or (target / common).resolve() != backing.resolve():
+            raise RuntimeError("rendered source does not belong to its backing repository")
+    if owner and owner.is_dir():
+        _git(owner, "worktree", "remove", "--force", str(target), check=False, timeout=300)
+    if target.exists():
         shutil.rmtree(target, ignore_errors=True)
-    if checkout and Path(checkout).is_dir():
-        _git(Path(checkout), "worktree", "prune", check=False)
+    if private:
+        if not target.exists():
+            shutil.rmtree(backing)
+    elif owner and owner.is_dir():
+        _git(owner, "worktree", "prune", check=False)
 
 
 # ------------------------------------------------------------- remote probe
@@ -212,7 +262,13 @@ def _last_apply_view(record: dict) -> dict:
 def _refuse_if_active(record: dict | None) -> None:
     if not record:
         return
-    job = job_view((record.get("last_apply") or {}).get("job_id"))
+    last = record.get("last_apply") or {}
+    job = job_view(last.get("job_id"))
+    if (not job and (last.get("job_id") or last.get("status") in
+            {"submitting", "submitted", "acceptance_unknown", "submission_failed"})):
+        raise StackCommandError(SUBMISSION_UNKNOWN,
+            f"stack {record.get('slug')} original apply request {last.get('request_id')} "
+            "has no established acceptance/outcome; inspect that original request/job before another apply")
     if job and job.get("lifecycle") in ACTIVE_LIFECYCLES:
         raise StackCommandError(
             APPLY_IN_PROGRESS,
@@ -225,11 +281,16 @@ def _submission_timeout(validated: dict) -> int:
 
 
 def _submit(argv: list[str]) -> str:
+    from sandbox.core._paths import BASE
+    from sandbox.services.environment import compatible_subprocess_environment
     try:
         result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=180,
-                                env=dict(os.environ))
+                                env=compatible_subprocess_environment({"SANDBOX_HOME": str(BASE)}))
     except subprocess.TimeoutExpired:
-        raise StackCommandError(SUBMISSION_FAILED, "job-start did not answer within 180 seconds") from None
+        raise StackCommandError(SUBMISSION_UNKNOWN,
+            "job-start acceptance is unknown after its response deadline; inspect the original request") from None
+    except OSError:
+        raise StackCommandError(SUBMISSION_FAILED, "job-start could not be launched") from None
     lines = [line for line in (result.stdout or "").splitlines() if line.strip().startswith("{")]
     payload = None
     if lines:
@@ -238,9 +299,14 @@ def _submit(argv: list[str]) -> str:
         except json.JSONDecodeError:
             payload = None
     job_id = payload.get("job_id") if isinstance(payload, dict) else None
-    if result.returncode != 0 or not isinstance(job_id, str) or not job_id:
-        detail = remote.redact_text((result.stderr or result.stdout or "no output").strip())[-500:]
-        raise StackCommandError(SUBMISSION_FAILED, f"job-start refused the apply: {detail}")
+    if (result.returncode != 0 or not isinstance(job_id, str)
+            or re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{32})", job_id) is None
+            or payload.get("ok") is False):
+        if (isinstance(payload, dict) and payload.get("status") == "refused"
+                and payload.get("acceptance") == "not_accepted"):
+            raise StackCommandError(SUBMISSION_FAILED, "job-start explicitly refused before acceptance")
+        raise StackCommandError(SUBMISSION_UNKNOWN,
+            "job-start returned no valid original acceptance receipt; inspect the original request")
     return job_id
 
 
@@ -265,8 +331,8 @@ def _refuse(args, exc: Exception) -> None:
 def _entry(remote_name: str | None) -> dict:
     if not remote_name:
         raise StackCommandError(REMOTE_UNKNOWN, "--remote is required")
-    entry = remote.get_remote(remote_name)
-    if not isinstance(entry, dict):
+    entry = host_target(remote_name)
+    if not isinstance(entry, dict) and not is_owner_target(entry):
         raise StackCommandError(REMOTE_UNKNOWN, f"no remote named {remote_name!r}")
     return entry
 
@@ -480,8 +546,6 @@ def _lifetime_fields(record: dict) -> dict:
 # ----------------------------------------------------------------- commands
 
 def _up(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     plan, confirm = bool(getattr(args, "plan", False)), bool(getattr(args, "confirm", False))
     if plan == confirm:
         raise StackCommandError(CONFIRMATION_REQUIRED, "stack up needs exactly one of --plan or --confirm")
@@ -491,7 +555,8 @@ def _up(args) -> dict:
     remote_name = args.remote
     template_path = Path(args.template).expanduser().resolve()
     checkout, relpath = template_checkout(template_path)
-    ref = resolve_ref(checkout, getattr(args, "ref", None))
+    from sandbox.hosting.server_cli_dispatch import resolve_stack_ref
+    ref = resolve_stack_ref(args, checkout)
     template = load_template(checkout, relpath, ref.commit)
     lifetime, lifetime_source, ttl, new_ttl = _requested_lifetime(args, ref, template.dev_branch)
     caller = _caller(checkout, args)
@@ -647,6 +712,9 @@ def _up(args) -> dict:
         earlier = [path for path in (previous or {}).get("worktrees") or [] if path != str(worktree)]
         record: stack_registry.StackRecord = {
             "remote": remote_name, "slug": slug, "project": project, "environment": environment,
+            # Caller context for owner labels and merge sweeps, not the new
+            # worktrees' Git owner. Their private backing paths derive from
+            # the worktrees list and share its retention/cleanup lifetime.
             "template": str(template_path), "checkout": str(checkout), "ref": ref.ref,
             "ref_branch": ref.ref_branch, "hostnames": sorted(hostnames),
             # `commit` stays what an apply last delivered; `sb host apply` moves
@@ -674,14 +742,15 @@ def _up(args) -> dict:
         try:
             job_id = _submit(argv)
         except StackCommandError as exc:
-            record["last_apply"].update({"status": "submission_failed", "error": exc.detail[:500]})
+            record["last_apply"].update({"status": "acceptance_unknown" if exc.code == SUBMISSION_UNKNOWN
+                else "refused", "error": exc.detail[:500]})
             registry.put(record)
             raise
         record["last_apply"].update({"job_id": job_id, "status": "submitted"})
         # Earlier worktrees belong to terminal jobs (`up` refuses while one is
         # active); drop them now that the new job owns its own source.
         for path in earlier:
-            _remove_worktree(str(checkout), path)
+            _remove_worktree((previous or {}).get("checkout"), path)
         record["worktrees"] = [str(worktree)]
         registry.put(record)
     if record["canonical"]:
@@ -713,6 +782,8 @@ def _release_fresh_claim(store, claimed: dict, compose_project: str) -> None:
 
 
 def _owner_checkout(record: dict | None) -> Path:
+    # Keep identity lookup on caller context; a private backing repository
+    # deliberately carries no copied user configuration or origin credentials.
     checkout = Path((record or {}).get("checkout") or ".")
     return checkout if checkout.is_dir() else Path.cwd()
 
@@ -751,8 +822,6 @@ def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -
 
 
 def _list(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     entry_name = getattr(args, "remote", None)
     if not entry_name:
         raise StackCommandError(REMOTE_UNKNOWN, "--remote is required")
@@ -821,8 +890,6 @@ def _check_owner(remote_item: dict | None, caller: dict, local: dict | None, for
 
 
 def _down(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     if not getattr(args, "confirm", False):
         raise StackCommandError(CONFIRMATION_REQUIRED,
                                 "stack down is destructive; pass --confirm to tear the stack down")
@@ -877,8 +944,6 @@ def _down(args) -> dict:
 
 
 def _ttl(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     if not getattr(args, "confirm", False):
         raise StackCommandError(CONFIRMATION_REQUIRED, "stack ttl changes the stack's expiry; pass --confirm")
     if not getattr(args, "name", None):
@@ -919,8 +984,6 @@ def _ttl(args) -> dict:
 
 
 def _sweep(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     entry = _entry(getattr(args, "remote", None))
     from sandbox.hosting.lifetime import merge
     checkouts: dict[str, Path] = {}
@@ -942,8 +1005,6 @@ def _sweep(args) -> dict:
 
 
 def _limits(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     entry = _entry(getattr(args, "remote", None))
     wanted = {}
     for flag, key in (("per_owner", "per_owner"), ("total", "total")):
@@ -966,8 +1027,6 @@ def _limits(args) -> dict:
 
 
 def _reap(args) -> dict:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     from sandbox.hosting.lifetime import reaper
     plan, confirm = bool(getattr(args, "plan", False)), bool(getattr(args, "confirm", False))
     if plan == confirm:
@@ -1070,8 +1129,6 @@ STACK_ACTIONS = ("up", "list", "down", "ttl", "sweep", "reap", "limits")
 
 
 def cmd_host_stack(args) -> None:
-    from sandbox.commands.hosting import guard_server_execution
-    guard_server_execution(args)
     action = getattr(args, "stack_action", None)
     handlers = {"up": _up, "list": _list, "down": _down, "ttl": _ttl, "sweep": _sweep,
                 "reap": _reap, "limits": _limits}

@@ -274,16 +274,19 @@ class WorkspaceGitDedupTests(unittest.TestCase):
 
     def test_remote_reset_and_overlay_apply_use_the_materializer_lock(self):
         from sandbox.core import _remote
+        from tests.test_remote_materialization_completion import ReceiptTransport
 
         calls = []
+        transport = ReceiptTransport()
         def run(_remote_record, command, **_kwargs):
             calls.append(command)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return transport(_remote_record, command, **_kwargs)
         with tempfile.TemporaryDirectory() as temp, patch.object(_remote, "ssh_run", side_effect=run):
             target = "/srv/source"
             _remote.reset_target_to({}, target, "a" * 40)
             _remote.apply_uncommitted({}, target, Path(temp), "", [])
-        lock_commands = [command for command in calls if ".sandbox-materialize-" in command]
+        lock_commands = [command for command in calls
+                         if shlex.split(command)[3] in ("acquire", "release")]
         self.assertEqual(len(lock_commands), 4)
         names = {command.split(".sandbox-materialize-", 1)[1].split(".lock", 1)[0]
                  for command in lock_commands}
@@ -291,16 +294,18 @@ class WorkspaceGitDedupTests(unittest.TestCase):
 
     def test_combined_remote_update_holds_one_lock_through_reset_and_publish(self):
         from sandbox.core import _remote
+        from tests.test_remote_materialization_completion import ReceiptTransport
 
         events = []
+        transport = ReceiptTransport()
         def run(_remote_record, command, **_kwargs):
-            events.append(command)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            events.append(shlex.split(command)[3])
+            return transport(_remote_record, command, **_kwargs)
         with patch.object(_remote, "ssh_run", side_effect=run), \
                 patch.object(_remote, "_reset_target_to_unlocked",
-                             side_effect=lambda *_args: events.append("reset")), \
+                             side_effect=lambda *_args, **_kwargs: events.append("reset")), \
                 patch.object(_remote, "_apply_uncommitted_unlocked",
-                             side_effect=lambda *_args: events.append("publish") or 2):
+                             side_effect=lambda *_args, **_kwargs: events.append("publish") or 2):
             applied = _remote.update_target_to(
                 {}, "/srv/source", "a" * 40,
                 project_root=Path("/local/source"), diff_text="diff",
@@ -308,9 +313,9 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             )
         self.assertEqual(applied, 2)
         self.assertEqual(len(events), 4)
-        self.assertIn("mkdir --", events[0])
+        self.assertEqual(events[0], "acquire")
         self.assertEqual(events[1:3], ["reset", "publish"])
-        self.assertIn("rmdir --", events[3])
+        self.assertEqual(events[3], "release")
 
     def test_real_git_objects_share_only_immutable_inodes_and_source_stays_clean(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -404,8 +409,14 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             source.mkdir()
             plan = plan_materialization(source, root / "workspace")
             original_mkdir = checkout.os.mkdir
+            original_open = checkout.os.open
             original_close = checkout.os.close
+            opened = []
             closed = []
+            def opening(*args, **kwargs):
+                descriptor = original_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
             def mkdir(name, *args, **kwargs):
                 if ".staging-" in str(name):
                     raise OSError(errno.ENOSPC, "injected staging failure")
@@ -414,12 +425,13 @@ class WorkspaceGitDedupTests(unittest.TestCase):
                 closed.append(descriptor)
                 return original_close(descriptor)
             with patch.object(checkout.os, "mkdir", side_effect=mkdir), \
+                    patch.object(checkout.os, "open", side_effect=opening), \
                     patch.object(checkout.os, "close", side_effect=close), \
                     self.assertRaises(WorkspaceMaterializationError) as raised:
                 materialize(plan)
             self.assertEqual(raised.exception.code, "workspace_staging_unavailable")
             self.assertFalse((root / materialization_lock_name(plan.source_path)).exists())
-            self.assertEqual(len(closed), 2)
+            self.assertCountEqual(closed, opened)
 
     def test_source_open_failure_closes_parent_once_with_bounded_error(self):
         from sandbox.workspaces import checkout
@@ -431,13 +443,14 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             plan = plan_materialization(source, root / "workspace")
             original_open = checkout.os.open
             original_close = checkout.os.close
-            calls = [0]
+            acquired = []
             closed = []
             def opened(*args, **kwargs):
-                calls[0] += 1
-                if calls[0] == 2:
+                if args[0] == source.name and kwargs.get('dir_fd') is not None:
                     raise PermissionError(errno.EACCES, "sensitive injected path")
-                return original_open(*args, **kwargs)
+                descriptor = original_open(*args, **kwargs)
+                acquired.append(descriptor)
+                return descriptor
             def closed_once(descriptor):
                 closed.append(descriptor)
                 return original_close(descriptor)
@@ -447,7 +460,35 @@ class WorkspaceGitDedupTests(unittest.TestCase):
                 materialize(plan)
             self.assertEqual(raised.exception.code, "workspace_source_unavailable")
             self.assertNotIn("sensitive", str(raised.exception))
-            self.assertEqual(len(closed), 1)
+            self.assertCountEqual(closed, acquired)
+
+    def test_admission_anchor_failure_is_bounded_and_closes_its_parent(self):
+        from sandbox.workspaces import checkout
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'source'
+            source.mkdir()
+            plan = plan_materialization(source, root / 'workspace')
+            original_open, original_close = checkout.os.open, checkout.os.close
+            opened, closed = [], []
+            def opening(name, *args, **kwargs):
+                if str(name).startswith('.sandbox-admission-'):
+                    raise PermissionError(errno.EACCES, 'sensitive injected anchor')
+                descriptor = original_open(name, *args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+            def closing(descriptor):
+                closed.append(descriptor)
+                return original_close(descriptor)
+            with patch.object(checkout.os, 'open', side_effect=opening), \
+                    patch.object(checkout.os, 'close', side_effect=closing), \
+                    patch.object(checkout, '_copy_worktree') as copy, \
+                    self.assertRaises(WorkspaceMaterializationError) as failure:
+                materialize(plan)
+            self.assertEqual(failure.exception.code, 'workspace_lock_unavailable')
+            self.assertNotIn('sensitive', str(failure.exception))
+            self.assertCountEqual(closed, opened)
+            copy.assert_not_called()
 
     def test_lock_acquisition_failure_closes_both_descriptors_once(self):
         from sandbox.workspaces import checkout
@@ -459,8 +500,14 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             plan = plan_materialization(source, root / "workspace")
             lock_name = materialization_lock_name(plan.source_path)
             original_mkdir = checkout.os.mkdir
+            original_open = checkout.os.open
             original_close = checkout.os.close
+            opened = []
             closed = []
+            def opening(*args, **kwargs):
+                descriptor = original_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
             def mkdir(name, *args, **kwargs):
                 if name == lock_name:
                     raise PermissionError(errno.EACCES, "sensitive injected path")
@@ -469,12 +516,13 @@ class WorkspaceGitDedupTests(unittest.TestCase):
                 closed.append(descriptor)
                 return original_close(descriptor)
             with patch.object(checkout.os, "mkdir", side_effect=mkdir), \
+                    patch.object(checkout.os, "open", side_effect=opening), \
                     patch.object(checkout.os, "close", side_effect=closed_once), \
                     self.assertRaises(WorkspaceMaterializationError) as raised:
                 materialize(plan)
             self.assertEqual(raised.exception.code, "workspace_lock_unavailable")
             self.assertNotIn("sensitive", str(raised.exception))
-            self.assertEqual(len(closed), 2)
+            self.assertCountEqual(closed, opened)
             self.assertFalse((root / lock_name).exists())
 
     def test_lock_release_failure_never_returns_a_released_receipt(self):

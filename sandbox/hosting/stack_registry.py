@@ -117,6 +117,35 @@ def read(path: Path | None = None) -> dict:
     return data
 
 
+def read_exact_record(remote_name: str, slug: str, *, budget) -> dict | None:
+    """Bounded recorded-only selector; no manifest or runtime requirement."""
+    import stat
+    path = registry_path()
+    budget.check()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, 'rb') as handle:
+        info = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o022 or info.st_size > 2 * 1024 * 1024):
+            raise ValueError('stack binding unavailable')
+        raw = handle.read(2 * 1024 * 1024 + 1)
+    budget.check()
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError('stack binding bounds')
+    data = json.loads(raw)
+    if (type(data) is not dict or type(data.get('version')) is not int
+            or data['version'] != 1 or type(data.get('stacks')) is not dict):
+        raise ValueError('stack binding invalid')
+    record = data['stacks'].get(record_key(remote_name, slug))
+    if record is not None and (type(record) is not dict or record.get('remote') != remote_name or record.get('slug') != slug):
+        raise ValueError('stack binding mismatch')
+    budget.check()
+    return record
+
+
 def _write(data: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix="registry-", suffix=".json", dir=path.parent)
@@ -154,11 +183,22 @@ class Registry:
 
 
 @contextmanager
-def locked(path: Path | None = None) -> Iterator[Registry]:
+def locked(path: Path | None = None, *, timeout_seconds: float | None = None) -> Iterator[Registry]:
     path = path or registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.parent / "registry.lock", "a+") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if timeout_seconds is None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('stack registry is busy')
+                    time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
         try:
             yield Registry(read(path), path)
         finally:

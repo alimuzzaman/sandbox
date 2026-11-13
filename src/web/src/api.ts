@@ -41,14 +41,87 @@ export async function postAction(
 // without this exact JSON body and panel header, or with an Origin other than
 // its own (contracts/panel-http.md). The result is never cached or kept.
 type ShareTarget = { remote: string; stack: string };
-export type SignInResult = { ok: true; url: string; expires_at: number; one_time: boolean; user: string } | ShareRefused;
+export type SignInResult = { ok: true; url: string; expires_at: number; one_time: true; user: string } | ShareRefused;
+
+function signInUnavailable(): ShareRefused {
+  return { ok: false, code: "sign_in_unavailable", message: "WordPress sign-in could not be confirmed. Check its status before requesting another link." };
+}
+
+const signInGuidance: Record<string, string> = {
+  sign_in_manifest_unavailable: "Rendered manifest unavailable. Reapply the recorded stack before signing in.",
+  sign_in_target_mismatch: "Rendered manifest identity changed. Restore or reapply the recorded stack before signing in.",
+  sign_in_not_declared: "Declare WordPress autologin user, service, container_path and request_path, then reapply the stack.",
+  sign_in_private_route: "WordPress is behind a private gate. Use the existing stack access link.",
+  sign_in_remote_unavailable: "The recorded remote is unavailable. Restore its controller registration before signing in.",
+};
+
+function signInRefusal(value: unknown): ShareRefused {
+  if (typeof value !== "object" || value === null || Array.isArray(value)
+      || !("ok" in value) || value.ok !== false
+      || !("code" in value) || typeof value.code !== "string" || value.code.length > 64
+      || !Object.prototype.hasOwnProperty.call(signInGuidance, value.code)) return signInUnavailable();
+  // Server text and URLs are never reflected, even for a recognized code.
+  return { ok: false, code: value.code, message: signInGuidance[value.code]! };
+}
+
+async function signInJSON(response: Response): Promise<unknown> {
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let size = 0;
+  let text = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > 8192) return null;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    return JSON.parse(text + decoder.decode()) as unknown;
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
+}
+
+// Only the immediate caller receives this URL. Malformed responses must never
+// reach navigation, the polling store, logs, or a reflected error message.
+function signInResponse(value: unknown): SignInResult {
+  if (typeof value === "object" && value !== null && "ok" in value && value.ok === false)
+    return signInRefusal(value);
+  if (typeof value !== "object" || value === null || !("ok" in value) || value.ok !== true
+      || !("url" in value) || typeof value.url !== "string" || value.url.length > 4096
+      || !("expires_at" in value) || typeof value.expires_at !== "number"
+      || !Number.isSafeInteger(value.expires_at) || value.expires_at <= Math.floor(Date.now() / 1000)
+      || !("one_time" in value) || value.one_time !== true
+      || !("user" in value) || typeof value.user !== "string"
+      || !/^[\x21-\x7e]{1,60}$/.test(value.user)) return signInUnavailable();
+  try {
+    const url = new URL(value.url);
+    if (!value.url.startsWith("https://") || /[\s\\\u0000-\u001f\u007f]/.test(value.url)
+        || url.protocol !== "https:" || !url.hostname || url.username || url.password
+        || url.search !== "?sandbox_autologin=1" || !/^#[A-Za-z0-9_-]{43}$/.test(url.hash))
+      return signInUnavailable();
+    return { ok: true, url: url.href, expires_at: value.expires_at, one_time: true, user: value.user };
+  } catch {
+    return signInUnavailable();
+  }
+}
+
 export async function postSignIn(body: ShareTarget): Promise<SignInResult> {
-  const response = await fetch('/api/hosting/sign-in', {
-    method: 'POST', cache: 'no-store', credentials: 'same-origin', redirect: 'error',
-    headers: { 'content-type': 'application/json', 'x-sandbox-panel': 'share' },
-    body: JSON.stringify(body),
-  });
-  return await response.json() as SignInResult;
+  try {
+    const response = await fetch('/api/hosting/sign-in', {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin', redirect: 'error',
+      headers: { 'content-type': 'application/json', 'x-sandbox-panel': 'share' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok && response.status !== 409) return signInUnavailable();
+    const value = await signInJSON(response);
+    return response.ok ? signInResponse(value) : signInRefusal(value);
+  } catch {
+    return signInUnavailable();
+  }
 }
 export function postShare(body: ShareTarget & { action: "create" }): Promise<ShareCreated | ShareRefused | SharePartial>;
 export function postShare(body: ShareTarget & { action: "list" }): Promise<ShareList | ShareRefused>;

@@ -1431,7 +1431,11 @@ the Origin CA certificate, and finally the local state entry. The project's depl
 source is shared by its environments and a first apply of another environment
 could be writing it, so destroy never removes it; delete
 `<home>/deploy-src/hosts/<project>` by hand once no environment of the project is
-left. Containers, volumes and networks are selected by the Compose project label,
+left. A server CLI owner apply publishes source only into a deploy-source
+directory owned by the owner with no group or other write; anything else refuses
+with `server_cli_owner_target_unavailable: owner source destination is unsafe`.
+Sandbox creates it under `umask 022`; a directory made earlier by an SSH login with
+umask 002 is `0775` and needs `chmod g-w` on that one directory. Containers, volumes and networks are selected by the Compose project label,
 never through `docker compose down`, so a Compose file elsewhere on the host cannot
 widen what is removed. Images are owned only when they carry the project label and a
 `<compose-name>-` tag. Other labelled images, including one named by `image:` in the
@@ -1645,6 +1649,41 @@ port in Compose through the value, for example
 `"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
 private `environment.env` file apply passes with `--env-file`.
 
+Runtime text publication sends bytes only on the selected owner's process stdin
+or the registered remote's SSH stdin. A fixed eight-byte length header travels
+on that same private stdin. Short or excess input refuses before publication,
+so EOF from an interrupted transfer cannot publish a partial environment.
+A private sibling stage is fully written
+and fsynced before atomic replacement; the directory is fsynced afterward.
+Equal content and mode leaves the destination unchanged. The publisher refuses
+unsafe path components, symlinks, nonregular or multiply linked destinations,
+foreign owners, broad writable modes, and changes observed before replacement.
+Replies contain only `published`, `already_current`, `not_published`, or
+`publication_unknown` status, without payloads or content digests. A completed
+process with exit 1 and exactly `{"ok": false, "status": "not_published"}`
+reports a known refusal before destination replacement. This does not assert
+that earlier steps of the apply had no effects or clear an existing completion
+fence. Missing, malformed, contradictory or unknown owner replies withhold
+completion through the existing operation fence.
+Receipt status values of the wrong JSON type also retain this fence and the
+original apply lease; they do not become parser exceptions that permit cleanup.
+
+The retained failure message includes only a bounded writer exit code and a
+fixed receipt classification: a recognized status, `empty`, `invalid_json`, or
+`invalid_shape`. It includes no raw stdout/stderr, recipient path, payload or
+content digest. These observations describe that completed result and never
+clear its unknown-outcome fence. Older generic failures cannot be reconstructed
+from a later invocation or from current path metadata.
+
+This publisher requires an installed owner revision containing
+`sandbox/hosting/runtime_file_writer.py`; protocol 25 is unchanged. Source
+readiness alone does not prove interrupted owner-path delivery. Before real
+keys, verify the installed revision and exercise that path with synthetic data.
+Caught interruptions clean up their own stage; SIGKILL or host loss can leave a
+private stage and an unknown original operation. Retain its identity and fence
+for recovery. Publication does not compare broker values with running containers
+or authorize secret reconciliation, rotation, or application apply.
+
 Missing generated secrets refuse `up --confirm` with `stack_secrets_missing` unless
 you pass `--generate`, which creates them exactly like `sb host secrets --generate`.
 Missing required secrets always refuse. `up` refuses while the stack's previous apply
@@ -1848,6 +1887,12 @@ working-directory or environment option, and none is added.
   `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
   `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else.
 
+Joined-owner exec retains binary output in private, original-job-bound artifacts.
+The effect deadline remains the original request's deadline. Each result read has
+a separate finite 60-second budget for authenticated status, output metadata and
+artifact retrieval. A terminal read may finish after the effect deadline; it
+does not submit or repeat the command. Missing or cancelled capture still refuses.
+
 **`--target` on read-only commands.** `host logs`, `host status` and `host diagnose`
 take the same `--target` or `--name` with `--remote` and resolve them the same way,
 so a stack can be inspected from the checkout that holds its template instead of
@@ -2015,6 +2060,9 @@ with `zone_not_allowed`. A controller state file that does not parse is
 **Configuration and the token.** The zones, the token reference and the ACME
 contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
+These are controller-owned even for a joined Tailnet remote. `host tailnet-name`
+runs on the controller; only its fixed nginx runner uses the registered remote
+transport. Do not move its broker, name records, or ACME account onto the server.
 The Cloudflare token (Zone:Read and DNS:Edit on those zones) is read through
 the secrets broker. It reaches only two programs, each run through a use
 profile that Sandbox defines in-process (`sandbox-tailnet-name-dns` and
@@ -2062,13 +2110,42 @@ expiry record stored only under `$SANDBOX_HOME/runtime/remote-previews.json`.
 ./sb preview cleanup --remote myvps --confirm
 ```
 
+On joined Tailnet remotes, all four preview actions run in the retained installed
+server CLI before controller configuration or provider lookup. The server owns
+`remote-previews.json` and resolves Cloudflare through its own store; no token is
+forwarded from the laptop. `preview list --remote NAME` reads that server's
+inventory. Without `--remote`, list still reads the controller-local inventory.
+The source-staged job returns its original acceptance receipt; acceptance alone
+does not mean the preview is ready. Inspect the original job's terminal result.
+The installed receiver must advertise `preview.owner-cli.v1`; an older receiver
+refuses before source staging, with no name-only deletion fallback.
+
 `preview list` prints each preview's identifying fields and its `https://<domain>` address, never the saved login URL; `--remote` limits it to one remote. It does not scan those fields for secrets, so a domain or path you chose is printed as it is. `preview create --json` includes the login URL: that is how you get it.
 
 Creation is confirmation-gated because it deploys the selected checkout, creates
 one Cloudflare-proxied A record, configures a Caddy route, and starts a remote
-container. `destroy` removes only the recorded Caddy fragment, named Sandbox
-instance, and exact DNS record. `cleanup` removes previews whose recorded expiry
-has passed; it is intentionally an explicit command, not a background reaper.
+container. Caddy supports `preview_routes`; nginx still refuses create with
+`front_door_capability_unavailable`, before controller provider lookup or job
+submission. That refusal does not prove preview creation works on a live target.
+
+`destroy` and `cleanup` require the original alias/machine binding, successful
+created-instance receipt/context, and current exact incarnation. The receiver
+compares canonical ownership under the same lifecycle writer guard used by
+ensure, runtime ensure/apply/destroy and registry writes, then holds it through
+teardown and deregistration. Ordinary explicit `instance delete NAME --yes` is
+still available; previews always pass the conditional options. A label, name,
+expiry or legacy registry row is never sufficient authority. Legacy preview rows
+remain listable and require explicit reconciliation rather than automatic deletion.
+Route removal compares the generated fragment including its original incarnation
+under the instance-route writer lock. DNS creation uses create-only POST, and
+removal reobserves the recorded ID, address, type, proxy mode and incarnation
+comment. Unknown delete/route/DNS outcomes stay fenced in the preview record;
+rerunning cleanup never blindly retries them. `cleanup` only selects expired
+records for these same checks; it is not a background reaper.
+
+These are source contracts. No deployed target, including the xSpeed dev front
+door, was exercised for this change. Runtime, cancellation and concurrent-writer
+acceptance remain unrun.
 
 ## 6. Explicitly out of scope (Phase 1)
 
@@ -2261,8 +2338,20 @@ The **Stacks & sites** page (`/hosting`, data at `GET /api/hosting`) is read-onl
 every `sb host stack` with one row per server created for it, plus the projects hosted with
 `sb host apply` without a stack. Each row is a link, with its state, its health and the
 ref it was built from. A stack also shows its slug, project, branch, commit, template
-path, last apply (status, time and request id), its Mailpit loopback port and named
-ports, and its created time. A TTL appears once stacks have one. The page has no actions.
+path, last apply (status, time and request id), its Mailpit upstream and named
+ports, and its created time. **Open inbox** appears only when this server has one
+managed tailnet HTTPS name for that exact `127.0.0.1:<mailpit-port>` upstream. The
+link opens `/mail/`. A bounded local read-only privileged helper projects the existing Sandbox-owned nginx block,
+public certificate and activation journal; it never reads a private key or probes
+the inbox. The managed activation must match the current block/certificate bytes, and the certificate must
+cover the name and be unexpired, and the loaded journal must match the exact
+block/certificate bytes. This is retained activation evidence, not a live health
+check. Missing, unmanaged, incomplete, changed or ambiguous records show an
+unavailable reason beside the upstream. Controller-only stacks show unavailable;
+a remote name or hostname pattern never establishes access. The managed name
+must bind the same tailnet IPv4 as the panel listener; a loopback-bound panel
+cannot establish this scope and shows access records unavailable. Discovery does not
+provision names or repair certificates. A TTL appears once stacks have one. The page has no actions.
 
 On a server it is built only from files on that server:
 
@@ -2308,8 +2397,14 @@ The controller page's WordPress admin action posts exactly `{remote, stack}` to
 `/api/hosting/sign-in` with the panel's same-origin guard. It resolves the recorded
 rendered manifest and uses the same host writer lock as the CLI. A missing WordPress
 autologin declaration, inaccessible private route or unavailable remote refuses the
-action. This currently requires a controller with the rendered stack manifest.
-Server-local sign-in and public teammate access are not implemented by this endpoint.
+action. Controller panels require the rendered stack manifest. Server panels use
+the separate admitted owner-local target path described in
+[owner-panel sharing](owner-panel-sharing.md), including its installation prerequisites.
+The browser accepts only a successful response with a one-time WordPress fragment
+URL and typed expiry/user metadata. Invalid, failed or unparseable responses never
+navigate the new tab or display returned response details. An unconfirmed response
+does not trigger a retry. This response validation adds no owner-local execution
+authority; the owner-local admission and writer boundary applies separately.
 Unavailable actions show declaration, manifest, private-gate or controller guidance
 on both own and Shared stack sections before a click. The operation repeats these
 checks at mint time. Named CLI login also refuses a manifest whose project or
@@ -2405,6 +2500,32 @@ The Feature 054 MCP diagnostic is `delivery_inspect(project_dir, remote,
 environment=None, label=None, operation_id=None, request_id=None,
 observe=False, limit=10, cursor=None)`. It shares the CLI serializer and
 returns `ok=true` when the query was serviced, not when delivery succeeded.
+
+`delivery inspect --remote` selects a scope in the executing controller's
+retained history. It does not dispatch inspection to the registered server.
+`--name` and `--target` likewise resolve this controller's hosting records.
+A missing local record therefore does not prove that a server-owned delivery
+is absent. Source publication does not copy that delivery history back.
+
+The existing fixed server CLI job mechanism can execute commands on the owner,
+but returns a durable job acceptance receipt and stages source. It is not the
+synchronous, recorded-only delivery projection promised by this diagnostic.
+The remote host-target inspector also requires successful apply and running
+container evidence, so it cannot supply the scope for interrupted deliveries.
+The separate `delivery inspect --server-owned --remote NAME` path now supplies
+an exact owner-bound read in candidate source. Select one `--name`, `--target` or
+`--original-job-id` and one `--operation-id` or `--request-id`. It requires the
+installed `delivery.inspect-exact.v1` capability and refuses missing retained
+bindings without staging a checkout or submitting a job. See
+[the closed delivery read contract](server-owned-delivery-inspection.md).
+This source change is not installed/runtime acceptance; neither exec recovery nor
+lease release supplies delivery inspection authority.
+
+`host stack repair-source --remote NAME --name STACK --repair-source deployed`
+provides a separate guarded source-only plan/confirm operation. Confirmation needs
+its exact `--repair-plan-digest`; it preserves the manifest and retained orphan,
+and never applies or releases a host lease. See
+[rendered source custody and repair](rendered-checkout-lifetime.md).
 
 `remote service status` checks the selected unit's non-secret ownership marker and
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local
@@ -2614,13 +2735,20 @@ install, not backed up or losslessly recoverable.
 
 ### `host_apply_lease_held`
 
+New physical `.lease.lock` anchors are created with owner-only permissions,
+independent of the caller's umask. Existing anchors are not chmodded or replaced
+by normal lease operations. A legacy group-writable anchor can therefore still
+refuse exact exec recovery. Preserve it and obtain an exact operator repair plan;
+do not weaken recovery's permission checks or recreate the lock inode.
+
 Every `sb host apply`, edge-only recovery, `sb host destroy` and `sb host stack down`
 holds one lease per target on the remote,
 `$SANDBOX_HOME/.sandbox/host-apply-<project>-<environment>.lease`, for the whole
 operation, so two controllers cannot interleave changes to one target's route and
 runtime. The lease file holds a random token, a random controller id
 (`$SANDBOX_HOME/runtime/hosting/controller-id` on the controller) and the time it was
-taken; nothing secret.
+taken; nothing secret. For server-owner execution, the holder is instead the
+first 32 hexadecimal characters of SHA-256 over `server-cli:<job_id>`.
 
 The lease never expires: an owner that outlived an expiry and kept writing would be
 the interleaving the lease is there to stop. The controller that holds it releases it,
@@ -2628,6 +2756,18 @@ or takes it over on its next operation (an apply that crashed). When another con
 holds it, finish or re-run the operation from that controller. If that controller is
 gone, first check on the remote that nothing of it still runs (no `sb` process for the
 target), then remove the lease file there by hand.
+
+Each server-owner job has a different holder, so starting a fresh job cannot
+take over an earlier job's lease. `host retire-delivery` closes the delivery
+record and its host-state claim; it does not release this separate lease.
+Do not repeat retirement or replay an uncertain apply to clear it. Exact manual
+recovery requires explicit operator approval after binding the lease holder to
+the original job, confirming its terminal delivery and process cessation, and
+checking a complete active-job inventory for competing writers. Hold the target's
+existing physical lease lock, recheck the exact lease identity and content under
+that lock, and remove only that lease. Preserve other leases, lock files and
+uncertain operation evidence. A changed identity or incomplete cessation proof
+refuses recovery; leases never expire automatically.
 
 The on-host stack reaper (spec 077) does not take the lease; it only removes targets
 whose lifetime record has expired. Controllers older than this lease do not take it
@@ -3497,3 +3637,84 @@ and the single-link regular ledger belong to the remote operator. While holding
 contents. This permission correction is reversible and does not clear live
 reservations. Retire the old writer from active use: running it again can recreate
 the group-writable file. Then retry the same immutable receipt.
+
+
+### Managed loopback port conflict recovery
+
+`host plan` reports `runtime.port_observation: provisional`: its local port is
+not an availability claim. Every apply obtains a complete bounded listener,
+Docker publication and host-summary observation through the selected owner or
+legacy runner before summary/source/target effects. Missing or ambiguous facts
+refuse. Valid exact primary publications retain their port, including saved
+aliases proven by retained physical machine evidence. Unknown owners reserve ports.
+Interface-qualified addresses are normalized while reserving the same TCP number.
+For IPv6, both `[address%interface]` and the `[address]%interface` form emitted
+by `ss` are accepted. Unmatched brackets and duplicate scopes still refuse.
+An existing loopback socket is exempt only when a privileged read-only probe
+ties its kernel inode and held process descriptor to a root-owned `docker-proxy`
+executable and its exact published container destination. Matching Docker labels
+and ports alone are insufficient. Unknown or unsupported socket owners refuse
+reuse of that port; Docker NAT without a host socket remains supported.
+Reservations proven to belong to another physical machine do not occupy this
+host's namespace; records without that proof remain conservative reservations.
+For a legacy target without a summary, the exact primary-only generated
+`compose.override.yml` format conservatively reserves its port. This bounded read
+requires a regular, single-link, owner-owned file and rejects symlinks, extra
+content and unsupported overrides. It grants no ownership or reassignment
+authority. Malformed existing summaries always refuse allocation. A missing
+summary without a supported legacy override also refuses allocation; ordinary
+housekeeping files are not target directories. This does not change named-stack
+port probing.
+
+A failed partial apply can explicitly replace its conflicting managed port:
+
+For an existing rendered stack, a Tailnet owner CLI may start in a staged
+controller checkout. Its `host apply` submits a nested job bound to the retained
+application worktree while the original parent is live. The reply reports child
+acceptance and its job ID, not delivery success. The child retains the complete
+port-recovery tuple, image receipt, explicit effect options and lock-wait policy;
+all ordinary source, generation, failed-attempt and port checks still run there.
+Canonical empty-overlay fingerprints count as clean without changing their
+stored bytes or replay identities. A real overlay or a mismatched source still
+refuses admission. No existing stack is re-rendered or removed by this handoff.
+
+```text
+sb host apply --remote REMOTE --project-dir PROJECT --environment ENV --confirm \
+  --reallocate-loopback-port OLD --expected-generation N \
+  --original-request-id FAILED_CHILD_REQUEST
+```
+
+This opt-in is apply-only. It requires the exact retained failed child job,
+terminal non-delivered operation, target, physical machine and unchanged hosting
+generation. If the previous delivery is still nonterminal, inspect it and use
+supported `host retire-delivery` only when eligible. This flag never retires it.
+The old number must also match a same-target summary bound to that failed request;
+the argument alone cannot establish an allocation, even if local state never
+saved one. A free old port, live target primary publication, active operation,
+successful delivery, missing evidence or stale fence refuses. Reapply uses a new
+durable request identity; preserve the original child request as provenance.
+Any live publication by the predecessor on its old port refuses reassignment,
+even when the successor changes its service name or internal container port.
+
+The selected new port, old binding, failed operation/job and summary digests are
+bound into configuration and admission receipts, with predecessor history retained.
+A retained replay uses that chosen number. It never selects another port after
+admission. Named volumes, Compose project and target/copy identity are preserved;
+normal full-recreate/initializer behavior still applies to a partial failed target.
+
+Builds run outside ingress locks. Immediately before the same Compose up, a fresh
+check of the admitted primary/gate pair runs under continuous existing Caddy then
+nginx flocks. Root-owned locks use the supported noninteractive sudo wrapper;
+the check and Compose run as the observed account. A fixed context allowlist,
+original groups, working directory and umask cross the privilege boundary only
+through anonymous stdin. Provider/application environments are not copied.
+The fresh recheck must match the originally observed Docker daemon ID before up.
+Missing sudo authority or account/context restoration refuses,
+with no unlocked fallback. Route transactions remain outside this critical section.
+Noncooperating processes can still race Docker/kernel binding and cause a failure.
+
+Controller and installed owner must carry this source revision before this option
+is used. The installed CLI parser is the wire grammar; no new envelope or schema
+version is introduced. Deployment must verify the installed revision independently.
+Source review is required before deployment; tests and runtime acceptance were
+not performed as part of this source-only implementation.

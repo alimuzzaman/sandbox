@@ -110,7 +110,7 @@ _TRANSITIONS = {
     Lifecycle.RUNNING: frozenset({Lifecycle.CANCELLING, Lifecycle.SUCCEEDED,
                                   Lifecycle.FAILED, Lifecycle.TIMED_OUT,
                                   Lifecycle.CANCELLED, Lifecycle.INTERRUPTED}),
-    Lifecycle.CANCELLING: frozenset({Lifecycle.CANCELLED, Lifecycle.FAILED,
+    Lifecycle.CANCELLING: frozenset({Lifecycle.CANCELLED, Lifecycle.TIMED_OUT, Lifecycle.FAILED,
                                      Lifecycle.INTERRUPTED}),
 }
 
@@ -271,6 +271,7 @@ class SourceIdentity:
     identity: str
     commit: str | None = None
     dirty_digest: str | None = None
+    content_digest: str | None = None
 
     def __post_init__(self) -> None:
         _safe_text(self.identity, "source identity")
@@ -278,6 +279,9 @@ class SourceIdentity:
             _safe_text(self.commit, "source commit")
         if self.dirty_digest is not None:
             _safe_text(self.dirty_digest, "source dirty digest")
+        if self.content_digest is not None and (not isinstance(self.content_digest, str)
+                or re.fullmatch(r'sha256:[0-9a-f]{64}', self.content_digest) is None):
+            raise ValueError('source content digest is invalid')
 
 
 @dataclass(frozen=True)
@@ -604,7 +608,8 @@ class JobSubmission:
             "source_access": self.source_access,
             "parallel_safe": self.parallel_safe,
             "materialization_source_root": self.materialization_source_root,
-            "source": asdict(self.source),
+            "source": {key: value for key, value in asdict(self.source).items()
+                       if key != 'content_digest' or value is not None},
         }
 
     def canonical_json(self) -> str:

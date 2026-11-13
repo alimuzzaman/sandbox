@@ -1,0 +1,65 @@
+R4 source-materialization completion contract (source only, unrun)
+
+Problem
+The old controller finally block removed the directory lease over a second SSH
+session after the first mutation session timed out. The first remote reset/tar
+could still be writing. Killing the controller SSH process is not remote process
+termination evidence.
+
+Implementation
+The existing shared materialization directory name remains the exclusion used
+by remote reset/overlay and workspace materialization. A random 32-hex operation
+ID is created before acquisition and retained in private, fsynced lease state.
+Each mutation step records its command/archive intent digest before launch.
+No archive bytes are placed in command arguments, diagnostics or receipt JSON.
+
+A standalone Linux Python coordinator holds an exclusive flock on the opened
+private lease anchor while executing each step. Before forking, it enables the
+Linux child-subreaper contract. After the immediate command exits, it waits for
+all adopted descendants, including descendants which leave the process group.
+Only ECHILD permits a durable completion receipt. Mutation stdout/stderr are
+suppressed; bounded nonsecret receipt JSON is the sole transport output.
+
+Reset retains its existing remote timeout. Tar now has a remote timeout too.
+Timeout expiry is not independently used to establish cessation. A coordinator
+which hangs, dies, loses transport, produces malformed evidence, or cannot enable
+the Linux contract leaves exclusion retained. No PID lookup, age, boot guess,
+or local transport exit permits removal. Unsupported receivers refuse safely.
+
+Known completed success and failure release normally. A completion-unknown
+exception exposes operation_id and never sends an automatic release/replay.
+The original caller's request and source identities are unchanged. A second
+writer receives busy and cannot replace the original operation or its lease.
+
+Supported source adapter recovery ports
+sandbox.core._remote.inspect_remote_materialization(remote, target_path,
+operation_id) reads the original same-anchor receipt. Inspection does not create
+files, mutate source or remove the lease. While the coordinator holds its anchor,
+inspection is unavailable rather than permission to infer stopped descendants.
+
+sandbox.core._remote.reconcile_remote_materialization(remote, target_path,
+operation_id) is EXPLICIT recovery, never invoked automatically after failure.
+It permits release only for the same operation's idle/no-launch or complete
+receipt. It rechecks the opened directory/control identities and completion state
+under the same anchor lock before removal. It never runs reset/tar/clean again.
+The operation ID is correlation, not an operator authorization allowlist.
+
+If the coordinator was killed before writing a complete receipt, reconciliation
+refuses even if its PID is absent. This patch deliberately supplies no unsafe
+force-unlock or guessed process-termination recovery. An incomplete acquisition
+can likewise retain a directory with missing evidence. Recovery for that case
+requires a separately reviewed proof procedure; manual rmdir is not supported.
+There is no new public CLI command in this bounded correction. These are concrete
+source adapter ports, not a claim of an installed user-facing recovery command.
+
+Limits and gates
+All tests added/updated in this checkpoint are definitions only and UNRUN.
+No import, tests, helpers, runtime, SSH, credentials, deployment or host effects
+were executed. Root owns short source checks and release review. Real coordinator
+tests require Linux and must be reported skipped on macOS, not called passed.
+The synthetic tests cover disconnect/active exclusion/reconcile/no replay,
+wrong receipt/intent/step, archive stdin and known positive completion. The Linux
+tests cover a real detached descendant remaining alive after local disconnect,
+second-writer exclusion, and release after all descendants finish.
+This source patch neither proves every legacy writer uses this lock nor revives
+paused managed-directory migration. It does not confer release readiness.

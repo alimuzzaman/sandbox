@@ -54,6 +54,7 @@ class RemoteSetRequest:
     target_key: str
     intent: CopyIntent = "either"
     target_project_dir: str | None = None
+    target_revision: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.remote) is not str or not _REMOTE_NAME_RE.fullmatch(self.remote):
@@ -64,6 +65,10 @@ class RemoteSetRequest:
         if self.intent not in COPY_INTENTS:
             raise SecretBrokerError("intent_conflict", "secret update intent is invalid")
         _validate_project_dir(self.target_project_dir)
+        if self.target_revision is not None and (
+                not isinstance(self.target_revision, str)
+                or not _REVISION_RE.fullmatch(self.target_revision)):
+            raise SecretBrokerError("input_invalid", "target source revision is invalid")
 
     @property
     def destination(self) -> str:
@@ -92,6 +97,8 @@ def remote_set_command(request: RemoteSetRequest) -> str:
         tail.append("--create-only")
     elif request.intent == "replace":
         tail.append("--replace-only")
+    if request.target_revision is not None:
+        tail.extend(("--if-revision", request.target_revision))
     return ('home="${SANDBOX_HOME:-$HOME/sandbox}"; exec "$home/sb-src/sb" '
             + " ".join(shlex.quote(word) for word in words) + " " + project + " "
             + " ".join(shlex.quote(word) for word in tail))

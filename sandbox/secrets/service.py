@@ -112,16 +112,13 @@ def load_secret_project_descriptor(root):
 
 class SecretService:
     def __init__(self, registry: SourceRegistry, audit: SecretAudit, *, revision_key_path,
-                 use_profiles=None, provider_adapter=None, credential_store=None,
-                 hosting_profiles=None):
+                 use_profiles=None, provider_adapter=None, credential_store=None):
         self.registry = registry
         self.audit = audit
         self.revision_key_path = revision_key_path
         self.use_profiles = dict(use_profiles or {})
         self.provider_adapter = provider_adapter
         self.credential_store = credential_store
-        from types import MappingProxyType
-        self.hosting_profiles = MappingProxyType(dict(hosting_profiles or {}))
 
     @staticmethod
     def _field(value, *names, default=None):
@@ -626,82 +623,6 @@ class SecretService:
                            **self._key_fields(keys))
         return self._operate("use_session", source, keys, surface, perform)
 
-    def _hosting_snapshot(self, source, keys, *, expected_revision, consumer=None,
-                          profile_name, expected_registration=None, surface="mcp"):
-        """Trusted composition only: audit, resolve once, compare, borrow, discard.
-
-        Preflight returns a PRIVATE revision and names/status only. Consumption
-        passes values exclusively to a fixed manifest consumer. No subprocess,
-        generic use-profile or escalation behavior is changed. The caller must
-        hold the service-owned current target fence throughout this invocation.
-        """
-        keys = tuple(keys)
-        if len(keys) > MAX_SELECTED_KEYS or len(set(keys)) != len(keys):
-            raise SecretBrokerError("selection_invalid", "hosting selection is invalid")
-        for key in keys:
-            self._validate_source_key(source, key)
-
-        def perform(correlation):
-            self._authorize(source, "use" if consumer is not None else "keys", surface)
-            policy = self.registry.policy(source)
-            import hashlib
-            import json
-            # NONSECRET registration metadata only. Paths remain private.
-            descriptor = {name: str(self._field(policy, name)) for name in (
-                "alias", "scope", "type", "kind", "path", "format", "endpoint",
-                "projectId", "environment", "key", "clientId", "authorityDigest", "timeoutSeconds")}
-            descriptor["modes"] = sorted(self._field(policy, "mcp_modes", "mcpModes", default=()) or ())
-            registration = hashlib.sha256(json.dumps(descriptor, sort_keys=True,
-                separators=(",", ":")).encode("utf-8")).hexdigest()
-            if expected_registration is not None and registration != expected_registration:
-                raise SecretBrokerError("source_changed", "hosting source registration changed")
-            values = {}
-            try:
-                if self._source_kind(policy) == "file":
-                    safe, document = self._document(source)
-                    revision = opaque_revision(load_revision_key(self.revision_key_path), safe.content)
-                    names = tuple((key, "missing" if key not in document.entries else
-                                   "unavailable" if document.entries[key].value is None else
-                                   "present" if document.entries[key].value else "missing") for key in keys)
-                    if consumer is not None:
-                        for key, status in names:
-                            if status == "present":
-                                values[key] = self._entry_value(document.entries[key])
-                else:
-                    self._require_infisical(policy)
-                    exact_key = self._provider_key(policy)
-                    if any(key != exact_key for key in keys):
-                        raise SecretBrokerError("selection_invalid", "hosting selection is invalid")
-                    value = self._provider_read(policy)
-                    revision = opaque_revision(load_revision_key(self.revision_key_path), value.encode("utf-8"))
-                    names = tuple((key, "present" if value else "missing") for key in keys)
-                    if consumer is not None and value:
-                        values[exact_key] = value
-                if not hmac.compare_digest(revision, expected_revision):
-                    raise SecretBrokerError("source_changed", "hosting source revision changed")
-                if consumer is None:
-                    return {"revision": revision, "names": names, "registration": registration}
-                if any(status != "present" for _, status in names):
-                    raise SecretBrokerError("key_missing", "hosting provider key is missing")
-                # Consumer failure data, including SecretBrokerError text/codes,
-                # never crosses this narrower boundary. Only these literals do.
-                result, failure = _bounded_call(lambda: consumer(values))
-                if failure is not None or type(result) is not str or result not in (
-                        "succeeded", "failed", "effects_unknown"):
-                    return {"code": "effects_unknown", "reason_code": "effects_unknown"}
-                return {"code": result, "reason_code": result}
-            finally:
-                values.clear()
-        # Outer safe boundary also replaces adapter messages/codes. Audit sees
-        # only service-generated fixed outcomes; no exception/body is returned.
-        result, failure = _bounded_call(lambda: self._operate(
-            "hosting_use" if consumer is not None else "hosting_preflight", source, keys,
-            surface, perform, profile=profile_name))
-        if failure is not None:
-            code = "source_changed" if failure.code == "source_changed" else "credential_source_unavailable"
-            raise SecretBrokerError(code, "hosting source is unavailable")
-        return result
-
     def use_profile(self, profile_name: str, *, surface: str = "mcp") -> dict:
         profile = self.use_profiles.get(profile_name)
         if profile is None:
@@ -956,7 +877,7 @@ class SecretService:
         return self._operate("unset", source, (key,), surface, perform)
 
     def copy_to_remote(self, source: str, key: str, request, sink, *,
-                       surface: str = "cli") -> dict:
+                       surface: str = "cli", expected_revision: str | None = None) -> dict:
         """Hand one local value to a remote broker's own ``set`` (spec 073).
 
         Every argument refusal precedes audit intent and any read. The value
@@ -974,9 +895,18 @@ class SecretService:
             raise SecretBrokerError("input_invalid", "remote secret request is invalid")
         if not callable(getattr(sink, "put", None)):
             raise SecretBrokerError("input_invalid", "remote secret sink is invalid")
+        if expected_revision is not None and (
+                not isinstance(expected_revision, str) or not expected_revision.isascii()
+                or len(expected_revision) != 35 or not expected_revision.startswith("r1_")
+                or any(c not in "0123456789abcdef" for c in expected_revision[3:])):
+            raise SecretBrokerError("input_invalid", "source revision is invalid")
 
         def perform(correlation):
-            _, document = self._document(source)
+            safe, document = self._document(source)
+            if expected_revision is not None:
+                current = opaque_revision(load_revision_key(self.revision_key_path), safe.content)
+                if not hmac.compare_digest(expected_revision, current):
+                    raise SecretBrokerError("revision_conflict", "source revision no longer matches")
             record = document.entries.get(key)
             if record is None:
                 raise SecretBrokerError("key_missing", "secret key does not exist")

@@ -2195,6 +2195,9 @@ class WorkspaceService:
                 "workspace_materialization_unavailable",
                 "CI source and disposable checkout must be distinct siblings")
         if restore_authority is not None:
+            from sandbox.workspaces.content import active_checkout_rows
+            if active_checkout_rows(checkout):
+                raise WorkspaceIndexError('workspace_materialization_busy', 'an admitted job still owns the checkout')
             artifact = Path(str(restore_authority.get("artifact_locator")))
             artifact_digest = restore_authority.get("artifact_digest")
             artifact_root = self._repo().index_path.parent / "ci-materializations"
@@ -2227,6 +2230,19 @@ class WorkspaceService:
                 "lock": {"key": "retained-artifact", "acquired": True,
                          "released": True},
             }
+        elif submission.source.content_digest is not None and checkout.is_dir():
+            # The transport already prepared these measured bytes. A later
+            # source publication must not make CI copy a different generation.
+            from sandbox.workspaces.content import verify_content
+            verify_content(checkout, submission.source.content_digest, expected_commit=submission.source.commit)
+            receipt_payload = {
+                'schema': 1, 'workspace_path': str(checkout),
+                'source_identity': submission.source.identity,
+                'history_mode': 'prepared-content', 'hardlinked_files': 0,
+                'copied_git_entries': 0, 'fallback_reason': None,
+                'source_mutation_check': 'content-verified',
+                'lock': {'key': 'admission', 'acquired': True, 'released': False},
+            }
         else:
             from sandbox.workspaces.checkout import (
                 WorkspaceMaterializationError, materialize, plan_materialization,
@@ -2239,6 +2255,9 @@ class WorkspaceService:
                 receipt = materialize(plan_materialization(
                     source, checkout, source_identity=source_identity,
                     workspace_label=submission.workspace_label,
+                    content_digest=submission.source.content_digest,
+                    request_id=submission.request_id, project_identity=submission.project_identity,
+                    source_commit=submission.source.commit,
                 ))
             except WorkspaceMaterializationError as exc:
                 raise WorkspaceIndexError(

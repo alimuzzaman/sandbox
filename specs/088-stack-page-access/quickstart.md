@@ -1,8 +1,9 @@
 # Reviewable future runtime acceptance plan
 
 Status: NOT EXECUTED. This plan describes full US1–US6 acceptance, not checkpoint
-completion or installed capability. It authorizes no runtime action. Current design
-worker ran no tests/builds/apps/network/remote jobs or credential/link mutations.
+completion or installed capability. It authorizes no runtime action. Local mocked
+checks are recorded separately in the handback; no live credential/link mutation or
+runtime acceptance has been performed by this reconciliation.
 
 ## Preconditions and stop boundaries
 
@@ -194,11 +195,11 @@ updates the owned generated bundle. Use finite-timeout durable execution where
 supported; retain replay-safe request and job id, no second submission identity on
 ambiguous acceptance. Never pass parent os.environ to test subprocesses; use
 synthetic_environment/run_test_process. Report command, counts, first failure <=40
-lines and complete safe log path. This pass executes none of these.
+lines and complete safe log path. Actual commands/results belong in the handback.
 
 Store evidence under the shared scratch root, with reviewed HEAD, installed revisions,
 owners, timestamps, browser network conditions, expected/observed outcomes per SC-001–010
-and every unverified case. Full acceptance requires independent PERSONAL Sol high
+and every unverified case. Full acceptance requires independent Codex Office GPT-6.1-Sol high
 source/authentication review and owner sign-off, not a focused green count.
 
 Before teardown list all fixture attempts and reconcile original ids plus WP keys.

@@ -1,7 +1,18 @@
-import { $ } from "../dom";
+import { $, esc } from "../dom";
 import { currentRoute, hostContext, localHostPath, navigate } from "../router";
 import { act } from "../actions";
 import { toast } from "../ui/toast";
+import { store } from "../state";
+import { busyHolder } from "../ui/poller";
+
+// Drafts contain only local form values, never responses, tokens or URLs.
+const draft = { project: "", label: "" };
+export function captureCreateDraft(): void {
+  const project = document.getElementById("createProject") as HTMLInputElement | null;
+  const label = document.getElementById("createLabel") as HTMLInputElement | null;
+  if (project) draft.project = project.value;
+  if (label) draft.label = label.value;
+}
 
 // Public entry kept for the existing call sites (sidebar "New" button + the
 // welcome CTA) — both just route to this page.
@@ -15,10 +26,17 @@ export function doCreate(): void {
 
 async function chooseProjectDirectory(): Promise<void> {
   const selected = await window.sandboxDesktop?.chooseProjectDirectory();
-  if (selected) ($("createProject") as HTMLInputElement).value = selected;
+  if (selected) {
+    draft.project = selected;
+    const input = document.getElementById("createProject") as HTMLInputElement | null;
+    if (input) { input.value = selected; input.focus(); }
+  }
 }
 
 export function initCreateView(): void {
+  for (const id of ["createProject", "createLabel"]) {
+    document.getElementById(id)?.addEventListener("input", captureCreateDraft);
+  }
   const button = document.getElementById("chooseProject");
   if (!button || !window.sandboxDesktop) return;
   button.hidden = false;
@@ -26,6 +44,8 @@ export function initCreateView(): void {
 }
 
 export function submitCreate(): void {
+  if (currentRoute().page !== "create" || hostContext(currentRoute()).kind !== "local") return;
+  captureCreateDraft();
   const projectDir = ($("createProject") as HTMLInputElement).value.trim();
   const label = ($("createLabel") as HTMLInputElement).value.trim().toLowerCase();
   if (!projectDir.startsWith("/")) {
@@ -40,6 +60,7 @@ export function submitCreate(): void {
 }
 
 export function createView(): string {
+  const busy = busyHolder(store.busy, "*");
   return `<div class="max-w-2xl mx-auto px-6 py-8">
     <a href="${localHostPath()}" data-link class="inline-flex items-center gap-1 text-[12.5px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
       <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -51,16 +72,16 @@ export function createView(): string {
       <code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">sandbox.config.json</code>,
       and the resolved directory becomes the instance identity.</p>
 
-    <div class="mt-5 space-y-4 rounded-lg border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+    <form onsubmit="event.preventDefault(); sb.submitCreate()" class="mt-5 space-y-4 rounded-lg border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
       <div><label for="createProject" class="block text-[12px] font-semibold text-neutral-800 dark:text-neutral-100">Local project directory</label>
       <p class="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400">Existing absolute path on this machine. It is validated again by the local-only dashboard service.</p>
-      <div class="mt-2 flex gap-2"><input id="createProject" autocomplete="off" placeholder="/Users/you/Sites/plugin" class="min-w-0 flex-1 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-200 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100">
+      <div class="mt-2 flex gap-2"><input id="createProject" value="${esc(draft.project)}" autocomplete="off" placeholder="/Users/you/Sites/plugin" class="min-w-0 flex-1 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-200 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100">
       <button id="chooseProject" hidden type="button" class="rounded-lg border border-neutral-300 px-3 py-2 text-[13px] font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-800">Choose folder</button></div></div>
       <div><label for="createLabel" class="block text-[12px] font-semibold text-neutral-800 dark:text-neutral-100">Instance label <span class="font-normal text-neutral-400">optional</span></label>
-      <input id="createLabel" autocomplete="off" maxlength="31" placeholder="review" class="mt-2 w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-200 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"></div>
+      <input id="createLabel" value="${esc(draft.label)}" autocomplete="off" maxlength="31" placeholder="review" class="mt-2 w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-200 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"></div>
       <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">Creates on the local host only. Remote creation is unavailable until remote lifecycle operations have a service-backed API.</div>
-      <button onclick="sb.submitCreate()" class="rounded-lg bg-blue-700 px-4 py-2 text-[13px] font-semibold text-white hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500">Create local instance</button>
-    </div>
+      <button type="submit" ${busy ? "disabled" : ""} class="rounded-lg bg-blue-700 px-4 py-2 text-[13px] font-semibold text-white hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500">${busy ? "Action pending · see activity" : "Create local instance"}</button>
+    </form>
 
     <p class="mt-4 text-[12.5px] text-neutral-500 dark:text-neutral-400">Creation runs as a background job. Progress opens in the activity panel.</p>
 

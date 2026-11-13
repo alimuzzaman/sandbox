@@ -19,6 +19,24 @@ from sandbox.jobs.models import ResolvedTarget
 from sandbox.transports.remote_jobs import RemoteJobTransport
 
 
+_SOURCE_COMMIT = 'c' * 40
+_CONTENT_DIGEST = 'sha256:' + 'f' * 64
+
+
+def _measured_matrix_ack(raw):
+    """Explicit wire double; real content admission is covered separately."""
+    payload = json.loads(raw)
+    receipt = {'ok': True, 'status': 'accepted',
+        'acceptance_contract': 'job.acceptance-receipt.v1',
+        'request_id': None, 'request_digest': 'd' * 64,
+        'source': {'identity': 'sha256:i', 'commit': _SOURCE_COMMIT,
+                   'dirty': False, 'dirty_digest': None, 'content_digest': _CONTENT_DIGEST}}
+    payload.update(receipt)
+    for child in payload['children']:
+        child.update(receipt, workspace=child['job_id'])
+    return json.dumps(payload)
+
+
 def _load_mcp_ci_tool():
     fake_app = types.ModuleType("app")
     fake_app.SANDBOX_ROOT = Path("/tmp/sandbox")
@@ -123,11 +141,11 @@ class RemoteCIJobTests(unittest.TestCase):
     def test_remote_matrix_control_contains_explicit_child_plan(self):
         calls = []
         transport = RemoteJobTransport(
-            deploy=lambda *_: {"target_path": "/srv/p", "commit": "c", "dirty": False,
-                               "dirty_digest": "d", "identity": "sha256:i"},
+            deploy=lambda *_: {"target_path": "/srv/p", "commit": _SOURCE_COMMIT, "dirty": False,
+                               "dirty_digest": None, "identity": "sha256:i", "content_digest": _CONTENT_DIGEST},
             ssh_run=lambda _remote, command, timeout: calls.append(command) or SimpleNamespace(
                 returncode=0,
-                stdout=('{"ok":true,"kind":"matrix","parent_job_id":"p","children":['
+                stdout=_measured_matrix_ack('{"ok":true,"kind":"matrix","parent_job_id":"p","children":['
                         '{"job_id":"a","execution_policy":{"profile":"exec","deadline_seconds":60,'
                         '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,'
                         '"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}},'
@@ -135,7 +153,7 @@ class RemoteCIJobTests(unittest.TestCase):
                         '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,'
                         '"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}]}\n')),
             remote_lookup=lambda _name: {"provisioned": True,
-                                         "capabilities": ["job.exec", "job.execution-policy.v1"]},
+                                         "capabilities": ["job.exec", "job.execution-policy.v1", "job.acceptance-receipt.v1", "job.source-content.v1"]},
             remote_sb_path=lambda _remote: "/srv/sandbox/sb-src/sb",
         )
         from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -205,11 +223,11 @@ class RemoteCIJobTests(unittest.TestCase):
     def test_remote_matrix_plan_carries_dependencies_and_accepted_differences(self):
         calls = []
         transport = RemoteJobTransport(
-            deploy=lambda *_: {"target_path": "/srv/p", "commit": "c", "dirty": False,
-                               "dirty_digest": "d", "identity": "sha256:i"},
+            deploy=lambda *_: {"target_path": "/srv/p", "commit": _SOURCE_COMMIT, "dirty": False,
+                               "dirty_digest": None, "identity": "sha256:i", "content_digest": _CONTENT_DIGEST},
             ssh_run=lambda _remote, command, timeout: calls.append(command) or SimpleNamespace(
                 returncode=0,
-                stdout=('{"ok":true,"kind":"matrix","parent_job_id":"p","children":['
+                stdout=_measured_matrix_ack('{"ok":true,"kind":"matrix","parent_job_id":"p","children":['
                         '{"job_id":"build","execution_policy":{"profile":"exec","deadline_seconds":60,'
                         '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,'
                         '"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}},'
@@ -218,7 +236,7 @@ class RemoteCIJobTests(unittest.TestCase):
                         '"cancel_grace_seconds":20,"cancel_on_stall":true,"cleanup_policy":"on-success","provenance":{}}}]}'),
             ),
             remote_lookup=lambda _name: {"provisioned": True,
-                                         "capabilities": ["job.exec", "job.execution-policy.v1"]},
+                                         "capabilities": ["job.exec", "job.execution-policy.v1", "job.acceptance-receipt.v1", "job.source-content.v1"]},
         )
         from sandbox.jobs.models import JobSubmission, SourceIdentity
         submissions = [

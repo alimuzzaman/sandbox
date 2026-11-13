@@ -111,7 +111,7 @@ def _revision_mismatch_message(installed: object, controller: object,
             f"checkout at the installed revision")
 
 
-def _require_compatible_runtime(remote: str, record: dict) -> None:
+def _require_compatible_runtime(remote: str, record: dict, *, timeout_seconds=None) -> None:
     """Spec 061 FR-003: admit the registered runtime when it is this exact
     revision, or when the live status verdict says it serves this
     controller's protocol. The live probe runs only on a revision difference.
@@ -125,7 +125,8 @@ def _require_compatible_runtime(remote: str, record: dict) -> None:
     if installed == controller and not strict_requested():
         return
     try:
-        status = _remote.remote_runtime_status_for_operation(record)
+        status = (_remote.remote_runtime_status_for_operation(record) if timeout_seconds is None else
+                  _remote.remote_runtime_status_for_operation(record, timeout_seconds=timeout_seconds))
     except Exception:  # noqa: BLE001 - remote detail is never forwarded
         status = None
     ok, state = admitted(status)
@@ -138,21 +139,31 @@ def _require_compatible_runtime(remote: str, record: dict) -> None:
     )
 
 
-def _build_host_memory_service(remote: str | None = None):
+def _build_host_memory_service(remote: str | None = None, *, budget_seconds=15):
     """Build the remote-only Feature 046 controller service."""
     if not remote:
         raise ValueError("remote_required")
     from sandbox.core import _remote
-    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+    import time
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError, validate_request
     from .host_memory.service import HostMemoryService
 
-    record = _remote.get_remote(remote)
+    validate_request({'action': 'host_memory_status', 'remote_name': remote, 'budget_seconds': budget_seconds})
+    deadline = time.monotonic() + budget_seconds
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise RemoteProtocolError('remote_budget_exhausted', 'host-memory observation exhausted its operation budget')
+        return value
+    record = _remote.get_remote(remote, budget_seconds=remaining())
     if not isinstance(record, dict):
         raise ValueError("unknown_remote")
-    _require_compatible_runtime(remote, record)
+    _require_compatible_runtime(remote, record, timeout_seconds=remaining())
 
     def request(selected, payload):
-        return _remote.remote_host_memory_request(selected, payload)
+        available = remaining()
+        payload = {**payload, 'budget_seconds': min(payload['budget_seconds'], available)}
+        return _remote.remote_host_memory_request(selected, payload, timeout_seconds=available)
 
     adapter = HostMemoryRemote(remote, record, request)
     from pathlib import Path
@@ -168,7 +179,7 @@ def _build_host_memory_service(remote: str | None = None):
 
 def host_memory_status(remote: str, *, budget_seconds: float = 15):
     """Return the bounded status envelope without exposing service authority."""
-    return _build_host_memory_service(remote).status(budget_seconds)
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).status(budget_seconds)
 
 
 def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) -> dict:
@@ -178,15 +189,36 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
     The adapter validates the service marker, revision and entire status schema.
     """
     import re
+    import time
     from sandbox.core import _remote
-    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError, validate_request
 
-    record = _remote.get_remote(remote)
+    validate_request({'action': 'host_memory_status', 'remote_name': remote, 'budget_seconds': budget_seconds})
+    deadline = time.monotonic() + budget_seconds
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise RemoteProtocolError('remote_budget_exhausted', 'authenticated identity observation exhausted its operation budget')
+        return value
+    record = _remote.get_remote(remote, budget_seconds=remaining())
     if not isinstance(record, dict):
         raise ValueError("recovery_target_identity_unavailable")
-    _require_compatible_runtime(remote, record)
-    adapter = HostMemoryRemote(remote, record, _remote.remote_host_memory_request)
-    value = adapter.call("host_memory_status", budget_seconds=budget_seconds)
+    _require_compatible_runtime(remote, record, timeout_seconds=remaining())
+    adapter = HostMemoryRemote(remote, record, lambda selected, payload:
+        _remote.remote_host_memory_request(selected, payload, timeout_seconds=remaining()))
+    try:
+        value = adapter.call("host_memory_status", budget_seconds=remaining())
+    except RemoteProtocolError as exc:
+        from sandbox.remote_runtime.join_adoption import joined
+        if exc.code != 'remote_runtime_revision_mismatch' or not joined(record):
+            raise
+        # This is a fresh read, before any operation binding or effect. Keep
+        # previously constructed adapters and persisted plans revision-bound.
+        from sandbox.remote_runtime.join_revision import reconnect_join_record
+        record = reconnect_join_record(remote, record, budget_seconds=remaining())
+        adapter = HostMemoryRemote(remote, record, lambda selected, payload:
+            _remote.remote_host_memory_request(selected, payload, timeout_seconds=remaining()))
+        value = adapter.call("host_memory_status", budget_seconds=remaining())
     identity = value.get("target_identity")
     if (value.get("evidence_state") not in {"known", "partial", "unmanaged"}
             or not isinstance(identity, str)
@@ -198,7 +230,7 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
 
 def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
     """Return Feature 046's immutable read-only governance projection only."""
-    service = _build_host_memory_service(remote)
+    service = _build_host_memory_service(remote, budget_seconds=budget_seconds)
     result = service.status(budget_seconds)
     if not result.get("ok"):
         error = result.get("error") or {}
@@ -208,23 +240,23 @@ def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
 
 def host_memory_plan(remote: str, *, size_gib: int = 4, budget_seconds: float = 15):
     """Return one deterministic controller-owned enable plan without mutation."""
-    return _build_host_memory_service(remote).plan(size_gib, budget_seconds)
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).plan(size_gib, budget_seconds)
 
 
 def host_memory_apply(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
     """Execute confirmed host-memory apply with normative outcome envelope."""
-    return _build_host_memory_service(remote).apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)
 
 def host_memory_history(remote: str, *, since=None, until=None, limit: int = 288, budget_seconds: float = 15):
     """Retrieve bounded aggregate history window for the remote host."""
-    return _build_host_memory_service(remote).history(
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).history(
         since=since, until=until, limit=limit, budget_seconds=budget_seconds,
     )
 
 
 def host_memory_disable(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
     """Execute confirmed host-memory disable with normative outcome envelope."""
-    service = _build_host_memory_service(remote)
+    service = _build_host_memory_service(remote, budget_seconds=budget_seconds)
     if not plan_id:
         plan_res = service.disable_plan(budget_seconds=min(budget_seconds, 15))
         if not plan_res.get("ok"):

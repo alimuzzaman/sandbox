@@ -7,6 +7,7 @@ import { fetchData, fetchRemotes, fetchUsage, fetchRemote, fetchHosting } from "
 import { navigate, initRouter, onRoute, currentRoute, isHostingRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
+import { initNavigation } from "./ui/navigation";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
 import { rowMenuToggle, rowMenuClose, initRowMenuClose } from "./ui/rowmenu";
 import {
@@ -17,7 +18,7 @@ import {
   act, op, doFocus, doServer, doDelete, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
-import { doCreate, submitCreate, initCreateView } from "./pages/create";
+import { doCreate, submitCreate } from "./pages/create";
 import { hostingStillChecking } from "./pages/hosting";
 import { shareLinks, shareStack } from "./pages/share";
 import { signInStack } from "./pages/stack";
@@ -245,6 +246,7 @@ function boot(): void {
   initConsole();
   initCselOutsideClose();
   initRowMenuClose();
+  const closeNavigation = initNavigation();
   initRouter();
 
   // Static sidebar buttons (not data-link).
@@ -252,6 +254,7 @@ function boot(): void {
   ($("startAll") as HTMLButtonElement).onclick = () => { if (requireLocal("Start all")) act("*", "start-all"); };
   ($("stopAll") as HTMLButtonElement).onclick = () => { if (requireLocal("Stop all")) act("*", "stop-all"); };
   ($("usageBtn") as HTMLAnchorElement).onclick = (event) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     event.stopPropagation();
     void showUsage();
@@ -261,14 +264,14 @@ function boot(): void {
     if (!requireLocal("Terminal")) return;
     const inst = activeInstanceName() || (store.data.instances[0] && store.data.instances[0].name);
     if (!inst) { toast("create an instance first", "err"); return; }
+    // The route callback opens the terminal once and retains its real opener.
     navigate(instancePath(inst, true));
-    openTerminal(inst);
   };
 
   // Re-render whenever the route changes (link clicks, back/forward, navigate()).
   onRoute((route) => {
+    closeNavigation();
     render();
-    if (route.page === "create") initCreateView();
     if (isHostingRoute(route)) refreshHosting();
     if (route.page === "remote" || route.page === "remote-instance" || route.page === "home" || route.page === "local-host") {
       void refresh();
@@ -283,7 +286,6 @@ function boot(): void {
 
   // Initial paint from current URL, then start polling.
   render();
-  if (currentRoute().page === "create") initCreateView();
   if (isHostingRoute()) refreshHosting();
   const r0 = currentRoute();
   if (r0.page === "instance" && r0.console) openTerminal(r0.name);

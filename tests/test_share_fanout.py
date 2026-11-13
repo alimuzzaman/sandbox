@@ -11,12 +11,14 @@ from unittest.mock import patch
 
 from sandbox.commands import host_share
 from sandbox.hosting import share, stack_registry
-from sandbox.hosting.share import attempts as ledger, fanout, stack_page
+from sandbox.hosting.share import attempts as ledger, fanout, stack_page, controller
 
 # Capture the production boundary before each fixture replaces transport/mint ports.
 _REAL_MINT_LINK = host_share.mint_link
 _REAL_DESCRIPTOR = fanout.descriptor
 _REAL_INSTALL_WORDPRESS_KEY = stack_page.install_wordpress_key
+_REAL_INSPECT_SERVICES = fanout.inspect_services
+_REAL_MANAGE = controller.BoundRuntime.manage
 
 
 class FanoutTests(unittest.TestCase):
@@ -43,6 +45,7 @@ class FanoutTests(unittest.TestCase):
         import sandbox.core._remote as remote
         # Fail closed on unconfigured cleanup effects; never consult real remotes.
         self.remote_entry = mock(remote, "get_remote", return_value={"provisioned": True})
+        mock(remote, "resolve_sandbox_home", return_value="/srv/fixture")
         self.remote_execute = mock(commands, "_remote_checked",
                                    side_effect=AssertionError("unexpected remote execution"))
         self.real_effects = commands._host_share_effects
@@ -51,6 +54,13 @@ class FanoutTests(unittest.TestCase):
             self.events.append(("locks", tuple(targets)))
             yield self.state
         mock(commands, "_host_share_effects", side_effect=effects)
+        @contextlib.contextmanager
+        def physical(targets):
+            yield controller.Ownership([(target, {"provisioned": True}, {}) for target in targets])
+        mock(controller, "hold", side_effect=physical)
+        mock(controller.BoundRuntime, "require_applied")
+        mock(fanout, "inspect_services", side_effect=lambda entry, compose, wp: controller.Services(
+            ledger.RuntimeIdentity("runtime_fingerprint", "a" * 64), "c" * 64, "d" * 64 if wp else None))
         mock(hosting, "load_host_state", return_value=self.state)
         mock(stack_registry, "read", return_value=self.registry)
         mock(hosting, "validate_manifest", side_effect=lambda directory, env: next(
@@ -59,10 +69,15 @@ class FanoutTests(unittest.TestCase):
              name=None, project_dir=None, environment=None: next(
             member for member in self.members if member.stack["slug"] == stack))
         self.capability = mock(host_share, "_remote_site", return_value={"ok": True, "capabilities": sorted(fanout.CAPABILITIES)})
+        def manage(bound, verb, name, *extra, **kwargs):
+            if verb == "list":
+                return self.capability.return_value
+            return _REAL_MANAGE(bound, verb, name, *extra, **kwargs)
+        mock(controller.BoundRuntime, "manage", autospec=True, side_effect=manage)
         mock(fanout.login, "assert_applicable")
         mock(fanout.login, "enabled_until_epoch", return_value=self.now + 200)
         mock(fanout, "descriptor", side_effect=self.descriptor)
-        self.real_observe = fanout.observe
+        self.real_observe = lambda entry, compose, wp: _REAL_INSPECT_SERVICES(entry, compose, wp).identity
         mock(fanout, "observe", return_value=ledger.RuntimeIdentity("runtime_fingerprint", "a" * 64))
         self.active_mint = None
         original_begin_mint = ledger.AttemptRepository.begin_mint
@@ -81,7 +96,7 @@ class FanoutTests(unittest.TestCase):
                        "allowed_host_suffixes": ["example.test"]}
         validated = {"project": slug, "environment": "dev", "login_service": declaration,
                      "compose": {"files": ["compose.yml"], "service": "web"},
-                     "routes": [{"hostname": f"{slug}.example.test", "primary": True}]}
+                     "routes": [{"hostname": f"{slug}.example.test", "primary": True, "mode": "serve"}]}
         record = {"remote": "dev", "slug": slug, "project": slug, "environment": "dev", "uses": uses,
                   "hostnames": [f"{slug}.example.test"]}
         return host_share.ShareTarget("dev", validated, {"provisioned": True}, slug + "/dev", "/src/" + slug, record)
@@ -89,9 +104,12 @@ class FanoutTests(unittest.TestCase):
     def descriptor(self, found, minted, page):
         return ledger.CleanupDescriptor(found.validated["login_service"]["share"]["hostname"],
             ledger.RuntimeIdentity("runtime_fingerprint", "a" * 64),
-            ledger.ComposeCleanup(found.stack["slug"], ("/srv/source/compose.yml",), "/srv/override.yml", "/srv/environment.env"))
+            ledger.ComposeCleanup("sandbox-host-" + found.stack["slug"] + "-dev",
+                (f"/srv/fixture/deploy-src/hosts/{found.stack['slug']}/compose.yml",),
+                f"/srv/fixture/runtime/hosts/{found.stack['slug']}/dev/compose.override.yml",
+                f"/srv/fixture/runtime/hosts/{found.stack['slug']}/dev/environment.env"))
 
-    def install_key(self, found, page, expiry):
+    def install_key(self, found, page, expiry, *, runtime=None):
         # Read durable storage through the owner already holding the parent lock.
         # recorded() discovers new repository instances and correctly refuses it.
         self.assertIsNotNone(self.active_mint)
@@ -106,8 +124,10 @@ class FanoutTests(unittest.TestCase):
         self.assertEqual(len(attempt.grants), 2)
         self.events.append(("key", found.stack["slug"]))
 
-    def mint_link(self, validated, entry, request, *, minted, stack_record):
+    def mint_link(self, validated, entry, request, *, minted, stack_record, on_completed=None, runtime=None):
         self.events.append(("mint", validated["project"], minted, stack_record))
+        if on_completed is not None:
+            on_completed()
         return minted, {"ok": True, "id": minted.link_id, "expires_at": minted.expires_at, "uses": request.uses}
 
     def test_parent_last_same_original_child_credentials_and_common_window(self):
@@ -144,30 +164,40 @@ class FanoutTests(unittest.TestCase):
 
         sent, returned = [], []
 
-        def transport(validated, _remote, entry, verb, *, input_data):
+        def transport(validated, _remote, entry, verb, *, input_data, on_completed=None):
             self.assertEqual((entry, verb), ("share", "mint"))
             envelope = json.loads(input_data)
             sent.append((validated["project"], envelope))
             self.assertEqual(set(envelope), {"link", "stack"})
-            config = {**validated["login_service"], "enabled_until_epoch": self.now + 200}
+            config = {**validated["login_service"], "enabled_until_epoch": self.now + 200,
+                      "panel_share": {"agent_mint": True}}
             output = io.StringIO()
             code = runtime.manage(config, [verb, entry],
                 Path(self.tmp.name) / "gate" / validated["project"],
                 stdin=io.StringIO(input_data), stdout=output, clock=lambda: self.now)
             self.assertEqual(code, 0)
+            if on_completed is not None:
+                on_completed()
             reply = json.loads(output.getvalue())
             self.assertTrue(reply["ok"], reply)
             return reply
 
-        def real_mint(validated, entry, request, *, minted, stack_record):
+        def real_mint(validated, entry, request, *, minted, stack_record, on_completed=None, runtime=None):
             actual, reply = _REAL_MINT_LINK(validated, entry, request,
-                                           minted=minted, stack_record=stack_record)
+                                           minted=minted, stack_record=stack_record, on_completed=on_completed,
+                                           runtime=runtime)
             self.assertIs(actual, minted)
             returned.append(actual)
             return actual, reply
 
+        def bound_transport(bound, verb, entry, *, payload, on_completed):
+            name = json.loads(payload)["stack"]["title"]
+            member = next(row for row in self.members if row.validated["project"] == name)
+            return transport(member.validated, member.entry, entry, verb,
+                             input_data=payload, on_completed=on_completed)
+
         with patch.object(host_share, "mint_link", side_effect=real_mint), \
-                patch.object(commands, "_site_remote", side_effect=transport), \
+                patch.object(controller.BoundRuntime, "manage", new=bound_transport), \
                 patch.object(share, "mint", wraps=share.mint) as allocate:
             result = fanout.create(self.members[0], self.request)
 
@@ -228,7 +258,7 @@ class FanoutTests(unittest.TestCase):
 
     def test_failed_reply_never_remints_original_ids(self):
         self.mint.side_effect = lambda *a, **kw: (kw["minted"], {"ok": True, "id": "wrong"})
-        with patch.object(fanout, "cleanup", side_effect=lambda repo, attempt: fanout.pending(attempt)):
+        with patch.object(fanout, "cleanup", side_effect=lambda repo, attempt, **kw: fanout.pending(attempt)):
             result = fanout.create(self.members[0], self.request)
         self.assertFalse(result["ok"])
         self.assertEqual(self.mint.call_count, 1)
@@ -294,7 +324,7 @@ class FanoutTests(unittest.TestCase):
             if stage == "active" and phase == "active":
                 raise Crash()
             return original_transition(repo, ident, phase)
-        def install(found, page, expiry):
+        def install(found, page, expiry, *, runtime=None):
             self.install_key(found, page, expiry)
             if stage == "key":
                 raise Crash()
@@ -317,6 +347,20 @@ class FanoutTests(unittest.TestCase):
              patch.object(commands, "_remote_checked", return_value=json.dumps(
                  {"ok": True, "revoked_links": 1, "revoked_sessions": 0})):
             result = fanout.revoke_attempt(attempt)
+        if stage == "key":
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["phase"], "cleanup_pending")
+            self.assertTrue(all(row["reason_code"] == "mint_completion_unknown"
+                                for row in result["still_live"]))
+            self.assertEqual(tuple(g.id for g in fanout.recorded("dev", stack="parent")[0].grants), original_ids)
+            # A crashed process cannot prove its original writer has stopped.
+            # Repeated revoke must retain the original fence and never remint.
+            with patch.object(share, "mint") as allocate:
+                again = fanout.create(self.members[0], self.request)
+            allocate.assert_not_called()
+            self.assertEqual(again["attempt_id"], attempt.id)
+            self.assertFalse(again["ok"])
+            return
         self.assertTrue(result["ok"])
         self.assertEqual(tuple(g.id for g in fanout.recorded("dev", stack="parent")[0].grants), original_ids)
         self.assertEqual(fanout.recorded("dev", stack="parent")[0].phase, "revoked")
@@ -324,13 +368,13 @@ class FanoutTests(unittest.TestCase):
     def test_crash_after_prepare_recovers_original_ids(self):
         self.crash_at("prepare")
 
-    def test_crash_after_key_recovers_original_ids(self):
+    def test_crash_after_key_retains_original_unknown_fence(self):
         self.crash_at("key")
 
-    def test_crash_after_child_mint_recovers_original_ids(self):
+    def test_crash_after_child_mint_uses_durable_original_settlement(self):
         self.crash_at("child")
 
-    def test_crash_after_parent_mint_recovers_original_ids(self):
+    def test_crash_after_parent_mint_uses_durable_original_settlement(self):
         self.crash_at("parent")
 
     def test_crash_before_active_recovers_original_ids(self):
@@ -338,7 +382,7 @@ class FanoutTests(unittest.TestCase):
 
     def test_lost_reply_blocks_fresh_allocation_until_cleanup(self):
         self.mint.side_effect = TimeoutError("lost reply")
-        with patch.object(fanout, "cleanup", side_effect=lambda repo, attempt: fanout.pending(attempt)):
+        with patch.object(fanout, "cleanup", side_effect=lambda repo, attempt, **kw: fanout.pending(attempt)):
             first = fanout.create(self.members[0], self.request)
             with patch.object(share, "mint") as allocate:
                 again = fanout.create(self.members[0], self.request)
@@ -411,7 +455,7 @@ class FanoutTests(unittest.TestCase):
                  "revoked_sessions": 0, "revoked_keys": 0}) as revoke:
             result = host_share.revoke_share("dev", "all", stack="parent")
         self.assertTrue(result["ok"])
-        durable.assert_called_once_with(row)
+        durable.assert_called_once_with(row, require_opt_in=False)
         self.assertEqual([call.args[2] for call in revoke.call_args_list], [legacy])
 
     def test_companion_audit_has_only_safe_identity_fields(self):
@@ -469,12 +513,22 @@ class FanoutTests(unittest.TestCase):
         import sandbox.commands.hosting as commands
         import sandbox.core._remote as remote
         with patch.object(remote, "get_remote", return_value={"provisioned": True}), \
-             patch.object(fanout, "observe", return_value=ledger.RuntimeIdentity("runtime_fingerprint", "b" * 64)), \
+             patch.object(fanout, "inspect_services", return_value=controller.Services(
+                 ledger.RuntimeIdentity("runtime_fingerprint", "b" * 64), "e" * 64, None)), \
              patch.object(commands, "_remote_checked") as execute:
             result = fanout.revoke_attempt(fanout.recorded("dev", stack="parent")[0])
         self.assertFalse(result["ok"])
         self.assertEqual(len(result["still_live"]), 2)
         execute.assert_not_called()
+
+    def test_panel_revoke_rechecks_running_opt_in_before_any_gate_or_key_effect(self):
+        fanout.create(self.members[0], self.request)
+        with patch.object(controller.BoundRuntime, "require_enabled",
+                          side_effect=share.ShareRefusal("agent_mint_not_enabled", "disabled")) as enabled:
+            result = fanout.revoke_attempt(fanout.recorded("dev", stack="parent")[0], require_opt_in=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(enabled.call_count, 2)
+        self.remote_execute.assert_not_called()
 
     def test_gate_absence_still_requires_wordpress_key_removal(self):
         result = fanout.create(self.members[0], self.request)
@@ -485,16 +539,18 @@ class FanoutTests(unittest.TestCase):
         ident = "l-" + "c" * 12
         descriptor = ledger.CleanupDescriptor("wp.example.test",
             ledger.RuntimeIdentity("runtime_fingerprint", "a" * 64),
-            ledger.ComposeCleanup("wp", ("/srv/compose.yml",), "/srv/override.yml", "/srv/environment.env"),
+            ledger.ComposeCleanup("sandbox-host-wp-dev", ("/srv/fixture/deploy-src/hosts/wp/compose.yml",),
+                "/srv/fixture/runtime/hosts/wp/dev/compose.override.yml", "/srv/fixture/runtime/hosts/wp/dev/environment.env"),
             ledger.WordPressCleanup("web", "/var/www/html/wp-content/mu-plugins/auto.php", ident[2:], self.now + 200))
         attempt = ledger.Attempt("a-" + "d" * 32, parent, self.now, self.now + 200, "prepared",
             (ledger.Grant(parent.target, "share", ident, self.now + 200, cleanup=descriptor),))
         wp_repo.prepare(attempt)
         wp_repo.begin_mint(attempt.id, ident)
+        wp_repo.update_grant(attempt.id, ident, "live")
         import sandbox.commands.hosting as commands
         import sandbox.core._remote as remote
         def execute(entry, command, **kwargs):
-            if " exec -T web " in command:
+            if "sandbox-key-absent" in command:
                 raise RuntimeError("key removal unavailable")
             raise fanout.login.LoginServiceError("site_link_unknown", "absent")
         with patch.object(remote, "get_remote", return_value={"provisioned": True}), \
@@ -509,7 +565,92 @@ class FanoutTests(unittest.TestCase):
             self.assertTrue(fanout.revoke_attempt(wp_repo.read(attempt.id))["ok"])
             self.assertTrue(fanout.revoke_attempt(wp_repo.read(attempt.id))["ok"])
 
-    def test_real_wordpress_descriptor_install_and_lost_reply_require_exact_cleanup_receipt(self):
+    def test_legacy_unknown_with_revoke_ack_cannot_close_or_allocate_while_original_is_delayed(self):
+        parent = ledger.Parent(fanout.target(self.members[0]), "parent")
+        repo = fanout.repository(parent)
+        ident = "l-" + "e" * 12
+        safe = replace(self.descriptor(self.members[0], None, None),
+            wordpress=ledger.WordPressCleanup("web", "/var/www/html/wp-content/mu-plugins/auto.php",
+                                             ident[2:], self.now + 200))
+        row = ledger.Attempt("a-" + "e" * 32, parent, self.now, self.now + 200, "prepared",
+            (ledger.Grant(parent.target, "share", ident, self.now + 200, cleanup=safe),))
+        repo.prepare(row)
+        repo.begin_mint(row.id, ident)
+        path = next(repo.root.glob("*.json"))
+        old = json.loads(path.read_text())
+        old["version"] = 2
+        old["attempts"][0]["grants"][0]["gate_revoked"] = True
+        del old["attempts"][0]["grants"][0]["original_settled"]
+        path.write_text(json.dumps(old))
+        pending = fanout.revoke_attempt(repo.read(row.id))
+        self.assertFalse(pending["ok"])
+        self.assertEqual(pending["still_live"][0]["reason_code"], "mint_completion_unknown")
+        self.remote_execute.assert_not_called()
+        # The old writer can still deliver its original result later. A new
+        # request must not infer that it has finished or allocate another link.
+        with patch.object(share, "mint") as allocate:
+            again = fanout.create(self.members[0], self.request)
+        allocate.assert_not_called()
+        self.assertFalse(again["ok"])
+        self.assertEqual(again["attempt_id"], row.id)
+        self.assertFalse(repo.read(row.id).grants[0].original_settled)
+
+    def test_legacy_terminal_and_mixed_attempts_keep_original_fences_after_v3_save(self):
+        from dataclasses import asdict
+        for case in ("non_wp", "wordpress", "mixed"):
+            with self.subTest(case=case), patch.object(fanout, "root",
+                    return_value=Path(self.tmp.name).resolve() / case):
+                parent = ledger.Parent(fanout.target(self.members[0]), "parent")
+                repo = fanout.repository(parent)
+                parent_id = "l-" + "e" * 12
+                safe = self.descriptor(self.members[0], None, None)
+                if case == "wordpress":
+                    safe = replace(safe, wordpress=ledger.WordPressCleanup("web",
+                        "/var/www/html/wp-content/mu-plugins/auto.php", parent_id[2:], self.now + 200))
+                grants = [ledger.Grant(parent.target, "share", parent_id, self.now + 200, cleanup=safe)]
+                if case == "mixed":
+                    grants.append(ledger.Grant(fanout.target(self.members[1]), "share", "l-" + "f" * 12,
+                        self.now + 200, cleanup=self.descriptor(self.members[1], None, None)))
+                row = ledger.Attempt("a-" + "e" * 32, parent, self.now, self.now + 200,
+                                     "prepared", tuple(grants))
+                repo.prepare(row)
+                old = asdict(row)
+                old["phase"] = "cleanup_pending" if case == "mixed" else "revoked"
+                for index, grant in enumerate(old["grants"]):
+                    del grant["original_settled"]
+                    grant.update(disposition="unknown" if index else "revoked",
+                                 gate_revoked=index == 0, wordpress_revoked=case == "wordpress")
+                path = next(repo.root.glob("*.json"))
+                path.write_text(json.dumps({"version": 2, "attempts": [old]}))
+                saved = repo.read(row.id)
+                self.assertEqual(saved.phase, "cleanup_pending")
+                self.assertEqual(saved.grants[0].disposition, "unknown")
+                self.assertFalse(saved.grants[0].gate_revoked)
+                self.assertFalse(saved.grants[0].wordpress_revoked)
+                self.assertFalse(saved.grants[0].original_settled)
+                self.assertEqual(len(saved.still_live(self.now)), len(grants))
+                # An unrelated save must not turn legacy terminal metadata into
+                # settlement proof or let the next process skip this original.
+                repo.transition(row.id, "revoking")
+                self.assertEqual(json.loads(path.read_text())["version"], 3)
+                self.capability.return_value = {"ok": True, "links": [], "sessions": []}
+                listing = host_share.list_shares("dev", stack="parent")
+                self.assertFalse(listing["ok"])
+                self.assertEqual(listing["attempts"][0]["grants"][0]["status"], "unknown")
+                reply = fanout.revoke_attempt(repo.read(row.id))
+                self.assertFalse(reply["ok"])
+                self.remote_execute.assert_not_called()
+                with patch.object(share, "mint") as allocate:
+                    again = fanout.create(self.members[0], self.request)
+                allocate.assert_not_called()
+                self.assertFalse(again["ok"])
+                self.assertEqual(again["attempt_id"], row.id)
+                self.assertFalse(repo.read(row.id).grants[0].original_settled)
+                repo.expire(now=self.now + 200)
+                self.assertEqual(repo.read(row.id).phase, "expired")
+                self.assertEqual(repo.read(row.id).still_live(self.now + 200), ())
+
+    def test_real_wordpress_descriptor_completed_mint_requires_exact_cleanup_receipt(self):
         import sandbox.commands.hosting as commands
         import sandbox.core._remote as remote
 
@@ -522,16 +663,20 @@ class FanoutTests(unittest.TestCase):
         installed, cleanup_calls = [], []
         marker = ["unconfirmed"]
 
-        def install(found, page, expires):
+        def install(found, page, expires, *, runtime=None):
             self.install_key(found, page, expires)
             if page["wordpress"]:
                 installed.append((page["wordpress"], expires))
-            _REAL_INSTALL_WORDPRESS_KEY(found, page, expires)
+            _REAL_INSTALL_WORDPRESS_KEY(found, page, expires, runtime=runtime)
 
-        def mint(validated, entry, request, *, minted, stack_record):
+        def mint(validated, entry, request, *, minted, stack_record, on_completed=None, runtime=None):
             if validated["project"] == "parent":
-                raise TimeoutError("synthetic lost parent mint acknowledgement")
-            return self.mint_link(validated, entry, request, minted=minted, stack_record=stack_record)
+                # Transport completed, but decoding/delivering its result failed.
+                # This is distinct from a still-running original operation.
+                on_completed()
+                raise ValueError("synthetic unreadable completed mint response")
+            return self.mint_link(validated, entry, request, minted=minted, stack_record=stack_record,
+                                  on_completed=on_completed)
 
         def execute(_entry, command, **kwargs):
             if "input_data" in kwargs:
@@ -566,11 +711,11 @@ class FanoutTests(unittest.TestCase):
         exact = f"sandbox-share-{wp.expires_at}-{wp.key_id}.php"
         self.assertTrue(any(exact in command for command in cleanup_calls))
 
-        # Retry must use original persisted cleanup identity even without a manifest.
+        # Retry uses persisted original identity without a manifest. The registered
+        # remote home still has to match before acquiring its physical lease.
         marker[0] = "sandbox-key-absent"
         cleanup_calls.clear()
         with patch.object(host_share, "resolve_target", side_effect=AssertionError("no manifest")), \
-                patch.object(remote, "resolve_sandbox_home", side_effect=AssertionError("no current home")), \
                 patch.object(commands, "_remote_checked", side_effect=execute):
             reply = fanout.revoke_attempt(row)
             again = fanout.revoke_attempt(fanout.recorded("dev", stack="parent")[0])

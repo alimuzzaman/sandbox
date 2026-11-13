@@ -1,6 +1,6 @@
 # Implementation plan: Stack page access
 
-**Branch**: `feat/stack-page-access` | **Date**: 2026-11-11 | **Spec**: [spec.md](spec.md)
+**Branch**: `feat/stack-page-access` | **Date**: 2026-11-13 | **Spec**: [spec.md](spec.md)
 
 **Numbering provenance**: Renumbered from `085-stack-page-access` to
 `088-stack-page-access` on 2026-11-11 under the coordinator reservation. Existing
@@ -20,11 +20,11 @@ sign-ins and companion pages. Keep the full panel private.
 - Language: Python 3.10+ hosting/controller code, TypeScript web UI, PHP WordPress mu-plugin.
 - Dependencies: existing YAML parser, stdlib HTTP/JSON/locking, Vite/TypeScript; no new packages.
 - Storage: existing controller stack registry and rendered manifests; a new token-free
-  share-attempt repository; gate private state; bounded WordPress hash pool.
-- Verification provider for the current task: PERSONAL Codex GPT-6.1-Sol high only.
-  This design pass runs no tests/builds/apps/network/remote jobs and spawns no helpers.
-  Historical reports keep their original provider provenance. Later runner assignment
-  and host slot are coordinator-owned, never an implicit Office/Luna fallback.
+  share-attempt repository (v3 writes, conservative v2 reads); gate private state; bounded WordPress hash pool.
+- Current implementation and independent review: Codex Office GPT-6.1-Sol high.
+  Bounded tests and typechecks run through Codex Office GPT-6-Luna high helpers.
+  Historical reports retain their actual provenance. Runtime work requires an
+  explicit coordinator-owned slot; the queued position is not a slot grant.
 - Platform: macOS controller and Linux remote hosting; existing tailnet panel.
 - Scope: direct uses limited to four, eight outstanding sign-ins per entry, existing
   gate bounds enforced by refusal without silent truncation. No recursive traversal or general health probing; only the explicit authenticated
@@ -46,8 +46,10 @@ Design is mapped to the constitution below; independent review and runtime proof
    and revision evidence land with code; deployed protocol upgrades remain owner actions.
 6. Preserve existing hosting/login paths. No facade or provider is removed.
 
-This task edits design only. It writes or runs no tests and certifies no checks from
-concurrent helpers. Future implementation/verification order remains coordinator-owned.
+Source for US1–US6 is present in the reconciled latest base cbda71e, including
+short links e04e293 and the owner-panel closure. This branch preserves that source
+and adds the previously separate behavioral regressions and design records.
+Mocked checks establish only the behavior they exercise; runtime proof remains open.
 
 ## Project structure
 
@@ -58,6 +60,7 @@ sandbox/hosting/panel_view.py          # shared read model
 sandbox/hosting/panel_access.py        # recorded-target access orchestration (new)
 sandbox/hosting/autologin.py           # bounded hash pool and WordPress renderer (new)
 sandbox/hosting/share/attempts.py       # durable token-free attempt repository (new)
+sandbox/hosting/share/controller.py     # physical ownership and bound effects
 sandbox/hosting/share/stack_page.py     # access coverage and page record
 sandbox/commands/host_stack.py         # plan/apply use checks, list/down output
 sandbox/commands/host_share.py         # parent/companion orchestration
@@ -76,9 +79,9 @@ Do not add imports of a facade or registry namespace prohibited by repo guidance
 ## Design decisions
 
 See [research.md](research.md), [data-model.md](data-model.md) and
-[contracts/access.md](contracts/access.md). These are proposed until implementation
-and verification. Earlier checkpoint reports are supplied historical evidence, not rerun here. Remote
-installed support remains unverified and no release is authorized.
+[contracts/access.md](contracts/access.md). They describe the integrated source.
+Installed support remains unverified and no release is authorized. Earlier reports
+remain historical evidence unless explicitly rerun against this reconciliation.
 
 Controller sign-in resolves the stack's recorded rendered manifest. The CLI's
 `--name` selection uses that resolver too; it must never fall back to cwd. The
@@ -87,7 +90,9 @@ unavailable result. Panel polling reads declaration metadata only and never mint
 
 Keep uses in controller records initially, including the controller overlay in
 stack list. Do not add a remote hoststore schema merely to display relationships.
-A this-server-only panel has no controller declaration and explains that limitation.
+A server-local panel uses the current applied owner_share projection, exact installed
+gate/config/container bindings and fixed verbs; it never invents a controller remote.
+See docs/owner-panel-sharing.md for the authority surface requiring the final review.
 
 Autologin stores hashes, user and expiry in a WordPress database site option.
 The declared mu-plugin path stays unchanged. A connection-scoped database advisory lock serializes hash
@@ -103,15 +108,18 @@ fresh clicks. Legacy direct CLI singleton remains separate. Host-only sessions c
 no panel or sibling authority. WordPress callback needs independent authentication
 review and owner sign-off before release; the exact source callback wire is recorded in access.md, with runtime parity unverified.
 
-Dependency e04e293 is integrated locally by normal merge 93431f7. Allocate derived
+Dependency e04e293 is in origin/latest cbda71e and is reconciled by a normal merge. Allocate derived
 l-12hex ids with the same MintedLink passed to later mint_link; final page travels in
 that mint, companions first then parent. No attach, reservation or replay-success mint.
 Durably persist safe original runtime/gate/key-cleanup identity before unknown-before-
 keyinstall/mint. Per-parent attempt lock then sorted unique effect locks, with short
 state snapshots and no shared lock nesting. List/revoke recover even without parent.
-Never remint on uncertainty or clean a replacement slug by guess. Exact four-capability negotiation and schema-2 original cleanup descriptors are
-recorded in access.md/data-model.md. Late controller result/error fields remain
-pending owner consolidation, not new invented contracts.
+Never remint on uncertainty or clean a replacement slug by guess. Four feature
+capabilities and bounded cleanup descriptors are recorded in access.md/data-model.md.
+Owner-local operation also requires owner-panel-gate-v1 and exact running digests.
+Controller list/revoke result fields are consolidated in access.md. A reloaded unknown
+operation remains cleanup_pending until original completion can be established or
+its unused capabilities expire; an absence probe cannot fence a late writer.
 
 ## Phase manifest
 
@@ -131,11 +139,12 @@ all own/direct shared routes, inboxes and sign-ins, and the owner can revoke it.
   merge block; installed protocol support, authentication review and runtime acceptance
   remain unverified. No partial release promised.
 
-Earlier local checkpoint work exists for panel/relationships/controller WordPress.
-This pass neither reruns nor adopts its tests as current proof. All six stories remain
-in one release. Follow [quickstart.md](quickstart.md), which is a future reviewable plan,
-not authorization to execute. Current design provider is personal Sol high; historical
-Office/other-provider review records are preserved in their original artifacts.
+All six stories remain in one release. Follow [quickstart.md](quickstart.md), which
+is a reviewable runtime plan, not authorization to execute. The owner approved the
+stack one-link model and Tailnet-panel plus current applied agent_mint policy.
+That approval does not extend to paused 090 authority or installed runtime acceptance.
+The final review must cover admission, currentness, writer serialization, original
+operation fences, callback claims, revocation and one-response token custody broadly.
 
 ## Complexity tracking
 
@@ -153,3 +162,17 @@ Source schema/runtime/WP/ledger were inspected, not executed. Constitution IV pr
 and VI compatibility acceptance remain open: v1 WP action is explicitly unavailable,
 v2 reissuance is required, and apply resets gate tmpfs. This is not runtime acceptance
 or approval of that compatibility limitation for release. No lifecycle upgrade is run.
+
+## Reconciliation, 2026-11-13
+
+Spec Kit specify → plan → tasks updated the existing 088 records using the owner
+decisions and cbda71e source. PRD/readiness provenance is preserved. Optional agent
+context regeneration is skipped to preserve latest pointers. Existing source carries
+the UI bundle; this reconciliation changes no UI production code and needs no rebuild.
+Runtime acceptance and the fresh broad authentication review are still release gates.
+
+The broad R1 auth review returned NOT SAFE. Controller sharing must now prove
+current running applied policy/config/target digests, hold the physical apply lease
+and use immutable services. Durable v3 settlement must not trust legacy v2 revoke
+bits. Per-entry TTL and route action association are also enforced. New fixture and
+fresh independent review evidence supersede earlier check counts only when recorded.

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from sandbox.services.source_fingerprint import source_has_changes
 
 from .models import (
     MAX_PHASES, MAX_RECEIPT_BYTES, MAX_SERVICES, ActivationRecoveryObservation,
@@ -83,7 +84,8 @@ def _host_apply_arguments(argv: object) -> dict | None:
     flags = set()
     items = argv[host_index + 2:]
     index = 0
-    value_flags = {"--project-dir", "--environment", "--remote", "--local-images"}
+    value_flags = {"--project-dir", "--environment", "--remote", "--local-images",
+                   "--reallocate-loopback-port", "--original-request-id", "--expected-generation"}
     while index < len(items):
         item = items[index]
         matching = next((flag for flag in value_flags if item.startswith(flag + "=")), None)
@@ -195,7 +197,7 @@ def validate_job_binding(request: RecoveryRequest, job: object,
     if (not isinstance(submitted_source, dict) or
             submitted_source.get("identity") != source.get("identity") or
             submitted_source.get("commit") != source.get("commit") or
-            submitted_source.get("dirty_digest") is not None):
+            source_has_changes(submitted_source.get("dirty_digest"))):
         return "binding_mismatch" if isinstance(submitted_source, dict) else "legacy_evidence"
     if (submission.get("project_identity") != operation.get("project_identity") or
             "sha256:" + hashlib.sha256(

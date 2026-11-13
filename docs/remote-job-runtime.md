@@ -6,6 +6,13 @@ stdout, stderr, combined event order, metrics, and terminal integrity metadata t
 the job store. SSH and MCP retrieve bounded retained pages and never own the
 child pipes.
 
+Joined capability discovery recognizes the installed `preview.owner-cli.v1`
+component alongside the fixed job and stack-reference contracts. This is component
+metadata, not an owner-role grant; machine, marker and runtime pins still match
+before local metadata adoption. `job-capabilities --name` is an installed host-target
+selector, not remote selection. Invoke that metadata command on the selected server
+through the supported registered `remote ssh` command when diagnosing discovery.
+
 ## Source checkout shape
 
 Remote exec, test and job submissions push the project's committed `HEAD` plus a
@@ -14,6 +21,34 @@ detached `HEAD` (the usual `git worktree add --detach` PR-review checkout) is
 pushed to an immutable `sandbox-source-<sha>` ref, so no branch has to be
 checked out. A project directory that is not a git checkout with a commit is
 refused with a message that says so; use `--local` for those.
+
+Receivers supporting `job.source-content.v1` measure the deployed working-tree
+bytes, executable modes, symlink targets and detached Git HEAD under the source
+lease. Git pushes update objects/refs only; they cannot publish working-tree
+files through `receive.denyCurrentBranch=updateInstead`. The measured content
+digest travels separately from the existing source identity and dirty digest.
+Workspace copying checks both the source and the staged copy against it. New
+admission rechecks the actual workspace while holding the same checkout lock
+used by refresh, through the SQLite acceptance commit. A changed tree is refused
+before acceptance, rather than acknowledging earlier source metadata for later
+bytes. The existing request identity must be preserved when investigating it.
+
+Contending copy or admission calls return a bounded busy refusal instead of
+waiting indefinitely for the checkout lock. Lock-access failures return a bounded
+error without exposing the underlying filesystem diagnostic.
+
+An admitted or still-leased job prevents another refresh of its checkout. For
+measured jobs, exact request replay also finds completed original records after
+their leases have been released. It returns the retained receipt without copying over job output;
+new submissions still require a byte check. CI uses a prepared verified copy
+instead of recopying a subsequently changed shared deployment. Unused nullable
+content fields do not alter legacy request digests. Older runtime capabilities
+do not authorize the new source contract; update through the supported lifecycle
+before relying on it. This contract adds no operator role or credential grant.
+
+A matrix checks every child's measured-source requirement and every supplied
+measurement before admitting its parent. A missing measurement in any new
+materialized child refuses the batch before any parent, child or launch.
 
 ## Normal operation
 

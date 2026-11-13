@@ -462,6 +462,10 @@ def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
     if not (isinstance(home, str) and home.startswith("/") and len(home) < 4096
             and "\x00" not in home and not set(home.split("/")[1:]) & {"", ".", ".."}):
         raise Refusal("request_invalid", "invalid job probe")
+    excluded = probe.get("exclude_job_id")
+    if excluded is not None and (not isinstance(excluded, str) or
+                                 re.fullmatch(r"[0-9a-f]{32}", excluded) is None):
+        raise Refusal("request_invalid", "invalid owner job identity")
     user = environ.get("SUDO_USER") or "root"
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
         raise Refusal("gate_unavailable", "the invoking user could not be determined")
@@ -475,7 +479,7 @@ def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
             or not stat.S_ISREG(registry_st.st_mode):
         raise Refusal("gate_unavailable", "the Sandbox home is not the invoking user's")
     command = ["env", "SANDBOX_HOME=" + home, "SANDBOX_AUTO_UPDATE=0",
-               home + "/sb-src/sb", "job-list", "--active-only", "--limit", "1", "--json"]
+               home + "/sb-src/sb", "job-list", "--active-only", "--limit", "2" if excluded else "1", "--json"]
     if user != "root":
         command = ["runuser", "-u", user, "--"] + command
     rc, out, _err = runner(command, timeout=60)
@@ -485,7 +489,14 @@ def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
         page = None
     if not (isinstance(page, dict) and page.get("ok") is True and isinstance(page.get("jobs"), list)):
         raise Refusal("gate_unavailable", "the remote's durable jobs could not be listed")
-    return bool(page["jobs"])
+    jobs = page["jobs"]
+    if any(not isinstance(row, dict) or not isinstance(row.get("job_id"), str) for row in jobs):
+        raise Refusal("gate_unavailable", "the remote's job identities are unavailable")
+    if excluded is not None:
+        if not any(row["job_id"] == excluded for row in jobs):
+            return True
+        return any(row["job_id"] != excluded for row in jobs)
+    return bool(jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +532,14 @@ def _chain_facts(chain, key, runner):
         facts["key_matches"] = rc1 == 0 and rc2 == 0 and bool(cert_pub.strip()) \
             and cert_pub.strip() == key_pub.strip()
     return facts
+
+
+def _panel_certificate_facts(chain, runner):
+    """Return only the public name and current-validity facts used by the panel."""
+    rc, out, _ = runner(["openssl", "x509", "-noout", "-checkend", "0",
+                         "-ext", "subjectAltName"], input=chain)
+    names = sorted(set(re.findall(r"DNS:([^,\s]+)", _text(out)))) if rc == 0 else []
+    return rc == 0, names
 
 
 def _check_chain(chain, key, fqdn, runner):
@@ -967,6 +986,88 @@ def inspect(payload, paths, runner, lock_wait):
             "inventory": rows}
 
 
+def mail_access(payload, paths, runner, lock_wait):
+    """Read-only panel projection; private key contents are never opened."""
+    ip = _tailnet_ip(payload.get("tailnet_ip"))
+    result = {"available": False, "partial": False, "names": []}
+    upstreams = payload.get("upstreams")
+    if not isinstance(upstreams, list) or len(upstreams) > 1000:
+        raise Refusal("request_invalid", "invalid upstream list")
+    requested = set()
+    for upstream in upstreams:
+        match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", upstream) if isinstance(upstream, str) else None
+        if not match or not 1 <= int(match[1]) <= 65535:
+            raise Refusal("request_invalid", "invalid upstream")
+        requested.add(upstream)
+    if not requested:
+        return {"ok": True, "available": True, "partial": False, "names": []}
+    conf = root = None
+    deadline = time.monotonic() + 8
+
+    def certificate_runner(argv, *, input=None, **_ignored):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refusal("observation_timeout")
+        return run(argv, input=input, timeout=min(2, remaining))
+
+    try:
+        conf = _open_dir(paths["conf_dir"], paths)
+        root = _open_dir(paths["cert_root"], paths)
+        with os.scandir(conf) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 1000 or time.monotonic() > deadline:
+                    result["partial"] = True
+                    break
+                if not (entry.name.startswith(FILE_PREFIX) and entry.name.endswith(".conf")):
+                    continue
+                fd = None
+                try:
+                    fqdn = _fqdn(entry.name[len(FILE_PREFIX):-len(".conf")])
+                    block, managed = _block(conf, fqdn, paths)
+                    header = _header(block) if managed else None
+                    if not header or header.get("version") != 1:
+                        raise Refusal("unmanaged_block")
+                    if header.get("tailnet_ip") != ip:
+                        continue
+                    upstream = header.get("upstream")
+                    match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", upstream or "")
+                    if (not match or not 1 <= int(match[1]) <= 65535
+                            or upstream not in requested):
+                        continue
+                    row = {"upstream": upstream, "url": None}
+                    result["names"].append(row)
+                    fd = _name_dir(root, fqdn, paths)
+                    if fd is None:
+                        continue
+                    _owned_entries(fd, paths)
+                    key = _lstat(fd, "privkey.pem")
+                    journal = _journal(fd, paths)
+                    chain = _read(fd, "fullchain.pem", paths, mode=0o644)
+                    if (key is None or not stat.S_ISREG(key.st_mode) or key.st_nlink != 1
+                            or key.st_uid not in paths["trusted_uids"]
+                            or stat.S_IMODE(key.st_mode) != 0o600 or not chain or not journal
+                            or journal.get("state") != "loaded"
+                            or journal.get("generation") != _generation(block, chain)):
+                        continue
+                    valid, names = _panel_certificate_facts(chain, certificate_runner)
+                    if valid and fqdn in names:
+                        row["url"] = "https://" + fqdn + "/mail/"
+                except (Refusal, OSError, ValueError, TypeError):
+                    result["partial"] = True
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+        result["available"] = True
+    except (Refusal, OSError):
+        pass
+    finally:
+        if root is not None:
+            os.close(root)
+        if conf is not None:
+            os.close(conf)
+    return {"ok": True, **result}
+
+
 def _row(conf_fd, root, fqdn, paths, runner):
     content, managed = _block(conf_fd, fqdn, paths)
     row = {"fqdn": fqdn, "block_present": content is not None, "block_managed": managed,
@@ -1361,7 +1462,8 @@ def remove(payload, paths, runner, lock_wait):
         scope.close()
 
 
-ACTIONS = {"inspect": inspect, "reserve": reserve, "extend": extend, "release": release,
+ACTIONS = {"inspect": inspect, "mail-access": mail_access,
+           "reserve": reserve, "extend": extend, "release": release,
            "settle": settle, "csr": csr,
            "commit": commit, "remove": remove}
 

@@ -23,6 +23,9 @@ HELD_EXIT = 45
 SCRIPT = r"""set -eu
 f=$1; token=$2; owner=$3; action=$4
 mkdir -p "$(dirname "$f")"
+# The physical anchor must satisfy exact exec recovery's owner-only policy.
+# Set this before opening it; changing umask later only protects the lease body.
+umask 077
 exec 9>"$f.lock"
 flock -w 30 9 || exit 46
 t=; o=; since=
@@ -30,7 +33,6 @@ if [ -f "$f" ]; then read -r t o since < "$f" || true; fi
 case "$action" in
 acquire)
   if [ -n "$t" ] && [ "$o" != "$owner" ]; then printf '%s\n' "$since"; exit 45; fi
-  umask 077
   printf '%s %s %s\n' "$token" "$owner" "$(date +%s)" > "$f.new"
   mv -f "$f.new" "$f" ;;
 release)

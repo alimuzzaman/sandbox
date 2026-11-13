@@ -228,7 +228,7 @@ class ShareRouteTest(unittest.TestCase):
                                                 "id": link_id})
                 self.assertEqual(status, 200)
                 self.assertEqual(body["revoked_links"], 1)
-                self.revoke.assert_called_with("xspeed-dev", link_id, stack="demo")
+                self.revoke.assert_called_with("xspeed-dev", link_id, stack="demo", caller="panel")
 
     def test_a_refusal_shows_its_code_and_message(self):
         self.create.side_effect = ShareRefusal("agent_mint_not_enabled", "set `share.agent_mint: true`")

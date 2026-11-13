@@ -167,7 +167,85 @@ def _remote_control_predispatch(args) -> bool:
     return bool(getattr(args, "remote", None))
 
 
+def _configure_capabilities(parser) -> None:
+    parser.add_argument('--json', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--inspect-delivery', metavar='JSON',
+                      help='read one exact retained delivery through the installed owner')
+    mode.add_argument('--inspect-host-target', action='store_true',
+                        help='read existing owner target metadata without source staging or job acceptance')
+    parser.add_argument('--origin-remote-name')
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument('--target')
+    selector.add_argument('--name')
+    parser.add_argument('--environment')
+
+
+def cmd_job_capabilities(_cfg, args) -> None:
+    """Observe the assembled installed job contract without opening its ledger."""
+    from sandbox.application.server_cli import capabilities, ServerCLIUnavailable
+    from sandbox.hosting.target_resolution import TargetRefusal
+    try:
+        if getattr(args, 'inspect_delivery', None) is not None:
+            if any(getattr(args, key, None) is not None for key in ('origin_remote_name', 'target', 'name', 'environment')):
+                raise ServerCLIUnavailable('mixed inspection selectors')
+            from sandbox.application.server_cli_delivery import decode_request, inspect_current_delivery
+            payload = inspect_current_delivery(decode_request(args.inspect_delivery))
+        elif getattr(args, 'inspect_host_target', False):
+            from sandbox.application.server_cli_targets import inspect_current_server_target
+            payload = inspect_current_server_target(origin_remote_name=getattr(args, 'origin_remote_name', None),
+                target=getattr(args, 'target', None), name=getattr(args, 'name', None),
+                environment=getattr(args, 'environment', None))
+        else:
+            if any(getattr(args, field, None) is not None for field in
+                   ('origin_remote_name', 'target', 'name', 'environment')):
+                raise ServerCLIUnavailable('target selectors require the installed inspection mode')
+            payload = capabilities()
+    except TargetRefusal as exc:
+        payload = {'schema_version': 1, 'ok': False, 'code': exc.code,
+                   'error': 'owner target metadata is unavailable; no job was accepted'}
+    except (ServerCLIUnavailable, OSError, ValueError, TypeError, KeyError):
+        payload = {'schema_version': 1, 'ok': False, 'code': 'server_cli_capability_unavailable',
+                   'error': 'installed server CLI capability is unavailable'}
+    print(json.dumps(payload, sort_keys=True))
+    if not payload['ok']:
+        raise SystemExit(1)
+
+
+def _capabilities_preconfiguration(args) -> bool:
+    """Fixed observation runs before migration/configuration compatibility writers."""
+    argv = list(getattr(args, '_server_cli_argv', ()) or ())
+    values = {'--inspect-delivery', '--origin-remote-name', '--target', '--name', '--environment'}
+    commands = 0
+    index = 0
+    valid = bool(argv)
+    while valid and index < len(argv):
+        token = argv[index]
+        option, separator, _ = token.partition('=')
+        if token == 'job-capabilities':
+            commands += 1
+        elif token in {'--json', '--inspect-host-target', '--strict-runtime'}:
+            pass
+        elif option in values:
+            if not separator:
+                index += 1
+                valid = index < len(argv)
+        else:
+            valid = False
+        index += 1
+    if not valid or commands != 1:
+        print(json.dumps({'schema_version': 1, 'ok': False,
+                          'code': 'server_cli_capability_unavailable',
+                          'error': 'installed observation selectors are unavailable'}, sort_keys=True))
+        raise SystemExit(1)
+    cmd_job_capabilities({}, args)
+    return True
+
+
 register_specs((
+    CommandSpec('job-capabilities', cmd_job_capabilities, configure=_configure_capabilities,
+                preconfiguration_dispatch=_capabilities_preconfiguration,
+                owner=__name__, scope='global', help='read installed durable CLI execution capabilities'),
     CommandSpec("job-policy", cmd_job_policy, configure=configure_parser, owner=__name__,
                 scope="global", predispatch_policy=_remote_control_predispatch,
                 help="show or set the durable-job slot limit and resource floors of a host"),

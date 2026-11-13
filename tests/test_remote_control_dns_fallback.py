@@ -62,7 +62,7 @@ class ControlDnsFallback(unittest.TestCase):
                 return "response"
 
         request = urllib.request.Request("https://sb-x.example.test/mcp")
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable), \
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable), \
                 mock.patch.object(remote.urllib.request, "OpenerDirector", Opener):
             self.assertEqual(remote._control_urlopen(REMOTE, request, 5), "response")
         self.assertEqual(opened["origin"], "203.0.113.7")
@@ -74,7 +74,7 @@ class ControlDnsFallback(unittest.TestCase):
     def test_unresolvable_host_without_origin_names_the_dns_record(self):
         request = urllib.request.Request("https://sb-x.example.test/mcp")
         entry = {k: v for k, v in REMOTE.items() if k != "origin_ipv4"}
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable):
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable):
             with self.assertRaises(urllib.error.URLError) as caught:
                 remote._control_urlopen(entry, request, 5)
         self.assertIn("sb-x.example.test does not resolve", str(caught.exception.reason))
@@ -83,7 +83,7 @@ class ControlDnsFallback(unittest.TestCase):
         def refused(*args, **kwargs):
             raise urllib.error.URLError(ConnectionRefusedError())
         request = urllib.request.Request("https://sb-x.example.test/mcp")
-        with mock.patch.object(remote.urllib.request, "urlopen", refused), \
+        with mock.patch.object(remote, "_control_primary_open", refused), \
                 mock.patch.object(remote.urllib.request, "OpenerDirector") as opener:
             with self.assertRaises(urllib.error.URLError):
                 remote._control_urlopen(REMOTE, request, 5)
@@ -100,7 +100,7 @@ class ControlDnsFallback(unittest.TestCase):
     def test_a_proxied_request_is_not_redirected_to_the_origin(self):
         request = urllib.request.Request("https://sb-x.example.test/mcp")
         request.set_proxy("proxy.example.test:3128", "https")
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable), \
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable), \
                 mock.patch.object(remote.urllib.request, "OpenerDirector") as opener:
             with self.assertRaises(urllib.error.URLError) as caught:
                 remote._control_urlopen(REMOTE, request, 5)
@@ -109,14 +109,14 @@ class ControlDnsFallback(unittest.TestCase):
 
     def test_public_callers_name_the_unresolvable_host(self):
         entry = {k: v for k, v in REMOTE.items() if k != "origin_ipv4"}
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable):
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable):
             with self.assertRaises(RuntimeError) as caught:
                 remote._remote_control_request(entry, "/resources", payload={"a": 1})
         self.assertIn("sb-x.example.test does not resolve in DNS", str(caught.exception))
 
     def test_diagnostics_and_verify_expose_dns_reason(self):
         entry = {k: v for k, v in REMOTE.items() if k != "origin_ipv4"}
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable):
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable):
             for caller in (remote.remote_diagnostics, remote.verify_remote):
                 with self.subTest(caller=caller.__name__):
                     with self.assertRaisesRegex(RuntimeError, "sb-x.example.test does not resolve in DNS"):
@@ -209,7 +209,7 @@ class ControlDnsFallbackWire(unittest.TestCase):
 
     def open_fallback(self, request, *, trust=True):
         context = ssl.create_default_context(cafile=str(self.cert)) if trust else ssl.create_default_context()
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable), \
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable), \
                 mock.patch.object(remote.ssl, "create_default_context", return_value=context):
             return remote._control_urlopen(self.entry, request, 3)
 
@@ -241,6 +241,44 @@ class ControlDnsFallbackWire(unittest.TestCase):
                 self.assertEqual([item[1] for item in self.requests], ["/mcp"])
                 self.assertEqual(self.connections - before, 1)
 
+    def test_primary_https_preserves_tls_identity_and_rejects_downgrade_redirect(self):
+        context = ssl.create_default_context(cafile=str(self.cert))
+        connect = socket.create_connection
+        attempted = []
+        def local_connection(address, *args, **kwargs):
+            attempted.append(address)
+            if address == ('control.example.test', self.port):
+                address = ('127.0.0.1', self.port)
+            return connect(address, *args, **kwargs)
+        with mock.patch.object(remote.socket, 'create_connection', side_effect=local_connection), \
+                mock.patch.object(remote.ssl, '_create_default_https_context', return_value=context):
+            for direct in (False, True):
+                with self.subTest(direct=direct):
+                    self.requests.clear()
+                    attempted.clear()
+                    self.status = 200
+                    self.location = None
+                    request = urllib.request.Request(self.entry['control_url'] + '/mcp', data=b'primary-body',
+                        headers={'Authorization': 'Bearer synthetic-token'})
+                    with remote._control_urlopen(self.entry, request, 3, direct=direct) as response:
+                        self.assertEqual(response.status, 200)
+                    self.assertEqual(len(self.requests), 1)
+                    self.assertEqual(self.requests[0][3], b'primary-body')
+                    self.assertEqual(self.requests[0][2].get_all('Host'), [f'control.example.test:{self.port}'])
+                    self.assertEqual(self.requests[0][2].get_all('Authorization'), ['Bearer synthetic-token'])
+                    self.assertEqual(attempted, [('control.example.test', self.port)])
+                    self.requests.clear()
+                    attempted.clear()
+                    self.status = 302
+                    self.location = f'http://127.0.0.1:{self.port}/escaped'
+                    request = urllib.request.Request(self.entry['control_url'] + '/mcp',
+                        headers={'Authorization': 'Bearer synthetic-token'})
+                    with self.assertRaises(urllib.error.HTTPError) as failure:
+                        remote._control_urlopen(self.entry, request, 3, direct=direct)
+                    self.assertEqual(failure.exception.code, 302)
+                    self.assertEqual(len(self.requests), 1)
+                    self.assertEqual(attempted, [('control.example.test', self.port)])
+
     def test_untrusted_and_mismatched_certificates_send_no_headers(self):
         for hostname, trust in (("control.example.test", False), ("wrong.example.test", True)):
             with self.subTest(hostname=hostname, trust=trust):
@@ -253,7 +291,7 @@ class ControlDnsFallbackWire(unittest.TestCase):
 
     def test_verify_remote_classifies_http_statuses_through_fallback(self):
         context = ssl.create_default_context(cafile=str(self.cert))
-        with mock.patch.object(remote.urllib.request, "urlopen", _unresolvable), \
+        with mock.patch.object(remote, "_control_primary_open", _unresolvable), \
                 mock.patch.object(remote.ssl, "create_default_context", return_value=context):
             for status in (400, 405, 406, 401):
                 with self.subTest(status=status):

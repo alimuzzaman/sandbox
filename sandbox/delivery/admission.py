@@ -10,6 +10,7 @@ import time
 
 from sandbox.jobs.registry import read_delivery_job_evidence
 from sandbox.jobs.process import capture_process_identity
+from sandbox.services.source_fingerprint import source_has_changes
 
 _CONTEXT_KEYS = {name: 'SANDBOX_DURABLE_' + name.upper() for name in (
     'job_id', 'request_id', 'project_identity', 'project_root_digest',
@@ -38,7 +39,7 @@ def validate_durable_context(project_dir: str | Path, *, database_path=None,
            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]*', fields[key]) is None
            for key in required):
         raise AdmissionError('recovery_context_invalid')
-    if fields['source_dirty_digest']:
+    if source_has_changes(fields['source_dirty_digest']):
         raise AdmissionError('recovery_source_dirty')
     root = Path(project_dir).expanduser().resolve()
     root_digest = 'sha256:' + hashlib.sha256(str(root).encode()).hexdigest()
@@ -85,7 +86,8 @@ def validate_durable_context(project_dir: str | Path, *, database_path=None,
         if (job.get('project_root') != str(root) or submitted.get('project_root') != str(root)
                 or submitted.get('target_kind') != 'local' or submitted.get('remote_name') is not None):
             raise AdmissionError('recovery_source_mismatch')
-        if job.get('source_dirty_digest') is not None or submitted.get('source_dirty_digest') is not None:
+        if (source_has_changes(job.get('source_dirty_digest'))
+                or source_has_changes(submitted.get('source_dirty_digest'))):
             raise AdmissionError('recovery_source_dirty')
         process = evidence['process']
         missing_child = not process or any(process.get(k) is None for k in (

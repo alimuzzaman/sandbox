@@ -5,14 +5,15 @@ from sandbox.resources.host_memory.models import HEX24
 from sandbox.resources.host_memory.remote import RemoteProtocolError, validate_response
 
 
-def discover_join_identity(name: str, record: dict, request) -> dict:
+def discover_join_identity(name: str, record: dict, request, *, budget_seconds=15,
+                           allow_revision_cache: bool = False) -> dict:
     """Read the installed schema-1 status contract without SSH or owner tokens.
 
     First admission trusts the selected tailnet service. Subsequent adoption
     preserves every existing pin, including the machine identity.
     """
     response = request(record, {"action": "host_memory_status", "remote_name": name,
-                                "budget_seconds": 15})
+                                "budget_seconds": budget_seconds})
     service = response.get("service") if isinstance(response, dict) else None
     if not isinstance(service, dict):
         raise RemoteProtocolError("remote_service_ownership_unknown", "service identity is unavailable")
@@ -30,9 +31,17 @@ def discover_join_identity(name: str, record: dict, request) -> dict:
     pinned_identity = record.get("control_identity", {})
     if not isinstance(pinned_service, dict) or not isinstance(pinned_identity, dict):
         raise RemoteProtocolError("remote_service_ownership_unknown", "registered identity is invalid")
+    if 'control_identity' in record and (
+            set(pinned_identity) != {'schema_version', 'target_identity'}
+            or type(pinned_identity.get('schema_version')) is not int or pinned_identity['schema_version'] != 1
+            or not isinstance(pinned_identity.get('target_identity'), str)
+            or not HEX24.fullmatch(pinned_identity['target_identity'])):
+        raise RemoteProtocolError('remote_target_identity_mismatch', 'registered machine identity is invalid')
     for field, observed, code in (
             ("ownership_marker", marker, "remote_service_ownership_unknown"),
             ("runtime_revision", revision, "remote_runtime_revision_mismatch")):
+        if field == 'runtime_revision' and allow_revision_cache:
+            continue  # Only the compatible-revision adapter may publish this cache change.
         if field in pinned_service and pinned_service[field] != observed:
             raise RemoteProtocolError(code, "registered service identity changed; adoption refused")
     if pinned_identity and pinned_identity != {"schema_version": 1, "target_identity": identity}:

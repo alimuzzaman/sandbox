@@ -69,8 +69,11 @@ class JobContractTests(unittest.TestCase):
         )}
         registry = builtin_job_component_registry(**components)
         self.assertEqual([item.component_id for item in registry.specs()], [
-            "repository", "storage", "process_identity", "clock", "profiles",
+            "server_cli", "repository", "storage", "process_identity", "clock", "profiles",
         ])
+        from sandbox.application.server_cli import FixedServerCLI
+        self.assertIs(type(registry.get("server_cli").component), FixedServerCLI)
+        self.assertEqual(registry.get("server_cli").owner, "sandbox.application.server_cli")
 
 
 if __name__ == "__main__":

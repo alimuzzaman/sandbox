@@ -22,8 +22,41 @@ from .metrics import append as append_metric, sample as sample_metric
 from sandbox.services.redaction import redact_structure, redact_text
 
 
+def _server_cli_parent_reason(descriptor, repository):
+    parent = descriptor.get('server_cli_parent')
+    context = descriptor.get('authoritative_context') or {}
+    if not isinstance(context, dict):
+        return 'parent_context_unavailable'
+    selected = context.get('execution_kind') == 'server-cli'
+    if parent is None and not selected:
+        return None
+    from datetime import datetime, timezone
+    try:
+        from .server_cli_lineage import check_server_cli_lineage, ServerCliLineageError
+        if parent is not None:
+            deadline = datetime.fromisoformat(parent['deadline_at'])
+            if datetime.now(timezone.utc) >= deadline:
+                return 'parent_deadline_exceeded'
+        # Old descriptors retain their immediate link; the repository follows
+        # that actual chain rather than trusting a caller-supplied root ID.
+        current_job = descriptor.get('job_id')
+        job_id = current_job if current_job is not None else parent['job_id']
+        rows = repository.server_cli_ancestry(job_id)
+        if (not isinstance(rows, list) or not rows or rows[0].get('kind') != 'server-cli'
+                or (current_job is not None and rows[0].get('job_id') != current_job)
+                or (current_job is not None and parent is not None and rows[0].get('parent_job_id') != parent['job_id'])):
+            return 'parent_context_unavailable'
+        check_server_cli_lineage(rows, pending_self=current_job is not None)
+    except ServerCliLineageError as exc:
+        return exc.reason
+    except Exception:
+        return 'parent_context_unavailable'
+    return None
+
+
 _CHILD_CONTEXT_KEYS = {
     "job_id": "SANDBOX_DURABLE_JOB_ID",
+    "execution_kind": 'SANDBOX_DURABLE_EXECUTION_KIND',
     "request_id": "SANDBOX_DURABLE_REQUEST_ID",
     "project_identity": "SANDBOX_DURABLE_PROJECT_IDENTITY",
     "project_root_digest": "SANDBOX_DURABLE_PROJECT_ROOT_DIGEST",
@@ -34,13 +67,26 @@ _CHILD_CONTEXT_KEYS = {
 
 
 @contextmanager
-def _child_identity_context(value: object):
+def _child_identity_context(value: object, environment=None):
     """Temporarily add only fixed authoritative keys for one child launch.
 
     The detached supervisor is single-purpose. This intentionally does not
     enumerate, copy, unpack, log, or persist the inherited environment.
     """
     context = value if isinstance(value, dict) else {}
+    if environment is not None:
+        # Only the adapter's explicit synthetic identity environment is copied,
+        # never os.environ. Other durable jobs retain their existing behavior.
+        child = dict(environment)
+        for field, environment_key in _CHILD_CONTEXT_KEYS.items():
+            item = context.get(field)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item or '\0' in item:
+                raise ValueError('durable child identity context is invalid')
+            child[environment_key] = item
+        yield child
+        return
     previous = {}
     changed = []
     try:
@@ -75,15 +121,38 @@ def _linux_cgroup_path(pid: int) -> str | None:
     return None
 
 
+def _inherited_server_cli_stdin(descriptor, current, *, fd=0):
+    binding = descriptor.get('anonymous_input')
+    if binding is None:
+        return subprocess.DEVNULL
+    from .anonymous_input import validate_inherited_input
+    if current.get('kind') != 'server-cli':
+        raise RuntimeError('anonymous input requires the fixed server CLI contract')
+    proof = json.loads(current.get('execution_policy_provenance_json') or '{}')
+    if (not isinstance(binding, dict) or proof.get('server_cli.stdin_sha256') != binding.get('sha256')
+            or proof.get('server_cli.stdin_size') != str(binding.get('size'))):
+        raise RuntimeError('retained anonymous input binding changed')
+    stdin = validate_inherited_input(fd, binding)
+    os.lseek(stdin, 0, os.SEEK_SET)
+    return stdin
+
+
+def _server_cli_deadline_remaining(descriptor, current):
+    value = descriptor.get('server_cli_deadline_at')
+    if value is None:
+        return None
+    if current.get('kind') != 'server-cli':
+        raise RuntimeError('absolute owner deadline requires the fixed CLI job')
+    proof = json.loads(current.get('execution_policy_provenance_json') or '{}')
+    if proof.get('server_cli.absolute_deadline_at') != value:
+        raise RuntimeError('retained original deadline changed')
+    from sandbox.application.server_cli_exec import remaining_deadline
+    return remaining_deadline(value)
+
+
 def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
-    from sandbox.installation.maintenance import operation_guard
-    with operation_guard(home=Path(descriptor['runtime_dir']).parent):
-        return _run_descriptor(descriptor)
-
-
-def _run_descriptor(descriptor) -> int:
     job_id = descriptor["job_id"]
     repository = JobRepository(descriptor["registry_path"])
     storage = JobStorage(descriptor["runtime_dir"], free_disk_reserve=descriptor.get("free_disk_reserve", 0))
@@ -108,12 +177,21 @@ def _run_descriptor(descriptor) -> int:
             supervisor_nonce_hash=descriptor["nonce_hash"])
         repository.transition(job_id, Lifecycle.RUNNING)
         output = JobOutputStore(storage, repository, job_id, secrets=descriptor.get("redaction_secrets", ()))
+        parent_reason = _server_cli_parent_reason(descriptor, repository)
+        if parent_reason is not None:
+            repository.transition(job_id, Lifecycle.TIMED_OUT if parent_reason == 'parent_deadline_exceeded' else Lifecycle.CANCELLED,
+                termination_reason=parent_reason)
+            return 124 if parent_reason == 'parent_deadline_exceeded' else 130
         if _managed_native_job(descriptor):
+            if descriptor.get('anonymous_input') is not None:
+                raise RuntimeError('anonymous input is unavailable for managed project execution')
             return _run_managed_native(descriptor, repository, output)
-        with _child_identity_context(descriptor.get("authoritative_context")):
+        stdin = _inherited_server_cli_stdin(descriptor, current)
+        original_remaining = _server_cli_deadline_remaining(descriptor, current)
+        with _child_identity_context(descriptor.get("authoritative_context"), descriptor.get('environment')) as environment:
             command = subprocess.Popen(
                 descriptor["argv"], cwd=descriptor["cwd"],
-                env=descriptor.get("environment"), stdin=subprocess.DEVNULL,
+                env=environment, stdin=stdin,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, close_fds=True)
         release_authority = False
@@ -141,6 +219,8 @@ def _run_descriptor(descriptor) -> int:
         selector.register(command.stdout, selectors.EVENT_READ, "stdout")
         selector.register(command.stderr, selectors.EVENT_READ, "stderr")
         deadline = time.monotonic() + int(descriptor["deadline_seconds"])
+        if original_remaining is not None:
+            deadline = min(deadline, time.monotonic() + _server_cli_deadline_remaining(descriptor, current))
         next_metric = time.monotonic()
         timed_out = False
         stall_cancelled = False
@@ -154,6 +234,12 @@ def _run_descriptor(descriptor) -> int:
 
         while True:
             now = time.monotonic()
+            parent_reason = _server_cli_parent_reason(descriptor, repository)
+            if parent_reason is not None:
+                if parent_reason == 'parent_deadline_exceeded':
+                    timed_out = True
+                if repository.get(job_id)['lifecycle'] != Lifecycle.CANCELLING.value:
+                    repository.transition(job_id, Lifecycle.CANCELLING, termination_reason=parent_reason)
             if (now - last_state_probe >= 0.05) or (not selector.get_map()) or (now >= deadline):
                 leader_alive, group_running, active_descendants = _group_state(command)
                 for pid in active_descendants:
@@ -240,24 +326,26 @@ def _run_descriptor(descriptor) -> int:
         output.finish("stderr")
         integrity = output.complete()
         output_completeness = "complete" if streams_eof else "partial"
+        cessation = json.dumps({"owned_work_stopped": True, "stop_error": None,
+            "owned_descendants": sorted(observed_descendants)})
 
         if timed_out:
             terminal_exit_code = 124 if (return_code is None or return_code == 0) else return_code
             repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=terminal_exit_code,
                 termination_reason="deadline_exceeded", output_completeness=output_completeness,
-                integrity_sha256=integrity)
+                integrity_sha256=integrity, result_json=cessation)
             return 124
         if stall_cancelled:
             terminal_exit_code = 130 if (return_code is None or return_code == 0) else return_code
             repository.transition(job_id, Lifecycle.CANCELLED, exit_code=terminal_exit_code,
                 termination_reason="cancelled_on_stall", output_completeness=output_completeness,
-                integrity_sha256=integrity)
+                integrity_sha256=integrity, result_json=cessation)
             return 130
         if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
             terminal_exit_code = 130 if (return_code is None or return_code == 0) else return_code
             repository.transition(job_id, Lifecycle.CANCELLED, exit_code=terminal_exit_code,
                 termination_reason="cancelled_by_request", output_completeness=output_completeness,
-                integrity_sha256=integrity)
+                integrity_sha256=integrity, result_json=cessation)
             return 130
         # Artifacts describe successful job output. Do not let a missing
         # artifact mask the child command's actual failure (for example a

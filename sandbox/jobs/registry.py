@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, TYPE_CHECKING
+from typing import Any, Iterator
 
 from sandbox.services.redaction import require_safe_argv
 
 from ._trace_snapshot import SnapshotBudget, SnapshotMissing, read_connection
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
-
-if TYPE_CHECKING:
-    from .credential_operations import CredentialOperationRepository
 
 
 SCHEMA_VERSION = 7
@@ -321,6 +320,14 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
     if len(differences) > MAX_SUBMISSION_ITEMS:
         raise ValueError("compatibility differences exceed the durable snapshot limit")
     source = raw["source"]
+    from .server_cli_retained import retained_provenance_value
+    raw_provenance = dict(raw.get("execution_policy_provenance") or {})
+    provenance = {}
+    for key, value in raw_provenance.items():
+        key = _bounded_text(key, "execution policy provenance key", maximum=64)
+        retained = retained_provenance_value(key, value, submission=raw, provenance=raw_provenance)
+        provenance[key] = (retained if retained is not None else
+                           _bounded_text(value, "execution policy provenance value", maximum=128))
     snapshot = {
         "version": 1,
         "kind": _bounded_text(raw["kind"], "job kind", maximum=64),
@@ -346,11 +353,7 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "cancel_grace_seconds": int(raw["cancel_grace_seconds"]),
         "cancel_on_stall": bool(raw["cancel_on_stall"]),
         "cleanup_policy": raw["cleanup_policy"],
-        "execution_policy_provenance": {
-            _bounded_text(key, "execution policy provenance key", maximum=64):
-            _bounded_text(value, "execution policy provenance value", maximum=128)
-            for key, value in dict(raw.get("execution_policy_provenance") or {}).items()
-        },
+        "execution_policy_provenance": provenance,
         "request_id": _bounded_text(raw.get("request_id"), "request id", maximum=64, allow_none=True),
         "parent_job_id": raw.get("parent_job_id"),
         "retry_of_job_id": raw.get("retry_of_job_id"),
@@ -379,13 +382,116 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
             "dirty_digest": _bounded_text(source.get("dirty_digest"), "source dirty digest", allow_none=True),
         },
     }
+    if source.get('content_digest') is not None:
+        snapshot['source']['content_digest'] = _bounded_text(
+            source['content_digest'], 'source content digest', maximum=71)
     payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
     if len(payload.encode("utf-8")) > MAX_SUBMISSION_SNAPSHOT_BYTES:
         raise ValueError("canonical submission snapshot exceeds 65536 bytes")
     return payload
 
 
+def read_checkout_admissions(database, checkout, *, request_id=None, project_identity=None):
+    """Read live bindings and the exact replay candidate without mutating state."""
+    database = Path(database)
+    if not database.exists():
+        return []
+    connection = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in connection.execute(
+            "SELECT job_id,request_id,project_identity,source_identity,submission_json FROM jobs "
+            "WHERE project_root=? AND (lifecycle IN ('accepted','queued','running','cancelling') "
+            "OR EXISTS (SELECT 1 FROM workspace_leases l WHERE l.job_id=jobs.job_id) "
+            "OR (request_id=? AND project_identity=?)) LIMIT 129",
+            (str(Path(checkout).resolve(strict=False)), request_id, project_identity))]
+    finally:
+        connection.close()
+
+
 class JobRepository:
+    @classmethod
+    def open_existing(cls, path: str | Path, *, read_only: bool = True):
+        """Open the current schema without creation, migration or reconciliation."""
+        selected = Path(path).expanduser().absolute()
+        info = selected.lstat()
+        if (selected.resolve() != selected or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) & 0o022):
+            raise JobRepositoryError("existing job registry ownership is unavailable")
+        result = cls.__new__(cls)
+        result.path = selected
+        mode = "ro" if read_only else "rw"
+        result.connection = sqlite3.connect(selected.as_uri() + "?mode=" + mode,
+            uri=True, timeout=5, isolation_level=None, check_same_thread=False)
+        result.connection.row_factory = sqlite3.Row
+        result._lock = threading.RLock()
+        result._checkpoint_on_close = False
+        try:
+            if result.schema_version() != SCHEMA_VERSION:
+                raise JobRepositoryError("existing job registry schema is unavailable")
+            result.connection.execute("PRAGMA foreign_keys=ON")
+            if not read_only:
+                result.connection.execute("PRAGMA synchronous=FULL")
+            return result
+        except BaseException:
+            result.connection.close()
+            raise
+
+    @contextmanager
+    def rendered_source_custody(self, roots, original_job_id):
+        """Hold admission/lease writers while proving released source consumers.
+
+        No startup reconciliation, lease release or job/result mutation. This
+        narrowly serves rendered-source repair, not execution or recovery.
+        """
+        validate_job_id(original_job_id)
+        roots = tuple(Path(root).absolute() for root in roots)
+        with self.transaction(immediate=True) as conn:
+            rows = conn.execute('SELECT job_id,project_root,lifecycle,finished_at, '
+                                'CASE WHEN length(result_json)<=65536 THEN result_json ELSE NULL END AS result_json '
+                                'FROM jobs ORDER BY job_id LIMIT 4097').fetchall()
+            for table in ('workspace_leases', 'host_capacity_leases'):
+                if conn.execute('SELECT 1 FROM ' + table + ' l LEFT JOIN jobs j ON j.job_id=l.job_id '
+                                'WHERE j.job_id IS NULL LIMIT 1').fetchone():
+                    raise JobRepositoryError('source lease ownership is unavailable')
+            if len(rows) > 4096:
+                raise JobRepositoryError('source custody inventory exceeds bounds')
+            relevant = []
+            matched_roots = set()
+            for row in rows:
+                if (not isinstance(row['project_root'], str) or len(row['project_root'].encode()) > 4096
+                        or not Path(row['project_root']).is_absolute()):
+                    raise JobRepositoryError('source consumer root is unavailable')
+                path = Path(row['project_root'])
+                matches = [i for i, root in enumerate(roots)
+                           if path == root or root in path.parents or path in root.parents]
+                if not matches:
+                    continue
+                matched_roots.update(matches)
+                if (row['lifecycle'] not in ('succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted')
+                        or not row['finished_at'] or not isinstance(row['result_json'], str)
+                        or len(row['result_json'].encode()) > 65536):
+                    raise JobRepositoryError('source consumer is active or uncertain')
+                stopped = json.loads(row['result_json'])
+                if (stopped.get('owned_work_stopped') is not True or stopped.get('stop_error') is not None
+                        or not isinstance(stopped.get('owned_descendants'), list)
+                        or len(stopped['owned_descendants']) > 1024):
+                    raise JobRepositoryError('source consumer cessation is unproved')
+                if (conn.execute('SELECT 1 FROM workspace_leases WHERE job_id=? LIMIT 1', (row['job_id'],)).fetchone()
+                        or conn.execute('SELECT 1 FROM host_capacity_leases WHERE job_id=? LIMIT 1', (row['job_id'],)).fetchone()):
+                    raise JobRepositoryError('source consumer retains custody')
+                process = conn.execute('SELECT host_boot_id,supervisor_pid,child_pid,child_pgid '
+                                       'FROM process_identities WHERE job_id=?', (row['job_id'],)).fetchone()
+                if process is None:
+                    raise JobRepositoryError('source consumer identity is unavailable')
+                relevant.append({'job_id': row['job_id'], 'process': dict(process),
+                                 'descendants': stopped['owned_descendants']})
+            if (len(matched_roots) != len(roots)
+                    or original_job_id not in {row['job_id'] for row in relevant}):
+                raise JobRepositoryError('original source custody binding is unavailable')
+            yield relevant
+
     def __init__(self, path: str | Path, *, busy_timeout_ms: int = 5_000) -> None:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -406,7 +512,8 @@ class JobRepository:
 
     def close(self) -> None:
         try:
-            self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            if getattr(self, "_checkpoint_on_close", True):
+                self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
         except sqlite3.Error:
             pass
         self.connection.close()
@@ -652,19 +759,6 @@ class JobRepository:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
             )
-            # Independent additive extension: existing job schema/projections stay
-            # at version 7. Publish the extension version in this same transaction.
-            from .credential_operations import initialize_schema
-            initialize_schema(connection)
-
-    def credential_operations(self) -> CredentialOperationRepository:
-        """Return the jobs-owned nonsecret ledger; this is not admission authority.
-
-        Repository initialization installs the extension. Lookup on the returned
-        owner only reads retained rows and never initializes installation identity.
-        """
-        from .credential_operations import CredentialOperationRepository
-        return CredentialOperationRepository(self)
 
     def schema_version(self) -> int:
         row = self.connection.execute(
@@ -747,6 +841,14 @@ class JobRepository:
                         raise JobRepositoryError(
                             "request workspace authority changed")
                     return dict(existing), True
+            # Returning an existing receipt is not new admission. Fence only
+            # new rows, atomically with the insertion and cancellation intent.
+            if submission.parent_job_id:
+                from .server_cli_lineage import check_server_cli_lineage, MAX_ANCESTORS, ServerCliLineageError
+                ancestors = self._server_cli_ancestry(connection, submission.parent_job_id)
+                check_server_cli_lineage(ancestors)
+                if len(ancestors) >= MAX_ANCESTORS:
+                    raise ServerCliLineageError('parent_context_unavailable')
             submission_json = _canonical_submission_snapshot(submission)
             job_id = new_job_id()
             values = (
@@ -797,6 +899,45 @@ class JobRepository:
         if row is None:
             raise JobNotFound(f"job {job_id!r} was not found")
         return dict(row)
+
+    @staticmethod
+    def _server_cli_ancestry(connection, job_id):
+        from .server_cli_lineage import CANCEL_EVENT, MAX_ANCESTORS, ServerCliLineageError
+        rows, seen = [], set()
+        while job_id is not None:
+            if job_id in seen or len(rows) >= MAX_ANCESTORS:
+                raise ServerCliLineageError('parent_context_unavailable')
+            seen.add(job_id)
+            row = connection.execute('SELECT * FROM jobs WHERE job_id=?', (validate_job_id(job_id),)).fetchone()
+            if row is None:
+                raise ServerCliLineageError('parent_context_unavailable')
+            value = dict(row)
+            value['server_cli_cancel_requested'] = connection.execute(
+                'SELECT 1 FROM job_events WHERE job_id=? AND kind=? LIMIT 1', (job_id, CANCEL_EVENT)).fetchone() is not None
+            rows.append(value)
+            job_id = value['parent_job_id']
+        return rows
+
+    def server_cli_ancestry(self, job_id):
+        """Read the complete actual chain and cancellation ledger consistently."""
+        with self._lock:
+            if self.connection.in_transaction:
+                return self._server_cli_ancestry(self.connection, job_id)
+            with self.transaction() as connection:
+                return self._server_cli_ancestry(connection, job_id)
+
+    def request_server_cli_cancellation(self, job_id):
+        """Durable admission fence, committed before traversing descendants."""
+        from .server_cli_lineage import CANCEL_EVENT
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute('SELECT kind FROM jobs WHERE job_id=?', (validate_job_id(job_id),)).fetchone()
+            if row is None or row['kind'] != 'server-cli':
+                raise JobRepositoryError('server_cli_cancellation_identity_unavailable')
+            if connection.execute('SELECT 1 FROM job_events WHERE job_id=? AND kind=? LIMIT 1', (job_id, CANCEL_EVENT)).fetchone():
+                return
+            sequence = connection.execute('SELECT COALESCE(MAX(sequence), -1)+1 FROM job_events WHERE job_id=?', (job_id,)).fetchone()[0]
+            connection.execute('INSERT INTO job_events(job_id,sequence,kind,occurred_at,payload_json) VALUES(?,?,?,?,?)',
+                (job_id, sequence, CANCEL_EVENT, _now(), '{}'))
 
     def bind_sync_projection(self, job_id: str, submission: JobSubmission, *,
                              workspace_id: str | None = None,

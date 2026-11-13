@@ -8,6 +8,7 @@ from .context import control_metadata, target_for_project
 from .models import (DeliveryError, canonical_digest, new_operation, now,
                      request_scope, target_digest, operation_summary)
 from .repository import DeliveryRepository
+from .server_binding import current_binding
 from .service import evaluate_operation, normalize_creation_receipt
 
 
@@ -38,8 +39,14 @@ class ExposureAttempt:
         self.repository = DeliveryRepository(RUNTIME_DIR.parent)
         target = target_for_project(project['root'], remote_name, label=label,
                                     target_kind='preview' if kind == 'preview_creation' else 'deploy')
-        from sandbox.resources.context import authenticated_target_identity
-        target['machine_identity'] = authenticated_target_identity(remote_name)['target_identity']
+        from sandbox.hosting.server_cli_target import is_owner_target
+        if is_owner_target(entry):
+            if entry.remote_name != remote_name:
+                raise DeliveryError('delivery_contract_invalid')
+            target['machine_identity'] = entry.owner.target_identity
+        else:
+            from sandbox.resources.context import authenticated_target_identity
+            target['machine_identity'] = authenticated_target_identity(remote_name)['target_identity']
         from .context import registered_host_digest
         target['registered_host_digest'] = registered_host_digest(entry, remote_name)
         config_digest = canonical_digest({'kind': project.get('kind', 'wordpress'),
@@ -77,7 +84,8 @@ class ExposureAttempt:
         if self.repository.has_open_operation(scope):
             raise DeliveryError('authority_pending')
         reserved = self.repository.reserve_request(scope, request_id,
-            self.operation['operation_id'], self.operation['intent_digest'], operation=self.operation)
+            self.operation['operation_id'], self.operation['intent_digest'], operation=self.operation,
+            server_binding=current_binding(self.operation))
         if reserved['status'] != 'reserved':
             raise ExposureReplay(reserved)
         self.operation = reserved['operation']

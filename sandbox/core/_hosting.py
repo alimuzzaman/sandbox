@@ -37,7 +37,6 @@ class HostingRefusal(HostingError):
 # the RecoveryRepository owner/CAS boundary.  Consumers validate membership
 # before opening state or entering an effect.  Unknown/bypass names fail closed.
 TARGET_MUTATION_CAPABILITIES = {
-    "shared_credentials": "hosting.shared-credentials.v1",
     "apply": "hosting.apply.v1",
     "sync": "hosting.sync.v1",
     "login-url": "hosting.login-url.v1",
@@ -563,13 +562,14 @@ def _basic_auth_route_pattern(path_template: str) -> str:
     return "^/" + "/".join(rendered) + "$"
 
 
-def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
+def validate_manifest(project_dir: str | Path, environment: str | None = None, *,
+                      git_root_observer=None) -> dict:
     root, manifest = load_manifest(project_dir)
-    return validate_loaded(root, manifest, environment)
+    return validate_loaded(root, manifest, environment, git_root_observer=git_root_observer)
 
 
 def validate_loaded(root: Path, manifest: dict, environment: str | None = None, *,
-                    require_checkout: bool = True) -> dict:
+                    require_checkout: bool = True, git_root_observer=None) -> dict:
     """Validate an already-loaded manifest.
 
     ``require_checkout=False`` lets ``sb host stack up --plan`` validate a
@@ -577,6 +577,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     without creating a Git worktree.
     """
     from sandbox.hosting import stack_template
+    observe_git_root = _git_root if git_root_observer is None else git_root_observer
     kind = stack_template.manifest_kind(manifest)
     if kind == "template":
         raise stack_template.refuse_plain_use()
@@ -606,7 +607,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         # A rendered stack manifest lives in Sandbox runtime state and points
         # at the clean worktree `sb host stack up` created for its commit.
         source_root_path = Path(stack["source_root"]).resolve()
-        checkout_root = _git_root(source_root_path) if source_root_path.is_dir() else None
+        checkout_root = observe_git_root(source_root_path) if source_root_path.is_dir() else None
         if require_checkout:
             worktrees = (_paths.RUNTIME_DIR / "stacks" / stack["slug"] / "source").resolve()
             if worktrees not in source_root_path.parents:
@@ -619,7 +620,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             raise HostingError("source_root must be a non-empty relative directory")
         source_root_path = (root / declared_source_root).resolve()
         if source_root_path != root.resolve():
-            checkout_root = _git_root(root)
+            checkout_root = observe_git_root(root)
             if checkout_root is None:
                 raise HostingError("source_root must stay within the manifest project root")
             try:
@@ -627,7 +628,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             except ValueError as exc:
                 raise HostingError("source_root must stay within the manifest checkout") from exc
         else:
-            checkout_root = _git_root(source_root_path)
+            checkout_root = observe_git_root(source_root_path)
     source_root_nested = bool(checkout_root and source_root_path != checkout_root)
     if not source_root_path.is_dir():
         raise HostingError(f"source_root does not exist: {declared_source_root}")
@@ -890,29 +891,147 @@ def _save_legacy_host_state(state: dict, path: Path) -> None:
         raise HostingError(f"could not save managed-host state: {exc}") from exc
 
 
-def allocate_loopback_port(state: dict, key: str) -> int:
-    """Return a deterministic, non-conflicting managed loopback port.
+def allocate_loopback_port(state: dict, key: str, *, observation=None,
+                           require_observation: bool = False, owner=None,
+                           gate_owner=None, gate_offset: int = 0,
+                           same_target_keys=(), allow_reallocate: bool = False,
+                           expected_old: int | None = None) -> int:
+    """Allocate purely; absent observation is an OFFLINE provisional choice.
 
-    The remote apply step verifies availability before binding. Persisting this
-    allocation makes plan/apply idempotent without probing or altering a VPS.
+    Effect callers must set require_observation. same_target_keys is caller proof
+    of aliases on this same physical target, not an alias-name equivalence guess.
+    Reassignment requires an explicit permission AND matching expected old port;
+    this function authorizes no effects and never changes state.
     """
-    existing = state.get("hosts", {}).get(key, {})
-    if isinstance(existing.get("loopback_port"), int):
-        return existing["loopback_port"]
+    from sandbox.hosting import ports
+
+    def refuse(message):
+        raise HostingRefusal("hosting_port_conflict", message)
+
+    def valid_port(value):
+        if type(value) is not int or not 1 <= value <= 65535:
+            refuse("invalid recorded loopback port")
+        return value
+
     if getattr(state, "unreadable", None):
-        # An unreadable per-target file may hold a port this view cannot see.
-        raise HostingError("a per-target hosting state file is unreadable; "
-                           "cannot allocate a loopback port safely")
-    used = {entry.get("loopback_port") for entry in state.get("hosts", {}).values()
-            if isinstance(entry, dict) and isinstance(entry.get("loopback_port"), int)}
+        refuse("a per-target hosting state file is unreadable")
+    hosts = state.get("hosts", {})
+    if not isinstance(hosts, dict):
+        refuse("invalid hosting state")
+    if require_observation and observation is None:
+        refuse("a complete current host port observation is required")
+    if type(gate_offset) is not int or gate_offset < 0:
+        refuse("invalid gate port offset")
+    if type(allow_reallocate) is not bool:
+        refuse("invalid reassignment permission")
+    if isinstance(same_target_keys, (str, bytes)):
+        refuse("invalid same-target alias evidence")
+    aliases = set(same_target_keys)
+    aliases.add(key)
+    suffix = key.split("/", 1)[-1]
+    for alias in aliases:
+        if type(alias) is not str or alias.split("/", 1)[-1] != suffix:
+            refuse("alias does not name the same project/environment")
+    if observation is not None:
+        try:
+            observation = ports.validate_snapshot(observation)
+            live = ports.primary_ports(observation, owner)
+        except ports.PortObservationError as exc:
+            refuse(str(exc))
+        if len(live) > 1:
+            refuse("inconsistent live primary ports")
+    else:
+        live = set()
+        if aliases != {key} or allow_reallocate:
+            refuse("alias recovery/reassignment requires a host observation")
+    recorded = set()
+    used = set()
+    for entry_key, entry in hosts.items():
+        if not isinstance(entry, dict):
+            refuse("malformed hosting reservation")
+        value = entry.get("loopback_port")
+        if value is None:
+            continue
+        value = valid_port(value)
+        physical = ((entry.get("hosting_operation") or {}).get("evidence") or {}).get("machine_identity")
+        if (observation is not None and isinstance(physical, str)
+                and re.fullmatch(r"[0-9a-f]{24}", physical)
+                and physical != observation["identity"]["target"]):
+            if entry_key in aliases:
+                refuse("alias machine disagrees with observed target")
+            continue  # Proven distinct hosts have separate port namespaces.
+        if entry_key in aliases:
+            if entry_key != key and (owner is None or entry.get("compose_project") != owner["project"]):
+                refuse("alias lacks matching Compose project metadata")
+            if owner is not None and entry.get("compose_project", owner["project"]) != owner["project"]:
+                refuse("recorded Compose identity disagrees with target")
+            recorded.add(value)
+        else:
+            used.add(value)
+        # Conservatively reserve every recorded target's possible gate, including
+        # legacy records without a login declaration. This cannot free a bind.
+        if gate_offset and entry_key not in aliases and value + gate_offset <= 65535:
+            used.add(value + gate_offset)
+    if len(recorded) > 1:
+        refuse("inconsistent alias ports")
+    if recorded and live and recorded != live:
+        refuse("recorded port disagrees with live target primary mapping")
+    if observation is not None:
+        own_reservations = {row["port"] for row in observation["reservations"]
+                            if row["project"] == owner["project"]}
+        if len(own_reservations) > 1 or (own_reservations and (recorded or live) and own_reservations != (recorded or live)):
+            refuse("host summary disagrees with target port")
+        # A stopped/failed target summary must never silently move to a fresh
+        # number when controller state is absent. Explicit recovery must pin it
+        # from failure-bound evidence before calling this allocator.
+        if own_reservations and not (recorded or live):
+            refuse("host summary has an existing allocation without matching saved/live authority")
+        # A summary alone is a reservation hint, never recovery authority.
+        for row in observation["reservations"]:
+            if row["project"] != owner["project"] or not (recorded or live):
+                used.add(row["port"])
+                if gate_offset:
+                    used.add(row["port"] + gate_offset)
+    pinned = next(iter(recorded or live), None)
+    if pinned is not None and not _PORT_START <= pinned < _PORT_START + _PORT_COUNT:
+        refuse("recorded/live primary port is outside the managed range")
+    if observation is not None and gate_owner is not None:
+        try:
+            gate_ports = ports.primary_ports(observation, gate_owner)
+        except ports.PortObservationError as exc:
+            refuse(str(exc))
+        if gate_ports and (pinned is None or gate_ports != {pinned + gate_offset}):
+            refuse("live gate port disagrees with primary allocation")
+    if allow_reallocate:
+        if pinned is None or type(expected_old) is not int or expected_old != pinned:
+            refuse("explicit reassignment requires the exact old port")
+        used.add(pinned)
+    elif expected_old is not None:
+        refuse("expected old port requires explicit reassignment permission")
+
+    def available(candidate):
+        if candidate in used or (gate_owner is not None and candidate + gate_offset in used):
+            return False
+        if observation is not None:
+            try:
+                ports.check_pair(observation, candidate, owner,
+                                 gate_owner=gate_owner, gate_offset=gate_offset)
+            except ports.PortObservationError:
+                return False
+        return True
+
+    if pinned is not None and not allow_reallocate:
+        if not available(pinned):
+            refuse(f"recorded/live TCP port {pinned} or its gate is occupied")
+        return pinned
     offset = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % _PORT_COUNT
     for index in range(_PORT_COUNT):
         candidate = _PORT_START + ((offset + index) % _PORT_COUNT)
         if STACK_PORT_START <= candidate < STACK_PORT_END:
             continue
-        if candidate not in used:
+        if available(candidate):
             return candidate
-    raise HostingError("no managed loopback ports are available")
+    refuse("no managed loopback ports are available")
 
 
 def compose_override(validated: dict, loopback_port: int) -> str:
@@ -930,8 +1049,10 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     from sandbox.hosting import login_service
     # Spec 081: the gate publishes its own managed loopback port, and the front
     # door sends every gate hostname there; the application keeps its port.
+    from sandbox.hosting.owner_share_record import target_digest
     return rendered + login_service.render_service(
-        declaration, gate_port=login_service.gate_loopback_port(loopback_port))
+        declaration, gate_port=login_service.gate_loopback_port(loopback_port),
+        target_digest=target_digest(validated))
 
 
 def resolve_environment(validated: dict, source_values: dict[str, str],
@@ -1003,12 +1124,25 @@ def render_compose_command(validated: dict, source_dir: str, override_path: str)
     return " ".join(shlex.quote(part) for part in files)
 
 
-def desired_runtime(validated: dict, remote_name: str, state: dict | None = None) -> dict:
+def desired_runtime(validated: dict, remote_name: str, state: dict | None = None, *,
+                    observation=None, require_observation: bool = False,
+                    same_target_keys=(), allow_reallocate: bool = False,
+                    expected_old: int | None = None) -> dict:
     """Produce a complete, mutation-free desired runtime record for plan/apply."""
     state = state or {"version": 1, "hosts": {}}
     key = state_key(remote_name, validated)
-    port = allocate_loopback_port(state, key)
     compose = validated["compose"]
+    owner = {"project": compose_project_name(validated), "service": compose["service"],
+             "container_port": compose["container_port"]}
+    from sandbox.hosting import login_service
+    gate_owner = ({"project": owner["project"], "service": login_service.SERVICE_NAME,
+                   "container_port": login_service.INTERNAL_PORT}
+                  if validated.get("login_service") else None)
+    port = allocate_loopback_port(
+        state, key, observation=observation, require_observation=require_observation,
+        owner=owner, gate_owner=gate_owner, gate_offset=login_service.GATE_PORT_OFFSET,
+        same_target_keys=same_target_keys, allow_reallocate=allow_reallocate,
+        expected_old=expected_old)
     services = [
         {"name": compose["service"], "role": "primary"},
         *({"name": name, "role": "init"}
@@ -1018,6 +1152,7 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
     ]
     runtime = {
         "key": key,
+        "port_observation": "observed" if observation is not None else "provisional",
         "compose_project": compose_project_name(validated),
         "services": services,
         "loopback_port": port,

@@ -347,8 +347,9 @@ service predates the entry: run `host apply`), `login_service_expired`, `email_r
 ### The stack page
 
 `sb host share create --remote R --stack <slug> --json` requests one recorded stack
-page and its direct `stack.uses` companions. This spec 088 source is awaiting checks,
-independent authentication review and authorized runtime acceptance. Installed v2
+page and its direct `stack.uses` companions. Spec 088 source is integrated with
+short links and owner-panel sharing in cbda71e. Final regression reconciliation,
+independent authentication review and authorized runtime acceptance remain open. Installed v2
 support is UNKNOWN. Read the [exact contract](../specs/088-stack-page-access/contracts/access.md)
 and [future acceptance plan](../specs/088-stack-page-access/quickstart.md) before rollout.
 
@@ -396,7 +397,7 @@ whenever recorded `ports.mailpit` exists, and must name a listed inbox_gate.
 `stack_sign_in` parses unique names; v2 page limits actions to 16. The pending pool
 limit of eight is a separate rule. Overflow/gaps refuse, never silently truncate.
 
-Durable attempts use schema 2 with original ids and bounded cleanup descriptors,
+Durable attempts write schema 3 with original-settlement evidence and original ids and bounded cleanup descriptors,
 never bearer tokens, keys, emails or whole manifests. Unknown acceptance requires
 list/revoke of original ids, not mint replay. Revoke parent then every companion;
 retain all survivors on partial failure. Gate absence is separate from WP key removal,
@@ -424,11 +425,39 @@ CLI JSON refusal envelopes include `ok:false`, `code`, and `message`; coverage r
 also includes `gaps` rows with `stack`, `target`, `piece`, `code`, `fix`, and optional
 `hostname`. Create, list and revoke print partial results and exit nonzero. Text list
 output includes retained attempt and grant identities, statuses and partial reasons;
-JSON retains `ok:false` and `partial_reasons`. This CLI correction has a defined
-regression but has not yet been run. The panel API projects only bounded safe attempt and live-grant identifiers,
+JSON retains `ok:false` and `partial_reasons`. Focused CLI fixtures exercise this
+contract; they do not establish installed behavior. The panel API projects only bounded safe attempt and live-grant identifiers,
 phase/status, expiry, and allowlisted reasons; list is HTTP 200 only when complete and
 409 for partial/invalid projection. Private cleanup descriptors are not projected.
 `expires_clamped` is a boolean; there is no detailed clamp-reason field.
+
+An original operation with unknown completion stays fenced after a process crash.
+Repeated revoke reports `mint_completion_unknown`; neither an absent gate record nor
+a new request proves that the old writer has stopped. Confirmed live grants can be
+revoked using their saved runtime identity; unknown unused capabilities must reach
+their recorded expiry unless original completion can be established. This can delay
+recovery and prevents an unsafe replacement mint. Owner-local execution additionally
+retains its original process handle and native writer leases, as described in
+[owner-panel-sharing.md](owner-panel-sharing.md).
+
+The version-3 `original_settled` fact records completion separately from gate revoke.
+It permits retrying WordPress removal after partial compensation. Version-2 records
+remain readable with this fact false: legacy `gate_revoked` never implies settlement.
+Legacy revoked/expired records with cleanup descriptors reopen as unknown cleanup,
+including mixed attempts. A subsequent v3 save cannot close that uncertainty.
+Descriptor-free terminal rows have zero-effect provenance: v2 required a descriptor
+before the first key/mint effect. New v3 revocation requires original settlement
+or a proven planned-only zero-effect closure.
+No remote state migration runs automatically.
+
+Controller stack issuance and panel revocation prove exact running source/config/access/target parity,
+including current applied agent_mint, under the real physical apply leases. Gate/WP
+effects use immutable container ids. A local unapplied enable or stale enable after
+another controller opted out refuses before key/grant effects. Unknown transport
+retains physical ownership for coordinated recovery; authentication expiry alone
+cannot prove that the old writer stopped. Per-click entries honor their shorter
+declared TTL as well as the ten-minute/source/window bounds. Mapped route rows open
+their declared action; only anonymous routes render ordinary open links.
 
 #### Worked stack template
 
@@ -657,3 +686,9 @@ client, so a prober can make legitimate opens wait out the minute. A stack page 
 WordPress admin and the listed sign-ins to whoever holds its link. Anyone with Sandbox access can mint one, and is
 effectively root on that server. Whoever holds an unused link has that access. The clock
 that sets a token's expiry is the issuing machine's, compared against the service's.
+
+The capability reply includes public boolean panel_agent_mint. Panel recovery
+without a manifest checks it on the exact original bound running gate before
+revoke/key effects. Disabling agent_mint refuses panel mutations; ordinary CLI
+operator cleanup remains available. Both durable and current legacy stack cleanup
+hold physical leases and address immutable service ids.

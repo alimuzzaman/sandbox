@@ -978,6 +978,13 @@ def instance_name_taken(name: str) -> bool:
 
 @contextmanager
 def project_lock(root):
+    from sandbox.project_registry.lifecycle import lifecycle_writer
+    with lifecycle_writer(), _project_lock(root):
+        yield
+
+
+@contextmanager
+def _project_lock(root):
     """Per-project create lock: two concurrent ensure_instance() calls for the
     same project serialize, so the second sees the first's result instead of
     racing to create a duplicate instance. Hold this around the

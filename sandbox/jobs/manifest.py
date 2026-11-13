@@ -49,6 +49,8 @@ def builtin_job_component_registry(*, repository: Any, storage: Any,
                                    profiles: Any) -> JobComponentRegistry:
     """Register the built-in mechanisms without constructing them implicitly."""
     registry = JobComponentRegistry()
+    from sandbox.application.server_cli import FixedServerCLI
+    registry.register('server_cli', FixedServerCLI(), owner='sandbox.application.server_cli', order=5)
     for order, (component_id, component, owner) in enumerate((
         ("repository", repository, "sandbox.jobs.registry"),
         ("storage", storage, "sandbox.jobs.storage"),

@@ -4,12 +4,18 @@
 
 **Created**: 2026-11-11
 
-**Status**: Draft
+**Status**: Source integrated; independent review and runtime acceptance pending
 
 **Input**: The ready PRD `specs/088-stack-page-access/prd.md` (Sol readiness review PASS,
 2026-11-11), which is the authoritative feature description.
 
 ## Clarifications
+
+### Session 2026-11-13
+
+- Q: Who may create or revoke through the Tailnet panel? → A: Anyone admitted by the existing panel peer, Host, Origin, JSON and header checks, for stacks whose current applied `share.agent_mint` is enabled. No separate named-operator login is required; audit must not imply named-person attribution.
+- Q: Does this policy approve the paused unified Tailnet sharing work? → A: No. This feature uses the fixed stack create/list/revoke and sign-in paths; paused 090 authority remains outside scope.
+- Q: May recovery retry an operation whose original execution is unknown? → A: No. Retain its original identities and report pending cleanup until original completion is proven or its unused capabilities expire. A missing grant alone does not prove the original writer has stopped.
 
 ### Session 2026-11-11
 

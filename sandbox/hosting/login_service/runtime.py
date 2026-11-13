@@ -419,6 +419,8 @@ class SiteStore:
             return {"ok": False, "code": "site_record_invalid"}
         stack = None
         if record["kind"] == "stack":
+            if config.get("panel_share", {}).get("agent_mint") is not True:
+                return {"ok": False, "code": "agent_mint_not_enabled"}
             stack = valid_stack(raw["stack"], self.name, record["id"], config)
             if (stack is None or record["scope"] != STACK_PAGE_PATH
                     or any(child["expires_at"] != record["expires_at"] for child in stack.get("companions", []))):
@@ -793,6 +795,10 @@ class Gate:
         if entry["mode"] == "magic_link" and (not isinstance(email, str) or not _ADDRESS.fullmatch(email)
                 or email.casefold() in entry["magic_link"].get("denied_emails", [])):
             return None
+        expires_at = min(int(expires_at), issued + int(entry["ttl_seconds"]),
+                         self.config["enabled_until_epoch"])
+        if expires_at <= issued:
+            return None
         token = secrets.token_urlsafe(32)
         record = {"schema": RECORD_SCHEMA, "entry": name,
                   "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
@@ -948,22 +954,47 @@ class Gate:
     def cookie_name(name):
         return f"__Host-sandbox_login_{name}"
 
-    def _signature(self, name, expires):
-        return hmac.new(self.session_key, f"{name}:{expires}".encode(), hashlib.sha256).hexdigest()
+    def _signature(self, name, expires, via=None):
+        message = f"{name}:{expires}"
+        if via is not None:
+            message += f":stack:{via['entry']}:{via['link']}"
+        return hmac.new(self.session_key, message.encode(), hashlib.sha256).hexdigest()
 
-    def new_session(self, name):
+    def new_session(self, name, record=None):
         expires = int(self.clock()) + self.config["session_ttl_seconds"]
+        if record is not None and "via" in record:
+            if not self.current(name, record):
+                return None
+            via = record["via"]
+            store = self.sites[via["entry"]]
+            parent = next((row for _, row in store._links() if row["id"] == via["link"]), None)
+            if parent is None:
+                return None
+            expires = min(expires, parent["expires_at"])
+            if not self.enabled() or self.clock() >= expires or not self.bound(record):
+                return None
+            return f"{expires}.{via['entry']}.{via['link']}.{self._signature(name, expires, via)}"
         return f"{expires}.{self._signature(name, expires)}"
 
     def session_valid(self, name, value):
-        expires, _, signature = (value or "").partition(".")
+        parts = (value or "").split(".")
+        via = None
+        if len(parts) == 4:
+            expires, entry, link, signature = parts
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", entry) or not _LINK_ID.fullmatch(link):
+                return False
+            via = {"entry": entry, "link": link}
+        elif len(parts) == 2:
+            expires, signature = parts
+        else:
+            return False
         if not _SESSION_EXPIRY.fullmatch(expires):
             return False
         # Bytes, because compare_digest raises on a non-ASCII str from a client.
-        if not hmac.compare_digest(self._signature(name, int(expires)).encode(),
+        if not hmac.compare_digest(self._signature(name, int(expires), via).encode(),
                                    signature.encode("utf-8", "replace")):
             return False
-        return self.clock() < int(expires)
+        return self.clock() < int(expires) and (via is None or self.bound({"via": via}))
 
     def _capture_json(self, path):
         capture = self.config["capture"]
@@ -1191,9 +1222,16 @@ _HEALTH_LABELS = {"up": "up", "up_login": "up (sign-in required)", "redirect": "
 
 def render_stack_page(record, health, links):
     """Plain HTML, every value escaped; the links are this view's alone."""
+    def route(item):
+        hostname = html.escape(item["hostname"], quote=True)
+        access = item.get("access", "open")
+        if record.get("schema") == STACK_SCHEMA_V2 and access != "open":
+            return ('<button data-action="' + html.escape(access, quote=True) + '">'
+                    + hostname + ' — Sign in</button>')
+        return (f'<a href="https://{hostname}/" rel="noreferrer noopener" '
+                f'target="_blank">{hostname}</a>')
     rows = "".join(
-        f'<tr><td><a href="https://{html.escape(item["hostname"])}/" rel="noreferrer noopener" '
-        f'target="_blank">{html.escape(item["hostname"])}</a></td><td>{html.escape(item["role"])}</td>'
+        f'<tr><td>{route(item)}</td><td>{html.escape(item["role"])}</td>'
         f'<td class="{html.escape(health.get(item["hostname"], "not_checked"))}">'
         f'{html.escape(_HEALTH_LABELS.get(health.get(item["hostname"], "not_checked"), "unknown"))}</td></tr>'
         for item in record["hosts"])
@@ -1329,7 +1367,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             if entry["hostname"] == host and entry["mode"] == "inbox_gate":
                 cookie = self._cookie(gate.cookie_name(name))
                 if gate.session_valid(name, cookie):
-                    return self._proxy(authenticated=True, session_expires=int(cookie.partition(".")[0]))
+                    return self._proxy(authenticated=True, session_expires=int(cookie.partition(".")[0]),
+                                       still_allowed=lambda: gate.enabled() and gate.session_valid(name, cookie))
                 if gate.is_live(name):
                     # Anyone without a link still meets the service's own login,
                     # but only while a link is outstanding (no standing access).
@@ -1710,13 +1749,15 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if entry["mode"] == "inbox_gate":
             if not gate.current(name, record):
                 return self._answer_not_found()
-            return self._start_session(name, entry)
+            return self._start_session(name, entry, record)
         return self._exchange_magic_link(name, entry, email, record)
 
-    def _start_session(self, name, entry):
+    def _start_session(self, name, entry, record=None):
         # No Max-Age or Expires: the cookie ends with the browser session. The
         # server-side limit is carried, signed, inside the value.
-        value = self.gate.new_session(name)
+        value = self.gate.new_session(name, record)
+        if value is None:
+            return self._answer_not_found()
         cookie = (f"{self.gate.cookie_name(name)}={value}; Path=/; "
                   "Secure; HttpOnly; SameSite=Strict")
         self._reply(303, b"", [("Location", entry.get("landing_path") or "/"), ("Set-Cookie", cookie)])
@@ -1756,10 +1797,10 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             headers.extend(capture_headers(gate.config["capture"], gate.credential).items())
         return headers
 
-    def _proxy(self, authenticated, session_expires=None):
+    def _proxy(self, authenticated, session_expires=None, still_allowed=None):
         target = urllib.parse.urlsplit(self.gate.config["capture"]["api_url"])
         return self._forward((target.hostname, target.port), self._upstream_headers(authenticated),
-                             session_expires)
+                             session_expires, still_allowed)
 
     def _forward(self, address, headers, session_expires, still_allowed=None):
         """Send this request to a fixed address; nothing in it chooses where."""
@@ -1779,6 +1820,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         connection = http.client.HTTPConnection(*address, timeout=30)
         try:
             body = self.rfile.read(length) if length else None
+            if still_allowed is not None and not still_allowed():
+                return self._answer_not_found()
             connection.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
             for name, value in headers:
                 connection.putheader(name, value)
@@ -1786,7 +1829,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
                 connection.putheader("Content-Length", str(len(body)))
             connection.endheaders(body)
             response = connection.getresponse()
-            self._relay(response)
+            if still_allowed is not None and not still_allowed():
+                return self._answer_not_found()
+            self._relay(response, still_allowed)
         except (OSError, http.client.HTTPException):
             self.close_connection = True
             return self._fail(502, "upstream_unavailable")
@@ -1794,7 +1839,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             connection.close()
         return None
 
-    def _relay(self, response):
+    def _relay(self, response, still_allowed=None):
         self.send_response(response.status)
         for name, value in response.getheaders():
             if name.lower() not in _HOP_BY_HOP and name.lower() not in (
@@ -1813,8 +1858,15 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if self.command == "HEAD":
             return
         while True:
+            if still_allowed is not None and not still_allowed():
+                self.close_connection = True
+                return
             chunk = response.read(65536)
             if not chunk:
+                return
+            # A slow upstream body can outlive the check at response headers.
+            if still_allowed is not None and not still_allowed():
+                self.close_connection = True
                 return
             self.wfile.write(chunk)
 
@@ -1837,12 +1889,17 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         connection open therefore never sees later requests that skipped the gate's checks.
         """
         self.close_connection = True
+        if still_allowed is not None and not still_allowed():
+            return self._answer_not_found()
         pending = self._buffered_client_bytes()
         try:
             upstream = socket.create_connection(address, timeout=10)
         except OSError:
             return self._fail(502, "upstream_unavailable")
         try:
+            # Connecting can block long enough for the original grant to end.
+            if still_allowed is not None and not still_allowed():
+                return self._answer_not_found()
             lines = [f"{self.command} {self.path} HTTP/1.1"]
             lines += [f"{name}: {value}" for name, value in headers]
             lines += ["Upgrade: websocket", "Connection: Upgrade", "", ""]
@@ -1851,6 +1908,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             if status != 101 or not any(name.lower() == "upgrade" and value.lower() == "websocket"
                                         for name, value in response_headers):
                 return self._fail(502, "upgrade_refused")
+            if still_allowed is not None and not still_allowed():
+                return self._answer_not_found()
             self.send_response(101)
             for name, value in response_headers:
                 if name.lower() not in ("x-robots-tag", "referrer-policy", "server", "date",
@@ -1986,7 +2045,12 @@ def manage(config, argv, state_dir, *, stdin, stdout, clock=time.time):
         return emit({"ok": False, "code": "site_entry_unknown"})
     if verb == "capabilities" and not extra:
         return emit({"ok": True, "capabilities": ["stack-page-v2", "stack-signin-pool-v1",
-                     "wordpress-claim-v1", "companion-status-v1"],
+                     "wordpress-claim-v1", "companion-status-v1", "owner-panel-gate-v1"],
+                     "config_digest": hashlib.sha256(json.dumps(config, sort_keys=True,
+                         separators=(",", ":")).encode()).hexdigest(),
+                     "panel_access_digest": config.get("panel_access_digest"),
+                     "panel_target_digest": config.get("panel_target_digest"),
+                     "panel_agent_mint": config.get("panel_share", {}).get("agent_mint") is True,
                      "stack_schemas": [STACK_SCHEMA, STACK_SCHEMA_V2], "link_schemas": [SITE_LINK_SCHEMA]})
     store = SiteStore(state_dir, name, clock)
     store.ensure()

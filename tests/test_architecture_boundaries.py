@@ -246,7 +246,6 @@ target.update(imported_parent.values())
         load_builtin_commands()
         # The request-activation command is now part of the explicit built-in
         # manifest; keep this inventory tied to the shipped command set.
-        # Spec 089 adds the manifest-owned, global installation identity command.
         self.assertEqual(len(COMMANDS), 94)
         self.assertEqual(validate_builtin_command_coverage(), ())
 

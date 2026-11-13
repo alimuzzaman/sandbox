@@ -8,6 +8,7 @@ import type {
 } from "../types";
 
 let resolveFn: ((v: ModalResult) => void) | null = null;
+let returnFocus: HTMLElement | null = null;
 
 function renderField(f: ModalField): string {
   if (f.type === "label") {
@@ -57,6 +58,9 @@ function renderField(f: ModalField): string {
 }
 
 export function modal(opts: ModalOpts = {}): Promise<ModalResult> {
+  // A second caller must not replace an unresolved confirmation.
+  if (resolveFn) return Promise.resolve(null);
+  returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   return new Promise((res) => {
     resolveFn = res;
     $("mTitle").textContent = opts.title || "";
@@ -69,14 +73,17 @@ export function modal(opts: ModalOpts = {}): Promise<ModalResult> {
                    : "bg-accent border-accent hover:bg-blue-700");
     $("modal").classList.remove("hidden");
     setTimeout(() => {
-      const f = $("mFields").querySelector("input,select") as HTMLElement | null;
-      (f || ok).focus();
+      if (!resolveFn) return;
+      const f = $("mFields").querySelector("input:not([type=hidden]),select,button") as HTMLElement | null;
+      (opts.danger ? $("mCancel") : f || ok).focus();
     }, 30);
   });
 }
 
 export function closeModal(val: ModalResult): void {
   $("modal").classList.add("hidden");
+  if (returnFocus?.isConnected) returnFocus.focus();
+  returnFocus = null;
   if (resolveFn) { const r = resolveFn; resolveFn = null; r(val); }
 }
 
@@ -98,8 +105,19 @@ export function initModal(): void {
   ($("mCancel") as HTMLButtonElement).onclick = () => closeModal(null);
   ($("mOk") as HTMLButtonElement).onclick = () => closeModal(modalValues());
   $("modal").addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Enter") ($("mOk") as HTMLButtonElement).click();
-    if ((e as KeyboardEvent).key === "Escape") closeModal(null);
+    if (e.key === "Escape") { e.preventDefault(); closeModal(null); }
+    // Buttons keep their native Enter behavior, especially Cancel.
+    if (e.key === "Enter" && e.target instanceof HTMLInputElement && e.target.type === "text") {
+      e.preventDefault();
+      ($("mOk") as HTMLButtonElement).click();
+    }
+    if (e.key === "Tab") {
+      const controls = [...$("modal").querySelectorAll<HTMLElement>("button,input,select,textarea,a[href],[tabindex]")]
+        .filter(el => el.tabIndex >= 0 && !el.matches(":disabled") && el.getClientRects().length > 0);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
   });
   $("modal").addEventListener("click", (e) => {
     if (e.target === $("modal")) closeModal(null);

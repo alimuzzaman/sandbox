@@ -444,6 +444,26 @@ def _consume_strict_runtime(argv: list[str]) -> list[str]:
     return out
 
 
+def _selection_argv(argv):
+    """Pure parser normalization; strict intent stays in forwarded argv."""
+    result, passthrough = [], False
+    for value in _normalize_test_routing_options(list(argv)):
+        if value == '--':
+            passthrough = True
+        if not passthrough and value == '--strict-runtime':
+            continue
+        result.append(value)
+    return result
+
+
+def _forwarded_cli_argv(argv, *, strict):
+    values = tuple(_normalize_test_routing_options(list(argv)))
+    head = values[:values.index('--')] if '--' in values else values
+    if strict and '--strict-runtime' not in head:
+        return ('--strict-runtime', *values)
+    return values
+
+
 @_config_parse_error_boundary
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
@@ -942,6 +962,10 @@ Per-project (each plugin carries its own sandbox.config.json):
              "Sandbox installs Caddy; nginx: a host-incumbent nginx stays the front door "
              "and Sandbox manages only /etc/nginx/conf.d/sandbox-*.conf. Refused on a "
              "remote that already hosts routes")
+    remote_p.add_argument('--adopt-compatible-revision', action='store_true',
+        help='remote service refresh: adopt an observed compatible revision cache on the same pinned owner/machine')
+    remote_p.add_argument('--tailnet-only', action='store_true',
+        help='remote service refresh: move this pinned owner registration to verified keyless Tailscale SSH')
     remote_p.add_argument("--remove-route", dest="remove_route", default=None,
         help="for `remote edge`: remove one Sandbox nginx route (e.g. host-myproj-production) "
              "and its certificates; requires --confirm")
@@ -1052,7 +1076,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, refresh only the front-door route (`host refresh-front-door`), sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`), or make share links (`host share create|list|revoke`)")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "refresh-front-door", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke", "repair-source"],
         help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, `host tailnet-name add|list|renew|remove`, or `host share create|list|revoke ID|all`; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("tailnet_hostname", nargs="?", default=None, metavar="FQDN",
         help="host tailnet-name add|renew|remove: the full hostname (refused for other host actions)")
@@ -1067,12 +1091,16 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host tailnet-name add/renew: ACME directory for this call (default: tailnet_names.acme_server)")
     host_p.add_argument("--force", action="store_true",
         help="host tailnet-name renew: reissue even when the certificate is not due")
+    host_p.add_argument('--repair-source', choices=['deployed'], help='repair-source: explicitly use recorded deployed Git objects')
+    host_p.add_argument('--repair-plan-digest', help='repair-source: exact plan digest required for confirmation')
+    host_p.add_argument('--installed-source-repair', help=argparse.SUPPRESS)
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
-        help="host stack up/down: the stack slug; host exec/logs/status/diagnose/refresh-front-door/retire-delivery/login-url: a recorded stack to target")
+        help="host stack up/down: the stack slug; host exec/logs/status/diagnose/refresh-front-door/retire-delivery: a recorded stack to target")
     host_p.add_argument("--ref", default=None, metavar="BRANCH|COMMIT",
         help="host stack up: ref to deploy, resolved on this controller (default: the checkout's HEAD)")
+    host_p.add_argument('--server-cli-stack-ref', help=argparse.SUPPRESS)
     host_p.add_argument("--port", action="append", default=None, metavar="NAME=PORT",
         help="host stack up: pin a named stack port (repeatable)")
     host_p.add_argument("--plan", action="store_true",
@@ -1117,9 +1145,6 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
-    for option in ("scope", "project", "source", "source-revision", "profile", "profile-revision"):
-        host_p.add_argument("--credential-" + option, default=None, metavar="REFERENCE",
-            help="disabled server credential groundwork; scope is personal-local (default) or server")
     host_p.add_argument("--target", default=None, metavar="PROJECT/ENVIRONMENT",
                         help="host destroy/heal: the recorded target (no manifest needed); host exec/logs/status/diagnose/refresh-front-door/retire-delivery: the recorded target, a stack's rendered manifest when one matches")
     host_p.add_argument("--clear-fenced", action="store_true",
@@ -1227,6 +1252,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="with confirmed host stage, close only a fully proven v2 cleanup uncertainty")
     host_p.add_argument("--job-id", default=None,
         help="failed durable host-apply job identity for recovery")
+    host_p.add_argument("--reallocate-loopback-port", type=int, default=None, metavar="OLD",
+        help="apply only: replace a proven conflicting failed-target allocation; requires original request and generation")
     host_p.add_argument("--original-request-id", default=None,
         help="original failed host-apply request identity")
     host_p.add_argument("--expected-generation", type=int, default=None,
@@ -1248,6 +1275,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--debounce", type=float, default=0.5,
         help="minimum quiet window after a transfer in watch mode (0.1-10; default 0.5)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
+    host_p.add_argument("--credential-scope", choices=("personal-local",), default=None,
+        help="explicitly use this controller's existing credential workflow")
+    host_p.add_argument('--exec-capture-artifacts', action='store_true', help=argparse.SUPPRESS)
 
 
     preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")
@@ -1375,6 +1405,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="list all instances, or change one named instance's lifecycle",
     )
     ins.add_argument("name", nargs="?", help="instance name (not needed for list)")
+    ins.add_argument('--creation-context-json', default=None,
+        help='original creation context required for conditional delete')
+    ins.add_argument('--expected-incarnation', default=None,
+        help='delete only the exact originally created incarnation')
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
     ins.add_argument("--project-dir", default=None,
@@ -1560,33 +1594,26 @@ Per-project (each plugin carries its own sandbox.config.json):
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
             sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
-    raw_argv = _consume_strict_runtime(
-        _normalize_test_routing_options(list(sys.argv[1:])))
+    from sandbox.application.command_selection import bind_cli_command_parser
+    bind_cli_command_parser(p, _selection_argv)
+    normalized_argv = _normalize_test_routing_options(list(sys.argv[1:]))
+    raw_argv = _consume_strict_runtime(normalized_argv)
+    from sandbox.remote_runtime.verdict import strict_requested
+    forwarded_argv = _forwarded_cli_argv(normalized_argv, strict=strict_requested())
     head_argv, host_exec_argv = raw_argv, None
     if "host" in raw_argv and "--" in raw_argv:
         from sandbox.hosting.host_exec import split_passthrough
         head_argv, host_exec_argv = split_passthrough(raw_argv)
-    # Argparse errors can contain arbitrary values, including unknown options.
-    # Credential requests use the same fixed diagnostic before any startup work.
-    if "host" in head_argv and any(token.startswith("--credential-") for token in head_argv):
-        from sandbox.commands.hosting import credential_argument_error
-        def credential_parse_error(message):
-            credential_argument_error("--json" in head_argv)
-        p.error = credential_parse_error
-        host_p.error = credential_parse_error
     args = p.parse_args(head_argv)
     if host_exec_argv is not None:
         if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "exec":
             args.exec_argv = host_exec_argv
         else:
             args = p.parse_args(raw_argv)
+    args._server_cli_argv = forwarded_argv
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "share":
         # `host share revoke ID|all` reuses the optional positional slot.
         args.share_id, args.tailnet_hostname = args.tailnet_hostname, None
-    command_spec = COMMAND_SPECS.get(getattr(args, "cmd", None))
-    if (command_spec is not None and command_spec.preconfiguration_dispatch is not None
-            and command_spec.preconfiguration_dispatch(args)):
-        return
     if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) != "tailnet-name":
         # Spec 078 added an optional FQDN positional and three sub-actions;
         # every other host action keeps refusing them as argparse did.
@@ -1606,23 +1633,22 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
-    # Lifecycle owns its explicit root guard; service startup is controlled by
-    # that lifecycle and leases each HTTP/tool operation separately.
-    if args.cmd in {'installation', 'mcp'}:
-        return _execute_parsed(args, raw_argv, invocation_started_monotonic)
-    from sandbox.installation.binding import InstallationBindingError
-    from sandbox.installation.maintenance import operation_guard
-    try:
-        with operation_guard():
-            return _execute_parsed(args, raw_argv, invocation_started_monotonic)
-    except InstallationBindingError as exc:
-        if getattr(args, 'json', False):
-            print(json.dumps({'ok': False, 'code': exc.code, 'error': str(exc)}))
-            raise SystemExit(1)
-        die(f'{exc.code}: {exc}')
+    command_spec = COMMAND_SPECS.get(args.cmd)
+    if args.cmd == 'delivery' and _explicit_global_option(raw_argv, '--instance'):
+        die('delivery is scope-selected and does not accept --instance', 2)
+    if (command_spec is not None and command_spec.preconfiguration_dispatch is not None
+            and command_spec.preconfiguration_dispatch(args)):
+        return
 
-
-def _execute_parsed(args, raw_argv, invocation_started_monotonic):
+    if args.cmd == 'instance' and args.action == 'delete':
+        # Resolve, compare and delete under the same writer boundary. Do not
+        # regenerate runtime/config files before a conditional mismatch refuses.
+        from sandbox.project_registry.lifecycle import lifecycle_writer
+        from sandbox.commands.instances_cmd import cmd_instance
+        with lifecycle_writer():
+            args.resolved_instance = None
+            cmd_instance(load_config(), args)
+        return
 
     # Spec 072: before any command effect, fast-forward this controller to a
     # newer published revision a remote reported, then re-run once.

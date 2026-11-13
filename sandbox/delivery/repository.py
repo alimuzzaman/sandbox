@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import sqlite3
 import uuid
+import time
 
 from .models import (DeliveryError, MAX_OPERATION_BYTES, TERMINAL, canonical_digest,
                      digest, encoded, fail, identifier, integer, now,
@@ -25,7 +26,8 @@ RETENTION = {'terminal_days': 30, 'terminal_per_target': 64, 'terminal_global': 
              'protected': 128, 'request_guards': 4096, 'target_metadata': 1024}
 
 class DeliveryRepository:
-    def __init__(self, home):
+    def __init__(self, home, *, deadline=None):
+        self.deadline = deadline
         self.path = Path(home) / 'runtime' / 'delivery' / 'outcomes.sqlite3'
 
     @contextlib.contextmanager
@@ -35,7 +37,12 @@ class DeliveryRepository:
             return
         conn = None
         try:
-            conn = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)
+            remaining = 2 if self.deadline is None else min(2, self.deadline - time.monotonic())
+            if remaining <= 0:
+                fail('bounds')
+            conn = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=remaining)
+            if self.deadline is not None:
+                conn.set_progress_handler(lambda: int(time.monotonic() >= self.deadline), 100)
             conn.row_factory = sqlite3.Row
             conn.execute('PRAGMA query_only=ON')
             if conn.execute('PRAGMA user_version').fetchone()[0] != 1:
@@ -156,6 +163,35 @@ class DeliveryRepository:
                 return {'status': 'missing', 'operation': None, 'operation_id': None, 'guard': None}
             return self._lookup(conn, scope, row['request_key_digest'])
 
+    def lookup_server_binding(self, job_id, *, operation_id=None, request_id=None):
+        """One retained admission join. Never scan jobs or infer a root from argv."""
+        from sandbox.jobs.models import validate_job_id
+        from .server_binding import validate_binding, MAX_BINDING_BYTES
+        validate_job_id(job_id)
+        if (operation_id is None) == (request_id is None):
+            fail()
+        with self._read() as conn:
+            if conn is None or conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='server_delivery_bindings'").fetchone() is None:
+                return None
+            # A native job may produce several deliveries; select exactly one.
+            rows = conn.execute('SELECT CASE WHEN length(document)<=? THEN document ELSE NULL END AS document '
+                                'FROM server_delivery_bindings WHERE job_id=? LIMIT 129',
+                                (MAX_BINDING_BYTES, job_id)).fetchall()
+            if len(rows) > 128:
+                fail('bounds')
+            matches = []
+            for row in rows:
+                if row['document'] is None or len(row['document']) > MAX_BINDING_BYTES:
+                    fail('bounds')
+                binding = validate_binding(json.loads(row['document']))
+                if binding['job_id'] != job_id:
+                    fail('binding_mismatch')
+                if (binding['operation_id'] == operation_id if operation_id is not None else binding['request_id'] == request_id):
+                    matches.append(binding)
+            if len(matches) > 1:
+                fail('binding_mismatch')
+            return matches[0] if matches else None
+
     def has_open_operation(self, scope):
         """Read all bounded protected rows in this logical scope, without pruning."""
         scope = scope_digest(scope)
@@ -187,10 +223,15 @@ class DeliveryRepository:
                     fail('delivery_capacity')
             return {'status': 'available', 'operation_id': operation_id, 'operation': None, 'guard': None}
 
-    def reserve_request(self, scope, request_key, operation_id, intent_digest, *, operation):
+    def reserve_request(self, scope, request_key, operation_id, intent_digest, *, operation, server_binding=None):
         scope = scope_digest(scope); key = request_key_digest(request_key, operation_id)
         identifier(operation_id); digest(intent_digest)
         checked = validate_operation(operation)
+        if server_binding is not None:
+            from .server_binding import validate_binding
+            validate_binding(server_binding)
+            if any(server_binding[key] != checked[key] for key in ('target', 'operation_id', 'request_id')):
+                fail('binding_mismatch')
         if checked['operation_id'] != operation_id or checked['intent_digest'] != intent_digest or checked['request_id'] != request_key:
             fail('request_conflict')
         from .models import request_scope
@@ -214,6 +255,16 @@ class DeliveryRepository:
                 fail('delivery_capacity')
             conn.execute('INSERT INTO request_bindings VALUES (?,?,?,?,?)', (scope, key, operation_id, intent_digest, encoded(guard)))
             stored = self._store(conn, checked, new=True)
+            if server_binding is not None:
+                # Additive, writer-only table. Old readers keep their v1 schema;
+                # exact readers never create it or invent bindings for old rows.
+                conn.execute('CREATE TABLE IF NOT EXISTS server_delivery_bindings '
+                    '(job_id TEXT NOT NULL, operation_id TEXT PRIMARY KEY, document BLOB NOT NULL)')
+                conn.execute('CREATE INDEX IF NOT EXISTS server_delivery_job ON server_delivery_bindings(job_id)')
+                if conn.execute('SELECT COUNT(*) FROM server_delivery_bindings').fetchone()[0] >= GUARD_LIMIT:
+                    fail('delivery_request_capacity')
+                conn.execute('INSERT INTO server_delivery_bindings VALUES (?,?,?)',
+                    (server_binding['job_id'], operation_id, encoded(server_binding)))
             return {'status': 'reserved', 'operation_id': operation_id, 'operation': stored, 'guard': guard}
 
     def _store(self, conn, operation, *, new=False):

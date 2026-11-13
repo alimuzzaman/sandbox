@@ -718,7 +718,6 @@ class ServerSelectionTests(OwnerTargetTests):
         audit.write.assert_called_once()
 
     def test_owner_exec_clamps_the_command_timeout_to_the_time_left(self):
-        from sandbox.hosting import host_exec as exec_policy
         code, output, acquired, ran, _ = self.run_owner_exec(seconds_left=100, timeout=300)
         self.assertEqual(code, 0)
         acquired.assert_called_once()
@@ -726,8 +725,9 @@ class ServerSelectionTests(OwnerTargetTests):
         argv = shlex.split(ran.call_args.args[0][-1])
         self.assertEqual(argv[:2], ["timeout", "--kill-after=10"])
         self.assertEqual(int(argv[2]), request.timeout_seconds)
-        self.assertLessEqual(request.timeout_seconds + exec_policy.SERVER_POST_COMMAND_SECONDS, 100)
-        self.assertGreaterEqual(request.timeout_seconds, 100 - exec_policy.SERVER_POST_COMMAND_SECONDS - 3)
+        # 100 s left less the 10 s kill grace and 15 s lease release.
+        self.assertLessEqual(request.timeout_seconds, 75)
+        self.assertGreaterEqual(request.timeout_seconds, 72)
         self.assertEqual(json.loads(output)["code"], "ok")
 
     def test_owner_exec_keeps_a_timeout_that_already_fits(self):

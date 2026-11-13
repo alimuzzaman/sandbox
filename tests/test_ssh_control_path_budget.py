@@ -113,3 +113,47 @@ class TailnetOnlyTransportTest(unittest.TestCase):
             self.assertEqual(remote.ssh_run(self.record, 'single-effect', timeout=2).returncode, 255)
         self.assertEqual(run.call_count, 1)
         self.assert_keyless(run.call_args.args[0])
+
+
+class UnsharedSessionKeepaliveTest(unittest.TestCase):
+    """A session with no shared master must notice a dead link by itself."""
+
+    tailnet = {'ssh': 'alim@212.95.33.238', 'joined': True, 'control_transport': 'tailscale',
+               'tailscale_host': '100.64.181.113'}
+
+    def assert_unshared_keepalive(self, args):
+        self.assertEqual(args.count('ServerAliveInterval=10'), 1)
+        self.assertEqual(args.count('ServerAliveCountMax=3'), 1)
+        self.assertNotIn('ServerAliveInterval=30', args)
+
+    def test_tailnet_ssh_scp_and_git_probe_the_server_without_a_master(self):
+        for multiplex in (True, False):
+            with self.subTest(multiplex=multiplex):
+                self.assert_unshared_keepalive(remote.ssh_command_args(self.tailnet, 'true', multiplex=multiplex))
+                self.assert_unshared_keepalive(remote.scp_command_args(
+                    self.tailnet, '/synthetic/file', '/synthetic/remote', multiplex=multiplex))
+                self.assert_unshared_keepalive(shlex.split(remote.git_ssh_command(self.tailnet, multiplex=multiplex)))
+
+    def test_server_exec_submit_transport_probes_the_server(self):
+        # submit_server_cli_exec sends job-start over exactly this argv shape.
+        args = remote.ssh_command_args(self.tailnet, 'sb job-start --server-cli', multiplex=False)
+        self.assert_unshared_keepalive(args)
+        self.assertEqual(args[-2:], ['alim@100.64.181.113', 'sb job-start --server-cli'])
+
+    def test_ordinary_unshared_session_probes_the_server(self):
+        self.assert_unshared_keepalive(remote.ssh_command_args({'ssh': 'owner@synthetic'}, 'true', multiplex=False))
+
+    def test_long_home_fallback_without_a_master_probes_the_server(self):
+        with mock.patch.object(remote, '_ssh_control_dir', return_value=Path('/fixture/' + 'long-home' * 12)), \
+                mock.patch.object(remote.sys, 'platform', 'darwin'):
+            args = remote.ssh_command_args({'ssh': 'owner@synthetic'}, 'true')
+        self.assertIn('ControlPath=none', args)
+        self.assert_unshared_keepalive(args)
+
+    def test_shared_master_keepalive_is_unchanged(self):
+        with mock.patch.object(remote, '_ssh_control_dir', return_value=Path('/fixture/s')):
+            args = remote.ssh_command_args({'ssh': 'owner@synthetic'}, 'true')
+        self.assertIn('ControlMaster=auto', args)
+        self.assertEqual(args.count('ServerAliveInterval=30'), 1)
+        self.assertEqual(args.count('ServerAliveCountMax=3'), 1)
+        self.assertNotIn('ServerAliveInterval=10', args)

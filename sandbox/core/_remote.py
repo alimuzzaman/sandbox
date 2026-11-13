@@ -884,13 +884,23 @@ def _ensure_ssh_control_dir() -> Path:
     return directory
 
 
+# A session without a shared master has no other liveness check. After a
+# laptop sleep or a network path change, ssh would otherwise wait on a dead
+# connection until the caller's own timeout. These probes are SSH protocol
+# messages answered by the server's sshd, so a remote command may stay silent
+# for any length of time; only an unanswered link ends the session (~30 s).
+_UNSHARED_KEEPALIVE = ("-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3")
+
+
 def _ssh_connection_options(multiplex: bool = True) -> list[str]:
     options = [
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
         "-o", "ConnectionAttempts=1",
     ]
-    if multiplex:
+    if not multiplex:
+        options.extend(_UNSHARED_KEEPALIVE)
+    else:
         control_path = _ssh_control_dir() / "cm-%C"
         # %C expands to40hex; OpenSSH binds a temporary master path with a
         # dot+16-character suffix before publishing the socket. Count bytes
@@ -898,7 +908,7 @@ def _ssh_connection_options(multiplex: bool = True) -> list[str]:
         limit = 108 if sys.platform.startswith('linux') else 104
         expanded = str(control_path).replace('%C', '0' * 40)
         if len(os.fsencode(expanded)) + 17 + 1 > limit:
-            options.extend(['-o', 'ControlMaster=no', '-o', 'ControlPath=none'])
+            options.extend(['-o', 'ControlMaster=no', '-o', 'ControlPath=none', *_UNSHARED_KEEPALIVE])
         else:
             options.extend([
                 "-o", "ControlMaster=auto",

@@ -564,15 +564,36 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
     """Same-user PIDs whose environment names this job; ``None`` when unreadable.
 
     Every durable child starts with ``SANDBOX_DURABLE_JOB_ID`` and its
-    descendants inherit it. Without ``/proc`` (macOS) nothing is scanned. A
-    same-user process whose environment cannot be read (it is non-dumpable,
-    as OpenSSH's per-connection process is) can only be the job's if it
-    started at or after the command, so one that provably started earlier is
-    skipped; any other unreadable process makes the scan ``None``.
+    descendants inherit it. Without ``/proc`` (macOS) nothing is scanned.
+
+    A same-user process P whose environment cannot be read (it is
+    non-dumpable, as an SSH server's per-connection process is) is skipped
+    when it provably started before the command. Otherwise its parent chain
+    decides (``_job_lineage``). A job descendant only ever has job processes
+    as ancestors, or, once orphaned, whoever adopted it: a child subreaper
+    among its ancestors or init. Those adopters are the supervisor's own
+    ancestors, the supervisor and the command, the set A computed before the
+    scan. So walking up from P's parent:
+
+    - a process in A makes the scan ``None``: P may be the job's, directly
+      or as an adopted orphan;
+    - a process whose readable environment names the job makes P a holder;
+    - a process outside A that started strictly before the command cannot
+      be a job process, so P is not the job's and is skipped (a Tailscale
+      SSH incubator under the root ``tailscaled``, for example);
+    - any other process (outside A, started at or after the command, its
+      environment unreadable or without the marker) continues the walk.
+
+    A link that cannot be read, a parent that started after its child (its
+    PID was reused) or a chain longer than 64 makes the scan ``None``, unless
+    P itself has exited meanwhile, which skips it. A parent PID reused during
+    the walk names a process that started after the command, so it can never
+    end the walk with a skip.
     """
     if not _PROC.is_dir():
         return []
     marker = ("SANDBOX_DURABLE_JOB_ID=" + job_id).encode()
+    adopters = _job_adopters(command_pid)
     command_start: int | None = None
     holders: set[int] = set()
     # Twice, as the takeover's own scans do: a process that forks and exits
@@ -589,38 +610,110 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
                 continue
             except OSError:
                 try:
-                    started = _start_ticks(directory)
+                    stat = _parent_and_start(directory)
                 except (FileNotFoundError, ProcessLookupError):
                     continue  # it has exited since the listing
                 if command_start is None:
                     with suppress(OSError):  # the unreaped leader keeps its stat
-                        command_start = _start_ticks(_PROC / str(command_pid))
-                if command_start is None or started is None or started >= command_start:
+                        command = _parent_and_start(_PROC / str(command_pid))
+                        command_start = command[1] if command else None
+                if command_start is None or stat is None:
                     return None
+                if stat[1] < command_start:
+                    continue
+                lineage = _job_lineage(directory, stat, command_start, adopters, marker)
+                if lineage is None:
+                    return None
+                if lineage:
+                    holders.add(int(directory.name))
                 continue
             if marker in environment.split(b"\0"):
                 holders.add(int(directory.name))
     return sorted(holders)
 
 
-def _start_ticks(directory: Path) -> int | None:
-    """A process's start time in clock ticks since boot (``/proc/<pid>/stat`` field 22).
+_LINEAGE_DEPTH = 64
 
-    The stat file stays readable when the process is non-dumpable. Raises
-    ``FileNotFoundError`` when the process is gone; ``None`` when the file
-    cannot be read or parsed.
+
+def _job_adopters(command_pid: int) -> frozenset[int] | None:
+    """A: every process that can adopt an orphaned job descendant, or ``None``.
+
+    That is the supervisor's ancestors up to init (PID 1, always included),
+    the supervisor and the command. ``None`` when a link cannot be read.
+    """
+    adopters = {1, os.getpid(), command_pid}
+    pid = os.getpid()
+    for _ in range(_LINEAGE_DEPTH):
+        if pid <= 1:  # 0: a parent outside this PID namespace
+            return frozenset(adopters)
+        try:
+            stat = _parent_and_start(_PROC / str(pid))
+        except OSError:
+            return None
+        if stat is None:
+            return None
+        pid = stat[0]
+        adopters.add(pid)
+    return None
+
+
+def _job_lineage(directory: Path, stat: tuple[int, int], command_start: int,
+                 adopters: frozenset[int] | None, marker: bytes) -> bool | None:
+    """Walk an unreadable process's parent chain (see ``_job_environment_holders``).
+
+    ``False``: not the job's. ``True``: an ancestor names the job. ``None``:
+    it may be the job's.
+    """
+    if adopters is None:
+        return None
+    parent, child_start = stat
+    for _ in range(_LINEAGE_DEPTH):
+        if parent in adopters:
+            return None
+        link = _PROC / str(parent)
+        try:
+            parent_stat = _parent_and_start(link)
+        except (FileNotFoundError, ProcessLookupError):
+            parent_stat = None
+        if parent_stat is None or parent_stat[1] > child_start:
+            return False if _exited(directory) else None
+        try:
+            environment = (link / "environ").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            return False if _exited(directory) else None
+        except OSError:
+            pass  # unreadable: another user's, or non-dumpable
+        else:
+            if marker in environment.split(b"\0"):
+                return True
+        if parent_stat[1] < command_start:
+            return False
+        parent, child_start = parent_stat
+    return None
+
+
+def _exited(directory: Path) -> bool:
+    return not (directory / "stat").exists()
+
+
+def _parent_and_start(directory: Path) -> tuple[int, int] | None:
+    """A process's parent PID and start time in clock ticks since boot.
+
+    Fields 4 and 22 of ``/proc/<pid>/stat``, which stays readable when the
+    process is non-dumpable. Raises ``FileNotFoundError`` when the process is
+    gone; ``None`` when the file cannot be read or parsed.
     """
     try:
-        text = (directory / "stat").read_text()
+        data = (directory / "stat").read_bytes()
     except (FileNotFoundError, ProcessLookupError):
         raise
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         return None
-    close = text.rfind(")")
-    fields = text[close + 2:].split()
-    if close < 0 or len(fields) <= 19 or not fields[19].isdigit():
+    close = data.rfind(b")")
+    fields = data[close + 2:].split()
+    if close < 0 or len(fields) <= 19 or not fields[1].isdigit() or not fields[19].isdigit():
         return None
-    return int(fields[19])
+    return int(fields[1]), int(fields[19])
 
 
 def _child_running(command: subprocess.Popen) -> bool:

@@ -677,7 +677,7 @@ class FailureCleanupTests(unittest.TestCase):
 class NormalExitCessationTests(unittest.TestCase):
     """A job that ends by itself records the stop proof only when nothing it started still runs."""
 
-    def run_job(self, script, *, deadline=20):
+    def run_job(self, script, *, deadline=20, runner=run_descriptor):
         temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         repo = self.repo = JobRepository(temp / "registry.sqlite")
         self.addCleanup(repo.close)
@@ -696,7 +696,7 @@ class NormalExitCessationTests(unittest.TestCase):
             "authoritative_context": {"job_id": row["job_id"]},
         }))
         descriptor.chmod(0o600)
-        run_descriptor(descriptor)
+        runner(descriptor)
         snap = repo.snapshot(row["job_id"])
         return snap, json.loads(snap["result_json"] or "null")
 
@@ -787,10 +787,11 @@ class NormalExitCessationTests(unittest.TestCase):
             self.assertEqual(supervisor._job_environment_holders("a" * 32, 1), [])
 
     @staticmethod
-    def fake_stat(directory, start):
-        """A /proc/<pid>/stat whose field 22 (start time in clock ticks) is ``start``."""
+    def fake_stat(directory, start, ppid=0):
+        """A /proc/<pid>/stat with parent ``ppid`` (field 4) and start time ``start`` (field 22)."""
         directory.mkdir(exist_ok=True)
-        (directory / "stat").write_text(f"{directory.name} (a b) S " + "0 " * 18 + f"{start} 0 0\n")
+        (directory / "stat").write_text(
+            f"{directory.name} (a b) S {ppid} " + "0 " * 17 + f"{start} 0 0\n")
 
     def test_an_unreadable_process_counts_only_when_it_started_with_or_after_the_job(self):
         proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -902,3 +903,207 @@ class NormalExitCessationTests(unittest.TestCase):
 
         with patch.object(supervisor, "_PROC", RacingProc(root)):
             self.assertEqual(supervisor._job_environment_holders("a" * 32, 1), [4242])
+
+    # A fake /proc for the parent-chain rule: the supervisor (this process) is a
+    # child of 90001, a child of init; the command 90500 started at tick 1000.
+    COMMAND = 90500
+
+    def lineage_proc(self):
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.fake_stat(proc / str(os.getpid()), 10, ppid=90001)
+        # Readable, so only membership in the adopters denies a child of theirs.
+        self.fake_process(proc, 90001, 5, 1, b"A=1\0")
+        self.fake_process(proc, 1, 1, 0, b"A=1\0")
+        self.fake_process(proc, self.COMMAND, 1000, os.getpid(), b"")
+        return proc
+
+    def fake_process(self, proc, pid, start, ppid, environment=None):
+        """``environment`` None: reading it fails, as for a non-dumpable process."""
+        self.fake_stat(proc / str(pid), start, ppid)
+        if environment is None:
+            (proc / str(pid) / "environ").mkdir()
+        else:
+            (proc / str(pid) / "environ").write_bytes(environment)
+
+    def holders(self, proc):
+        with patch.object(supervisor, "_PROC", proc):
+            return supervisor._job_environment_holders("a" * 32, self.COMMAND)
+
+    def test_an_unreadable_process_started_during_the_job_is_judged_by_its_parents(self):
+        job = b"SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"\0"
+        cases = (
+            # A Tailscale SSH incubator: its root tailscaled started long before.
+            ("unreadable parent started earlier", [(90600, 900, 1, None)], []),
+            ("readable parent started earlier", [(90600, 900, 1, b"A=1\0")], []),
+            ("walks through a newer parent", [(90600, 1005, 90550, b"A=1\0"),
+                                             (90550, 800, 1, None)], []),
+            ("newer parent names the job", [(90600, 1005, 90550, job), (90550, 800, 1, None)],
+             [90600, 90700]),
+            ("child of the command", [], None),
+            ("child of the supervisor", [], None),
+            ("adopted by a supervisor ancestor", [], None),
+            ("adopted by init", [], None),
+            ("newer unreadable parent adopted by init", [(90600, 1005, 1, None)], None),
+        )
+        parents = {"child of the command": self.COMMAND, "child of the supervisor": os.getpid(),
+                   "adopted by a supervisor ancestor": 90001, "adopted by init": 1}
+        for name, chain, expected in cases:
+            with self.subTest(name):
+                proc = self.lineage_proc()
+                self.fake_process(proc, 90700, 1010, parents.get(name, 90600))
+                for pid, start, ppid, environment in chain:
+                    self.fake_process(proc, pid, start, ppid, environment)
+                self.assertEqual(self.holders(proc), expected)
+
+    def test_an_unreadable_process_whose_parents_cannot_be_traced_counts(self):
+        def proc_with(*chain):
+            proc = self.lineage_proc()
+            self.fake_process(proc, 90700, 1100, 90600)
+            for pid, start, ppid in chain:
+                self.fake_process(proc, pid, start, ppid, b"A=1\0")
+            return proc
+
+        with self.subTest("missing parent"):
+            self.assertIsNone(self.holders(proc_with()))
+        with self.subTest("garbled parent stat"):
+            proc = proc_with((90600, 900, 1))
+            (proc / "90600" / "stat").write_text("garbage")
+            self.assertIsNone(self.holders(proc))
+        with self.subTest("parent started after its child: a reused PID"):
+            self.assertIsNone(self.holders(proc_with((90600, 1120, 1))))
+        with self.subTest("supervisor ancestry unreadable"):
+            proc = proc_with((90600, 900, 1))
+            (proc / "90001" / "stat").unlink()
+            self.assertIsNone(self.holders(proc))
+        for depth, expected in ((63, []), (64, None)):
+            with self.subTest(f"{depth} newer parents, then an older one"):
+                chain = [(90600 - i, 1099 - i, 90600 - i - 1) for i in range(depth)]
+                chain.append((90600 - depth, 900, 1))
+                self.assertEqual(self.holders(proc_with(*chain)), expected)
+
+        with self.subTest("the process exits during the walk"):
+            proc = proc_with()  # its parent is missing, which alone counts
+            read = supervisor._parent_and_start
+
+            def exits_after_its_stat_is_read(directory):
+                result = read(directory)
+                if directory.name == "90700":
+                    for entry in ("environ", "stat"):
+                        path = directory / entry
+                        path.rmdir() if path.is_dir() else path.unlink()
+                    directory.rmdir()
+                return result
+            with patch.object(supervisor, "_parent_and_start", exits_after_its_stat_is_read):
+                self.assertEqual(self.holders(proc), [])
+
+    @staticmethod
+    def proc_stat(pid):
+        """(parent PID, start ticks) from the real /proc/<pid>/stat."""
+        fields = Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+        return int(fields[1]), int(fields[19])
+
+    def non_dumpable_session_helper(self, fifo, pid_path):
+        """Model a Tailscale SSH session: a non-dumpable process started before the
+        job forks a non-dumpable child once ``fifo`` is written, during the job."""
+        os.mkfifo(fifo)
+        script = (self.NON_DUMPABLE + "\n"
+                  "import os, sys, time\n"
+                  "print('ready', flush=True)\n"
+                  "open(sys.argv[1]).read()\n"
+                  "if os.fork() == 0:\n"
+                  "    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
+                  "    open(sys.argv[2], 'w').write(str(os.getpid()))\n"
+                  "    time.sleep(60)\n"
+                  "    os._exit(0)\n"
+                  "time.sleep(60)\n")
+        helper = subprocess.Popen([sys.executable, "-c", script, str(fifo), str(pid_path)],
+                                  stdout=subprocess.PIPE, text=True, env={"PATH": "/usr/bin:/bin"},
+                                  start_new_session=True)
+        self.addCleanup(helper.wait)
+        self.addCleanup(helper.kill)
+        self.assertEqual(helper.stdout.readline().strip(), "ready")
+        helper.stdout.close()
+        return helper
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs Linux /proc")
+    def test_a_non_dumpable_session_opened_during_the_job_under_an_older_parent_does_not_deny(self):
+        temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        fifo, pid_path, start_path = temp / "go", temp / "pid", temp / "start"
+        helper = self.non_dumpable_session_helper(fifo, pid_path)
+        snap, result = self.run_job(
+            f"cut -d' ' -f22 /proc/$$/stat > {start_path}; echo go > {fifo}; "
+            f"while [ ! -s {pid_path} ]; do sleep .05; done; exit 255")
+        pid = self.leftover(pid_path)
+        with self.assertRaises(PermissionError):
+            Path(f"/proc/{pid}/environ").read_bytes()
+        self.assertEqual((snap["lifecycle"], snap["exit_code"]), ("failed", 255))
+        self.assertIs(result["owned_work_stopped"], True, result)
+        session, parent = self.proc_stat(pid), self.proc_stat(helper.pid)
+        command_start = int(start_path.read_text())
+        self.assertEqual(session[0], helper.pid)
+        self.assertGreaterEqual(session[1], command_start)  # it started during the job
+        self.assertLess(parent[1], command_start)
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs Linux /proc")
+    def test_a_non_dumpable_daemon_adopted_by_a_subreaper_ancestor_is_not_proven_stopped(self):
+        temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        pid_path = temp / "pid"
+        daemon = ("import os, sys, time\n"
+                  "if os.fork(): sys.exit(0)\n"
+                  "os.setsid()\n"
+                  "parent = os.getpid()\n"
+                  "if os.fork(): sys.exit(0)\n"
+                  "null = os.open(os.devnull, os.O_RDWR)\n"
+                  "for fd in (0, 1, 2): os.dup2(null, fd)\n"
+                  + self.NON_DUMPABLE + "\n"
+                  "while os.getppid() == parent: time.sleep(.01)\n"
+                  "open(sys.argv[1], 'w').write(f'{os.getpid()} {os.getppid()}')\n"
+                  "time.sleep(30)\n")
+        script_path = temp / "daemon.py"
+        script_path.write_text(daemon)
+        # The supervisor runs under a child subreaper, as under systemd or a
+        # container init that sets PR_SET_CHILD_SUBREAPER.
+        wrapper_script = ("import ctypes, subprocess, sys\n"
+                          "ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)\n"
+                          "sys.exit(subprocess.call([sys.executable, '-m',"
+                          " 'sandbox.jobs.supervisor', sys.argv[1]]))\n")
+        wrappers = []
+
+        def under_subreaper(descriptor):
+            root = str(Path(__file__).resolve().parents[1])
+            wrapper = subprocess.Popen(
+                [sys.executable, "-c", wrapper_script, str(descriptor)], cwd=root,
+                env=synthetic_environment({"PYTHONPATH": root, "PYTHONDONTWRITEBYTECODE": "1"}))
+            wrappers.append(wrapper.pid)
+            self.assertEqual(wrapper.wait(60), 1)  # the supervisor's code for a failed job
+
+        snap, result = self.run_job(
+            f"{sys.executable} {script_path} {pid_path}; "
+            f"while [ ! -s {pid_path} ]; do sleep .05; done; exit 255", runner=under_subreaper)
+        pid, adopter = map(int, pid_path.read_text().split())
+        pid_path.write_text(str(pid))
+        self.leftover(pid_path)
+        self.assertEqual(adopter, wrappers[0])  # adopted by the subreaper, not init
+        self.assertEqual(snap["lifecycle"], "failed")
+        self.assertIs(result["owned_work_stopped"], False, result)
+        self.assertEqual(result["unproven"], "process_environment_unavailable")
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs Linux /proc")
+    def test_a_non_dumpable_child_of_the_command_counts(self):
+        pid_path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "pid"
+        child = (self.NON_DUMPABLE + "; import sys, time;"
+                 " open(sys.argv[1], 'w').write(str(__import__('os').getpid())); time.sleep(30)")
+        command = subprocess.Popen(
+            ["/bin/sh", "-c", f"{sys.executable} -c \"{child}\" {pid_path} & wait"],
+            env={"PATH": "/usr/bin:/bin"}, start_new_session=True)
+        self.addCleanup(command.wait)
+
+        def kill():
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(command.pid, 9)
+        self.addCleanup(kill)
+        pid = self.leftover(pid_path)
+        self.assertEqual(self.proc_stat(pid)[0], command.pid)
+        with self.assertRaises(PermissionError):
+            Path(f"/proc/{pid}/environ").read_bytes()
+        self.assertIsNone(supervisor._job_environment_holders("a" * 32, command.pid))

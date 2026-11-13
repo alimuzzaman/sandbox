@@ -78,14 +78,24 @@ process group or session still runs, no descendant it saw is still running,
 nothing still holds the job's output pipes and, on Linux, no same-user process
 still carries the job's `SANDBOX_DURABLE_JOB_ID` in two scans of `/proc`. A
 same-user process whose environment cannot be read (a non-dumpable one, such as
-OpenSSH's per-connection `sshd: owner@notty`) is skipped only when its
-`/proc/<pid>/stat` start time is earlier than the command's; one that started at or
-after the command, one whose start time cannot be read, and an unreaped
-non-dumpable zombie all fail the check (`process_environment_unavailable`). So an
-SSH session of the owner that opened while the job ran, and is still open when
-the command exits, blocks the proof: for example a Tailscale SSH session that
-keeps a non-dumpable owner process per connection while the joined exec client
-polls `job-status`. The takeover then refuses with `host_target_busy`, as before. The environment scan has a 2 s limit, like each `ps` call;
+OpenSSH's per-connection `sshd: owner@notty` or a Tailscale SSH
+`tailscaled be-child ssh` incubator) is skipped when its `/proc/<pid>/stat`
+start time is earlier than the command's. Otherwise its parent chain (field 4 of
+each `stat`) decides. Only the supervisor's own ancestors, the supervisor, the
+command and init can adopt an orphaned job process, so walking up from its
+parent: reaching one of those fails the check (`process_environment_unavailable`);
+a parent whose readable environment carries the job's ID fails it
+(`job_environment_running`); a parent outside that set that started before the
+command proves the process is not the job's, and it is skipped; any other parent
+continues the walk. A parent that cannot be read, one that started after its
+child (a reused PID), a chain deeper than 64, a start time that cannot be read and
+an unreaped non-dumpable zombie all fail the check
+(`process_environment_unavailable`); a process that exits during its walk is
+skipped. So an owner's SSH session opened while the job ran no longer blocks the
+proof when the root server process above it started before the command, as the
+`tailscaled` behind each Tailscale SSH session the joined exec client opens to
+poll `job-status` does. When the check fails, the takeover refuses with
+`host_target_busy`, as before. The environment scan has a 2 s limit, like each `ps` call;
 one that runs out fails the check (`process_environment_scan_timed_out`), and the
 job still ends and releases its leases as usual. A failed check records `false`
 with the reason in `unproven`; the lifecycle and exit code are unchanged. A process

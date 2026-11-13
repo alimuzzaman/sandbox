@@ -41,8 +41,9 @@ selectable only once it has a lifetime record: run
 (or `permanent`) once after its first apply. `host apply` never creates that
 record. After a succeeded apply it only moves an existing classified record's
 commit to the applied one, without changing its lifetime or TTL. Classify takes
-the commit from the server's own `summary.json` when that shows a succeeded
-apply, so classifying from a controller with older local history still matches.
+the commit, and the route hostnames when it lists any, from the server's own
+`summary.json` when that shows a succeeded apply, so classifying from a controller
+with older local history still matches and records the target's current names.
 Without a record, exec refuses with `host_server_target_evidence_unavailable`
 and a hint: classify an unclassified target, or re-apply a classified one whose commit is stale.
 A stack selected with `--name` never needs classify; its hint asks for a

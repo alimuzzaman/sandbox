@@ -453,12 +453,17 @@ class HostStoreTests(unittest.TestCase):
         cleared = self.run_op("classify", project="mockups", environment="sandbox", clear=True)
         self.assertTrue(cleared["result"]["removed"])
 
-    def write_summary(self, commit, status="succeeded", project="mockups", environment="sandbox"):
+    def write_summary(self, commit, status="succeeded", project="mockups", environment="sandbox",
+                      routes=None):
         path = self.home / "runtime" / "hosts" / project / environment / "summary.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"schema": 1, "project": project, "environment": environment,
+        summary = {"schema": 1, "project": project, "environment": environment,
             "compose_project": hs.compose_project_for(project, environment), "commit": commit,
-            "last_apply": {"status": status}}))
+            "last_apply": {"status": status}}
+        if routes is not None:
+            summary["routes"] = [{"hostname": name, "mode": "serve", "primary": index == 0}
+                                 for index, name in enumerate(routes)]
+        path.write_text(json.dumps(summary))
         return path
 
     def test_record_apply_never_creates_a_record(self):
@@ -516,6 +521,21 @@ class HostStoreTests(unittest.TestCase):
         done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted",
                            commit=COMMIT)
         self.assertEqual(done["result"]["record"]["commit"], DEV_COMMIT)
+
+    def test_classify_prefers_the_server_summary_hostnames_over_controller_history(self):
+        current = ["wp-setup-plan.example.test", "hub-setup-plan.example.test"]
+        old = ["old-a.example.test", "old-b.example.test", "old-c.example.test"]
+        self.write_summary(DEV_COMMIT, routes=current)
+        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted",
+                           commit=COMMIT, hostnames=old)
+        self.assertEqual(done["result"]["record"]["hostnames"], sorted(current))
+        # Without a succeeded summary listing routes, the controller's names are kept.
+        for status, routes in (("failed", current), ("succeeded", None)):
+            with self.subTest(status=status, routes=routes):
+                self.write_summary(DEV_COMMIT, status=status, routes=routes)
+                done = self.run_op("classify", project="mockups", environment="sandbox",
+                                   lifetime="hosted", commit=COMMIT, hostnames=old)
+                self.assertEqual(done["result"]["record"]["hostnames"], sorted(old))
 
     def test_classify_keeps_controller_commit_without_a_succeeded_server_summary(self):
         self.write_summary(DEV_COMMIT, status="failed")

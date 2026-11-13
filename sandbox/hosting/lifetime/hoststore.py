@@ -1050,9 +1050,9 @@ def _record_merge(store, request, now):
 SUMMARY_MAX_BYTES = 64 * 1024
 
 
-def _server_summary_commit(home, project, environment):
-    """The commit of this target's last succeeded apply, from the summary that apply
-    wrote on this host (``runtime/hosts/<project>/<environment>/summary.json``).
+def _server_summary(home, project, environment):
+    """This target's summary of its last succeeded apply, as that apply wrote it on
+    this host (``runtime/hosts/<project>/<environment>/summary.json``).
 
     ``None`` when the summary is missing, unreadable, for another target or not a
     succeeded apply. The exec selector checks the same fields.
@@ -1072,13 +1072,33 @@ def _server_summary_commit(home, project, environment):
         return None
     if not isinstance(summary, dict):
         return None
-    last, commit = summary.get("last_apply"), summary.get("commit")
+    last = summary.get("last_apply")
     if ((summary.get("project"), summary.get("environment")) != (project, environment)
             or summary.get("compose_project") != compose_project_for(project, environment)
-            or not isinstance(last, dict) or last.get("status") != "succeeded"
-            or not isinstance(commit, str) or not _COMMIT_RE.fullmatch(commit)):
+            or not isinstance(last, dict) or last.get("status") != "succeeded"):
         return None
-    return commit
+    return summary
+
+
+def _summary_commit(summary):
+    commit = summary.get("commit") if summary else None
+    return commit if isinstance(commit, str) and _COMMIT_RE.fullmatch(commit) else None
+
+
+def _summary_hostnames(summary):
+    """The route hostnames of a succeeded apply's summary, or ``None`` if it lists none."""
+    routes = summary.get("routes") if summary else None
+    if not isinstance(routes, list) or not routes:
+        return None
+    names = [route.get("hostname") if isinstance(route, dict) else None for route in routes]
+    if not all(isinstance(name, str) and name.strip() for name in names):
+        return None
+    return sorted(names)
+
+
+def _server_summary_commit(home, project, environment):
+    """The commit of this target's last succeeded apply on this host, or ``None``."""
+    return _summary_commit(_server_summary(home, project, environment))
 
 
 def _record_apply(store, request, now):
@@ -1152,13 +1172,16 @@ def _classify(store, request, now):
         raise StoreRefusal(TTL_INVALID, "only a temporary target has a TTL")
     stamp = to_rfc3339(now)
     # The server's own succeeded apply beats a controller's possibly older hosts.json.
-    known = {"commit": _server_summary_commit(store.home, project, environment) or request.get("commit"),
+    summary = _server_summary(store.home, project, environment)
+    known = {"commit": _summary_commit(summary) or request.get("commit"),
              "repo": request.get("repo")}
     try:
         commit, repo = _target_identity(known)
     except ValueError as exc:
         raise StoreRefusal(REQUEST_INVALID, str(exc))
-    hostnames = request.get("hostnames")
+    hostnames = _summary_hostnames(summary)
+    if hostnames is None:
+        hostnames = request.get("hostnames")
     if hostnames is None:
         hostnames = list(record.hostnames) if record else []
     if not isinstance(hostnames, list) or not all(isinstance(item, str) for item in hostnames):

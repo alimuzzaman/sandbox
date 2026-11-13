@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -678,7 +679,7 @@ class NormalExitCessationTests(unittest.TestCase):
 
     def run_job(self, script, *, deadline=20):
         temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        repo = JobRepository(temp / "registry.sqlite")
+        repo = self.repo = JobRepository(temp / "registry.sqlite")
         self.addCleanup(repo.close)
         storage = JobStorage(temp, free_disk_reserve=0)
         argv = ["/bin/sh", "-c", script]
@@ -852,3 +853,33 @@ class NormalExitCessationTests(unittest.TestCase):
         self.assertEqual(snap["lifecycle"], "failed")
         self.assertIs(result["owned_work_stopped"], False, result)
         self.assertEqual(result["unproven"], "process_environment_unavailable")
+
+    def test_an_environment_read_that_blocks_cannot_hold_up_the_jobs_end(self):
+        # Reading /proc/<pid>/environ takes the target's mmap lock and can block
+        # with no timeout. A FIFO with no writer blocks the same way.
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (proc / "4242").mkdir()
+        fifo = proc / "4242" / "environ"
+        os.mkfifo(fifo)
+
+        def unblock():
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        # Releases the blocked read after the test, and on code without a limit.
+        timer = threading.Timer(6, unblock)
+        timer.start()
+        self.addCleanup(unblock)
+        self.addCleanup(timer.cancel)
+        started = time.monotonic()
+        with patch.object(supervisor, "_PROC", proc), \
+                patch.object(supervisor, "_ENVIRONMENT_SCAN_SECONDS", .3, create=True):
+            snap, result = self.run_job("exit 0")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual((snap["lifecycle"], snap["exit_code"]), ("succeeded", 0))
+        self.assertIs(result["owned_work_stopped"], False, result)
+        self.assertEqual(result["unproven"], "process_environment_scan_timed_out")
+        with self.repo.transaction() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT (SELECT count(*) FROM workspace_leases WHERE job_id=?)"
+                " + (SELECT count(*) FROM host_capacity_leases WHERE job_id=?)",
+                (snap["job_id"], snap["job_id"])).fetchone()[0], 0)

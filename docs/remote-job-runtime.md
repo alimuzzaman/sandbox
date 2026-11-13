@@ -80,8 +80,10 @@ output pipes and, on Linux, no same-user process still carries the job's
 skipped only when its `/proc/<pid>/stat` start time is earlier than the command's;
 one that started at or after the command records `false`
 (`process_environment_unavailable`), so an owner's SSH session that does not share
-a connection and opened while the job ran still blocks the proof. Otherwise it
-records `false` with the reason in `unproven`; the lifecycle and exit code are unchanged. A process that left both the
+a connection and opened while the job ran still blocks the proof. The environment
+scan has a 2 s limit, like each `ps` call: a scan that runs out records `false`
+(`process_environment_scan_timed_out`), and the job still ends and releases its
+leases as usual. Otherwise it records `false` with the reason in `unproven`; the lifecycle and exit code are unchanged. A process that left both the
 group and the session and also cleared its environment or changed user is not
 detected. `interrupted` jobs never record the proof. Exec lease takeover,
 `job-reconcile --job-id` and stack source repair rely on it, and each also checks

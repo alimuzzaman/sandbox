@@ -8,6 +8,7 @@ import os
 import selectors
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -498,11 +499,9 @@ def _normal_exit_unproven(command: subprocess.Popen, job_id: str, observed_desce
     if not streams_eof:
         return "output_pipes_held"
     try:
-        holders = _job_environment_holders(job_id, command.pid)
-        if holders is None:
-            return "process_environment_unavailable"
-        if holders:
-            return "job_environment_running"
+        reason = _environment_unproven(job_id, command.pid)
+        if reason is not None:
+            return reason
         result = subprocess.run(
             ["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True,
             timeout=2, check=True,
@@ -526,6 +525,39 @@ def _normal_exit_unproven(command: subprocess.Popen, job_id: str, observed_desce
     except (OSError, subprocess.SubprocessError, ValueError):
         return "process_table_unavailable"
     return None
+
+
+# Like each ``ps`` call: reading another process's environment takes its mmap
+# lock, so one stuck in uninterruptible sleep must not hold up the job's end.
+_ENVIRONMENT_SCAN_SECONDS = 2.0
+
+
+def _environment_unproven(job_id: str, command_pid: int) -> str | None:
+    """Run the environment scan with a time limit; the reason it fails, or ``None``.
+
+    The scan runs in a daemon thread. A read still blocked at the limit is
+    left behind: its sleep is killable, so it cannot keep the supervisor
+    from exiting.
+    """
+    outcome: list = []
+
+    def scan() -> None:
+        try:
+            outcome.append(_job_environment_holders(job_id, command_pid))
+        except BaseException as exc:  # handed to the caller below
+            outcome.append(exc)
+
+    thread = threading.Thread(target=scan, name="job-environment-scan", daemon=True)
+    thread.start()
+    thread.join(_ENVIRONMENT_SCAN_SECONDS)
+    if not outcome:
+        return "process_environment_scan_timed_out"
+    holders = outcome[0]
+    if isinstance(holders, BaseException):
+        raise holders
+    if holders is None:
+        return "process_environment_unavailable"
+    return "job_environment_running" if holders else None
 
 
 def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:

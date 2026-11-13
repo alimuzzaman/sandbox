@@ -146,6 +146,7 @@ def capabilities() -> dict:
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     from sandbox.workspaces.content import source_content_available
     from sandbox.hosting.server_cli_dispatch import stack_ref_contract_available, STACK_REF_CONTRACT
+    from sandbox.hosting.server_cli_dispatch import source_branch_contract_available, SOURCE_BRANCH_CONTRACT
     from sandbox.commands.preview_server import preview_contract_available, CONTRACT as PREVIEW_CONTRACT
     from sandbox.application.server_cli_source_repair import contract_available as source_repair_available
     from sandbox.hosting.source_repair import CONTRACT as SOURCE_REPAIR_CONTRACT
@@ -158,6 +159,7 @@ def capabilities() -> dict:
             'source_repair_capabilities': [SOURCE_REPAIR_CONTRACT] if source_repair_available() else [],
             'server_exec_capabilities': [EXEC_CONTRACT] if exec_contract_available() else [],
             'server_exec_capture_capabilities': [CAPTURE_CONTRACT] if capture_contract_available() else [],
+            'server_cli_apply_capabilities': [SOURCE_BRANCH_CONTRACT] if source_branch_contract_available() else [],
             'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +
                 (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
                  and source_content_available() else []) +
@@ -591,7 +593,8 @@ class FixedServerCLI:
 
 def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
                         request_id: str, timeout_seconds: int = 900,
-                        source_ref: str | None = None, required_capabilities: tuple[str, ...] = ()) -> dict:
+                        source_ref: str | None = None, required_capabilities: tuple[str, ...] = (),
+                        source_branch_bound: bool = False) -> dict:
     """Submit before controller host/CI/provider-secret preflight.
 
     Returns the original remote durable acceptance receipt; never retries an
@@ -662,6 +665,12 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     required.update(required_capabilities)
     if source_ref is not None:
         required.add(STACK_REF_CONTRACT)
+    from sandbox.hosting.server_cli_dispatch import SOURCE_BRANCH_CONTRACT
+    apply_capabilities = observed.get('server_cli_apply_capabilities', [])
+    if source_branch_bound is not False and (source_branch_bound is not True
+            or not isinstance(apply_capabilities, list)
+            or SOURCE_BRANCH_CONTRACT not in apply_capabilities):
+        raise ServerCLIUnavailable('installed server CLI cannot bind the source branch')
     if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
             or observed.get('target_identity') != identity['target_identity']
             or observed.get('runtime_revision') != (entry.get('mcp_service') or {}).get('runtime_revision')

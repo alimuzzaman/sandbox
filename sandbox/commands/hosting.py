@@ -5436,7 +5436,14 @@ def _validate_apply_source(validated: dict) -> str:
                 "the stack source checkout is not at the rendered stack commit")
         branch = stack.get("ref_branch") or ""
     else:
-        branch = remote.current_branch(validated["project_root"])
+        # Inside a retained server-CLI job the staged copy is detached; the
+        # controller-bound branch for this exact commit stands in for Git.
+        from sandbox.hosting.server_cli_dispatch import resolve_source_branch, SourceBranchBindingError
+        try:
+            branch = resolve_source_branch(validated["project_root"])
+        except SourceBranchBindingError as exc:
+            raise hosting.HostingRefusal(
+                exc.code, "the bound deploy branch does not match this server job") from None
     policy = validated["deploy"]
     if not branch_allowed(branch, policy["allowed_branches"]):
         allowed = ", ".join(policy["allowed_branches"])

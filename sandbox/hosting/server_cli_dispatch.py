@@ -13,6 +13,11 @@ import subprocess
 import sys
 
 STACK_REF_CONTRACT = 'job.server-cli-stack-ref.v1'
+# Advertised outside the job ``capabilities`` list: older controllers refuse
+# any contract they do not know there, which would break their job-start.
+SOURCE_BRANCH_CONTRACT = 'job.server-cli-source-branch.v1'
+SOURCE_BRANCH_OPTION = '--server-cli-source-branch'
+_SOURCE_BRANCH_ACTIONS = frozenset({'apply', 'recover'})
 
 
 class StackRefBindingError(RuntimeError):
@@ -66,6 +71,83 @@ def resolve_stack_ref(args, checkout):
     if validate_owner_current(context.owner) != context:
         raise StackRefBindingError('server_cli_stack_ref_owner_changed')
     return ref
+
+
+class SourceBranchBindingError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def source_branch_contract_available():
+    """The real installed host parser and receiver must compose this option."""
+    from sandbox.application.command_selection import selected_invocation, CommandSelectionUnavailable
+    try:
+        selected = selected_invocation(('host', 'apply', SOURCE_BRANCH_OPTION + '={}'))
+        return selected is not None and selected.command == ('host', 'apply') and callable(resolve_source_branch)
+    except CommandSelectionUnavailable:
+        return False
+
+
+def _head_commit(checkout):
+    from sandbox.core import _remote
+    result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=str(checkout),
+        env=_remote.git_environment(), capture_output=True, text=True, check=False, timeout=15)
+    commit = (result.stdout or '').strip().lower()
+    if result.returncode != 0 or re.fullmatch('[0-9a-f]{40}', commit) is None:
+        return None
+    return commit
+
+
+def _branch_name_valid(branch):
+    from sandbox.core import _remote
+    if (not isinstance(branch, str) or not branch or len(branch) > 255 or branch == 'HEAD'
+            or branch.startswith('-') or any(ord(char) < 33 or ord(char) == 127 for char in branch)):
+        return False
+    result = subprocess.run(['git', 'check-ref-format', 'refs/heads/' + branch],
+        env=_remote.git_environment(), capture_output=True, text=True, check=False, timeout=15)
+    return result.returncode == 0
+
+
+def resolve_source_branch(checkout):
+    """The deploy-policy branch for a project-dir apply.
+
+    Outside a retained server-CLI job this is the checkout's own branch, as
+    before. Inside one, the staged checkout is detached, so the branch is the
+    one the controller bound into the retained argv, valid only for the exact
+    staged commit of this job.
+    """
+    from sandbox.application.server_cli import server_cli_context_if_selected, validate_owner_current
+    from sandbox.core import _remote
+    context = server_cli_context_if_selected()
+    if context is None:
+        return _remote.current_branch(checkout)
+    argv = tuple(context.argv)
+    head = argv.index('--') if '--' in argv else len(argv)
+    bound = [value for value in argv[:head] if value.split('=', 1)[0] == SOURCE_BRANCH_OPTION]
+    if not bound:
+        # A controller without this contract: Git's state decides, as before.
+        return _remote.current_branch(checkout)
+    if len(bound) != 1 or '=' not in bound[0]:
+        raise SourceBranchBindingError('server_cli_source_branch_mismatch')
+    packed = bound[0].split('=', 1)[1]
+    if len(packed) > 4096:
+        raise SourceBranchBindingError('server_cli_source_branch_invalid')
+    try:
+        value = json.loads(packed)
+    except ValueError:
+        raise SourceBranchBindingError('server_cli_source_branch_invalid') from None
+    if (not isinstance(value, dict) or set(value) != {'branch', 'commit'}
+            or not isinstance(value['commit'], str) or not _branch_name_valid(value['branch'])):
+        raise SourceBranchBindingError('server_cli_source_branch_invalid')
+    if (not isinstance(context.source_commit, str) or value['commit'] != context.source_commit
+            or Path(context.project_root).resolve() != Path(checkout).resolve()):
+        raise SourceBranchBindingError('server_cli_source_branch_mismatch')
+    if validate_owner_current(context.owner) != context:
+        raise SourceBranchBindingError('server_cli_source_branch_owner_changed')
+    if _head_commit(checkout) != context.source_commit:
+        raise SourceBranchBindingError('server_cli_source_branch_source_changed')
+    return value['branch']
 
 
 def dispatch_host_if_selected(args) -> bool:
@@ -172,6 +254,24 @@ def _dispatch_host_if_selected(args) -> bool:
         argv.append('--server-cli-stack-ref=' + json.dumps({
             'ref': ref.ref, 'commit': ref.commit, 'ref_branch': ref.ref_branch},
             sort_keys=True, separators=(',', ':')))
+    source_branch_bound = False
+    if action in _SOURCE_BRANCH_ACTIONS:
+        if getattr(args, 'server_cli_source_branch', None) is not None or any(
+                value.split('=', 1)[0] == SOURCE_BRANCH_OPTION for value in argv):
+            raise ValueError('server_cli_source_branch_reserved')
+        # The staged server copy is detached; carry the branch this controller
+        # would have checked. A detached or non-Git controller binds nothing,
+        # so the server decides from Git exactly as it did before.
+        from sandbox.core import _remote
+        try:
+            branch = _remote.current_branch(root, allow_detached=True)
+        except RuntimeError:
+            branch = None
+        commit = _head_commit(root) if branch is not None else None
+        if branch is not None and commit is not None and _branch_name_valid(branch):
+            argv.append(SOURCE_BRANCH_OPTION + '=' + json.dumps(
+                {'branch': branch, 'commit': commit}, sort_keys=True, separators=(',', ':')))
+            source_branch_bound = True
     # Paths in the fixed command refer to its staged source, not the Mac.
     # No host path, runtime path or target identity is supplied as authority.
     head = argv.index("--") if "--" in argv else len(argv)
@@ -201,7 +301,8 @@ def _dispatch_host_if_selected(args) -> bool:
     args._server_cli_submission_started = True
     receipt = dispatch_server_cli(remote_name, argv, project_dir=str(root),
         request_id=request_id, timeout_seconds=getattr(args, "timeout", None) or 900,
-        **({'source_ref': source_ref} if source_ref is not None else {}))
+        **({'source_ref': source_ref} if source_ref is not None else {}),
+        **({'source_branch_bound': True} if source_branch_bound else {}))
     # The adapter returns the retained original receipt, including unknown
     # acceptance. Never reinterpret it as execution or delivery success.
     if not isinstance(receipt, dict):

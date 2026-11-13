@@ -167,6 +167,17 @@ On a consumed link the service:
 A token is consumed before the exchange starts, so it cannot trigger a second mail. It
 stays consumed if a later step fails: issue a new link.
 
+Magic-link capture serializes mailbox snapshot, application request, and capture polling
+with one process-local exchange lock shared by all magic-link entries. Waiting is bounded
+by the upstream timeout; a busy lock returns HTTP 503 `capture_busy`. After acquiring
+the lock, the gate checks that it is enabled and the source token is still current,
+checks both again after the mailbox snapshot and immediately before sending the
+application request, then releases the lock on every exit. This lock is separate from
+the pending-token pool lock, so issuing, claiming, and evicting tokens does not wait for
+mailbox I/O. This proves capture selection is serialized in source; it does not verify
+that the real Hub permits multiple one-time tokens to coexist or defines compatible
+token-replacement policy. Real Hub token policy remains UNVERIFIED.
+
 ## Sharing a private site: share links
 
 A share link lets someone with no tailnet access and no account open a private
@@ -335,35 +346,205 @@ service predates the entry: run `host apply`), `login_service_expired`, `email_r
 
 ### The stack page
 
-`sb host share create --remote R --stack <slug> --json` makes a link to a read-only page
-for one recorded stack. The page lists the stack's hostnames, with role (the first DNS
-label) and health, and sign-in links:
+`sb host share create --remote R --stack <slug> --json` requests one recorded stack
+page and its direct `stack.uses` companions. Spec 088 source is integrated with
+short links and owner-panel sharing in cbda71e. Final regression reconciliation,
+independent authentication review and authorized runtime acceptance remain open. Installed v2
+support is UNKNOWN. Read the [exact contract](../specs/088-stack-page-access/contracts/access.md)
+and [future acceptance plan](../specs/088-stack-page-access/quickstart.md) before rollout.
 
-- **WordPress admin**, when the stack target declares `autologin` (`user`,
-  `container_path`) and is not private. Minting writes a per-link mu-plugin,
-  `sandbox-share-<expiry>-<link id>.php`, next to `container_path`. It holds a random
-  key; the gate holds the same key. Each page view signs a fresh token that works once
-  and for at most 10 minutes, on the main site of the main network only (on a multisite,
-  every other blog refuses it). Revoking the link deletes the file and fails if the file survives; an expired one
-  is inert and removed at the next mint.
-- **Login-service entries** named in `share.stack_sign_in`, such as a Hub QA sign-in
-  (`magic_link` or `inbox_gate`). Each view writes that entry's token record, as
-  `host login-url` would, so the previous link of the entry stops working. A `magic_link`
-  entry uses the target's saved address, or `--email`. The token is bound to the stack
-  link: once that link is revoked or expires, an unused sign-in link from its page is
-  refused, even one a view was still minting during the revoke, or one whose sign-in
-  form was still being posted. A newer view replaces the entry's link, and the older one
-  stops working even mid-post. A service session that a
-  sign-in already started keeps its own lifetime (`session_ttl_seconds`).
-- **Revoke retries.** If the gate revoke works but the WordPress key file cannot be
-  deleted, the command says so; running the same revoke again deletes the file, even
-  though the gate no longer knows the link. `host login-url --revoke` takes the same path.
+The page shows bounded own routes, delivered revisions/health, inbox and direct Shared
+routes. GET/HEAD/refresh issue no sign-ins. A click sends same-origin authenticated
+POST `/__sandbox/stack/sign-in`, exact `{action,csrf}`, JSON and
+`X-Sandbox-Stack-Action: 1`, using a live host-only stack session. The server chooses
+only declared entry actions, `$wordpress`, or companion index actions. Navigation
+success is `{ok:true,url}` once; status success is `{ok:true,available:true}`. Neither
+DOM, persistent browser storage, query nor audit receives tokens. Browser proof pending.
 
-Tokens ride in the URL fragment and are posted by a small page, so no request line or
-access log holds one. The page is served by the stack target's own gate: the stack's
-manifest needs a `share` block with `agent_mint: true`. Health comes from the gate: over
-the project's network for the stack's own hostnames, and over public HTTPS for linked
-WordPress sites on `allowed_host_suffixes`. A stack session reaches only the page.
+Each click issues independently, with at most eight pending hashes per logical entry
+across visitors/source links. Ninth evicts oldest unclaimed issuance. Unused links
+fail after source revoke/expiry; source is rechecked through delayed exchanges.
+Application sessions already established keep their normal lifetime. Plain CLI
+singleton sign-ins remain separate. Shared WordPress requires a per-link claim plugin
+and a fixed HTTPS online HMAC claim with signed receipt before auth. Callback carries
+only token hash/nonce/time/MAC and kid, never raw token/key; audit excludes hashes too.
+See the contract for exact framing, bounds and fail-closed receipt validation.
+
+Companion descriptors are flat private gate metadata, not nested pages. An authenticated
+non-consuming POST `/__sandbox/stack/companion-status` probes child token/id/expiry and
+paired title/hosts/notes over fixed TLS origin, no redirects, five-second timeout.
+Navigation returns the existing child fragment URL only after this check. Child sets
+its own host-only cookie. Parent session confers no child, panel or proxy authority.
+Child restart/lost page means unavailable; no automatic remint or fallback.
+
+Before any key/grant effect, installed gates must advertise ALL of `stack-page-v2`,
+`stack-signin-pool-v1`, `wordpress-claim-v1`, `companion-status-v1`. A capability string
+in source is not installed capability or revision proof. Retained v1 pages are readable
+by the compatible reader only while their tmpfs records remain present; v1 WP actions
+are explicitly unavailable because the stateless plugin cannot enforce eviction.
+Applying a new runtime resets gate tmpfs links, sessions, stack pages, and pools,
+including legacy records. Reissue v2 explicitly after an authorized apply; there is no
+silent migration or link survival promise. `sandbox.share-link.v2` is unchanged.
+Review this compatibility limitation before release.
+
+Creation must cover every own/direct-used route and inbox before any effect. Mapping
+an ordinary route to no action means author-declared `open`, subject to known private/
+Basic Auth restrictions. Missing linked-site access metadata is a gap, never evidence
+of anonymous reachability. `share.route_sign_in` maps at most 16 exact served hostnames
+to listed entry names or `$wordpress` for the configured WP primary. Magic-link mapping
+uses link_origin hostname. `inbox_sign_in` is parser-optional but coverage-required
+whenever recorded `ports.mailpit` exists, and must name a listed inbox_gate.
+`stack_sign_in` parses unique names; v2 page limits actions to 16. The pending pool
+limit of eight is a separate rule. Overflow/gaps refuse, never silently truncate.
+
+Durable attempts write schema 3 with original-settlement evidence and original ids and bounded cleanup descriptors,
+never bearer tokens, keys, emails or whole manifests. Unknown acceptance requires
+list/revoke of original ids, not mint replay. Revoke parent then every companion;
+retain all survivors on partial failure. Gate absence is separate from WP key removal,
+and repeated cleanup must still remove the original per-link plugin. Missing parent
+metadata does not erase attempts. Runtime copy-id/fingerprint must be independently
+observed under ownership locks; descriptor equality alone is no proof, and same-slug
+replacement must fail closed. Controller recovery fields are source-defined: attempt
+summaries contain `attempt_id`, `phase`, parent `link_id`, `expires_at`, `target`,
+`stack`, and per-grant `target`, `entry`, `id`, `expires_at`, `status`, `gate_revoked`,
+and `wordpress_revoked`. Pending cleanup returns `ok:false`, `phase:cleanup_pending`,
+`code:share_cleanup_pending`, and `still_live` rows with `target`, `entry`, `id`,
+`expires_at`, `status`, and `reason_code`.
+
+Stack list includes current `links` and `sessions`, plus durable `attempts`. A missing
+current parent with recorded attempts returns empty current arrays and
+`partial_reasons:["current_parent_unavailable"]`; an incomplete durable phase returns
+`partial_reasons:["durable_cleanup_pending"]`. Stack-wide revoke combines durable
+original-id cleanup and individually selected legacy grants from the current parent;
+partial results use `phase:cleanup_pending`, `code:share_cleanup_pending`, `still_live`,
+and sorted `partial_reasons` (`durable_cleanup_unconfirmed`,
+`legacy_cleanup_unconfirmed`, or `current_parent_unavailable`). It does not send an
+unbounded gate-wide revoke.
+
+CLI JSON refusal envelopes include `ok:false`, `code`, and `message`; coverage refusal
+also includes `gaps` rows with `stack`, `target`, `piece`, `code`, `fix`, and optional
+`hostname`. Create, list and revoke print partial results and exit nonzero. Text list
+output includes retained attempt and grant identities, statuses and partial reasons;
+JSON retains `ok:false` and `partial_reasons`. Focused CLI fixtures exercise this
+contract; they do not establish installed behavior. The panel API projects only bounded safe attempt and live-grant identifiers,
+phase/status, expiry, and allowlisted reasons; list is HTTP 200 only when complete and
+409 for partial/invalid projection. Private cleanup descriptors are not projected.
+`expires_clamped` is a boolean; there is no detailed clamp-reason field.
+
+An original operation with unknown completion stays fenced after a process crash.
+Repeated revoke reports `mint_completion_unknown`; neither an absent gate record nor
+a new request proves that the old writer has stopped. Confirmed live grants can be
+revoked using their saved runtime identity; unknown unused capabilities must reach
+their recorded expiry unless original completion can be established. This can delay
+recovery and prevents an unsafe replacement mint. Owner-local execution additionally
+retains its original process handle and native writer leases, as described in
+[owner-panel-sharing.md](owner-panel-sharing.md).
+
+The version-3 `original_settled` fact records completion separately from gate revoke.
+It permits retrying WordPress removal after partial compensation. Version-2 records
+remain readable with this fact false: legacy `gate_revoked` never implies settlement.
+Legacy revoked/expired records with cleanup descriptors reopen as unknown cleanup,
+including mixed attempts. A subsequent v3 save cannot close that uncertainty.
+Descriptor-free terminal rows have zero-effect provenance: v2 required a descriptor
+before the first key/mint effect. New v3 revocation requires original settlement
+or a proven planned-only zero-effect closure.
+No remote state migration runs automatically.
+
+Controller stack issuance and panel revocation prove exact running source/config/access/target parity,
+including current applied agent_mint, under the real physical apply leases. Gate/WP
+effects use immutable container ids. A local unapplied enable or stale enable after
+another controller opted out refuses before key/grant effects. Unknown transport
+retains physical ownership for coordinated recovery; authentication expiry alone
+cannot prove that the old writer stopped. Per-click entries honor their shorter
+declared TTL as well as the ten-minute/source/window bounds. Mapped route rows open
+their declared action; only anonymous routes render ordinary open links.
+
+#### Worked stack template
+
+This complete hosting declaration illustrates the declared fields for a repository
+with `compose.yml` services `wordpress` and background `capture`. The latter must
+actually be Mailpit with login configured using the same secret, API at `/mail`, and
+any published capture port bound to loopback. The named mailpit port must be wired by
+the repository Compose configuration through MAILPIT_PORT. No app or Compose code is
+created here. `fixture-hub` must already be an isolated recorded same-remote stack
+with its own complete gate/access declaration; `uses` does not provision it.
+
+All domains are reserved placeholders, not deployment destinations. Replace the
+synthetic image digest with an owner-reviewed real pin, choose an enabled_until
+within 30 days at apply, supply CAPTURE_PASSWORD through the approved secret workflow,
+and select an authorized remote/ref before planning. The digest below is intentionally
+syntactic, not an image availability claim. No hostname, IP, email or credential from
+a real service is needed in committed examples.
+
+```yaml
+version: 1
+project: fixture-{slug}
+stack:
+  slug: '^[a-z0-9][a-z0-9-]{0,30}$'
+  ports: [mailpit]
+  uses: [fixture-hub]
+environments:
+  sandbox:
+    compose:
+      files: [compose.yml]
+      service: wordpress
+      container_port: 80
+      background_services: [capture]
+    healthcheck: {path: /, statuses: [200, 302]}
+    host:
+      primary: wp-{slug}.example.test
+      aliases:
+        - {hostname: share-{slug}.example.test, mode: serve}
+        - {hostname: inbox-{slug}.example.test, mode: serve}
+    deploy:
+      allowed_branches: ['{ref_branch}']
+      require_clean: true
+    cloudflare: {proxied: true, tls: origin-ca, ssl_mode: strict}
+    secrets:
+      required: {CAPTURE_PASSWORD: FIXTURE_CAPTURE_PASSWORD}
+      values:
+        MAILPIT_PORT: '{port:mailpit}'
+    autologin:
+      user: fixture-admin
+      service: wordpress
+      request_path: /wp-login.php
+      container_path: /var/www/html/wp-content/mu-plugins/99-sandbox-host-autologin.php
+      ttl_seconds: 600
+      login_service:
+        image: python:3.13-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        enabled_until: 2026-12-01
+        session_ttl_seconds: 3600
+        allowed_host_suffixes: [example.test]
+        capture:
+          service: capture
+          adapter: mailpit_v1
+          api_url: http://capture:8025/mail
+          username: fixture-capture
+          credential_secret: CAPTURE_PASSWORD
+      entries:
+        mail:
+          mode: inbox_gate
+          requires_email: false
+          hostname: inbox-{slug}.example.test
+          path: /__sandbox/login/mail
+          ttl_seconds: 600
+          landing_path: /mail/
+    share:
+      hostname: share-{slug}.example.test
+      private: false
+      agent_mint: true
+      stack_sign_in: [mail]
+      route_sign_in:
+        wp-{slug}.example.test: '$wordpress'
+      inbox_sign_in: mail
+```
+
+`$wordpress` is reserved, never an entry name or member of stack_sign_in. Route mapping
+hostname KEYS may use approved placeholders; entry names and inbox_sign_in stay literal.
+This is source-aligned documentation, not a parsed or applied fixture. Parser success
+would still not prove complete route coverage or installed support. Real WP/MySQL,
+multisite, persistent cache, uniform 404/timing and browser runtime acceptance remain
+unverified.
 
 ### From the panel
 
@@ -479,7 +660,8 @@ run `host apply`).
   host-only, `Path=/`, `Secure`, `HttpOnly` and `SameSite=Lax`, with `Max-Age` set to
   the latest remaining session. It holds up to 8 session secrets, so one browser can
   hold several shares on one gate. The response is a 303 to the link's scope (or the
-  stack page) with `Referrer-Policy: no-referrer`.
+  stack page). Stack action and WP fragment openers use `Referrer-Policy: same-origin`
+  to preserve same-origin POST Origin; token-bearing cross-origin referrals remain excluded.
 - **Refusals.** Expired, spent, revoked, malformed and unknown links, and an `Origin`
   other than the gate's (or `null`, which browsers send from a `no-referrer` page), all
   get the same 404, with the same body and headers, after the same lookup. More than 30 link attempts per entry in 60 seconds
@@ -504,3 +686,9 @@ client, so a prober can make legitimate opens wait out the minute. A stack page 
 WordPress admin and the listed sign-ins to whoever holds its link. Anyone with Sandbox access can mint one, and is
 effectively root on that server. Whoever holds an unused link has that access. The clock
 that sets a token's expiry is the issuing machine's, compared against the service's.
+
+The capability reply includes public boolean panel_agent_mint. Panel recovery
+without a manifest checks it on the exact original bound running gate before
+revoke/key effects. Disabling agent_mint refuses panel mutations; ordinary CLI
+operator cleanup remains available. Both durable and current legacy stack cleanup
+hold physical leases and address immutable service ids.

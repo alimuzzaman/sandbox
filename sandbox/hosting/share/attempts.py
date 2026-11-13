@@ -4,7 +4,8 @@ Callers preallocate every link id, then call prepare BEFORE remote effects. Hold
 ``locked()`` across cleanup and mint; call begin_mint before key installation OR a gate mint request.
 Unknown acceptance must be reconciled by id, never retried with a replacement id.
 
-Wire contract: exact version 2 envelope. Version 1 refuses without migration.
+Wire contract: version 3 writes original-settlement evidence. Version 2 is read
+conservatively with no settlement evidence; version 1 refuses without migration.
 Grant.cleanup holds only the canonical public gate DNS hostname (HTTPS origin is
 computed), original runtime incarnation, bounded Compose argv inputs, and optional
 WP service/plugin path/key id/expiry/protocol. No manifest, command, bearer/token hash,
@@ -112,6 +113,7 @@ class Grant:
     cleanup: CleanupDescriptor | None = None
     gate_revoked: bool = False
     wordpress_revoked: bool = False
+    original_settled: bool = False
 
 
 @dataclass(frozen=True)
@@ -246,7 +248,7 @@ def _expired_safely(grant: Grant, now: int) -> bool:
     return grant.expires_at <= now and (grant.cleanup is not None or grant.disposition == "planned")
 
 
-def _parse(value: object) -> Attempt:
+def _parse(value: object, *, legacy: bool = False) -> Attempt:
     value = _object(value, {"id", "parent", "created_at", "expires_at", "phase", "grants"})
     _name(value["id"], _ATTEMPT_ID)
     parent = _parent(value["parent"])
@@ -258,7 +260,7 @@ def _parse(value: object) -> Attempt:
     grants = []
     for row in value["grants"]:
         row = _object(row, {"target", "entry", "id", "expires_at", "disposition",
-                            "cleanup", "gate_revoked", "wordpress_revoked"})
+                            "cleanup", "gate_revoked", "wordpress_revoked", "original_settled"})
         target = _target(row["target"])
         _name(row["entry"], _ENTRY)
         _name(row["id"], _LINK_ID)
@@ -267,14 +269,16 @@ def _parse(value: object) -> Attempt:
         _require(type(row["disposition"]) is str and row["disposition"] in
                  {"planned", "unknown", "live", "revoked", "expired"})
         cleanup = _cleanup(row["cleanup"], row["id"], row["expires_at"])
-        _require(type(row["gate_revoked"]) is bool and type(row["wordpress_revoked"]) is bool)
+        _require(all(type(row[key]) is bool for key in
+                     ("gate_revoked", "wordpress_revoked", "original_settled")))
         grant = Grant(target, row["entry"], row["id"], row["expires_at"], row["disposition"],
-                      cleanup, row["gate_revoked"], row["wordpress_revoked"])
+                      cleanup, row["gate_revoked"], row["wordpress_revoked"], row["original_settled"])
         _require(grant.disposition not in ("unknown", "live") or cleanup is not None)
         if grant.disposition == "planned":
-            _require(not grant.gate_revoked and not grant.wordpress_revoked)
+            _require(not grant.gate_revoked and not grant.wordpress_revoked and not grant.original_settled)
         if grant.disposition == "revoked":
-            _require(grant.gate_revoked and not _wordpress_pending(grant))
+            _require(grant.gate_revoked and not _wordpress_pending(grant)
+                     and (legacy or grant.original_settled))
         if grant.disposition == "expired":
             _require(cleanup is not None or not _wordpress_pending(grant))
         grants.append(grant)
@@ -291,6 +295,28 @@ def _parse(value: object) -> Attempt:
     if phase in ("revoked", "expired"):
         _require(all(grant.disposition in ("revoked", "expired") for grant in grants))
     return Attempt(value["id"], parent, value["created_at"], value["expires_at"], phase, tuple(grants))
+
+
+def _legacy_attempt(record: Attempt) -> Attempt:
+    """Discard pre-fence acknowledgements that could precede a delayed writer.
+
+    A v2 begin_mint required a cleanup descriptor. A terminal row without one
+    therefore has proven zero effects. Other legacy terminal rows cannot prove
+    settlement, even when the whole attempt says revoked or the key was absent.
+    """
+    grants, ambiguous = [], False
+    for grant in record.grants:
+        if grant.disposition in ("revoked", "expired"):
+            if grant.cleanup is None:
+                grant = replace(grant, original_settled=True)
+            else:
+                ambiguous = True
+                grant = replace(grant, disposition="unknown", gate_revoked=False, wordpress_revoked=False)
+        elif grant.disposition == "unknown":
+            grant = replace(grant, gate_revoked=False, wordpress_revoked=False)
+        grants.append(grant)
+    return _parse(asdict(replace(record, grants=tuple(grants),
+                                 phase="cleanup_pending" if ambiguous else record.phase)))
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -393,10 +419,20 @@ class AttemptRepository:
             _require(len(body) <= _MAX_BYTES)
             document = json.loads(body, object_pairs_hook=_unique_object)
             document = _object(document, {"version", "attempts"})
-            _require(type(document["version"]) is int and document["version"] == 2)
+            _require(type(document["version"]) is int and document["version"] in (2, 3))
             rows = document["attempts"]
             _require(type(rows) is list and len(rows) <= _MAX_ATTEMPTS)
-            records = tuple(_parse(row) for row in rows)
+            if document["version"] == 2:
+                # Old gate_revoked bits predate original-writer fencing. Never
+                # promote them into completion evidence, including after a save.
+                for row in rows:
+                    _require(type(row) is dict and type(row.get("grants")) is list)
+                    for grant in row["grants"]:
+                        _require(type(grant) is dict and "original_settled" not in grant)
+                        grant["original_settled"] = False
+            records = tuple(_parse(row, legacy=document["version"] == 2) for row in rows)
+            if document["version"] == 2:
+                records = tuple(_legacy_attempt(row) for row in records)
             if validate_parent:
                 _require(all(record.parent == self.parent for record in records))
             _require(len({record.id for record in records}) == len(records))
@@ -408,7 +444,7 @@ class AttemptRepository:
 
     def _write(self, records: tuple[Attempt, ...]) -> None:
         _require(len(records) <= _MAX_ATTEMPTS)
-        body = (json.dumps({"version": 2, "attempts": [asdict(row) for row in records]},
+        body = (json.dumps({"version": 3, "attempts": [asdict(row) for row in records]},
                            sort_keys=True, separators=(",", ":")) + "\n").encode()
         _require(len(body) <= _MAX_BYTES)
         directory = self._local.directory
@@ -523,7 +559,8 @@ class AttemptRepository:
             previous = next((row for row in records if row.id == attempt.id), None)
             if previous is not None:
                 original = replace(previous, phase="prepared", grants=tuple(
-                    replace(grant, disposition="planned", gate_revoked=False, wordpress_revoked=False)
+                    replace(grant, disposition="planned", gate_revoked=False, wordpress_revoked=False,
+                            original_settled=False)
                     for grant in previous.grants))
                 _require(original == attempt)
                 return previous
@@ -600,7 +637,8 @@ class AttemptRepository:
                              (grant.disposition == "unknown" and disposition == "live") or
                              (grant.disposition in ("planned", "unknown", "live") and disposition == "revoked"))
                     if disposition == "revoked":
-                        grant = replace(grant, gate_revoked=True)
+                        _require(grant.disposition != "unknown" or grant.original_settled)
+                        grant = replace(grant, gate_revoked=True, original_settled=True)
                         # Gate revocation alone cannot discharge an installed or
                         # possibly installed WordPress key after lost acceptance.
                         if not _wordpress_pending(grant):
@@ -609,9 +647,24 @@ class AttemptRepository:
                             grant = replace(grant, disposition="unknown")
                     else:
                         _require(not grant.gate_revoked and not grant.wordpress_revoked)
-                        grant = replace(grant, disposition=disposition)
+                        grant = replace(grant, disposition=disposition, original_settled=True)
                 grants.append(grant)
             return replace(record, grants=tuple(grants))
+        return self._update(attempt_id, change)
+
+    def confirm_original_settled(self, attempt_id: str, grant_id: str) -> Attempt:
+        """Only the original invocation's completed-transport callback calls this.
+
+        Gate absence, a saved revoke bit, a timeout, or another request is not
+        evidence. This separately versioned fact survives partial compensation.
+        """
+        _name(grant_id, _LINK_ID)
+        def change(record: Attempt) -> Attempt:
+            _require(any(grant.id == grant_id for grant in record.grants))
+            return replace(record, grants=tuple(
+                replace(grant, original_settled=True) if grant.id == grant_id
+                and grant.disposition in ("unknown", "live") else grant
+                for grant in record.grants))
         return self._update(attempt_id, change)
 
     def confirm_wordpress_removed(self, attempt_id: str, grant_id: str) -> Attempt:
@@ -630,7 +683,7 @@ class AttemptRepository:
                     if grant.disposition not in ("revoked", "expired"):
                         _require(grant.disposition in ("unknown", "live"))
                         grant = replace(grant, wordpress_revoked=True)
-                        if grant.gate_revoked:
+                        if grant.gate_revoked and grant.original_settled:
                             grant = replace(grant, disposition="revoked")
                 grants.append(grant)
             return replace(record, grants=tuple(grants))

@@ -1177,3 +1177,61 @@ class SiteCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StackAccessDeclarationTests(unittest.TestCase):
+    def environment(self):
+        env = _environment(_login_block())
+        env["host"]["aliases"].append({"hostname": "share.example.test", "mode": "serve"})
+        env["share"] = {"hostname": "share.example.test", "stack_sign_in": ["app", "inbox"],
+                        "route_sign_in": {"app.example.test": "app"}, "inbox_sign_in": "inbox"}
+        return env
+
+    def test_route_map_matches_destination_instead_of_gate(self):
+        self.assertEqual(_validate(self.environment())["login_service"]["share"]["route_sign_in"],
+                         {"app.example.test": "app"})
+        for host, name in (("gate.example.test", "app"), ("absent.example.test", "app"),
+                           ("app.example.test", "missing")):
+            env = self.environment(); env["share"]["route_sign_in"] = {host: name}
+            with self.subTest(host=host, name=name), self.assertRaises(hosting.HostingError):
+                _validate(env)
+
+    def test_inbox_must_be_explicit_listed_inbox_gate(self):
+        for name in ("app", "share", "missing"):
+            env = self.environment(); env["share"]["inbox_sign_in"] = name
+            with self.subTest(name=name), self.assertRaises(hosting.HostingError):
+                _validate(env)
+        env = self.environment(); env["share"]["stack_sign_in"] = ["app"]
+        with self.assertRaises(hosting.HostingError):
+            _validate(env)
+
+    def test_wordpress_reserved_mapping_requires_wordpress_configuration(self):
+        env = self.environment(); env["share"]["route_sign_in"] = {"app.example.test": "$wordpress"}
+        with self.assertRaises(hosting.HostingError):
+            _validate(env)
+
+
+class LinkedAccessDeclarationTests(unittest.TestCase):
+    environment = StackAccessDeclarationTests.environment
+
+    def test_missing_declaration_normalizes_empty(self):
+        self.assertEqual(_validate(self.environment())["login_service"]["share"]["linked_access"], {})
+
+    def test_exact_declaration_round_trip(self):
+        env = self.environment()
+        env["share"]["linked_access"] = {"linked.example.test": "open"}
+        self.assertEqual(_validate(env)["login_service"]["share"]["linked_access"],
+                         {"linked.example.test": "open"})
+
+    def test_rejects_malformed_off_suffix_and_overflow_declarations(self):
+        invalid = [None, [], {"Linked.example.test": "open"},
+                   {"linked.example.test.": "open"}, {"*.example.test": "open"},
+                   {"https://linked.example.test": "open"}, {"linked.other.test": "open"},
+                   {"linked.example.test": "protected"}, {"linked.example.test": True},
+                   {"linked.example.test": {"token": "synthetic"}},
+                   {"linked.example.test": "https://example.test"},
+                   {f"s{i}.example.test": "open" for i in range(17)}]
+        for value in invalid:
+            env = self.environment(); env["share"]["linked_access"] = value
+            with self.subTest(value=value), self.assertRaises(hosting.HostingError):
+                _validate(env)

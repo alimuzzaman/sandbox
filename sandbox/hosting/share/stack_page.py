@@ -629,7 +629,7 @@ def key_directory(container_path: str) -> str:
     return posixpath.dirname(container_path)
 
 
-def install_wordpress_key(found, stack: dict, expires_at: int) -> None:
+def install_wordpress_key(found, stack: dict, expires_at: int, *, runtime=None) -> None:
     """Write this link's key file into the WordPress container, and drop expired ones.
 
     The plugin travels on SSH stdin: argv is visible to process listings.
@@ -637,7 +637,18 @@ def install_wordpress_key(found, stack: dict, expires_at: int) -> None:
     wordpress = stack.get("wordpress")
     if not wordpress:
         return
+    if runtime is not None:
+        runtime.install_wordpress(wordpress, expires_at)
+        return
     from sandbox.commands.hosting import _remote_checked
+    script, plugin = wordpress_key_install(wordpress, expires_at)
+    service = shlex.quote(wordpress["service"])
+    _remote_checked(found.entry, f"{_prefix(found)} exec -T {service} sh -c {shlex.quote(script)}",
+                    timeout=60, input_data=plugin)
+
+
+def wordpress_key_install(wordpress: dict, expires_at: int) -> tuple[str, str]:
+    """Fixed key-install program and private stdin, shared by bound adapters."""
     plugin = render_key_plugin(wordpress["kid"], wordpress["key"], wordpress["user"], expires_at,
                                **({"claim_origin": wordpress["claim_origin"]}
                                   if "claim_origin" in wordpress else {}))
@@ -651,9 +662,7 @@ def install_wordpress_key(found, stack: dict, expires_at: int) -> None:
         "[ \"$e\" -le \"$now\" ] && rm -f \"$f\"; done; "
         f"t={shlex.quote(target)}; tmp=\"$t.tmp.$$\"; cat > \"$tmp\"; chmod 0644 \"$tmp\"; mv -f \"$tmp\" \"$t\""
     )
-    service = shlex.quote(wordpress["service"])
-    _remote_checked(found.entry, f"{_prefix(found)} exec -T {service} sh -c {shlex.quote(script)}",
-                    timeout=60, input_data=plugin)
+    return script, plugin
 
 
 def remove_wordpress_keys(found, link_id: str) -> int:

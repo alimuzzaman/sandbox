@@ -419,6 +419,8 @@ class SiteStore:
             return {"ok": False, "code": "site_record_invalid"}
         stack = None
         if record["kind"] == "stack":
+            if config.get("panel_share", {}).get("agent_mint") is not True:
+                return {"ok": False, "code": "agent_mint_not_enabled"}
             stack = valid_stack(raw["stack"], self.name, record["id"], config)
             if (stack is None or record["scope"] != STACK_PAGE_PATH
                     or any(child["expires_at"] != record["expires_at"] for child in stack.get("companions", []))):
@@ -792,6 +794,10 @@ class Gate:
             return None
         if entry["mode"] == "magic_link" and (not isinstance(email, str) or not _ADDRESS.fullmatch(email)
                 or email.casefold() in entry["magic_link"].get("denied_emails", [])):
+            return None
+        expires_at = min(int(expires_at), issued + int(entry["ttl_seconds"]),
+                         self.config["enabled_until_epoch"])
+        if expires_at <= issued:
             return None
         token = secrets.token_urlsafe(32)
         record = {"schema": RECORD_SCHEMA, "entry": name,
@@ -1216,9 +1222,16 @@ _HEALTH_LABELS = {"up": "up", "up_login": "up (sign-in required)", "redirect": "
 
 def render_stack_page(record, health, links):
     """Plain HTML, every value escaped; the links are this view's alone."""
+    def route(item):
+        hostname = html.escape(item["hostname"], quote=True)
+        access = item.get("access", "open")
+        if record.get("schema") == STACK_SCHEMA_V2 and access != "open":
+            return ('<button data-action="' + html.escape(access, quote=True) + '">'
+                    + hostname + ' — Sign in</button>')
+        return (f'<a href="https://{hostname}/" rel="noreferrer noopener" '
+                f'target="_blank">{hostname}</a>')
     rows = "".join(
-        f'<tr><td><a href="https://{html.escape(item["hostname"])}/" rel="noreferrer noopener" '
-        f'target="_blank">{html.escape(item["hostname"])}</a></td><td>{html.escape(item["role"])}</td>'
+        f'<tr><td>{route(item)}</td><td>{html.escape(item["role"])}</td>'
         f'<td class="{html.escape(health.get(item["hostname"], "not_checked"))}">'
         f'{html.escape(_HEALTH_LABELS.get(health.get(item["hostname"], "not_checked"), "unknown"))}</td></tr>'
         for item in record["hosts"])
@@ -2037,6 +2050,7 @@ def manage(config, argv, state_dir, *, stdin, stdout, clock=time.time):
                          separators=(",", ":")).encode()).hexdigest(),
                      "panel_access_digest": config.get("panel_access_digest"),
                      "panel_target_digest": config.get("panel_target_digest"),
+                     "panel_agent_mint": config.get("panel_share", {}).get("agent_mint") is True,
                      "stack_schemas": [STACK_SCHEMA, STACK_SCHEMA_V2], "link_schemas": [SITE_LINK_SCHEMA]})
     store = SiteStore(state_dir, name, clock)
     store.ensure()

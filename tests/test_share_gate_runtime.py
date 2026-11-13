@@ -2,7 +2,7 @@
 
 Covers what 075's site tests do not: path scope and traversal refusals, unlimited
 links, several shares in one cookie, the link-file recheck, no-index on every gate
-answer, robots.txt, and the stack page with its per-view sign-in links.
+answer, robots.txt, and the stack page with authenticated per-click sign-in actions.
 """
 import base64
 import hashlib
@@ -48,6 +48,7 @@ class _Gate(unittest.TestCase):
         self.upstream = _Fake(("127.0.0.1", 0), _Upstream)
         self.upstream.store = self.upstream_store
         _serve(self.upstream)
+        self.addCleanup(self.upstream.server_close)
         self.addCleanup(self.upstream.shutdown)
         self.logs = []
         self.now = time.time()
@@ -55,6 +56,7 @@ class _Gate(unittest.TestCase):
             "enabled_until_epoch": int(self.now) + 40 * 86400,
             "session_ttl_seconds": 43200,
             "capture": None,
+            "panel_share": {"agent_mint": True},
             "allowed_host_suffixes": ["dev.example.test"],
             "entries": {
                 "share": {"mode": "site_gate", "requires_email": False, "hostname": GATE,
@@ -73,6 +75,7 @@ class _Gate(unittest.TestCase):
             self.config, "", self.state_dir, clock=lambda: self.now, log=self.logs.append,
             public_address=("127.0.0.1", 0), health_address=("127.0.0.1", 0))
         _serve(self.public)
+        self.addCleanup(self.public.server_close)
         self.addCleanup(self.public.shutdown)
         self.addCleanup(self.health.server_close)
         self.ids = {}
@@ -444,6 +447,15 @@ class StackPageTests(_Gate):
         self.assertEqual(response.getheader("Location"), share.STACK_PAGE_PATH)
         return response.getheader("Set-Cookie").split(";", 1)[0], link_id
 
+    def test_running_applied_opt_out_refuses_stack_mint_before_any_record(self):
+        self.config["panel_share"]["agent_mint"] = False
+        request = share.LinkRequest("share", "stack", share.STACK_PAGE_PATH, 300, None)
+        minted = share.mint(request, now=self.now, ends_at=self.config["enabled_until_epoch"])
+        reply = self.manage("mint", "share", stdin=json.dumps({
+            "link": share.link_record(request, minted), "stack": None}))
+        self.assertEqual(reply, {"ok": False, "code": "agent_mint_not_enabled"})
+        self.assertEqual(self.manage("list", "share")["links"], [])
+
     @staticmethod
     def _fake_probe(host, probe, _upstream, suffixes):
         if probe == "internal":
@@ -454,36 +466,30 @@ class StackPageTests(_Gate):
         with patch.object(runtime, "_probe", side_effect=self._fake_probe):
             return self.get(share.STACK_PAGE_PATH, cookie)
 
-    def test_page_lists_hosts_with_health_and_fresh_links(self):
-        cookie, link_id = self.stack_cookie()
+    def action(self, cookie, action="qa"):
         response, body = self.view(cookie)
         self.assertEqual(response.status, 200)
-        self.assertEqual(response.getheader("X-Robots-Tag"), TAG)
-        self.assertIn("style-src 'sha256-", response.getheader("Content-Security-Policy"))
-        text = body.decode()
-        self.assertIn('<meta name="robots" content="noindex, nofollow">', text)
-        self.assertIn(HUB, text)
-        self.assertIn('class="up"', text)
-        self.assertIn("not checked", text)
-        wp = re.search(r'href="(https://wp\.dev\.example\.test/\?sandbox_share_login=([0-9a-f]{12})#([^"]+))"', text)
-        self.assertIsNotNone(wp)
-        self.assertEqual(wp.group(2), link_id[2:])
-        exp, nonce, mac = wp.group(3).split(".")
-        self.assertLessEqual(int(exp) - int(self.now), runtime.SIGN_IN_SECONDS)
-        message = f"sandbox-share-login.v1|{link_id[2:]}|{exp}|{nonce}".encode()
-        self.assertEqual(mac, hmac.new(bytes.fromhex(WP_KEY), message, hashlib.sha256).hexdigest())
-        qa = re.search(rf'href="https://{re.escape(QA_HOST)}/__sandbox/login/qa#sandbox_autologin=([A-Za-z0-9_-]+)"', text)
-        self.assertIsNotNone(qa)
-        record = json.loads((self.state_dir / "qa.json").read_text())
-        self.assertEqual(record["token_sha256"], hashlib.sha256(qa.group(1).encode()).hexdigest())
-        self.assertEqual((record["email"], record["expires_at"] - record["issued_at"]),
-                         ("qa@dev.example.test", runtime.SIGN_IN_SECONDS))
-        self.assertTrue(self.public.gate.is_live("qa"))
-        _, again = self.view(cookie)
-        self.assertNotEqual(re.search(r"#([0-9]+\.[^\"]+)\"", again.decode()).group(1), wp.group(3))
-        joined = " ".join(self.logs)
-        for value in (wp.group(3), qa.group(1), WP_KEY):
-            self.assertNotIn(value, joined)
+        csrf = re.search(r'name="stack-csrf" content="([0-9a-f]+)"', body.decode()).group(1)
+        response, body = self.request("POST", runtime.STACK_ACTION_PATH,
+            body=json.dumps({"action": action, "csrf": csrf}),
+            headers={"Cookie": cookie, "Origin": "https://" + GATE,
+                     "X-Sandbox-Stack-Action": "1", "Content-Type": "application/json"})
+        self.assertEqual(response.status, 200, body)
+        return json.loads(body)["url"].partition("#sandbox_autologin=")[2]
+
+    def test_page_lists_hosts_without_minting(self):
+        cookie, _ = self.stack_cookie()
+        with patch.object(self.public.gate, "mint_sign_in", side_effect=AssertionError("GET minted")):
+            response, body = self.view(cookie)
+            head, empty = self.request("HEAD", share.STACK_PAGE_PATH, headers={"Cookie": cookie})
+        self.assertEqual((response.status, head.status, empty), (200, 200, b""))
+        self.assertIn(HUB.encode(), body)
+        self.assertIn(b'data-action="qa"', body)
+        self.assertNotIn(WP_KEY.encode(), body)
+        self.assertNotIn(b"#sandbox_autologin=", body)
+        self.assertFalse((self.state_dir / "qa.json").exists())
+        self.assertFalse(self.public.gate.is_live("qa"))
+        self.assertIn("connect-src 'self'", response.getheader("Content-Security-Policy"))
 
     def test_a_stack_session_reaches_nothing_but_the_page(self):
         cookie, _ = self.stack_cookie()
@@ -506,21 +512,19 @@ class StackPageTests(_Gate):
 
     def test_revoking_the_stack_link_ends_the_sign_in_links_it_minted(self):
         cookie, link_id = self.stack_cookie()
-        self.assertEqual(self.view(cookie)[0].status, 200)
+        self.action(cookie)
         gate = self.public.gate
         self.assertTrue(gate.is_live("qa"))
         self.manage("revoke", "share", link_id)
-        # The token record is still on disk, but it no longer counts.
-        self.assertTrue((self.state_dir / "qa.json").exists())
+        # Pooled sign-ins never overwrite the direct CLI singleton.
+        self.assertFalse((self.state_dir / "qa.json").exists())
         self.assertFalse(gate.is_live("qa"))
         self.assertIsNone(gate.record("qa"))
 
     def test_a_sign_in_posted_slowly_across_a_revoke_is_refused(self):
         # Headers first, so the gate loads the token record; then the revoke; then the body.
         cookie, link_id = self.stack_cookie()
-        _, body = self.view(cookie)
-        token = re.search(rf'href="https://{re.escape(QA_HOST)}/__sandbox/login/qa#sandbox_autologin=([A-Za-z0-9_-]+)"',
-                          body.decode()).group(1)
+        token = self.action(cookie)
         form = urllib.parse.urlencode({"token": token}).encode()
         sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=10)
         self.addCleanup(sock.close)
@@ -533,29 +537,21 @@ class StackPageTests(_Gate):
         self.assertIn(b" 404 ", sock.recv(4096).split(b"\r\n", 1)[0])
         self.assertFalse((self.state_dir / "used" / hashlib.sha256(token.encode()).hexdigest()).exists())
 
-    def test_a_sign_in_posted_slowly_across_a_newer_view_is_refused(self):
-        # Token A's headers, then a reload of the stack page mints B, then A's body.
-        cookie, _link_id = self.stack_cookie()
-        pattern = rf'href="https://{re.escape(QA_HOST)}/__sandbox/login/qa#sandbox_autologin=([A-Za-z0-9_-]+)"'
-        token = re.search(pattern, self.view(cookie)[1].decode()).group(1)
-        form = urllib.parse.urlencode({"token": token}).encode()
-        sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=10)
-        self.addCleanup(sock.close)
-        sock.sendall((f"POST /__sandbox/login/qa HTTP/1.1\r\nHost: {QA_HOST}\r\n"
-                      "Content-Type: application/x-www-form-urlencoded\r\n"
-                      f"Content-Length: {len(form)}\r\n\r\n").encode())
-        time.sleep(0.5)
-        newer = re.search(pattern, self.view(cookie)[1].decode()).group(1)
-        self.assertNotEqual(newer, token)
-        sock.sendall(form)
-        self.assertIn(b" 404 ", sock.recv(4096).split(b"\r\n", 1)[0])
-        self.assertFalse((self.state_dir / "used" / hashlib.sha256(token.encode()).hexdigest()).exists())
+    def test_newer_click_does_not_invalidate_older_click(self):
+        cookie, _ = self.stack_cookie()
+        first, second = self.action(cookie), self.action(cookie)
+        self.assertNotEqual(first, second)
+        with patch.object(self.public.gate, "sign_in", return_value="https://" + HUB + "/verify"):
+            for token in (first, second):
+                response, _ = self.request("POST", "/__sandbox/login/qa", host=QA_HOST,
+                    body=urllib.parse.urlencode({"token": token}))
+                self.assertEqual(response.status, 303)
 
     def test_a_spent_one_use_stack_link_keeps_its_sign_in_links(self):
         token, link_id = self.mint(kind="stack", scope=share.STACK_PAGE_PATH, stack=dict(self.STACK), uses=1)
         response, _ = self.open(token)
         cookie = response.getheader("Set-Cookie").split(";", 1)[0]
-        self.assertEqual(self.view(cookie)[0].status, 200)
+        self.action(cookie)
         self.assertTrue(self.public.gate.is_live("qa"))
 
     def test_a_sign_in_record_naming_an_unknown_stack_link_is_dead(self):

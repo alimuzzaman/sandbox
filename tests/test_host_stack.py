@@ -111,6 +111,36 @@ class _Runtime:
 
 
 class TemplateSchemaTests(unittest.TestCase):
+    def test_gate_placeholders_render_distinct_names_and_literal_regex_values(self):
+        import copy
+        import re
+        import yaml
+        document = yaml.safe_load(TEMPLATE)
+        env = document['environments']['sandbox']
+        env['share'] = {'hostname': 'share-{slug}.example.test'}
+        env['autologin'] = {'entries': {'app': {
+            'hostname': 'login-{slug}.example.test',
+            'magic_link': {'request_origin': 'https://app-{slug}.example.test',
+                           'link_origin': 'https://app-{slug}.example.test',
+                           'link_pattern': r'^/login/{ref_branch}/[a-z]{4,8}$',
+                           'required_params': {'return': 'https://app-{slug}.example.test'}}}}}
+        template = stack_template.parse_template(document)
+        for slug in ('first', 'second'):
+            rendered = stack_template.render(template, slug=slug,
+                ref=StackRef('feature.v2', COMMIT, 'feature.v2'), ports={'mailpit': 18142},
+                source_root='/fixture', template_path='/template.yml')
+            result = rendered['environments']['sandbox']
+            self.assertEqual(result['share']['hostname'], f'share-{slug}.example.test')
+            self.assertEqual(result['autologin']['entries']['app']['hostname'], f'login-{slug}.example.test')
+            pattern = result['autologin']['entries']['app']['magic_link']['link_pattern']
+            self.assertIsNotNone(re.fullmatch(pattern, '/login/feature.v2/abcd'))
+            self.assertIsNone(re.fullmatch(pattern, '/login/featureXv2/abcd'))
+        for path in ('user', 'container_path', 'request_path'):
+            invalid = copy.deepcopy(document)
+            invalid['environments']['sandbox']['autologin'][path] = '{slug}'
+            with self.subTest(path=path), self.assertRaises(StackTemplateError):
+                stack_template.parse_template(invalid)
+
     def test_plain_commands_refuse_a_template(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "sandbox.hosting.yml").write_text(TEMPLATE)
@@ -192,6 +222,27 @@ class TemplateSchemaTests(unittest.TestCase):
         self.assertEqual(str(stack_template.template_source_root(template, "config/sandbox.hosting.yml")), ".")
         with self.assertRaises(StackTemplateError):
             stack_template.template_source_root(template, "sandbox.hosting.yml")
+
+
+class StackUsesSchemaTests(unittest.TestCase):
+    def template(self, uses):
+        data = _yaml(TEMPLATE)
+        data["stack"]["uses"] = uses
+        return stack_template.parse_template(data)
+
+    def test_uses_is_optional_and_direct(self):
+        self.assertEqual(stack_template.parse_template(_yaml(TEMPLATE)).uses, ())
+        self.assertEqual(self.template(["dev", "shared-2"]).uses, ("dev", "shared-2"))
+
+    def test_invalid_relationships_have_distinct_refusals(self):
+        for value, code in (("dev", "stack_uses_invalid"), ([None], "stack_uses_invalid"),
+                            (["DEV"], "stack_uses_invalid"), (["../dev"], "stack_uses_invalid"),
+                            (["{slug}"], "stack_uses_invalid"),
+                            (["dev", "dev"], "stack_uses_duplicate"),
+                            (["a", "b", "c", "d", "e"], "stack_uses_limit")):
+            with self.subTest(value=value), self.assertRaises(StackTemplateError) as caught:
+                self.template(value)
+            self.assertEqual(caught.exception.code, code)
 
 
 class BranchPolicyTests(unittest.TestCase):
@@ -499,6 +550,85 @@ class StackCommandTests(unittest.TestCase):
                     lifetime=None, ttl=None, owner=None, copy=None, force_owner=False)
         base.update(values)
         return SimpleNamespace(**base)
+
+    def test_uses_missing_or_self_refuses_before_effects_in_plan_and_confirm(self):
+        for name, code in (("missing", "stack_uses_missing"), ("demo", "stack_uses_self")):
+            data = _yaml(TEMPLATE)
+            data["stack"]["uses"] = [name]
+            template = stack_template.parse_template(data)
+            for mode in ("plan", "confirm"):
+                with self.subTest(name=name, mode=mode), \
+                        patch.object(host_stack, "load_template", return_value=template), \
+                        patch.object(host_stack, "_secrets_gate") as secrets_gate, \
+                        patch.object(host_stack, "_add_worktree") as worktree, \
+                        self.assertRaises(StackTemplateError) as caught:
+                    host_stack._up(self.args("up", **{mode: True}))
+                self.assertEqual(caught.exception.code, code)
+                secrets_gate.assert_not_called()
+                worktree.assert_not_called()
+                self.assertEqual(self.remote_records(), {})
+
+    def test_direct_uses_persist_and_are_shown_without_expanding_cycles(self):
+        data = _yaml(TEMPLATE)
+        data["stack"]["uses"] = ["dev"]
+        template = stack_template.parse_template(data)
+        with stack_registry.locked() as registry:
+            registry.put({"remote": "r", "slug": "dev", "project": "shared",
+                          "environment": "sandbox", "uses": ["demo"], "ports": {}})
+        with patch.object(host_stack, "load_template", return_value=template), \
+                patch.object(host_stack, "_submit", return_value="job-uses"):
+            result = host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(result["uses"], ["dev"])
+        record = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(record["uses"], ["dev"])
+        self.assertEqual(host_stack._list_row(record, None, "missing")["uses"], ["dev"])
+        self.assertIn("uses: dev", host_stack._render_text(result))
+
+    def test_uses_on_another_remote_does_not_satisfy_reference(self):
+        data = _yaml(TEMPLATE)
+        data["stack"]["uses"] = ["dev"]
+        with stack_registry.locked() as registry:
+            registry.put({"remote": "other", "slug": "dev", "ports": {}})
+        with patch.object(host_stack, "load_template", return_value=stack_template.parse_template(data)), \
+                self.assertRaises(StackTemplateError) as caught:
+            host_stack._up(self.args("up", plan=True))
+        self.assertEqual(caught.exception.code, "stack_uses_missing")
+
+    def test_down_reports_dependents_and_preserves_their_reference(self):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        from sandbox.jobs.registry import JobRepository
+
+        def submit_terminal_job(argv):
+            # Persist the original job through its repository API. A fabricated
+            # id has no cessation evidence and must not pass down's admission guard.
+            repository = JobRepository(self.runtime.runtime / "jobs" / "registry.sqlite3")
+            try:
+                row, _ = repository.accept(JobSubmission(
+                    kind="test", project_root=argv[argv.index("--project-dir") + 1],
+                    project_identity="dependent-down-fixture", target_kind="local",
+                    workspace_label="default", argv=("true",), deadline_seconds=60,
+                    request_id=argv[argv.index("--request-id") + 1],
+                    source=SourceIdentity("sha256:" + "a" * 64)))
+                job_id = row["job_id"]
+                repository.transition(job_id, "running")
+                repository.transition(job_id, "succeeded", exit_code=0)
+                return job_id
+            finally:
+                repository.close()
+
+        with patch.object(host_stack, "_submit", side_effect=submit_terminal_job):
+            host_stack._up(self.args("up", confirm=True))
+        original = stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_id"]
+        self.assertEqual(host_stack.job_view(original)["lifecycle"], "succeeded")
+        with stack_registry.locked() as registry:
+            registry.put({"remote": "r", "slug": "consumer", "project": "consumer",
+                          "environment": "sandbox", "uses": ["demo"], "ports": {}})
+        from sandbox.hosting import destroy
+        with patch.object(destroy, "execute", return_value={"state": "destroyed"}):
+            result = host_stack._down(self.args("down", confirm=True))
+        self.assertEqual(result["used_by"], ["consumer"])
+        self.assertEqual(stack_registry.read()["stacks"]["r/consumer"]["uses"], ["demo"])
+        self.assertIn("used by: consumer", host_stack._render_text(result))
 
     def test_resolve_ref_kinds(self):
         self.assertEqual(host_stack.resolve_ref(self.hub, "stack/demo").ref_branch, "stack/demo")
@@ -936,6 +1066,62 @@ class HostDispatchTests(unittest.TestCase):
         args = seen[0]
         self.assertEqual((args.action, args.stack_action, args.port, args.plan, args.name, args.ref),
                          ("stack", "up", ["mailpit=8025"], True, "demo", "stack/demo"))
+
+
+class PersonalStackCredentialScopeCompatibilityTests(unittest.TestCase):
+    """Exercise legacy callers with intended state/store boundaries mocked."""
+
+    def test_default_and_explicit_scope_keep_remote_stack_listing_contract(self):
+        from unittest.mock import Mock
+        results = []
+        for scope in (None, "personal-local"):
+            args = SimpleNamespace(remote="fixture-personal-remote")
+            if scope is not None:
+                args.credential_scope = scope
+            entry = {"fixture": "remote-entry"}
+            store = Mock()
+            store.list.return_value = {"records": [], "policy": {"total": 3}}
+            with patch.object(host_stack, "_entry", return_value=entry) as lookup, \
+                    patch.object(stack_registry, "read", return_value={"stacks": {}}) as read, \
+                    patch.object(host_stack, "_store", return_value=store) as make_store:
+                result = host_stack._list(args)
+            lookup.assert_called_once_with("fixture-personal-remote")
+            read.assert_called_once_with()
+            make_store.assert_called_once_with(entry, None)
+            store.list.assert_called_once_with()
+            self.assertEqual(result, {"ok": True, "action": "stack-list", "remote": "fixture-personal-remote",
+                                      "stacks": [], "targets": [], "unclassified": [], "invalid": [],
+                                      "policy": {"total": 3}})
+            results.append(result)
+        self.assertEqual(results[0], results[1])
+
+    def test_personal_missing_provider_and_generated_keys_keep_different_outcomes(self):
+        validated = {"secrets": {"required": {"TOKEN": "PROVIDER_TOKEN"},
+                                 "generated": {"PASSWORD": "GENERATED_PASSWORD"}}}
+        # The real secret-status boundary is synthetic. No provider or native store is read.
+        for missing, generate, message in ((["PROVIDER_TOKEN", "GENERATED_PASSWORD"], True, "required hosting secrets"),
+                                           (["GENERATED_PASSWORD"], False, "generated hosting secrets")):
+            with self.subTest(missing=missing, generate=generate), \
+                    patch.object(hosting_cmd, "_secret_status", return_value=({}, missing)) as status, \
+                    patch.object(hosting_cmd.personal_secrets, "generate_secret") as generator, \
+                    patch.object(hosting_cmd.personal_secrets, "write_secret") as writer:
+                with self.assertRaisesRegex(host_stack.StackCommandError, message):
+                    host_stack._secrets_gate(validated, generate=generate, confirm=True)
+                status.assert_called_once_with(validated)
+                generator.assert_not_called()
+                writer.assert_not_called()
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, ["GENERATED_PASSWORD"])) as status, \
+                patch.object(hosting_cmd.personal_secrets, "generate_secret", return_value="synthetic-generated-value") as generator, \
+                patch.object(hosting_cmd.personal_secrets, "write_secret") as writer:
+            self.assertEqual(host_stack._secrets_gate(validated, generate=True, confirm=True), [])
+            status.assert_called_once_with(validated)
+            generator.assert_called_once_with()
+            writer.assert_called_once_with("GENERATED_PASSWORD", "synthetic-generated-value")
+        # Planning still reports missing names without generation, even when requested.
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, ["GENERATED_PASSWORD"])), \
+                patch.object(hosting_cmd.personal_secrets, "generate_secret") as generator:
+            self.assertEqual(host_stack._secrets_gate(validated, generate=True, confirm=False), ["GENERATED_PASSWORD"])
+            generator.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

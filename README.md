@@ -20,6 +20,11 @@ request correlation, and local and installed runtime revisions; see
 CLI progress output masks values attached to password, token, secret, and credential
 arguments while keeping the command shape visible.
 
+Hosted stack pages and their direct shared services use one stack-scoped link.
+Controller issuance requires current applied opt-in and running gate bindings under
+physical apply ownership. Uncertain original operations remain fenced; legacy revoke
+bits do not prove completion. See [stack access and recovery](docs/login-service.md#the-stack-page).
+
 ## Extension boundaries
 
 Sandbox keeps public CLI and MCP behavior stable while feature ownership is modularized:

@@ -122,7 +122,7 @@ def new_link(validated: dict, request: share.LinkRequest) -> share.MintedLink:
 
 def mint_link(validated: dict, entry: dict, request: share.LinkRequest, *,
               minted: share.MintedLink | None = None,
-              stack_record: dict | None = None, on_completed=None) -> tuple[share.MintedLink, dict]:
+              stack_record: dict | None = None, on_completed=None, runtime=None) -> tuple[share.MintedLink, dict]:
     """Store one link record (and its stack page) in the running gate.
 
     Returns the minted link and the gate's confirmation. The token itself goes
@@ -133,9 +133,13 @@ def mint_link(validated: dict, entry: dict, request: share.LinkRequest, *,
     payload = {"link": share.link_record(request, minted),
                "stack": stack_page.gate_record(stack_record, request.entry, minted.link_id)
                if stack_record is not None else None}
-    reply = _site_remote(validated, entry, request.entry, "mint",
-                         input_data=json.dumps(payload, sort_keys=True),
-                         **({"on_completed": on_completed} if on_completed is not None else {}))
+    if runtime is not None:
+        reply = runtime.manage("mint", request.entry, payload=json.dumps(payload, sort_keys=True),
+                               on_completed=on_completed)
+    else:
+        reply = _site_remote(validated, entry, request.entry, "mint",
+                             input_data=json.dumps(payload, sort_keys=True),
+                             **({"on_completed": on_completed} if on_completed is not None else {}))
     if reply.get("id") != minted.link_id:
         raise ShareRefusal("share_failed", "the gate did not confirm the link")
     return minted, reply
@@ -189,7 +193,7 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
         if stack:
             for previous in fanout.recorded(remote_name, stack=stack):
                 if previous.phase not in ("active", "revoked", "expired"):
-                    cleanup = fanout.revoke_attempt(previous)
+                    cleanup = fanout.revoke_attempt(previous, require_opt_in=caller == "panel")
                     if not cleanup["ok"]:
                         _audit(None, "create", remote_name=remote_name, target_label=label,
                                outcome="refused", code="share_cleanup_pending")
@@ -224,7 +228,8 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
                     "this target does not allow agent-made links, so the link is shown only on the "
                     "owner's terminal; set `share.agent_mint: true` to return it in --json")
         if stack:
-            result = fanout.create(found, request, email=email, requested_entry=entry)
+            result = fanout.create(found, request, email=email, requested_entry=entry,
+                                   require_opt_in=caller == "panel")
             if result.get("ok") is False:
                 _audit(found, "create", remote_name=remote_name, target_label=label,
                        outcome="refused", code="share_cleanup_pending", entry=request.entry)
@@ -322,7 +327,7 @@ def list_shares(remote_name: str, *, target: str | None = None, name: str | None
             **({"partial_reasons": ["durable_cleanup_pending"]} if incomplete else {})}
 
 
-def revoke_on_gate(found: ShareTarget, name: str, link_id: str) -> dict:
+def revoke_on_gate(found: ShareTarget, name: str, link_id: str, *, runtime=None) -> dict:
     """Revoke on the gate, then delete a stack link's WordPress key file.
 
     The gate drops the stack page first. The key file goes even when the gate no longer
@@ -330,12 +335,13 @@ def revoke_on_gate(found: ShareTarget, name: str, link_id: str) -> dict:
     Callers hold the host writer lock.
     """
     try:
-        reply = _remote_site(found, "revoke", name, link_id)
+        reply = runtime.manage("revoke", name, link_id) if runtime else _remote_site(found, "revoke", name, link_id)
     except login.LoginServiceError as exc:
         if exc.code != "site_link_unknown" or link_id.startswith("s-"):
             raise
         reply = None
-    keys = 0 if link_id.startswith("s-") else stack_page.remove_wordpress_keys(found, link_id)
+    keys = (runtime.remove_legacy_wordpress(link_id) if runtime else
+            (0 if link_id.startswith("s-") else stack_page.remove_wordpress_keys(found, link_id)))
     if reply is None:
         if not keys:
             raise login.LoginServiceError("site_link_unknown", "no live share link or session has that id")
@@ -379,7 +385,7 @@ def _check_recorded_revoke_selectors(remote_name: str, attempt, *, target: str |
 
 def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, name: str | None = None,
                  stack: str | None = None, project_dir: str | None = None,
-                 environment: str | None = None, entry: str | None = None) -> dict:
+                 environment: str | None = None, entry: str | None = None, caller: str = "cli") -> dict:
     found, label, name_ = None, target or name or stack or "unresolved", entry
     try:
         if sum(value is not None for value in (target, name, stack)) > 1:
@@ -394,13 +400,13 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
                 _check_recorded_revoke_selectors(
                     remote_name, rows[0], target=target, name=name, stack=stack,
                     project_dir=project_dir, environment=environment, entry=entry)
-                result = fanout.revoke_attempt(rows[0])
+                result = fanout.revoke_attempt(rows[0], require_opt_in=caller == "panel")
                 _audit(None, "revoke", remote_name=remote_name, target_label=f"stack:{rows[0].parent.stack}",
                        outcome="ok" if result["ok"] else "refused", link_id=link_id,
                        code=None if result["ok"] else "share_cleanup_pending", entry=entry)
                 return result
         if stack and link_id == "all":
-            result = _revoke_stack_all(remote_name, stack, entry=entry)
+            result = _revoke_stack_all(remote_name, stack, entry=entry, require_opt_in=caller == "panel")
             _audit(None, "revoke", remote_name=remote_name, target_label=f"stack:{stack}", entry=entry,
                    outcome="ok" if result["ok"] else "refused", link_id="all",
                    code=None if result["ok"] else "share_cleanup_pending")
@@ -414,8 +420,19 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
         from sandbox.commands.hosting import _with_host_writer_lock
 
         try:
-            reply = _with_host_writer_lock(found.validated, found.remote,
-                                           lambda _current, _save: revoke_on_gate(found, name_, link_id))
+            if stack:
+                from sandbox.commands.hosting import _host_share_effects
+                from sandbox.hosting.share import controller
+                targets = (fanout.target(found),)
+                with _host_share_effects(targets), controller.hold(targets) as physical:
+                    runtime = controller.bind_current(found, physical)
+                    if caller == "panel":
+                        runtime.require_applied(found, name_)
+                    reply = revoke_on_gate(found, name_, link_id, runtime=runtime)
+                    runtime.require_current()
+            else:
+                reply = _with_host_writer_lock(found.validated, found.remote,
+                                               lambda _current, _save: revoke_on_gate(found, name_, link_id))
         except TimeoutError:
             raise ShareRefusal("share_failed", "another host apply or recovery owns this target") from None
     except Exception as exc:  # noqa: BLE001
@@ -432,13 +449,13 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
             "revoked_keys": reply.get("revoked_keys", 0)}
 
 
-def _revoke_stack_all(remote_name, stack, *, entry=None):
+def _revoke_stack_all(remote_name, stack, *, entry=None, require_opt_in=False):
     """Original durable ids plus legacy grants on this parent's current gate only."""
     rows = fanout.recorded(remote_name, stack=stack)
     results, reasons = [], []
     for row in rows:
         try:
-            results.append(fanout.revoke_attempt(row))
+            results.append(fanout.revoke_attempt(row, require_opt_in=require_opt_in))
         except Exception:
             results.append(fanout.pending(row))
             reasons.append("durable_cleanup_unconfirmed")
@@ -446,10 +463,15 @@ def _revoke_stack_all(remote_name, stack, *, entry=None):
         found = resolve_target(remote_name, stack=stack)
         selected = _entry_name(_declaration(found), entry)
         from sandbox.commands.hosting import _host_share_effects
+        from sandbox.hosting.share import controller
         # Keep lookup and legacy cleanup under the same target lease. Never send
         # 'all' to a companion or infer that its gate belongs to this parent.
-        with _host_share_effects((fanout.target(found),)):
-            reply = _remote_site(found, "list", selected)
+        targets = (fanout.target(found),)
+        with _host_share_effects(targets), controller.hold(targets) as physical:
+            runtime = controller.bind_current(found, physical)
+            if require_opt_in:
+                runtime.require_applied(found, selected)
+            reply = runtime.manage("list", selected)
             if (reply.get("ok") is not True or not isinstance(reply.get("links"), list)
                     or not isinstance(reply.get("sessions"), list)):
                 raise ValueError("unconfirmed current grants")
@@ -466,7 +488,7 @@ def _revoke_stack_all(remote_name, stack, *, entry=None):
                 if ident in protected or source in protected or ident in durable or source in durable:
                     continue
                 try:
-                    result = revoke_on_gate(found, selected, ident)
+                    result = revoke_on_gate(found, selected, ident, runtime=runtime)
                     if any(type(result.get(key)) is not int or result[key] < 0
                            for key in ("revoked_links", "revoked_sessions", "revoked_keys")):
                         raise ValueError("invalid revoke receipt")

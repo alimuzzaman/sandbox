@@ -1039,7 +1039,7 @@ class TestHostingManifest(unittest.TestCase):
         url = hosting.autologin_url(validated, "opaque-token", 1234567890)
         self.assertEqual(
             url,
-            "https://example.test/wp-login.php?sandbox_autologin=opaque-token&expires=1234567890",
+            "https://example.test/wp-login.php?sandbox_autologin=1#opaque-token",
         )
 
     def test_rejects_unsafe_autologin_container_path(self):
@@ -1055,10 +1055,10 @@ class TestHostingManifest(unittest.TestCase):
         token = "not-written-to-the-server"
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         plugin = hosting.render_autologin_mu_plugin(token_hash, "admin", int(time.time()) + 600)
-        self.assertIn(token_hash, plugin)
+        self.assertNotIn(token_hash, plugin)
         self.assertNotIn(token, plugin)
-        self.assertIn("add_site_option", plugin)
-        self.assertIn("SANDBOX_HOST_AUTOLOGIN_EXPIRES_AT", plugin)
+        self.assertIn("update_site_option", plugin)
+        self.assertIn("sandbox_host_autologin_consume", plugin)
 
     def test_existing_host_keeps_its_allocated_loopback_port(self):
         with self._write(_manifest()) as directory:
@@ -5610,3 +5610,31 @@ class TestBuildSecretFingerprint(unittest.TestCase):
             "complete": True, "topology": {"state": "ready"}, "health": {"state": "ready"},
             "source_revision": {"state": "not_declared", "checks": []},
         }, "a" * 40))
+
+
+class PersonalCredentialScopeCompatibilityTests(unittest.TestCase):
+    """Caller compatibility under synthetic legacy boundaries, not CLI startup proof."""
+
+    def test_default_and_explicit_scope_keep_validate_contract_with_optional_remote(self):
+        for remote_name in (None, "fixture-personal-remote"):
+            observed = []
+            for scope in (None, "personal-local"):
+                args = types.SimpleNamespace(action="validate", json=True, project_dir="/synthetic/project",
+                                             environment="fixture", remote=remote_name)
+                if scope is not None:
+                    args.credential_scope = scope
+                validated = {"project": "fixture-project", "environment": "fixture",
+                             "secrets": {"required": {"TOKEN": "PROVIDER_TOKEN"},
+                                         "generated": {"PASSWORD": "GENERATED_PASSWORD"}}}
+                output = io.StringIO()
+                with patch.object(hosting, "validate_manifest", return_value=validated) as validate, \
+                        patch.object(remote, "get_remote", side_effect=AssertionError("validate must not connect")), \
+                        patch.object(hosting_cmd, "_secret_status", side_effect=AssertionError("validate must not read keys")), \
+                        redirect_stdout(output):
+                    hosting_cmd.cmd_host({}, args)
+                validate.assert_called_once_with("/synthetic/project", "fixture")
+                payload = json.loads(output.getvalue())
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["secrets"], validated["secrets"])
+                observed.append(payload)
+            self.assertEqual(observed[0], observed[1])

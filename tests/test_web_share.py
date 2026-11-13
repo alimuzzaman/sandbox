@@ -228,7 +228,7 @@ class ShareRouteTest(unittest.TestCase):
                                                 "id": link_id})
                 self.assertEqual(status, 200)
                 self.assertEqual(body["revoked_links"], 1)
-                self.revoke.assert_called_with("xspeed-dev", link_id, stack="demo")
+                self.revoke.assert_called_with("xspeed-dev", link_id, stack="demo", caller="panel")
 
     def test_a_refusal_shows_its_code_and_message(self):
         self.create.side_effect = ShareRefusal("agent_mint_not_enabled", "set `share.agent_mint: true`")
@@ -245,6 +245,88 @@ class ShareRouteTest(unittest.TestCase):
                 self.assertEqual((status, cache, body["code"]), (500, "no-store", "share_failed"))
                 self.assertNotIn(SECRET.encode(), raw)
 
+    def test_create_preserves_safe_attempt_metadata_and_discards_private_extensions(self):
+        self.create.return_value = {**CREATED, "attempt_id": "a-" + "c" * 32, "phase": "active",
+                                    "private_body": {"token": SECRET}, "notes": [SECRET]}
+        status, cache, body, raw = self.post({"action": "create", "remote": "xspeed-dev", "stack": "demo"})
+        self.assertEqual((status, cache), (200, "no-store"))
+        self.assertEqual(body, {**CREATED, "attempt_id": "a-" + "c" * 32, "phase": "active"})
+        self.assertNotIn(SECRET.encode(), raw)
+
+    def test_partial_create_and_revoke_preserve_cleanup_and_never_leak_extensions(self):
+        grant = {"target": "r/demo/dev", "entry": "share", "id": LINK_ID,
+                 "expires_at": 1800000000, "status": "unknown", "reason_code": "cleanup_unconfirmed"}
+        result = {"ok": False, "attempt_id": "a-" + "c" * 32, "phase": "cleanup_pending",
+                  "still_live": [{**grant, "token": SECRET, "wordpress": {"key": SECRET}}],
+                  "link": LINK, "message": SECRET, "private_body": SECRET}
+        for action, handler in (("create", self.create), ("revoke", self.revoke)):
+            with self.subTest(action):
+                handler.return_value = result
+                payload = {"action": action, "remote": "xspeed-dev", "stack": "demo"}
+                if action == "revoke":
+                    payload["id"] = LINK_ID
+                status, cache, body, raw = self.post(payload)
+                self.assertEqual((status, cache, body["ok"]), (409, "no-store", False))
+                self.assertEqual(body["still_live"], [grant])
+                self.assertEqual(body["attempt_id"], result["attempt_id"])
+                self.assertNotIn(SECRET.encode(), raw)
+                self.assertNotIn(CANARY.encode(), raw)
+
+    def test_list_preserves_durable_attempts_when_parent_is_missing(self):
+        attempt = {"attempt_id": "a-" + "c" * 32, "phase": "cleanup_pending",
+                   "link_id": LINK_ID, "expires_at": 1800000000}
+        self.list.return_value = {"ok": False, "attempts": [{**attempt, "token": SECRET}],
+                                  "links": [], "sessions": [], "partial_reasons": ["parent_unavailable", SECRET],
+                                  "private_body": SECRET, "message": SECRET}
+        status, cache, body, raw = self.post({"action": "list", "remote": "xspeed-dev", "stack": "demo"})
+        self.assertEqual((status, cache, body["ok"]), (409, "no-store", False))
+        self.assertEqual(body["attempts"], [attempt])
+        self.assertNotIn(SECRET.encode(), raw)
+
+    def test_coverage_exception_projects_only_safe_fields_and_fixed_guidance(self):
+        from sandbox.hosting.share.fanout import CoverageRefusal
+        error = CoverageRefusal([{"stack": "demo", "target": "r/demo/dev", "hostname": "demo.test",
+                                  "piece": "access", "code": "linked_access_unknown", "fix": SECRET,
+                                  "token": SECRET, "private_body": {"wordpress": SECRET}}])
+        error.message = SECRET
+        self.create.side_effect = error
+        status, cache, body, raw = self.post({"action": "create", "remote": "xspeed-dev", "stack": "demo"})
+        self.assertEqual((status, cache, body["code"]), (409, "no-store", "stack_share_coverage_incomplete"))
+        self.assertEqual(set(body["gaps"][0]), {"stack", "target", "hostname", "piece", "code", "fix"})
+        self.assertIn("linked-site", body["gaps"][0]["fix"])
+        self.assertNotIn(SECRET.encode(), raw)
+
+    def test_controller_grant_summaries_project_pending_rows_without_private_descriptors(self):
+        grant = {"target": "r/demo/dev", "entry": "share", "id": LINK_ID,
+                 "expires_at": 1800000000, "status": "unknown"}
+        self.list.return_value = {"ok": False, "links": [], "sessions": [], "attempts": [{
+            "attempt_id": "a-" + "c" * 32, "phase": "cleanup_pending", "link_id": LINK_ID,
+            "expires_at": 1800000000, "grants": [{**grant, "cleanup": {"wordpress_key": SECRET},
+                                                    "token": SECRET}], "private_body": SECRET}]}
+        status, cache, body, raw = self.post({"action": "list", "remote": "xspeed-dev", "stack": "demo"})
+        self.assertEqual((status, cache), (409, "no-store"))
+        self.assertEqual(body["attempts"][0]["still_live"], [{**grant, "reason_code": "cleanup_unconfirmed"}])
+        self.assertNotIn(SECRET.encode(), raw)
+
+    def test_every_share_route_response_disables_cache(self):
+        for method in ("GET", "DELETE", "HEAD", "OPTIONS"):
+            with self.subTest(method):
+                status, cache, _ = self.request(method, "/api/hosting/share")
+                self.assertEqual((status, cache), (404 if method in ("GET", "DELETE") else 501, "no-store"))
+
+    def test_allowed_fields_also_reject_nested_or_secret_values(self):
+        self.list.return_value = {"ok": True, "target": "https://private.test/" + SECRET,
+            "entry": {"secret": SECRET}, "links": [{"id": LINK_ID, "kind": SECRET,
+            "scope": "https://private.test/" + SECRET, "expires_at": {"key": SECRET}}],
+            "sessions": [{"id": SESSION_ID, "link": SECRET}],
+            "attempts": [{"attempt_id": SECRET, "phase": SECRET, "link_id": LINK_ID,
+                          "expires_at": SECRET}], "partial_reasons": [SECRET]}
+        _, cache, body, raw = self.post({"action": "list", "remote": "xspeed-dev", "stack": "demo"})
+        self.assertEqual(cache, "no-store")
+        self.assertNotIn(SECRET.encode(), raw)
+        self.assertNotIn(b"private.test", raw)
+        self.assertFalse(body["ok"])
+
     def test_the_link_reaches_only_the_minting_response(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -257,6 +339,23 @@ class ShareRouteTest(unittest.TestCase):
                            ("stderr", err.getvalue().encode())):
             with self.subTest(name):
                 self.assertNotIn(CANARY.encode(), text)
+
+
+class ShareRecoveryPureTests(unittest.TestCase):
+    def test_node_recovery_suite(self):
+        import shutil
+        from tests.subprocess_support import run_test_process
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is unavailable")
+        version = run_test_process([node, "--version"], capture_output=True, text=True, timeout=10)
+        match = re.match(r"v(\d+)\.(\d+)", version.stdout)
+        if not match or tuple(map(int, match.groups())) < (22, 13):
+            self.skipTest("node 22.13 or newer provides stripTypeScriptTypes")
+        result = run_test_process([node, "--experimental-strip-types", "--test",
+                                   "src/web/tests/share-recovery.test.ts"],
+                                  cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout[-4000:] + result.stderr[-1000:])
 
 
 class ShareDialogSourceTests(unittest.TestCase):

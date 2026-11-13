@@ -63,6 +63,8 @@ Manual (orchestrator, after the merge and a gate apply):
 1. `sb host share create --remote R --project-dir . --json`: `link` reads
    `https://<gate>/s/#<22 characters>` and `link_id` reads `l-<12 hex>`.
 2. Open it in a private window: the site opens, and the address bar shows no `#`.
-3. An old-form link minted before the apply still opens until its expiry.
+3. Apply resets the gate tmpfs, discarding existing links and sessions. Mint a new
+   link after apply. Legacy-format compatibility covers retained legacy records;
+   it does not preserve links or sessions across apply.
 4. `curl -si -X POST -d token=AAAAAAAAAAAAAAAAAAAAAA https://<gate>/s/` answers 404.
 5. `sb host share revoke l-<12 hex> --remote R --project-dir .`: a reload answers 404.

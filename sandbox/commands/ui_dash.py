@@ -497,7 +497,7 @@ def _web_share(payload, *, owner_request=None) -> tuple[int, dict]:
         elif action == "list":
             source = host_share.list_shares(remote_name, stack=stack)
         else:
-            source = host_share.revoke_share(remote_name, link_id, stack=stack)
+            source = host_share.revoke_share(remote_name, link_id, stack=stack, caller="panel")
         if not isinstance(source, dict):
             raise ValueError("invalid share response")
         if action == "list":

@@ -46,7 +46,12 @@ function wp_cache_delete(...$args) {}
 function is_multisite() { return false; }
 function home_url($path) { return 'https://wp.example.test' . $path; }
 function status_header($status) {}
-function wp_die($message) { echo 'refused'; exit; }
+function wp_die($message, $title = '', $args = array()) {
+    // WordPress answers 500 unless the args name another response code.
+    $response = is_array($args) && isset($args['response']) ? $args['response'] : 500;
+    file_put_contents(__DIR__ . '/refusal.json', json_encode(array('message' => $message, 'response' => $response)));
+    echo 'refused'; exit;
+}
 function wp_unslash($value) { return $value; }
 function get_user_by($field, $value) { return (object) array('ID' => 1); }
 function wp_set_current_user($id) {}
@@ -125,6 +130,38 @@ if ($input['op'] === 'request') {
         self.assertEqual(self.run_php({'op': 'request', 'token': token,
                                       'origin': 'https://wp.example.test', 'site': 'same-origin'}), 'signed-in')
         self.assertFalse(self.consume(token))
+
+    def refusal(self, payload):
+        self.assertEqual(self.run_php({'op': 'request', **payload}), 'refused')
+        return json.loads((self.root / 'refusal.json').read_text())
+
+    def test_every_refusal_answers_403_and_origin_has_its_own_message(self):
+        token = 'b' * 43
+        self.mint(token)
+        origin = self.refusal({'token': token})
+        bad_format = self.refusal({'token': 'short', 'origin': 'https://wp.example.test',
+                                   'site': 'same-origin'})
+        unknown = self.refusal({'token': 'c' * 43, 'origin': 'https://wp.example.test',
+                                'site': 'same-origin'})
+        self.assertEqual([item['response'] for item in (origin, bad_format, unknown)], [403, 403, 403])
+        self.assertEqual(origin['message'], 'This sign-in must be opened in a browser from the stack page.')
+        self.assertEqual(bad_format['message'], 'Open a fresh sign-in link from the stack page.')
+        self.assertIn('used or expired', unknown['message'])
+        self.assertEqual(len({origin['message'], bad_format['message'], unknown['message']}), 3)
+        self.assertEqual(self.consume(token), 'admin')
+
+
+class AutologinRefusalTextTest(unittest.TestCase):
+    """Runs without PHP: every refusal in the plugin passes the 403 response arg."""
+
+    def test_rendered_plugin_refusals_pass_response_403(self):
+        plugin = autologin.render_plugin()
+        self.assertEqual(plugin.count('wp_die('), 3)
+        self.assertEqual(plugin.count("array('response' => 403)"), 3)
+        self.assertIn('This sign-in must be opened in a browser from the stack page.', plugin)
+        # The same-origin guard itself is unchanged.
+        self.assertIn('sandbox_host_autologin_same_origin($_SERVER', plugin)
+        self.assertIn("$_SERVER['HTTP_SEC_FETCH_SITE'] !== 'same-origin'", plugin)
 
 
 @unittest.skipUnless(shutil.which('php') and shutil.which('node') and

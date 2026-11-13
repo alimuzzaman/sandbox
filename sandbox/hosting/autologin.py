@@ -132,18 +132,19 @@ add_action('init', static function () {
     if (!sandbox_host_autologin_same_origin($_SERVER['HTTP_ORIGIN'] ?? null) ||
         (isset($_SERVER['HTTP_SEC_FETCH_SITE']) && $_SERVER['HTTP_SEC_FETCH_SITE'] !== 'same-origin')) {
         status_header(403);
-        wp_die('Open a fresh sign-in link from the stack page.');
+        wp_die('This sign-in must be opened in a browser from the stack page.', '', array('response' => 403));
     }
     $token = $_POST['sandbox_autologin'] ?? null;
     if (!is_string($token) || !preg_match('/^[A-Za-z0-9_-]{43}$/D', $token)) {
         status_header(403);
-        wp_die('Open a fresh sign-in link from the stack page.');
+        wp_die('Open a fresh sign-in link from the stack page.', '', array('response' => 403));
     }
     try { $login = sandbox_host_autologin_consume(wp_unslash($token)); }
     catch (Throwable $error) { $login = false; }
     if (!$login || !($user = get_user_by('login', $login))) {
         status_header(403);
-        wp_die('This Sandbox sign-in was used or expired. Click sign-in again on the stack page.');
+        wp_die('This Sandbox sign-in was used or expired. Click sign-in again on the stack page.', '',
+               array('response' => 403));
     }
     wp_set_current_user($user->ID);
     wp_set_auth_cookie($user->ID, false, is_ssl());

@@ -930,8 +930,10 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     from sandbox.hosting import login_service
     # Spec 081: the gate publishes its own managed loopback port, and the front
     # door sends every gate hostname there; the application keeps its port.
+    from sandbox.hosting.owner_share_record import target_digest
     return rendered + login_service.render_service(
-        declaration, gate_port=login_service.gate_loopback_port(loopback_port))
+        declaration, gate_port=login_service.gate_loopback_port(loopback_port),
+        target_digest=target_digest(validated))
 
 
 def resolve_environment(validated: dict, source_values: dict[str, str],

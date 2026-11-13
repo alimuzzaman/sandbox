@@ -552,8 +552,9 @@ def status_view(declaration: dict, *, now: float) -> dict:
     }
 
 
-def runtime_config(declaration: dict) -> dict:
+def runtime_config(declaration: dict, *, target_digest: str | None = None) -> dict:
     """What the running service needs; never carries a secret or its name."""
+    from sandbox.hosting.owner_share_record import digest
     capture = declaration["capture"]
     entries = {}
     for name, entry in declaration["entries"].items():
@@ -570,6 +571,11 @@ def runtime_config(declaration: dict) -> dict:
         "entries": entries,
         # A stack page probes linked sites over public HTTPS only on these hosts.
         "allowed_host_suffixes": list(declaration["allowed_host_suffixes"]),
+        # Public applied policy, bound by the owner-panel gate capability digest.
+        "panel_share": dict(declaration.get("share") or {}),
+        "panel_target_digest": target_digest,
+        "panel_access_digest": digest({key: declaration[key] for key in
+            ("enabled_until", "allowed_host_suffixes", "session_ttl_seconds", "entries", "share") if key in declaration}),
     }
 
 
@@ -577,14 +583,14 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def render_service(declaration: dict, gate_port: int | None = None) -> str:
+def render_service(declaration: dict, gate_port: int | None = None, *, target_digest: str | None = None) -> str:
     """Render the Compose service block; it joins the override's ``services:``.
 
     With ``gate_port`` the service publishes on that loopback port only, so the front
     door can send gate hostnames straight to it (spec 081).
     """
     source = _runtime_source()
-    config = _b64(json.dumps(runtime_config(declaration), sort_keys=True, separators=(",", ":")).encode())
+    config = _b64(json.dumps(runtime_config(declaration, target_digest=target_digest), sort_keys=True, separators=(",", ":")).encode())
     probe = f"import urllib.request as u;u.urlopen('http://127.0.0.1:{HEALTH_PORT}/healthz',timeout=3)"
     capture = declaration["capture"]
     started_after = sorted({*([capture["service"]] if capture else []), *site_upstream_services(declaration)})

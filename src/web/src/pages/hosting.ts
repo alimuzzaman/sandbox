@@ -7,6 +7,7 @@ import { store } from "../state";
 import { theme } from "../theme";
 import { hostingAnchor, hostingTargetPath, stackPath } from "../router";
 import { shareButtons } from "./share";
+import { stackSignInAction } from "../ui/stack-signin";
 import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget, LifetimeRow, LifetimeView } from "../types";
 import {
   applyLabel, compareLifetimes, expiryTone, lifetimeLabel, reapLabel, timeLeft, CPU_LABEL, CPU_TITLE, type Tone,
@@ -222,7 +223,7 @@ export function stackCard(stack: HostingStack): string {
       <div class="min-w-0"><div class="${theme.label}">Stack</div>
         <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold"><a data-link class="hover:underline" href="${esc(stackPath(stack.source === "this-server" ? "this-server" : stack.remote, stack.slug))}">${esc(stack.slug)}</a></h2>
         <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(stack.project)} · ${esc(stack.environment)} · ${esc(sourceNote(stack.source, stack.remote))}</p></div>
-      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}${shareButtons(stack.remote, stack.slug)}</div>
+      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}${shareButtons(stack.remote, stack.slug)}${stackSignInAction(stack)}</div>
     </header>
     <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.", stack.page_access)}</div>
     <dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">

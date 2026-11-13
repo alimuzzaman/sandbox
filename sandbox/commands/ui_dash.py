@@ -335,6 +335,14 @@ _SHARE_MESSAGES = {
     "stack_unknown": "the controller has no available record for this stack",
     "stack_share_coverage_incomplete": "stack access coverage is incomplete",
     "share_failed": "the share request failed; inspect it on the controller",
+    "owner_share_unavailable": "This stack has no current applied owner-sharing evidence.",
+    "owner_share_upgrade_required": "Update the server and reapply this stack before owner-local sharing.",
+    "owner_share_target_changed": "The original stack changed; its previous operation must be resolved first.",
+    "owner_share_gate_changed": "The original gate changed; its previous operation must be resolved first.",
+    "owner_share_original_target_changed": "Cleanup cannot target a replacement stack or gate.",
+    "owner_share_original_unavailable": "This link has no original owner-panel operation to revoke.",
+    "owner_share_effect_unknown": "The original operation is unconfirmed. Check its status before another request.",
+    "share_agent_mint_disabled": "This stack has not enabled panel-created sharing links.",
 }
 _SHARE_REASONS = frozenset({"cleanup_unconfirmed", "share_runtime_unknown", "share_cleanup_failed",
     "current_parent_unavailable", "original_runtime_unproven", "parent_unavailable", "parent_missing", "parent_unreachable", "gate_unavailable",
@@ -465,7 +473,7 @@ def _share_rows(rows, *, sessions=False):
     return result
 
 
-def _web_share(payload) -> tuple[int, dict]:
+def _web_share(payload, *, owner_request=None) -> tuple[int, dict]:
     """Project only public share metadata; the create link is the one secret exception."""
     from sandbox.commands import host_share
     from sandbox.hosting.share import ShareRefusal
@@ -475,7 +483,15 @@ def _web_share(payload) -> tuple[int, dict]:
     except ValueError as exc:
         return 400, {"ok": False, "code": "panel_request_invalid", "message": str(exc)}
     try:
-        if action == "create":
+        if owner_request is not None:
+            from sandbox.hosting import owner_panel_gate, owner_panel_share
+            if (type(owner_request) is not owner_panel_gate.PanelRequest
+                    or owner_request._seal is not owner_panel_gate._SEAL
+                    or (owner_request.action, owner_request.remote, owner_request.stack, owner_request.link_id)
+                    != (action, remote_name, stack, link_id)):
+                raise ValueError("owner request admission mismatch")
+            source = owner_panel_share.execute(owner_request)
+        elif action == "create":
             source = host_share.create_share(remote_name, stack=stack, caller="panel")
         elif action == "list":
             source = host_share.list_shares(remote_name, stack=stack)
@@ -544,7 +560,7 @@ def _web_share(payload) -> tuple[int, dict]:
         return 500, _share_failure({})
 
 
-def _web_sign_in(payload) -> tuple[int, dict]:
+def _web_sign_in(payload, *, owner_request=None) -> tuple[int, dict]:
     from sandbox.hosting import panel_access
     from sandbox.hosting.share import append_audit, audit_record
 
@@ -561,7 +577,16 @@ def _web_sign_in(payload) -> tuple[int, dict]:
     try:
         # Record intent before the effect. Audit failure must not silently mint.
         audit('requested')
-        result = panel_access.sign_in(remote_name, stack)
+        if owner_request is not None:
+            from sandbox.hosting import owner_panel_gate, owner_panel_share
+            if (type(owner_request) is not owner_panel_gate.PanelRequest
+                    or owner_request._seal is not owner_panel_gate._SEAL
+                    or (owner_request.action, owner_request.remote, owner_request.stack, owner_request.link_id)
+                    != ("create", remote_name, stack, None)):
+                raise ValueError("owner request admission mismatch")
+            result = owner_panel_share.wordpress_admin(owner_request)
+        else:
+            result = panel_access.sign_in(remote_name, stack)
         audit('succeeded')
         return 200, {'ok': True, **_pick(result, ('url', 'expires_at', 'one_time', 'user'))}
     except panel_access.SignInUnavailable as exc:
@@ -588,10 +613,11 @@ def _hosting_view() -> tuple[int, dict]:
 
     try:
         sources, partial, known, lifetimes = [], [], [], {}
+        server_records = None
         now = int(time.time())
         if _hosts_control_service():
-            sources.append(panel_view.server_source(
-                panel_records.read_server_records(_paths.RUNTIME_DIR)))
+            server_records = panel_records.read_server_records(_paths.RUNTIME_DIR)
+            sources.append(panel_view.server_source(server_records))
             lifetimes["this-server"] = panel_lifetime.read_server(_paths.RUNTIME_DIR, now)
             try:
                 rows = list(_core().registry_all().values())
@@ -620,7 +646,7 @@ def _hosting_view() -> tuple[int, dict]:
         view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
                                      lifetimes=lifetimes)
         from sandbox.hosting import panel_access
-        panel_access.enrich(view, stack_data, host_state)
+        panel_access.enrich(view, stack_data, host_state, server_records=server_records)
         view["partial_reasons"] = partial + view["partial_reasons"]
         return 200, remote_core.redact_structure(view)
     except Exception:
@@ -713,7 +739,22 @@ def cmd_web(cfg, args) -> None:
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             except (ValueError, RecursionError):  # deep nesting fits in 4 KiB
                 payload = None
-            code, result = (_web_sign_in(payload) if self.path == _SIGN_IN_PATH else _web_share(payload))
+            owner_request = None
+            if self.path in (_SHARE_PATH, _SIGN_IN_PATH) and _hosts_control_service():
+                from sandbox.hosting import owner_panel_gate
+                try:
+                    selected = payload
+                    if self.path == _SIGN_IN_PATH:
+                        if type(payload) is not dict or set(payload) != {"remote", "stack"}:
+                            raise ValueError("invalid sign-in selection")
+                        selected = {"action": "create", **payload}
+                    owner_request = owner_panel_gate.admit(self.client_address[0],
+                        self.server.server_address[0], self.headers, allowed_names, selected)
+                except ValueError:
+                    return self._send(400, json.dumps({"ok": False,
+                        "code": "panel_request_invalid", "message": "Invalid stack sharing request."}), no_store=True)
+            code, result = (_web_sign_in(payload, owner_request=owner_request) if self.path == _SIGN_IN_PATH
+                            else _web_share(payload, owner_request=owner_request))
             return self._send(code, json.dumps(result), no_store=True)
 
         def do_DELETE(self):

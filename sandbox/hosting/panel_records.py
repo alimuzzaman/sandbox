@@ -90,6 +90,7 @@ class TargetSummary(TypedDict):
     commit: str | None
     last_apply: LastApply
     stack: StackFacts | None
+    owner_share: NotRequired[dict]
 
 
 class SiteLink(TypedDict):
@@ -277,7 +278,7 @@ def parse_target_summary(data: object) -> TargetSummary:
     healthcheck = _text(data.get("healthcheck_path") or "/", "healthcheck_path", limit=500)
     if not healthcheck.startswith("/"):
         raise RecordError("healthcheck_path must start with /")
-    return {
+    result = {
         "schema": SCHEMA,
         "remote": _text(data.get("remote"), "remote", limit=64),
         "project": _part(data.get("project"), "project"),
@@ -290,6 +291,10 @@ def parse_target_summary(data: object) -> TargetSummary:
         "last_apply": _last_apply(data.get("last_apply")),
         "stack": _stack_facts(data["stack"]) if data.get("stack") is not None else None,
     }
+    if data.get("owner_share") is not None:
+        from sandbox.hosting.owner_share_record import parse
+        result["owner_share"] = parse(data["owner_share"])
+    return result
 
 
 def parse_site_link(data: object) -> SiteLink:
@@ -364,6 +369,10 @@ def build_target_summary(validated: dict, remote_name: str, runtime: dict, *,
         "routes": routes, "commit": commit, "last_apply": dict(last_apply),
         "stack": build_stack_facts(stack, stack_record) if isinstance(stack, dict) else None,
     }
+    from sandbox.hosting.owner_share_record import build
+    access = build(validated, stack_record)
+    if access is not None:
+        raw["owner_share"] = access
     return parse_target_summary(raw)
 
 

@@ -80,9 +80,12 @@ still carries the job's `SANDBOX_DURABLE_JOB_ID` in two scans of `/proc`. A
 same-user process whose environment cannot be read (a non-dumpable one, such as
 OpenSSH's per-connection `sshd: owner@notty`) is skipped only when its
 `/proc/<pid>/stat` start time is earlier than the command's; one that started at or
-after the command fails the check (`process_environment_unavailable`), so an
-owner's SSH session that does not share a connection and opened while the job ran
-still blocks the proof. The environment scan has a 2 s limit, like each `ps` call;
+after the command, one whose start time cannot be read, and an unreaped
+non-dumpable zombie all fail the check (`process_environment_unavailable`). So an
+SSH session of the owner that opened while the job ran, and is still open when
+the command exits, blocks the proof: for example a Tailscale SSH session that
+keeps a non-dumpable owner process per connection while the joined exec client
+polls `job-status`. The takeover then refuses with `host_target_busy`, as before. The environment scan has a 2 s limit, like each `ps` call;
 one that runs out fails the check (`process_environment_scan_timed_out`), and the
 job still ends and releases its leases as usual. A failed check records `false`
 with the reason in `unproven`; the lifecycle and exit code are unchanged. A process

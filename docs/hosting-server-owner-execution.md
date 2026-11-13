@@ -105,7 +105,12 @@ An unknown owner process outcome also blocks later process calls in that same
 retained job, including a reissued same-server target. Apply withholds provider
 and runtime rollback while the original child may still write, and keeps its
 physical lease. A timeout of the exec client does not prove container-side
-descendants stopped, so owner exec keeps that lease as well.
+descendants stopped, so owner exec keeps that lease as well. The next owner exec
+on that target takes the lease over once the job registry shows the job terminal
+with `owned_work_stopped: true` and none of its recorded processes runs, and audits
+the takeover with both job ids. That proves the job's own processes stopped, not a
+command Docker left running in the container. Leases of applies, destroys and other
+controllers are never taken over (`docs/remote-hosting.md`, `host_apply_lease_held`).
 
 The client's absolute deadline is the requested `--timeout` plus 25 seconds:
 the 10-second kill grace and 15 seconds to release the lease and publish the
@@ -113,8 +118,8 @@ capture. Just before taking the lease, the job clamps the command's timeout to
 what is left of that deadline less those 25 seconds, so the command gets the
 requested timeout minus the time spent before acceptance. With less than 26
 seconds left it takes no lease and refuses with `host_exec_timeout` (exit 1);
-nothing runs. A lease held by another job refuses with `host_target_busy`
-(exit 1), and a deadline that passes inside the job is `host_exec_timeout`
+nothing runs. A lease held by another job that is not an ended exec job refuses
+with `host_target_busy` (exit 1), and a deadline that passes inside the job is `host_exec_timeout`
 (exit 124). Only an unknown failure is still `host_exec_transport_failed`
 (exit 255).
 

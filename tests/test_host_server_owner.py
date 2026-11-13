@@ -750,6 +750,65 @@ class ServerSelectionTests(OwnerTargetTests):
                 ran.assert_not_called()
                 self.assertEqual(audit.write.call_args.args[1].code, "host_target_busy")
 
+    def hold_lease(self, holder):
+        """A real lease file and lock on this target, held by ``holder`` five minutes ago."""
+        from sandbox.hosting import target_lease
+        path = Path(target_lease.lease_path(str(self.home), "project", "dev"))
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        os.close(os.open(str(path) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600))
+        since = int((datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp())
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+        path.write_text(f"{'a' * 32} {holder} {since}\n")
+        return path
+
+    def ended_exec_registry(self, job_id):
+        from sandbox.application import server_cli_exec_recovery as recovery
+        now = datetime.now(timezone.utc)
+        row = {"job_id": job_id, "kind": "server-cli", "target_kind": "local", "lifecycle": "timed_out",
+            "started_at": (now - timedelta(minutes=10)).isoformat(), "finished_at": (now - timedelta(minutes=1)).isoformat(),
+            "result_json": json.dumps({"owned_work_stopped": True, "stop_error": None, "owned_descendants": []}),
+            "execution_policy_provenance_json": json.dumps({"server_cli.exec_target": "project/dev"}), "process": {}}
+        registry = Mock()
+        registry.list.return_value = [row]
+        registry.snapshot.return_value = row
+        self.enterContext(patch.object(recovery, "_registry", return_value=registry))
+        self.enterContext(patch.object(recovery, "_ceased", return_value={}))
+        return recovery.exec_lease_owner(job_id)
+
+    def test_the_lease_of_an_ended_stopped_exec_job_is_taken_over_and_audited(self):
+        from sandbox.hosting import target_lease
+        ended = "1" * 32
+        path = self.hold_lease(self.ended_exec_registry(ended))
+        held = target_lease.LeaseHeld("another controller holds this target's lease (since unix time 1)")
+        code, output, _, ran, audit = self.run_owner_exec(seconds_left=300, timeout=30, acquire=held)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(json.loads(output)["code"], "ok")
+        ran.assert_called_once()
+        audit.write_lease_takeover.assert_called_once()
+        self.assertEqual(audit.write_lease_takeover.call_args.kwargs,
+                         {"previous_job_id": ended, "job_id": self.context.job_id})
+        token, holder, _ = path.read_text().split()
+        self.assertEqual(holder, hashlib.sha256(
+            ("server-cli-exec:" + self.context.job_id).encode()).hexdigest()[:32])
+        release = self.process.call_args_list[-1].args[1]
+        self.assertTrue(release.endswith(" release"))
+        self.assertIn(token, release)
+
+    def test_an_apply_lease_is_never_taken_over(self):
+        from sandbox.hosting import target_lease
+        self.ended_exec_registry("1" * 32)
+        path = self.hold_lease("c" * 32)  # an apply's random controller id
+        before = path.read_text()
+        held = target_lease.LeaseHeld("another controller holds this target's lease (since unix time 1)")
+        code, output, _, ran, audit = self.run_owner_exec(seconds_left=300, timeout=30, acquire=held)
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["code"], "host_target_busy")
+        self.assertIn("removed by hand", payload["error"])
+        ran.assert_not_called()
+        audit.write_lease_takeover.assert_not_called()
+        self.assertEqual(path.read_text(), before)
+
     def test_a_deadline_expiry_inside_the_scope_is_a_timeout_not_a_transport_failure(self):
         expired = getattr(sdk, "ServerCLIDeadlineExpired", sdk.ServerCLIUnavailable)
         for capture in (False, True):

@@ -1892,7 +1892,10 @@ working-directory or environment option, and none is added.
   `sb host status --remote R --target P/E`.
 - **Audit.** Each run that reached the remote appends one line to
   `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
-  `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else.
+  `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else. A
+  server-owner exec that takes over an ended exec job's target lease also appends a
+  `lease_takeover` line with `previous_job_id` and `job_id`
+  ([`host_apply_lease_held`](#host_apply_lease_held)).
 
 Joined-owner exec retains binary output in private, original-job-bound artifacts.
 The effect deadline remains the original request's deadline. Each result read has
@@ -2755,7 +2758,7 @@ operation, so two controllers cannot interleave changes to one target's route an
 runtime. The lease file holds a random token, a random controller id
 (`$SANDBOX_HOME/runtime/hosting/controller-id` on the controller) and the time it was
 taken; nothing secret. For server-owner execution, the holder is instead the
-first 32 hexadecimal characters of SHA-256 over `server-cli:<job_id>`.
+first 32 hexadecimal characters of SHA-256 over `server-cli-exec:<job_id>`.
 
 The lease never expires: an owner that outlived an expiry and kept writing would be
 the interleaving the lease is there to stop. The controller that holds it releases it,
@@ -2764,8 +2767,21 @@ holds it, finish or re-run the operation from that controller. If that controlle
 gone, first check on the remote that nothing of it still runs (no `sb` process for the
 target), then remove the lease file there by hand.
 
-Each server-owner job has a different holder, so starting a fresh job cannot
-take over an earlier job's lease. `host retire-delivery` closes the delivery
+Each server-owner job has a different holder, so a job never takes over a lease
+merely because it runs as the same Linux user. One case is taken over: a later
+server-owner `sb host exec` replaces a lease whose holder is the exec lease of a
+server-cli job in the server's own job registry when that job is terminal
+(`succeeded`, `failed`, `timed_out`, `cancelled` or `interrupted`), recorded
+`owned_work_stopped: true` with no stop error, ran against the same target, took the
+lease while it ran, and none of its recorded processes or its process group still
+runs. The check and the replacement happen under the lease's own lock, so two
+takers cannot both win, and `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` gets a
+`lease_takeover` line with both job ids. This ends the hand cleanup after an exec
+whose command reached its own `--timeout`. It proves the job's own processes
+stopped, not that a command Docker started inside the container has; Docker does not
+signal it when its client is killed. Any other holder (an apply, a destroy, another
+controller, or an exec job whose end is not proven) is never taken over and keeps
+the behaviour below. `host retire-delivery` closes the delivery
 record and its host-state claim; it does not release this separate lease.
 Do not repeat retirement or replay an uncertain apply to clear it. Exact manual
 recovery requires explicit operator approval after binding the lease holder to

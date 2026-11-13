@@ -9,7 +9,6 @@ import time
 from contextlib import ExitStack, contextmanager
 import dataclasses
 import datetime
-import hashlib
 import math
 
 import sandbox.core._hosting as hosting
@@ -163,14 +162,35 @@ def _known_failure(exc):
     if isinstance(exc, ExecRefusal):
         return exc.code, exc.detail, exc.exit_code
     if isinstance(exc, target_lease.LeaseHeld):
-        return (target_resolution.TARGET_BUSY, f"{exc}; nothing ran. Retry once the holding job finishes; if that job already ended "
-                "(for example its command timed out), the lease stays until it is removed by hand "
-                "(docs/remote-hosting.md, host_apply_lease_held)",
+        return (target_resolution.TARGET_BUSY, f"{exc}; nothing ran. Retry once the holding job finishes. "
+                "A lease left by an exec job that ended with its work stopped is taken over by the next exec; "
+                "a lease held by an apply, a destroy, another controller or an exec job whose end is not "
+                "proven stays until it is removed by hand (docs/remote-hosting.md, host_apply_lease_held)",
                 host_exec.EXIT_REFUSAL)
     if isinstance(exc, ServerCLIDeadlineExpired):
         return (host_exec.TIMED_OUT, "the original server CLI deadline expired; "
                 "inspect the original job before any replay", host_exec.EXIT_TIMEOUT)
     return None
+
+
+def _take_over_ended_exec_lease(request, path, owner, job_id):
+    """The lease of an ended, stopped exec job on this target, taken over and audited."""
+    from sandbox.application.server_cli_exec_recovery import take_over_ended_exec_lease
+    target = request.owner_selection.target
+    # Opened first, so a takeover is never left out of the audit.
+    with host_exec.AuditLog() as audit:
+        taken = take_over_ended_exec_lease(path, owner=owner,
+                                           target=f"{target.project}/{target.environment}")
+        if taken is None:
+            return None
+        lease, previous_job_id = taken
+        if previous_job_id is not None:
+            try:
+                audit.write_lease_takeover(request, previous_job_id=previous_job_id, job_id=job_id)
+            except OSError as exc:
+                print(f"sb host exec: warning: lease takeover from job {previous_job_id} not audited: "
+                      f"{exc.strerror or exc}", file=sys.stderr)
+    return lease
 
 
 @contextmanager
@@ -203,10 +223,17 @@ def _execution_scope(request, entry):
         request = _fit_deadline(request, context.deadline_at)
         # One job cannot take over another live job's physical lease merely
         # because both execute as the same shared Linux owner.
-        owner = hashlib.sha256(("server-cli-exec:" + context.job_id).encode()).hexdigest()[:32]
-        lease = target_lease.acquire(lambda command: entry.process(command, timeout=30),
-            target_lease.lease_path(entry.sandbox_home(), selected.target.project,
-                                    selected.target.environment), owner)
+        from sandbox.application.server_cli_exec_recovery import exec_lease_owner
+        owner = exec_lease_owner(context.job_id)
+        path = target_lease.lease_path(entry.sandbox_home(), selected.target.project,
+                                       selected.target.environment)
+        try:
+            lease = target_lease.acquire(lambda command: entry.process(command, timeout=30),
+                                         path, owner)
+        except target_lease.LeaseHeld:
+            lease = _take_over_ended_exec_lease(request, path, owner, context.job_id)
+            if lease is None:
+                raise
         selected.require_current()
         yield request
         selected.require_current()

@@ -2,6 +2,8 @@
 
 This never signals, resumes or replays a job, repairs its result, or retires
 scheduler/workspace leases. Historical execution authority is not reissued.
+A later exec job may also take over a lease whose exec job has ended with its
+owned work stopped (``take_over_ended_exec_lease``); no other lease is taken.
 """
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
@@ -11,7 +13,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
+import time
 
 from sandbox.jobs.models import validate_job_id
 
@@ -86,7 +90,7 @@ def _ceased(process, stopped):
 
 
 @contextmanager
-def _lease_lock(path):
+def _lease_lock(path, wait_seconds=0):
     parent = path.parent
     info = parent.lstat()
     if (parent.resolve() != parent or not stat.S_ISDIR(info.st_mode)
@@ -98,7 +102,15 @@ def _lease_lock(path):
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022):
             _refuse()
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        end = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    raise
+                time.sleep(0.05)
         yield
     finally:
         os.close(descriptor)
@@ -200,3 +212,122 @@ def _reconcile_exec_lease(repository, job_id, *, confirm=False, expected_plan=No
             os.close(parent)
         repository.append_event(job_id, "server_exec_lease_retired", {"plan_digest": digest})
         return {**result, "status": "retired", "lease_present": False, "requires_confirm": False}
+
+
+ENDED_LIFECYCLES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "interrupted"})
+TAKEOVER_LOCK_SECONDS = 5
+_JOB_PAGES = 50
+
+
+def exec_lease_owner(job_id):
+    """The lease holder ``sb host exec`` writes for one server-cli job."""
+    return hashlib.sha256(("server-cli-exec:" + job_id).encode()).hexdigest()[:32]
+
+
+def _lease_holder(path):
+    """The holder written in the lease file, with the same file checks as recovery."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        body = os.read(descriptor, 257)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or len(body) > 256):
+            _refuse()
+        holder = body.decode("ascii").split()[1]
+        if not re.fullmatch(r"[0-9a-f]{32}", holder):
+            _refuse()
+        return holder
+    finally:
+        os.close(descriptor)
+
+
+def _ended_exec_job(repository, holder, target):
+    """The registry's server-cli job whose exec lease ``holder`` is, proven ended and stopped.
+
+    An apply, destroy or controller holder matches no job and refuses.
+    """
+    cursor = None
+    for _ in range(_JOB_PAGES):
+        rows = repository.list(kind="server-cli", limit=200, cursor_job_id=cursor)
+        for listed in rows:
+            if exec_lease_owner(listed["job_id"]) != holder:
+                continue
+            row = repository.snapshot(listed["job_id"])
+            stopped = json.loads(row.get("result_json") or "{}")
+            proof = json.loads(row.get("execution_policy_provenance_json") or "{}")
+            if (row.get("job_id") != listed["job_id"] or row.get("kind") != "server-cli"
+                    or row.get("target_kind") != "local"
+                    or row.get("lifecycle") not in ENDED_LIFECYCLES
+                    or stopped.get("owned_work_stopped") is not True
+                    or stopped.get("stop_error") is not None
+                    or not isinstance(stopped.get("owned_descendants"), list)
+                    or proof.get("server_cli.exec_target") != target):
+                _refuse()
+            # No recorded process, descendant or process group may still run.
+            _ceased(row.get("process") or {}, stopped)
+            return row
+        if len(rows) < 200:
+            break
+        cursor = rows[-1]["job_id"]
+    _refuse()
+
+
+def _write_lease(path, token, owner):
+    """The same body and mode the shell lease script writes, replaced atomically."""
+    temporary = str(path) + ".new"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.write(descriptor, f"{token} {owner} {int(time.time())}\n".encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    parent = os.open(Path(path).parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _registry():
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.jobs.registry import JobRepository
+    return JobRepository.open_existing(RUNTIME_DIR / "jobs" / "registry.sqlite3", read_only=True)
+
+
+def take_over_ended_exec_lease(path, *, owner, target, repository=None):
+    """Take a target lease held by an ended exec job; ``None`` when it is not one.
+
+    Under the lease's own lock, the holder must be the exec lease of a
+    server-cli job in this server's registry that is terminal, recorded its
+    owned work stopped, has no live process, ran against ``target`` and took
+    the lease while it ran. Returns ``(lease, previous_job_id)``; the lease is
+    released like any acquired one. ``previous_job_id`` is ``None`` when the
+    lease was already gone.
+    """
+    path = Path(path)
+    with ExitStack() as held:
+        try:
+            held.enter_context(_lease_lock(path, TAKEOVER_LOCK_SECONDS))
+        except (ValueError, OSError):
+            return None  # the lock is unsafe, missing or stayed held
+        try:
+            if repository is None:
+                repository = _registry()
+                held.callback(repository.close)
+            holder = _lease_holder(path)
+            previous = None
+            if holder is not None:
+                row = _ended_exec_job(repository, holder, target)
+                _lease(path, row["job_id"], row)
+                previous = row["job_id"]
+        except Exception:
+            # Anything unproven keeps the lease where it is.
+            return None
+        lease = {"path": str(path), "token": secrets.token_hex(16), "owner": owner}
+        _write_lease(path, lease["token"], owner)
+        return lease, previous

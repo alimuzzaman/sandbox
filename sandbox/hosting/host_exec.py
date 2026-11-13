@@ -360,6 +360,17 @@ class AuditLog:
             "exit_code": outcome.exit_code, "code": outcome.code,
             "duration_ms": outcome.duration_ms,
         }
+        self._append(record)
+
+    def write_lease_takeover(self, request: ExecRequest, *, previous_job_id: str, job_id: str,
+                             now=None) -> None:
+        """One line naming the ended job whose target lease this job took over."""
+        at = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._append({"at": at, "remote": request.target.remote, "target": request.target.label,
+                      "service": request.service, "event": "lease_takeover",
+                      "previous_job_id": previous_job_id, "job_id": job_id})
+
+    def _append(self, record: dict) -> None:
         line = (json.dumps(record, sort_keys=True) + "\n").encode()
         if self._fd is None:
             raise OSError("audit log is closed")

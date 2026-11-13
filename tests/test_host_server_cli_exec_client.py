@@ -238,6 +238,7 @@ class ExecClientTests(unittest.TestCase):
     def test_server_selector_refusal_plain_output_names_code_and_hint(self):
         from sandbox.application.server_cli_targets import ServerTargetRefused
         self.args.json = False
+        self.args.name, self.args.target = None, "project/dev"
         self.observe.side_effect = ServerTargetRefused("host_server_target_evidence_unavailable")
         errors = io.StringIO()
         with redirect_stderr(errors), self.assertRaises(SystemExit):
@@ -245,6 +246,21 @@ class ExecClientTests(unittest.TestCase):
         self.assertIn("host_server_target_evidence_unavailable:", errors.getvalue())
         self.assertIn("hint: an unclassified target needs sb host classify", errors.getvalue())
         self.assertNotIn("--lifetime hosted --confirm", errors.getvalue())
+        self.submit.assert_not_called()
+
+    def test_stack_selector_evidence_refusal_never_asks_for_classify(self):
+        from sandbox.application.server_cli_targets import ServerTargetRefused
+        self.observe.side_effect = ServerTargetRefused("host_server_target_evidence_unavailable")
+        for as_json in (True, False):
+            with self.subTest(json=as_json):
+                self.args.json = as_json
+                output, errors = io.StringIO(), io.StringIO()
+                with redirect_stdout(output), redirect_stderr(errors), self.assertRaises(SystemExit):
+                    dispatch.dispatch_host_if_selected(self.args)
+                hint = json.loads(output.getvalue())["hint"] if as_json else errors.getvalue()
+                self.assertIn("sb host stack up", hint)
+                self.assertIn("sb host stack list --remote NAME", hint)
+                self.assertNotIn("classify", hint)
         self.submit.assert_not_called()
 
     def test_other_observation_failures_stay_generic_unavailable(self):

@@ -49,6 +49,11 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
             "check sb host status before retrying",
         "host_target_invalid": "check --target, --name and --environment",
     }
+    if getattr(args, "name", None):
+        # Stacks get their lifetime record from sb host stack up, never classify.
+        hints["host_server_target_evidence_unavailable"] = (
+            "a stack needs a succeeded sb host stack up of its current commit on this server; "
+            "check sb host stack list --remote NAME, then retry")
     payload = {"ok": False, "code": code, "acceptance": acceptance,
                "error": messages[code], **_handle(receipt, request_id)}
     if code in hints:

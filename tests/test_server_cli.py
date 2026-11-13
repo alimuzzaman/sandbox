@@ -89,6 +89,68 @@ class ServerCLIContractTest(unittest.TestCase):
         run.assert_not_called()
 
 
+class ServerCLIRevisionCacheTest(unittest.TestCase):
+    """One owner check must not re-hash the installed tree; an upgrade still shows."""
+
+    def setUp(self):
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.home = temporary / 'home'
+        root = self.home / 'sandbox/sb-src'
+        root.mkdir(parents=True)
+        executable = root / 'sb'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o700)
+        self.unit = self.home / '.config/systemd/user' / _remote.REMOTE_MCP_SERVICE
+        self.unit.parent.mkdir(parents=True)
+        self.write_unit('b' * 24)
+        # The hashed tree is the one this process imported from; a stand-in
+        # directory lets the test swap it the way migrate does.
+        self.tree = temporary / 'installed'
+        (self.tree / 'sandbox/core').mkdir(parents=True)
+        self.hash = mock.Mock(return_value='b' * 24)
+        for patch in (mock.patch.object(cli, '_installed_revision', None, create=True),
+                      mock.patch.object(cli.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(self.home))),
+                      mock.patch.object(_paths, 'ROOT', root),
+                      mock.patch.object(_paths, 'RUNTIME_DIR', self.home / 'sandbox/runtime'),
+                      mock.patch.object(_remote, '__file__', str(self.tree / 'sandbox/core/_remote.py')),
+                      mock.patch.object(_remote, '_remote_mcp_runtime_revision', self.hash),
+                      mock.patch.object(cli, 'machine_identity', return_value='c' * 24)):
+            self.enterContext(patch)
+
+    def write_unit(self, revision):
+        self.unit.write_text('Environment=SANDBOX_REMOTE_MCP_MARKER=' + 'a' * 24 + '\n'
+            'Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + revision + '\n'
+            'WorkingDirectory=%h/sandbox/sb-src\nExecStart=%h/sandbox/sb-src/sb mcp\n')
+        self.unit.chmod(0o600)
+
+    def test_repeated_owner_checks_hash_the_installed_tree_once(self):
+        for _ in range(50):
+            self.assertEqual(cli.read_current_server_owner().runtime_revision, 'b' * 24)
+        self.assertEqual(self.hash.call_count, 1)
+
+    def test_a_rewritten_unit_revision_is_still_refused_with_the_cached_hash(self):
+        cli.read_current_server_owner()
+        self.write_unit('d' * 24)
+        with self.assertRaises(cli.ServerCLIUnavailable):
+            cli.read_current_server_owner()
+        self.assertEqual(self.hash.call_count, 1)
+
+    def test_a_migrate_swap_of_the_installed_tree_is_hashed_again(self):
+        cli.read_current_server_owner()
+        staged = self.tree.with_name('staged')
+        (staged / 'sandbox/core').mkdir(parents=True)
+        # migrate exchanges the directories before it rewrites the unit.
+        self.tree.rename(self.tree.with_name('previous'))
+        staged.rename(self.tree)
+        self.hash.return_value = 'e' * 24
+        with self.assertRaises(cli.ServerCLIUnavailable):
+            cli.read_current_server_owner()
+        self.assertEqual(self.hash.call_count, 2)
+        self.write_unit('e' * 24)
+        self.assertEqual(cli.read_current_server_owner().runtime_revision, 'e' * 24)
+        self.assertEqual(self.hash.call_count, 2)
+
+
 class ServerCLIDispatchTest(unittest.TestCase):
     def dispatch(self, *, capability=None, capability_error=None):
         record = {'joined': True, 'provisioned': True, 'control_transport': 'tailscale',

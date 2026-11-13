@@ -53,10 +53,42 @@ class ServerCliOwner:
     runtime_revision: str
 
 
+_installed_revision: tuple | None = None
+
+
+def _installed_runtime_revision() -> str:
+    """Hash the installed source once per installed tree in this process.
+
+    Every authority check compares the unit's recorded revision with this
+    value, hundreds of times per job, and one hash reads the whole tree. A
+    migrate swaps the installed directory with renameat2 before it rewrites the
+    unit, so the cached hash is keyed on that directory's inode: the swap gives
+    a new inode and the next check hashes the new tree again. Unit, marker and
+    owner metadata are still re-read on every check.
+    """
+    global _installed_revision
+    from sandbox.core import _remote
+    compute = _remote._remote_mcp_runtime_revision
+    root = Path(_remote.__file__).resolve().parents[2]
+
+    def tree():
+        info = os.stat(root)
+        return info.st_dev, info.st_ino
+
+    key = (compute, tree())
+    cached = _installed_revision
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    value = compute()
+    if tree() == key[1]:
+        _installed_revision = (key, value)
+    return value
+
+
 def _current_owner() -> ServerCliOwner:
     """Read only the selected nonsecret unit metadata, never EnvironmentFile."""
     from sandbox.core._paths import ROOT, RUNTIME_DIR
-    from sandbox.core._remote import _remote_mcp_runtime_revision, REMOTE_MCP_SERVICE
+    from sandbox.core._remote import REMOTE_MCP_SERVICE
     home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
     unit = home / '.config/systemd/user' / REMOTE_MCP_SERVICE
     info = unit.lstat()
@@ -83,7 +115,7 @@ def _current_owner() -> ServerCliOwner:
     command = shlex.split(fields.get('ExecStart', '').replace('%h', str(home)))
     working = fields.get('WorkingDirectory', '').replace('%h', str(home))
     if (not isinstance(marker, str) or not re.fullmatch('[0-9a-f]{24}', marker)
-            or revision != _remote_mcp_runtime_revision()
+            or revision != _installed_runtime_revision()
             or not command or Path(command[0]).resolve() != executable
             or Path(working).resolve() != Path(ROOT).resolve()):
         raise ServerCLIUnavailable('installed CLI and selected owner service identity do not agree')

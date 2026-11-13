@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -775,11 +776,79 @@ class NormalExitCessationTests(unittest.TestCase):
             (proc / pid / "environ").write_bytes(environment)
         (proc / "self").mkdir()
         with patch.object(supervisor, "_PROC", proc):
-            self.assertEqual(supervisor._job_environment_holders("a" * 32), [4242])
-            self.assertEqual(supervisor._job_environment_holders("c" * 32), [])
+            self.assertEqual(supervisor._job_environment_holders("a" * 32, 1), [4242])
+            self.assertEqual(supervisor._job_environment_holders("c" * 32, 1), [])
             command = subprocess.Popen(["true"], start_new_session=True)
             command.wait()
             self.assertEqual(supervisor._normal_exit_unproven(command, "a" * 32, set(), True),
                              "job_environment_running")
         with patch.object(supervisor, "_PROC", proc / "missing"):
-            self.assertEqual(supervisor._job_environment_holders("a" * 32), [])
+            self.assertEqual(supervisor._job_environment_holders("a" * 32, 1), [])
+
+    @staticmethod
+    def fake_stat(directory, start):
+        """A /proc/<pid>/stat whose field 22 (start time in clock ticks) is ``start``."""
+        directory.mkdir(exist_ok=True)
+        (directory / "stat").write_text(f"{directory.name} (a b) S " + "0 " * 18 + f"{start} 0 0\n")
+
+    def test_an_unreadable_process_counts_only_when_it_started_with_or_after_the_job(self):
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.fake_stat(proc / "500", 1000)  # the command, an unreaped zombie
+        (proc / "500" / "environ").write_bytes(b"")
+        self.fake_stat(proc / "4242", 900)
+        (proc / "4242" / "environ").mkdir()  # reading it fails, as for a non-dumpable process
+        with patch.object(supervisor, "_PROC", proc):
+            self.assertEqual(supervisor._job_environment_holders("a" * 32, 500), [])
+            for start in (1000, 1001):
+                with self.subTest(start=start):
+                    self.fake_stat(proc / "4242", start)
+                    self.assertIsNone(supervisor._job_environment_holders("a" * 32, 500))
+            (proc / "4242" / "stat").write_text("garbage")
+            self.assertIsNone(supervisor._job_environment_holders("a" * 32, 500))
+            (proc / "4242" / "stat").unlink()  # it exited after the listing
+            self.assertEqual(supervisor._job_environment_holders("a" * 32, 500), [])
+            self.fake_stat(proc / "4242", 900)
+            (proc / "500" / "stat").unlink()  # no command start time: nothing is provably older
+            self.assertIsNone(supervisor._job_environment_holders("a" * 32, 500))
+
+    NON_DUMPABLE = "import ctypes; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)"  # PR_SET_DUMPABLE, 0
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs Linux /proc")
+    def test_an_unrelated_non_dumpable_process_started_earlier_does_not_deny_the_proof(self):
+        # As OpenSSH's per-connection process of the owner is, while an exec client waits.
+        helper = subprocess.Popen(
+            [sys.executable, "-c", self.NON_DUMPABLE + "; print('ready', flush=True);"
+             " import time; time.sleep(60)"],
+            stdout=subprocess.PIPE, text=True, env={"PATH": "/usr/bin:/bin"},
+            start_new_session=True)
+        self.addCleanup(helper.wait)
+        self.addCleanup(helper.kill)
+        self.assertEqual(helper.stdout.readline().strip(), "ready")
+        helper.stdout.close()
+        with self.assertRaises(PermissionError):
+            Path(f"/proc/{helper.pid}/environ").read_bytes()
+        snap, result = self.run_job("exit 255")
+        self.assertEqual((snap["lifecycle"], snap["exit_code"]), ("failed", 255))
+        self.assertIs(result["owned_work_stopped"], True, result)
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs Linux /proc")
+    def test_a_job_daemon_that_becomes_non_dumpable_is_not_proven_stopped(self):
+        pid_path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "pid"
+        daemon = ("import os, sys, time\n"
+                  "if os.fork(): sys.exit(0)\n"
+                  "os.setsid()\n"
+                  "if os.fork(): sys.exit(0)\n"
+                  "null = os.open(os.devnull, os.O_RDWR)\n"
+                  "for fd in (0, 1, 2): os.dup2(null, fd)\n"
+                  + self.NON_DUMPABLE + "\n"
+                  "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                  "time.sleep(30)\n")
+        script_path = pid_path.with_name("daemon.py")
+        script_path.write_text(daemon)
+        snap, result = self.run_job(
+            f"{sys.executable} {script_path} {pid_path}; "
+            f"while [ ! -s {pid_path} ]; do sleep .05; done; exit 255")
+        self.leftover(pid_path)
+        self.assertEqual(snap["lifecycle"], "failed")
+        self.assertIs(result["owned_work_stopped"], False, result)
+        self.assertEqual(result["unproven"], "process_environment_unavailable")

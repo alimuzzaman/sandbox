@@ -498,7 +498,7 @@ def _normal_exit_unproven(command: subprocess.Popen, job_id: str, observed_desce
     if not streams_eof:
         return "output_pipes_held"
     try:
-        holders = _job_environment_holders(job_id)
+        holders = _job_environment_holders(job_id, command.pid)
         if holders is None:
             return "process_environment_unavailable"
         if holders:
@@ -528,15 +528,20 @@ def _normal_exit_unproven(command: subprocess.Popen, job_id: str, observed_desce
     return None
 
 
-def _job_environment_holders(job_id: str) -> list[int] | None:
+def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
     """Same-user PIDs whose environment names this job; ``None`` when unreadable.
 
     Every durable child starts with ``SANDBOX_DURABLE_JOB_ID`` and its
-    descendants inherit it. Without ``/proc`` (macOS) nothing is scanned.
+    descendants inherit it. Without ``/proc`` (macOS) nothing is scanned. A
+    same-user process whose environment cannot be read (it is non-dumpable,
+    as OpenSSH's per-connection process is) can only be the job's if it
+    started at or after the command, so one that provably started earlier is
+    skipped; any other unreadable process makes the scan ``None``.
     """
     if not _PROC.is_dir():
         return []
     marker = ("SANDBOX_DURABLE_JOB_ID=" + job_id).encode()
+    command_start: int | None = None
     holders = []
     for directory in _PROC.iterdir():
         if not directory.name.isdigit() or int(directory.name) == os.getpid():
@@ -548,10 +553,39 @@ def _job_environment_holders(job_id: str) -> list[int] | None:
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
-            return None
+            try:
+                started = _start_ticks(directory)
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # it has exited since the listing
+            if command_start is None:
+                with suppress(OSError):  # the unreaped leader keeps its stat
+                    command_start = _start_ticks(_PROC / str(command_pid))
+            if command_start is None or started is None or started >= command_start:
+                return None
+            continue
         if marker in environment.split(b"\0"):
             holders.append(int(directory.name))
     return holders
+
+
+def _start_ticks(directory: Path) -> int | None:
+    """A process's start time in clock ticks since boot (``/proc/<pid>/stat`` field 22).
+
+    The stat file stays readable when the process is non-dumpable. Raises
+    ``FileNotFoundError`` when the process is gone; ``None`` when the file
+    cannot be read or parsed.
+    """
+    try:
+        text = (directory / "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        raise
+    except (OSError, UnicodeDecodeError):
+        return None
+    close = text.rfind(")")
+    fields = text[close + 2:].split()
+    if close < 0 or len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    return int(fields[19])
 
 
 def _child_running(command: subprocess.Popen) -> bool:

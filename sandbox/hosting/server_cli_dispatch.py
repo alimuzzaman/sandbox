@@ -117,17 +117,23 @@ def resolve_source_branch(checkout):
     one the controller bound into the retained argv, valid only for the exact
     staged commit of this job.
     """
-    from sandbox.application.server_cli import server_cli_context_if_selected, validate_owner_current
     from sandbox.core import _remote
+    branch = bound_source_branch(checkout)
+    # No retained job, or a controller without this contract: Git decides.
+    return _remote.current_branch(checkout) if branch is None else branch
+
+
+def bound_source_branch(checkout):
+    """The validated controller-bound branch, or None when none was bound."""
+    from sandbox.application.server_cli import server_cli_context_if_selected, validate_owner_current
     context = server_cli_context_if_selected()
     if context is None:
-        return _remote.current_branch(checkout)
+        return None
     argv = tuple(context.argv)
     head = argv.index('--') if '--' in argv else len(argv)
     bound = [value for value in argv[:head] if value.split('=', 1)[0] == SOURCE_BRANCH_OPTION]
     if not bound:
-        # A controller without this contract: Git's state decides, as before.
-        return _remote.current_branch(checkout)
+        return None
     if len(bound) != 1 or '=' not in bound[0]:
         raise SourceBranchBindingError('server_cli_source_branch_mismatch')
     packed = bound[0].split('=', 1)[1]

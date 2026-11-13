@@ -3846,6 +3846,12 @@ def _recovery_source_check(validated: dict, operation: dict) -> bool:
                  "core.untrackedCache=false", "-C", str(project_root), *arguments], check=True,
                 capture_output=True, text=True, env=child_environment).stdout
         branch = probe("branch", "--show-current").strip()
+        if not branch and not validated.get("stack"):
+            # A retained server-CLI recover runs in a detached staged copy;
+            # only the validated controller binding for this exact commit
+            # stands in for Git. Stack provenance keeps its own handling.
+            from sandbox.hosting.server_cli_dispatch import bound_source_branch
+            branch = bound_source_branch(project_root) or ""
         if branch != (operation.get("evidence") or {}).get("source_branch"):
             return False
         commit = probe("rev-parse", "HEAD").strip()

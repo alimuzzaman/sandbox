@@ -210,6 +210,40 @@ class SourceBranchTests(unittest.TestCase):
             host_commands._validate_apply_source(validated)
         self.assertEqual(raised.exception.code, 'server_cli_source_branch_owner_changed')
 
+    def recovery(self, staged, context, branch='main', commit=None, owner=None):
+        validated = {'project_root': str(staged), 'environment': 'sandbox'}
+        operation = {'source': {'clean': True, 'commit': commit or self.head},
+                     'evidence': {'source_branch': branch}}
+        with patch.object(sdk, 'server_cli_context_if_selected', return_value=context), \
+                patch.object(sdk, 'validate_owner_current', return_value=owner or context):
+            return host_commands._recovery_source_check(validated, operation)
+
+    def test_detached_staged_recovery_uses_the_bound_branch(self):
+        staged, context = self.receiver()
+        self.assertTrue(self.recovery(staged, context))
+
+    def test_detached_staged_recovery_refuses_mismatches(self):
+        staged, context = self.receiver()
+        self.assertFalse(self.recovery(staged, context, branch='dev'))
+        self.assertFalse(self.recovery(staged, context, commit='f' * 40))
+        self.assertFalse(self.recovery(staged, context, owner=replace(context, job_id='e' * 32)))
+        self.assertFalse(self.recovery(staged, replace(context, source_commit='f' * 40)))
+        self.assertFalse(self.recovery(staged, replace(context, argv=('host', 'recover'))))
+        self.assertFalse(self.recovery(staged, None))
+        staged_stack = {'project_root': str(staged), 'environment': 'sandbox', 'stack': {'commit': self.head}}
+        with patch.object(sdk, 'server_cli_context_if_selected', return_value=context), \
+                patch.object(sdk, 'validate_owner_current', return_value=context):
+            self.assertFalse(host_commands._recovery_source_check(staged_stack, {
+                'source': {'clean': True, 'commit': self.head}, 'evidence': {'source_branch': 'main'}}))
+
+    def test_attached_recovery_reads_git_as_before(self):
+        validated = {'project_root': str(self.client), 'environment': 'sandbox'}
+        operation = {'source': {'clean': True, 'commit': self.head}, 'evidence': {'source_branch': 'main'}}
+        with patch.object(sdk, 'server_cli_context_if_selected', return_value=None):
+            self.assertTrue(host_commands._recovery_source_check(validated, operation))
+            operation['evidence']['source_branch'] = 'dev'
+            self.assertFalse(host_commands._recovery_source_check(validated, operation))
+
     def test_outside_a_server_job_git_state_decides_as_before(self):
         validated = {'project_root': str(self.client), 'environment': 'sandbox',
                      'deploy': {'allowed_branches': ['main'], 'require_clean': True}}

@@ -163,7 +163,9 @@ def _known_failure(exc):
     if isinstance(exc, ExecRefusal):
         return exc.code, exc.detail, exc.exit_code
     if isinstance(exc, target_lease.LeaseHeld):
-        return (target_resolution.TARGET_BUSY, f"{exc}; nothing ran, retry when it finishes",
+        return (target_resolution.TARGET_BUSY, f"{exc}; nothing ran. Retry once the holding job finishes; if that job already ended "
+                "(for example its command timed out), the lease stays until it is removed by hand "
+                "(docs/remote-hosting.md, host_apply_lease_held)",
                 host_exec.EXIT_REFUSAL)
     if isinstance(exc, ServerCLIDeadlineExpired):
         return (host_exec.TIMED_OUT, "the original server CLI deadline expired; "

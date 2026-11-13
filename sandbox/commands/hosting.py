@@ -6431,6 +6431,29 @@ def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | N
               f"{remote.redact_text(str(exc))[:200]}", file=sys.stderr)
 
 
+def _record_target_apply(entry, validated: dict, result: object) -> None:
+    """Keep a classified (non-stack) target's lifetime commit at this apply's commit.
+
+    Called once the summary of a finished apply is written. The host store moves
+    the commit only on an existing ``kind: "target"`` record and only when that
+    summary records a succeeded apply of this commit. It never creates a record,
+    so ``sb host classify`` stays required, and never changes lifetime or TTL.
+    Best effort: the apply already happened, so a store problem only leaves the
+    record at its earlier commit, reported on stderr.
+    """
+    commit = result.get("commit") if isinstance(result, dict) else None
+    if validated.get("stack") or not isinstance(commit, str):
+        return
+    from sandbox.hosting.lifetime import client as lifetime_client
+    try:
+        lifetime_client.StoreClient(lifetime_client.ssh_runner(entry), None).call(
+            "record_apply", project=validated["project"],
+            environment=validated["environment"], commit=commit)
+    except (hosting.HostingError, OSError, RuntimeError, KeyError, TypeError, ValueError) as exc:
+        print(f"warning: lifetime record of {validated.get('project')}/{validated.get('environment')} "
+              f"not moved to the applied commit: {remote.redact_text(str(exc))[:200]}", file=sys.stderr)
+
+
 def _cmd_host_stage(args) -> None:
     """Static Feature 050 dispatch with no manifest/Compose/runtime preflight."""
     if getattr(args, "stage_status", False) and not getattr(args, "verified_plan", None):
@@ -9230,6 +9253,8 @@ def cmd_host(cfg, args) -> None:
                         before_effects=prepare_coverage,
                         summary_recorder=summary_recorder,
                     ))
+                    # The deferred summary write has run; its succeeded commit is now on the host.
+                    _record_target_apply(current_entry, validated, result)
 
                 binding_known = True
                 if current_zone:

@@ -427,6 +427,88 @@ class ServerSelectionTests(OwnerTargetTests):
                 selection.inspect_server_exec_target(origin_remote_name='box', name='named')
             self.assertFalse(sentinel.exists(), 'dirty-file refusal executed a content filter')
 
+    def use_plain_target(self, commit="e" * 40):
+        self.lifetime = {"project": "project", "environment": "dev", "kind": "target",
+            "slug": None, "copy_id": None, "commit": commit,
+            "compose_project": "sandbox-host-project-dev", "state": "active", "ports": {}}
+        self.summary["stack"] = None
+
+    def test_plain_target_without_lifetime_record_refuses_as_missing_evidence(self):
+        self.use_plain_target()
+        self.lifetime = {**self.lifetime, "project": "other"}
+        with self.assertRaises(TargetRefusal) as refused:
+            selection.read_owner_exec_selection(self.entry, target="project/dev")
+        self.assertEqual(refused.exception.code, selection.UNAVAILABLE)
+        self.process.assert_not_called()
+
+    def test_classified_plain_target_selects_and_a_stale_commit_refuses(self):
+        self.use_plain_target()
+        selected = selection.read_owner_exec_selection(self.entry, target="project/dev")
+        self.assertEqual(selected.target.label, "project/dev")
+        self.assertEqual(selected.services, (("web", 1, "f" * 12),))
+        self.assertIsNone(selected.copy_id)
+        self.summary["commit"] = self.published_commit = "a" * 40
+        with self.assertRaises(TargetRefusal) as refused:
+            selection.read_owner_exec_selection(self.entry, target="project/dev")
+        self.assertEqual(refused.exception.code, selection.UNAVAILABLE)
+
+    def store_runner(self):
+        from sandbox.hosting.lifetime import hoststore
+        calls = []
+        def run(command, payload):
+            calls.append(json.loads(payload))
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps(
+                hoststore.handle(json.loads(payload), str(self.home), free_paths=())), stderr="")
+        return run, calls
+
+    def write_server_summary(self, commit):
+        (self.override.parent / "summary.json").write_text(json.dumps({**self.summary, "commit": commit}))
+        self.summary["commit"] = self.published_commit = commit
+
+    def stored_lifetime(self):
+        from sandbox.hosting.lifetime import hoststore
+        return hoststore.handle({"op": "list", "now": hoststore.to_rfc3339(1_800_000_000)},
+            str(self.home), free_paths=())["result"]["records"]
+
+    def test_succeeded_apply_refreshes_a_classified_plain_target_for_selection(self):
+        from sandbox.commands import hosting
+        from sandbox.hosting.lifetime import client as lifetime_client
+        run, calls = self.store_runner()
+        caller = {"label": "owner", "controller": "a" * 32}
+        self.use_plain_target()
+        self.write_server_summary("e" * 40)
+        lifetime_client.StoreClient(run, caller).call(
+            "classify", project="project", environment="dev", lifetime="hosted")
+        self.lifetime = self.stored_lifetime()[0]
+        first = selection.read_owner_exec_selection(self.entry, target="project/dev")
+        # A later server-side apply at a new commit; exec refuses until the record moves.
+        self.write_server_summary("a" * 40)
+        with self.assertRaises(TargetRefusal):
+            selection.read_owner_exec_selection(self.entry, target="project/dev")
+        validated = {"project": "project", "environment": "dev"}
+        with patch.object(lifetime_client, "ssh_runner", return_value=run):
+            hosting._record_target_apply(self.entry, validated, {"commit": "a" * 40})
+        self.assertEqual(calls[-1]["op"], "record_apply")
+        self.lifetime = self.stored_lifetime()[0]
+        self.assertEqual((self.lifetime["commit"], self.lifetime["lifetime"]), ("a" * 40, "hosted"))
+        refreshed = selection.read_owner_exec_selection(self.entry, target="project/dev")
+        self.assertEqual(refreshed.source_commit, "a" * 40)
+        self.assertNotEqual(refreshed.fingerprint, first.fingerprint)
+
+    def test_apply_of_an_unclassified_or_stack_target_creates_no_lifetime_record(self):
+        from sandbox.commands import hosting
+        from sandbox.hosting.lifetime import client as lifetime_client
+        run, calls = self.store_runner()
+        self.use_plain_target()
+        self.write_server_summary("a" * 40)
+        with patch.object(lifetime_client, "ssh_runner", return_value=run):
+            hosting._record_target_apply(self.entry, {"project": "project", "environment": "dev"},
+                                         {"commit": "a" * 40})
+            hosting._record_target_apply(self.entry, {"project": "project", "environment": "dev",
+                                         "stack": {"slug": "named"}}, {"commit": "a" * 40})
+        self.assertEqual([call["op"] for call in calls], ["record_apply"])
+        self.assertEqual(self.stored_lifetime(), [])
+
     def test_server_inventory_resolves_without_local_history_and_uses_actual_alias_keys(self):
         with patch("sandbox.hosting.stack_registry.read", side_effect=AssertionError("local registry")), \
                 patch("sandbox.core._hosting.load_host_state", side_effect=AssertionError("local history")):

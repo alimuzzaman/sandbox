@@ -1046,6 +1046,69 @@ def _record_merge(store, request, now):
     return {"recorded": True, "merged": merge.merged}
 
 
+SUMMARY_MAX_BYTES = 64 * 1024
+
+
+def _server_summary_commit(home, project, environment):
+    """The commit of this target's last succeeded apply, from the summary that apply
+    wrote on this host (``runtime/hosts/<project>/<environment>/summary.json``).
+
+    ``None`` when the summary is missing, unreadable, for another target or not a
+    succeeded apply. The exec selector checks the same fields.
+    """
+    path = Path(home).joinpath("runtime", "hosts", project, environment, "summary.json")
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            data = handle.read(SUMMARY_MAX_BYTES + 1)
+        summary = json.loads(data.decode("utf-8")) if len(data) <= SUMMARY_MAX_BYTES else None
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(summary, dict):
+        return None
+    last, commit = summary.get("last_apply"), summary.get("commit")
+    if ((summary.get("project"), summary.get("environment")) != (project, environment)
+            or summary.get("compose_project") != compose_project_for(project, environment)
+            or not isinstance(last, dict) or last.get("status") != "succeeded"
+            or not isinstance(commit, str) or not _COMMIT_RE.fullmatch(commit)):
+        return None
+    return commit
+
+
+def _record_apply(store, request, now):
+    """After a succeeded apply, move an existing classified target's commit to it.
+
+    Only an existing active ``kind: "target"`` record changes, and only its commit
+    and ``updated_at``. A missing record stays missing (``sb host classify`` creates
+    it) and lifetime, TTL and owner never change. The commit must be the one the
+    server summary records for a succeeded apply.
+    """
+    project, environment = str(request.get("project") or ""), str(request.get("environment") or "")
+    if not TARGET_PART_RE.fullmatch(project) or not TARGET_PART_RE.fullmatch(environment):
+        raise StoreRefusal(REQUEST_INVALID, "--target must be PROJECT/ENVIRONMENT")
+    commit = request.get("commit")
+    if not isinstance(commit, str) or not _COMMIT_RE.fullmatch(commit):
+        raise StoreRefusal(REQUEST_INVALID, "commit must be a full commit")
+    compose_project = compose_project_for(project, environment)
+    records, invalid = store.load()
+    record = records.get(compose_project)
+    if record is None or compose_project in invalid:
+        return {"recorded": False, "reason": "no lifetime record"}
+    if record.kind != "target" or record.state != "active" or record.reap_run is not None:
+        return {"recorded": False, "reason": "not an active classified target"}
+    if _server_summary_commit(store.home, project, environment) != commit:
+        return {"recorded": False, "reason": "the server summary does not record this succeeded apply"}
+    if record.commit == commit:
+        return {"recorded": False, "reason": "already current"}
+    updated = replace(record, commit=commit, updated_at=to_rfc3339(now))
+    checked = parse_record(record_to_dict(updated))
+    if isinstance(checked, Invalid):
+        raise StoreRefusal(RECORD_INVALID, checked.reason)
+    store.write(updated)
+    store.audit("record_apply", compose_project, None, now, commit=commit, previous=record.commit)
+    return {"recorded": True, "commit": commit}
+
+
 def _classify(store, request, now):
     caller = _caller(request)
     project, environment = str(request.get("project") or ""), str(request.get("environment") or "")
@@ -1082,7 +1145,9 @@ def _classify(store, request, now):
     elif ttl is not None:
         raise StoreRefusal(TTL_INVALID, "only a temporary target has a TTL")
     stamp = to_rfc3339(now)
-    known = {"commit": request.get("commit"), "repo": request.get("repo")}
+    # The server's own succeeded apply beats a controller's possibly older hosts.json.
+    known = {"commit": _server_summary_commit(store.home, project, environment) or request.get("commit"),
+             "repo": request.get("repo")}
     try:
         commit, repo = _target_identity(known)
     except ValueError as exc:
@@ -1137,7 +1202,7 @@ def _policy_op(store, request, now):
 
 
 _OPS = {"list": False, "check": False, "claim": True, "update": True, "release": True,
-        "record_merge": True, "classify": True, "policy": True}
+        "record_merge": True, "classify": True, "record_apply": True, "policy": True}
 
 
 def handle(request, home, *, free_paths=None):
@@ -1161,6 +1226,8 @@ def handle(request, home, *, free_paths=None):
                 result = _record_merge(store, request, now)
             elif op == "classify":
                 result = _classify(store, request, now)
+            elif op == "record_apply":
+                result = _record_apply(store, request, now)
             else:
                 result = _policy_op(store, request, now)
         return {"ok": True, "result": result}

@@ -453,6 +453,76 @@ class HostStoreTests(unittest.TestCase):
         cleared = self.run_op("classify", project="mockups", environment="sandbox", clear=True)
         self.assertTrue(cleared["result"]["removed"])
 
+    def write_summary(self, commit, status="succeeded", project="mockups", environment="sandbox"):
+        path = self.home / "runtime" / "hosts" / project / environment / "summary.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 1, "project": project, "environment": environment,
+            "compose_project": hs.compose_project_for(project, environment), "commit": commit,
+            "last_apply": {"status": status}}))
+        return path
+
+    def test_record_apply_never_creates_a_record(self):
+        self.write_summary(DEV_COMMIT)
+        root = self.home / "runtime" / "target-lifetimes"
+        result = self.run_op("record_apply", project="mockups", environment="sandbox", commit=DEV_COMMIT)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["result"]["recorded"])
+        self.assertEqual(self.run_op("list")["result"]["records"], [])
+        self.assertFalse((root / "sandbox-host-mockups-sandbox.json").exists())
+
+    def test_record_apply_moves_only_the_commit_of_a_classified_target(self):
+        self.write_summary(COMMIT)
+        before = self.run_op("classify", project="mockups", environment="sandbox", lifetime="temporary",
+                             ttl_seconds=7200)["result"]["record"]
+        self.assertEqual(before["commit"], COMMIT)
+        self.write_summary(DEV_COMMIT)
+        later = hs.to_rfc3339(NOW + 60)
+        done = hs.handle(dict(_request("record_apply", project="mockups", environment="sandbox",
+                                       commit=DEV_COMMIT), now=later, caller=None), str(self.home))
+        self.assertTrue(done["result"]["recorded"], done)
+        after = self.run_op("list")["result"]["records"][0]
+        self.assertEqual(after["commit"], DEV_COMMIT)
+        self.assertEqual(after["updated_at"], later)
+        for key in ("kind", "lifetime", "lifetime_source", "ttl_seconds", "expires_at", "owner",
+                    "classified_by", "classified_at", "created_at", "hostnames", "extended_count"):
+            self.assertEqual(after[key], before[key], key)
+        audit = [json.loads(line) for line in
+                 (self.home / "runtime" / "target-lifetimes" / "audit.jsonl").read_text().splitlines()]
+        self.assertEqual(audit[-1]["op"], "record_apply")
+        self.assertEqual((audit[-1]["commit"], audit[-1]["previous"]), (DEV_COMMIT, COMMIT))
+
+    def test_record_apply_needs_the_server_summary_of_that_succeeded_apply(self):
+        self.write_summary(COMMIT)
+        self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted")
+        for commit, status in ((DEV_COMMIT, "applying"), (DEV_COMMIT, "unverified"),
+                               ("e" * 40, "succeeded")):
+            with self.subTest(commit=commit, status=status):
+                self.write_summary(DEV_COMMIT, status)
+                result = self.run_op("record_apply", project="mockups", environment="sandbox", commit=commit)
+                self.assertFalse(result["result"]["recorded"], result)
+                self.assertEqual(self.run_op("list")["result"]["records"][0]["commit"], COMMIT)
+        self.assertEqual(self.run_op("record_apply", project="mockups", environment="sandbox",
+                                     commit="short")["code"], hs.REQUEST_INVALID)
+
+    def test_record_apply_leaves_stack_records_alone(self):
+        self.run_op("claim", record=stack_record())
+        self.write_summary(DEV_COMMIT, project="hub-demo")
+        result = self.run_op("record_apply", project="hub-demo", environment="sandbox", commit=DEV_COMMIT)
+        self.assertFalse(result["result"]["recorded"])
+        self.assertEqual(self.run_op("list")["result"]["records"][0]["commit"], COMMIT)
+
+    def test_classify_prefers_the_server_summary_commit_over_controller_history(self):
+        self.write_summary(DEV_COMMIT)
+        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted",
+                           commit=COMMIT)
+        self.assertEqual(done["result"]["record"]["commit"], DEV_COMMIT)
+
+    def test_classify_keeps_controller_commit_without_a_succeeded_server_summary(self):
+        self.write_summary(DEV_COMMIT, status="failed")
+        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted",
+                           commit=COMMIT)
+        self.assertEqual(done["result"]["record"]["commit"], COMMIT)
+
     def test_record_merge_only_for_the_checked_commit(self):
         self.run_op("claim", record=stack_record())
         evidence = {"merged": True, "dev_branch": "dev", "dev_commit": DEV_COMMIT}

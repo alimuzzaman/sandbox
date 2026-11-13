@@ -35,7 +35,18 @@ Observation, validation and planning keep their existing paths. Joined
 metadata-only server selection and one no-source retained job. It needs no
 local checkout, stack registry or hosting history. The client waits for the
 original job and returns its validated capture and underlying exit code.
-`--target PROJECT/ENVIRONMENT` is also supported. Non-joined targets keep their existing controller execution paths.
+`--target PROJECT/ENVIRONMENT` is also supported. A non-stack target is
+selectable only once it has a lifetime record: run
+`sb host classify --remote NAME --target PROJECT/ENVIRONMENT --lifetime hosted --confirm`
+(or `permanent`) once after its first apply. `host apply` never creates that
+record. After a succeeded apply it only moves an existing classified record's
+commit to the applied one, without changing its lifetime or TTL. Classify takes
+the commit from the server's own `summary.json` when that shows a succeeded
+apply, so classifying from a controller with older local history still matches.
+Without a record, exec refuses with `host_server_target_evidence_unavailable`
+and a hint to classify the target. A busy target or one whose last apply did not
+succeed refuses with `host_target_busy`. Non-joined targets keep their existing
+controller execution paths.
 
 The default batch contract transfers original non-TTY stdin once through the
 SDK's hash-bound anonymous input facility, bounded to 1 MiB and a 30-second

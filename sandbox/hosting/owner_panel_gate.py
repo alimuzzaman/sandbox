@@ -23,8 +23,8 @@ from sandbox.hosting.share import ShareRefusal
 
 _SEAL = object()
 _LIVE = {}  # Actual Popen handles only. Never reconstruct one from a pid/body.
-_LOADER = ("import base64,sys; "
-           "exec(compile(base64.b64decode(sys.argv[1]),'login_service','exec')) "
+_LOADER = ("import base64,sys,zlib; "
+           "exec(compile(zlib.decompress(base64.b64decode(sys.argv[1])),'login_service','exec')) "
            "if sys.stdin.buffer.read(1) == b'\\x01' else sys.exit(73)")
 
 

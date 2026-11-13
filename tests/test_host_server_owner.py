@@ -764,13 +764,18 @@ class ServerSelectionTests(OwnerTargetTests):
     def ended_exec_registry(self, job_id):
         from sandbox.application import server_cli_exec_recovery as recovery
         now = datetime.now(timezone.utc)
-        row = {"job_id": job_id, "kind": "server-cli", "target_kind": "local", "lifecycle": "timed_out",
+        # A top-level exec job that failed by itself (its command reached its own
+        # --timeout), as the supervisor records it.
+        row = {"job_id": job_id, "kind": "server-cli", "target_kind": "local", "lifecycle": "failed",
+            "parent_job_id": None,
             "started_at": (now - timedelta(minutes=10)).isoformat(), "finished_at": (now - timedelta(minutes=1)).isoformat(),
             "result_json": json.dumps({"owned_work_stopped": True, "stop_error": None, "owned_descendants": []}),
-            "execution_policy_provenance_json": json.dumps({"server_cli.exec_target": "project/dev"}), "process": {}}
+            "execution_policy_provenance_json": json.dumps({"server_cli.exec_target": "project/dev"}),
+            "process": {"supervisor_start_identity": "supervisor-start", "child_start_identity": "child-start"}}
         registry = Mock()
         registry.list.return_value = [row]
         registry.snapshot.return_value = row
+        registry.children.return_value = []
         self.enterContext(patch.object(recovery, "_registry", return_value=registry))
         self.enterContext(patch.object(recovery, "_ceased", return_value={}))
         return recovery.exec_lease_owner(job_id)

@@ -211,7 +211,7 @@ class ExecClientTests(unittest.TestCase):
                 return {"ok": True, "jobs": rows}
             if argv[0] == "job-status":
                 return {"ok": True, "job_id": argv[1], "request_id": "original-exec", "kind": "server-cli",
-                        "source_commit": source["commit"], "source_identity": source["identity"],
+                        "target_kind": "local", "source_commit": source["commit"], "source_identity": source["identity"],
                         "execution_policy_provenance_json": json.dumps(provenance or proof)}
             raise AssertionError("lookup is read-only: " + argv[0])
         from sandbox.transports.remote_jobs import RemoteJobTransport

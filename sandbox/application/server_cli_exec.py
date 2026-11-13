@@ -392,7 +392,7 @@ def recover_server_cli_exec_acceptance(remote_name, unknown, *, budget_seconds=A
         retained = json.loads(state['execution_policy_provenance_json'])
         if (state.get('ok') is not True or state.get('job_id') != job_id
                 or state.get('request_id') != request_id or state.get('kind') != KIND
-                or not isinstance(retained, dict)
+                or state.get('target_kind') != 'local' or not isinstance(retained, dict)
                 or any(retained.get(key) != value for key, value in proof.items())
                 or state.get('source_commit') != source.get('commit')
                 or state.get('source_identity') != source.get('identity')):

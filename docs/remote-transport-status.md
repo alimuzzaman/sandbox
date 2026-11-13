@@ -207,8 +207,8 @@ session died while the Mac slept, the client reads the server's job ledger once
 before reporting, within 15 seconds: `job-list --kind server-cli`, then
 `job-status` of the matching job. If exactly one server-cli job carries this
 request ID and its retained provenance and source equal what this client sent,
-the result reports `acceptance: accepted` with its `job_id` and the client reads
-the job's result as usual. No match, more than one match, a different request or
+the client reads the job's result as usual; if that read fails, it reports
+`acceptance: accepted` with the `job_id` and a `sb job-status` hint. No match, more than one match, a different request or
 a failed lookup stays `server_cli_exec_acceptance_unknown`. The lookup never
 submits again and never falls back to the controller.
 

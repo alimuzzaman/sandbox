@@ -151,7 +151,8 @@ class AcceptanceLookupTests(unittest.TestCase):
 
     def test_status_for_another_request_or_job_stays_unknown(self):
         for changes in ({'request_id': 'another-request'}, {'job_id': OTHER_JOB}, {'kind': 'test'},
-                        {'ok': False}, {'execution_policy_provenance_json': None}):
+                        {'ok': False}, {'execution_policy_provenance_json': None},
+                        {'target_kind': 'remote'}, {'target_kind': None}):
             with self.subTest(changes=changes):
                 self.state = status(**changes)
                 self.assertIsNone(self.recover())

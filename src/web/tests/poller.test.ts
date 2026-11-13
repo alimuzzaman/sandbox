@@ -299,9 +299,13 @@ test("withTimeout passes through a value that arrives first", async () => {
   assert.equal(res, "ok");
 });
 
-test("a timed-out action is not called failed", async () => {
+test("transport failures leave action completion unconfirmed", async () => {
   const never = new Promise<string>(() => {});
   const timedOut = await withTimeout(never, 1).catch((error: unknown) => error);
-  assert.match(actionFailureText(timedOut), /may still be running/);
-  assert.equal(actionFailureText(new Error("boom")), "request failed: Error: boom");
+  for (const error of [timedOut, new Error("boom")]) {
+    assert.match(actionFailureText(error), /Outcome unconfirmed/);
+    assert.match(actionFailureText(error), /may have been accepted/);
+    assert.match(actionFailureText(error), /No resubmission/);
+    assert.doesNotMatch(actionFailureText(error), /request failed|boom/);
+  }
 });

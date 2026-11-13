@@ -2992,7 +2992,8 @@ def _host_apply_argv(validated: dict, remote_name: str, args=None) -> list[str]:
 
 def _host_delivery_guidance(validated: dict, remote_name: str, *,
                             request_id: str | None = None, source_commit: str | None = None,
-                            timeout: int = 900, json_output: bool = False, apply_args=None) -> list[str]:
+                            timeout: int = 900, json_output: bool = False, apply_args=None,
+                            source_branch_token: str | None = None) -> list[str]:
     """A reviewable argv template, never an implicit job submission.
 
     `sb host stack up` submits exactly this argv, with its own request id,
@@ -3012,6 +3013,8 @@ def _host_delivery_guidance(validated: dict, remote_name: str, *,
     from sandbox.hosting.server_cli_target import selected_owner_target
     owner_target = selected_owner_target(remote_name)
     apply_argv = _host_apply_argv(validated, remote_name, apply_args)
+    if source_branch_token is not None:
+        apply_argv.append(source_branch_token)
     if owner_target is not None:
         from sandbox.application.server_cli import local_server_cli_submission_argv
         context = owner_target.require_current()
@@ -3032,21 +3035,39 @@ def _submit_existing_owner_apply(validated: dict, args) -> bool:
     """An outer owner CLI is a parent, never application-source authority."""
     from sandbox.hosting.server_cli_target import selected_owner_target
     target = selected_owner_target(args.remote)
-    if target is None or not validated.get("stack"):
+    if target is None:
         return False
     context = target.require_current()
-    if Path(context.project_root).resolve() == Path(validated['project_root']).resolve():
-        return False
+    source_branch_token = None
+    if validated.get("stack"):
+        if Path(context.project_root).resolve() == Path(validated['project_root']).resolve():
+            return False
+    else:
+        # Parentage comes from the kernel-proven retained row, never argv/env.
+        # A local child must pass ordinary admission before it can run effects.
+        if context.parent_job_id is not None:
+            _durable_host_context(validated['project_root'])
+            return False
+        from sandbox.hosting.server_cli_dispatch import bound_source_branch, SOURCE_BRANCH_OPTION
+        if bound_source_branch(validated['project_root']) is None:
+            raise hosting.HostingError('recovery_source_mismatch')
+        source_branch_token = next(value for value in context.argv
+                                   if value.startswith(SOURCE_BRANCH_OPTION + '='))
     dirty, untracked = remote.capture_uncommitted(validated['project_root'])
     if dirty or untracked:
         raise hosting.HostingError('recovery_source_dirty')
-    # Loading the rendered stack already constrained this source to its owned
-    # worktree. Submit while this genuine parent is live; do not replay a
-    # prepare command after that authority has ended.
+    # Stacks use their owned rendered worktree. Project-dir uses only the
+    # exact retained staged root/HEAD checked by bound_source_branch, never
+    # the parent's generic source identity as delivery authority. The local
+    # child must earn that authority through ordinary durable admission.
+    # Submit while this parent is live; never replay its prepare argv later.
     source_commit = _resolve_host_source_commit(validated['project_root'])
+    if not validated.get('stack') and source_commit != context.source_commit:
+        raise hosting.HostingError('recovery_source_mismatch')
+    _validate_apply_source(validated)
     argv = _host_delivery_guidance(validated, args.remote,
         request_id=context.request_id, source_commit=source_commit,
-        timeout=900, json_output=True, apply_args=args)
+        timeout=900, json_output=True, apply_args=args, source_branch_token=source_branch_token)
     from sandbox.commands.host_stack import _submit
     job_id = _submit(argv)
     print(json.dumps({"ok": True, "status": "accepted", "job_id": job_id,
@@ -8909,12 +8930,12 @@ def cmd_host(cfg, args) -> None:
         if local_images_digest is not None and isinstance(cfg, dict) \
                 and cfg.get("hostingImages") is not None:
             die("--local-images cannot satisfy the declared hostingImages authority")
+        if _submit_existing_owner_apply(validated, args):
+            return
         try:
             branch = _validate_apply_source(validated)
         except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
             die(str(exc))
-        if _submit_existing_owner_apply(validated, args):
-            return
         eligibility = _host_recovery_eligibility(validated, args.remote, apply_args=args)
         if not eligibility["eligible"]:
             if args.json:

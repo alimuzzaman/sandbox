@@ -9,8 +9,8 @@ Confirmed joined Tailscale stack-up and apply requests select the fixed installe
 job before controller configuration and provider-key preflight. Every admitted
 operator has the existing Linux owner's Sandbox rights. No controller allowlist,
 owner SSH private key, managed installation or copied laptop provider key is a
-prerequisite. An explicit `--credential-scope personal-local` retains the existing
-controller credential workflow. The separate explicit registered-profile contract
+prerequisite. Joined remotes refuse an explicit `--credential-scope personal-local`: joined
+hosting requires server-held credentials. The separate explicit registered-profile contract
 remains separate and cannot silently become this execution path.
 
 Stack creation resolves `--ref` on the invoking controller before submission and
@@ -35,8 +35,7 @@ Observation, validation and planning keep their existing paths. Joined
 metadata-only server selection and one no-source retained job. It needs no
 local checkout, stack registry or hosting history. The client waits for the
 original job and returns its validated capture and underlying exit code.
-`--target PROJECT/ENVIRONMENT` is also supported. Non-joined targets and explicit
-personal-local execution keep their existing paths.
+`--target PROJECT/ENVIRONMENT` is also supported. Non-joined targets keep their existing controller execution paths.
 
 The default batch contract transfers original non-TTY stdin once through the
 SDK's hash-bound anonymous input facility, bounded to 1 MiB and a 30-second
@@ -219,8 +218,8 @@ The minimal shared command hook is one optional `CommandSpec` field,
 after parsing, before configuration/migration/credential access. The call checks
 the selected command's handler and returns from CLI main only when it returns
 true. The access SDK already retains `args._server_cli_argv = tuple(raw_argv)`
-at that boundary. Exposing `--credential-scope personal-local` preserves an
-explicit controller execution choice; it requires no registered-profile fields.
+at that boundary. The parser exposes `--credential-scope personal-local`, but joined hosting
+refuses that override before submission; it does not select controller execution.
 
 Owned runtime files are `commands/hosting.py`, `commands/host_stack.py`,
 `commands/host_exec.py`, `hosting/host_exec.py`, `hosting/server_cli_dispatch.py`,
@@ -231,3 +230,21 @@ delta, rather than copying the whole feature's hosting or CLI files. The SDK
 owns `application/server_cli.py`, fixed job admission/supervision and core
 process/home delegates. Its actual installed parser, contract discovery and
 retained job authority must accompany these adapters.
+
+## Project-dir delivery children
+
+A source-bound project-dir apply requires both `job.server-cli-source-branch.v1`
+and `job.server-cli-project-dir-apply.v1` in `server_cli_apply_capabilities`,
+outside the strict job capability list. Older servers refuse before staging.
+The outer job submits one local durable child with the same staged root, clean
+HEAD, validated branch token and live parent. Retained parentage distinguishes
+the child even though its root equals its parent's root. The child must pass
+ordinary durable admission before effects; the outer never applies directly.
+The existing cleanup guard protects parent materialization while children run,
+and resource inventory protects live job roots. The child's original deadline
+and cancellation lineage remain enforced.
+
+`host recover` does not use ordinary apply admission or submit another apply;
+it keeps the recovery service's source/authority guards and bound-branch check.
+Rollback applies use the same nested apply path. This source fix has not been
+installed or exercised against a live host.

@@ -93,8 +93,9 @@ class SourceBranchTests(unittest.TestCase):
         base = {'schema_version': 1, 'target_identity': 'c' * 24, 'ownership_marker': 'a' * 24,
             'runtime_revision': 'b' * 24,
             'capabilities': [sdk.CONTRACT, 'job.acceptance-receipt.v1', 'job.source-content.v1']}
-        for apply_caps, accepted in ((None, False), ([], False), ('x', False),
-                                     ([dispatch.SOURCE_BRANCH_CONTRACT], True)):
+        for apply_caps, accepted in ((None, False), ([], False), ('x', False), ([{}], False),
+                                     ([dispatch.SOURCE_BRANCH_CONTRACT], False),
+                                     (['job.server-cli-source-branch.v1', 'job.server-cli-project-dir-apply.v1'], True)):
             caps = dict(base)
             if apply_caps is not None:
                 caps['server_cli_apply_capabilities'] = apply_caps
@@ -120,7 +121,7 @@ class SourceBranchTests(unittest.TestCase):
                 patch.object(sdk, '_receiver_routing_metadata', return_value={}), \
                 patch.object(dispatch, 'source_branch_contract_available', return_value=True):
             caps = sdk.capabilities()
-        self.assertEqual(caps['server_cli_apply_capabilities'], [dispatch.SOURCE_BRANCH_CONTRACT])
+        self.assertEqual(caps['server_cli_apply_capabilities'], [dispatch.SOURCE_BRANCH_CONTRACT, 'job.server-cli-project-dir-apply.v1'])
         # Older controllers refuse unknown entries here; keep them working.
         self.assertNotIn(dispatch.SOURCE_BRANCH_CONTRACT, caps['capabilities'])
 
@@ -146,6 +147,93 @@ class SourceBranchTests(unittest.TestCase):
         with patch.object(sdk, 'server_cli_context_if_selected', return_value=context), \
                 patch.object(sdk, 'validate_owner_current', return_value=context):
             return host_commands._validate_apply_source(validated)
+
+    def nested_submission(self, staged, context, *, stack=None):
+        from unittest.mock import Mock
+        target = Mock()
+        target.require_current.return_value = context
+        validated = {'project_root': str(staged), 'environment': 'sandbox',
+                     'deploy': {'allowed_branches': ['main'], 'require_clean': True}}
+        if stack is not None:
+            validated['stack'] = stack
+        self.enterContext(patch('sandbox.hosting.server_cli_target.selected_owner_target', return_value=target))
+        self.enterContext(patch.object(sdk, 'server_cli_context_if_selected', return_value=context))
+        self.enterContext(patch.object(sdk, 'validate_owner_current', return_value=context))
+        self.enterContext(patch.object(sdk, 'installed_cli', return_value=Path(context.owner.executable)))
+        submit = self.enterContext(patch('sandbox.commands.host_stack._submit', return_value='e' * 32))
+        return validated, submit
+
+    def test_outer_project_dir_submits_one_source_bound_local_child(self):
+        staged, context = self.receiver()
+        validated, submit = self.nested_submission(staged, context)
+        args = self.arguments(server_cli_source_branch='untrusted-user-value')
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(host_commands._submit_existing_owner_apply(validated, args))
+        submit.assert_called_once()
+        argv = submit.call_args.args[0]
+        self.assertIn('--local', argv)
+        self.assertIn('--server-cli', argv)
+        for option, value in (('--project-dir', str(staged)), ('--source-commit', self.head),
+                              ('--parent-job-id', context.job_id)):
+            self.assertEqual(argv[argv.index(option) + 1], value)
+        self.assertEqual(argv.count(context.argv[-1]), 1)
+        self.assertNotIn('untrusted-user-value', argv)
+        # Revalidate the forwarded token against the child's own context.
+        child = replace(context, job_id='e' * 32, argv=tuple(argv[argv.index('--') + 1:]))
+        object.__setattr__(child, 'parent_job_id', context.job_id)
+        with patch.object(sdk, 'server_cli_context_if_selected', return_value=child), \
+                patch.object(sdk, 'validate_owner_current', return_value=child):
+            self.assertEqual(host_commands._validate_apply_source(validated), 'main')
+            self.assertTrue(self.recovery(staged, child))
+
+    def test_project_dir_child_requires_admission_and_never_resubmits(self):
+        staged, context = self.receiver()
+        object.__setattr__(context, 'parent_job_id', 'f' * 32)
+        validated, submit = self.nested_submission(staged, context)
+        with patch.object(host_commands, '_durable_host_context', return_value={'job_id': context.job_id}) as admit:
+            self.assertFalse(host_commands._submit_existing_owner_apply(validated, self.arguments()))
+        admit.assert_called_once_with(str(staged))
+        from sandbox.delivery.admission import AdmissionError
+        with patch.object(host_commands, '_durable_host_context', side_effect=AdmissionError('recovery_source_mismatch')):
+            with self.assertRaises(AdmissionError):
+                host_commands._submit_existing_owner_apply(validated, self.arguments())
+        submit.assert_not_called()
+
+    def test_outer_project_dir_refuses_dirty_missing_invalid_or_changed_source(self):
+        staged, original = self.receiver()
+        cases = [replace(original, argv=('host', 'apply')),
+                 replace(original, argv=('host', 'apply', '--server-cli-source-branch={')),
+                 replace(original, source_commit='f' * 40),
+                 replace(original, project_root=str(self.client))]
+        for context in cases:
+            with self.subTest(context=context):
+                validated, submit = self.nested_submission(staged, context)
+                with self.assertRaises((hosting.HostingError, dispatch.SourceBranchBindingError)):
+                    host_commands._submit_existing_owner_apply(validated, self.arguments())
+                submit.assert_not_called()
+        validated, submit = self.nested_submission(staged, original)
+        (staged / 'dirty').write_text('dirty')
+        with self.assertRaisesRegex(hosting.HostingError, 'recovery_source_dirty'):
+            host_commands._submit_existing_owner_apply(validated, self.arguments())
+        submit.assert_not_called()
+
+    def test_stack_nested_submission_keeps_rendered_source_and_no_branch_token(self):
+        staged, context = self.receiver()
+        # Stack source is a separately owned rendered root, unlike project-dir.
+        context = replace(context, project_root=str(self.client))
+        validated, submit = self.nested_submission(staged, context,
+            stack={'commit': self.head, 'ref_branch': 'main'})
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(host_commands._submit_existing_owner_apply(validated, self.arguments()))
+        argv = submit.call_args.args[0]
+        self.assertEqual(argv[argv.index('--project-dir') + 1], str(staged))
+        self.assertEqual(argv[argv.index('--source-commit') + 1], self.head)
+        self.assertFalse(any(value.startswith(dispatch.SOURCE_BRANCH_OPTION) for value in argv))
+        context = replace(context, project_root=str(staged))
+        validated, submit = self.nested_submission(staged, context,
+            stack={'commit': self.head, 'ref_branch': 'main'})
+        self.assertFalse(host_commands._submit_existing_owner_apply(validated, self.arguments()))
+        submit.assert_not_called()
 
     def test_detached_staged_checkout_uses_the_bound_branch(self):
         staged, context = self.receiver()

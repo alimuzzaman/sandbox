@@ -207,6 +207,12 @@ class RetainedServerCLIContextTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['env']['HOME'], OWNER.home)
         self.assertEqual(run.call_count, 1)
 
+    def test_parentage_is_read_from_the_retained_process_bound_row(self):
+        outer, _run = self.observe()
+        self.assertIsNone(outer.parent_job_id)
+        child, _run = self.observe(row_fields={'parent_job_id': 'e' * 32})
+        self.assertEqual(child.parent_job_id, 'e' * 32)
+
     def test_selector_digest_is_read_only_after_original_retained_process_proof(self):
         digest = 'sha256:' + 'a' * 64
         context, _run = self.observe(provenance_fields={'server_cli.target_selector_digest': digest})

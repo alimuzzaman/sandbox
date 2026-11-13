@@ -16,6 +16,7 @@ STACK_REF_CONTRACT = 'job.server-cli-stack-ref.v1'
 # Advertised outside the job ``capabilities`` list: older controllers refuse
 # any contract they do not know there, which would break their job-start.
 SOURCE_BRANCH_CONTRACT = 'job.server-cli-source-branch.v1'
+NESTED_APPLY_CONTRACT = 'job.server-cli-project-dir-apply.v1'
 SOURCE_BRANCH_OPTION = '--server-cli-source-branch'
 _SOURCE_BRANCH_ACTIONS = frozenset({'apply', 'recover'})
 

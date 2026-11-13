@@ -536,6 +536,19 @@ class HostStoreTests(unittest.TestCase):
                 done = self.run_op("classify", project="mockups", environment="sandbox",
                                    lifetime="hosted", commit=COMMIT, hostnames=old)
                 self.assertEqual(done["result"]["record"]["hostnames"], sorted(old))
+        # A summary with an invalid commit, or for another target, supplies no hostnames.
+        for commit in (None, "not-a-commit"):
+            with self.subTest(commit=commit):
+                self.write_summary(commit, routes=current)
+                done = self.run_op("classify", project="mockups", environment="sandbox",
+                                   lifetime="hosted", commit=COMMIT, hostnames=old)
+                self.assertEqual(done["result"]["record"]["hostnames"], sorted(old))
+        path = self.write_summary(DEV_COMMIT, routes=current)
+        path.write_text(path.read_text().replace('"project": "mockups"', '"project": "other"'))
+        self.assertIn('"project": "other"', path.read_text())
+        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted",
+                           commit=COMMIT, hostnames=old)
+        self.assertEqual(done["result"]["record"]["hostnames"], sorted(old))
 
     def test_classify_keeps_controller_commit_without_a_succeeded_server_summary(self):
         self.write_summary(DEV_COMMIT, status="failed")

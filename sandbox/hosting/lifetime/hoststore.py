@@ -1086,8 +1086,11 @@ def _summary_commit(summary):
 
 
 def _summary_hostnames(summary):
-    """The route hostnames of a succeeded apply's summary, or ``None`` if it lists none."""
-    routes = summary.get("routes") if summary else None
+    """The route hostnames of a succeeded apply's summary, or ``None`` if it lists
+    none or its commit is not a valid one."""
+    if _summary_commit(summary) is None:
+        return None
+    routes = summary.get("routes")
     if not isinstance(routes, list) or not routes:
         return None
     names = [route.get("hostname") if isinstance(route, dict) else None for route in routes]

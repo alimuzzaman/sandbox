@@ -104,6 +104,62 @@ class OwnerPanelEmailTests(unittest.TestCase):
         self.assertTrue(self.create()["ok"])
         self.load.assert_not_called()
 
+    def test_default_or_alias_change_at_lock_entry_refuses_before_mint_or_effect(self):
+        alias = "alias/example-site/production"
+        self.grant.snapshot["native_keys"] = [self.key, alias]
+        entry = self.validated["login_service"]["entries"]["app"]
+        entry["magic_link"]["denied_emails"] = ["denied@example.test"]
+        for case in ("alias_conflict", "missing", "invalid", "denied"):
+            with self.subTest(case=case):
+                self.state["hosts"] = {key: {"login_default_email": "teammate@example.test"}
+                                       for key in (self.key, alias)}
+
+                @contextlib.contextmanager
+                def changed_at_lock_entry(*args):
+                    if case == "alias_conflict":
+                        self.state["hosts"][alias]["login_default_email"] = "other@example.test"
+                    else:
+                        value = {"missing": None, "invalid": "invalid-address",
+                                 "denied": "denied@example.test"}[case]
+                        for record in self.state["hosts"].values():
+                            record["login_default_email"] = value
+                    yield
+
+                with patch.object(owner, "_held", side_effect=changed_at_lock_entry), \
+                        patch.object(owner.share, "mint", wraps=owner.share.mint) as mint:
+                    with self.assertRaises(CoverageRefusal) as error:
+                        self.create()
+                    self.assertIn("share_email_unavailable", {gap["code"] for gap in error.exception.gaps})
+                    mint.assert_not_called()
+                self.effect.assert_not_called()
+                self.store.save.assert_not_called()
+                self.audit.assert_not_called()
+
+    def test_replaced_default_at_lock_entry_builds_page_for_locked_identity(self):
+        locked = False
+        reads = []
+
+        @contextlib.contextmanager
+        def changed_at_lock_entry(*args):
+            nonlocal locked
+            self.state["hosts"][self.key]["login_default_email"] = "updated@example.test"
+            locked = True
+            try:
+                yield
+            finally:
+                locked = False
+
+        def read_state():
+            reads.append(locked)
+            return copy.deepcopy(self.state)
+
+        self.load.side_effect = read_state
+        with patch.object(owner, "_held", side_effect=changed_at_lock_entry):
+            self.assertTrue(self.create()["ok"])
+        self.assertEqual(reads, [True])
+        actions = self.effect.call_args.kwargs["payload"]["stack"]["sign_in"]
+        self.assertEqual(actions[0], {"entry": "app", "email": "updated@example.test"})
+
 
 if __name__ == "__main__":
     unittest.main()

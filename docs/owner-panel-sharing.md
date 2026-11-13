@@ -15,6 +15,10 @@ The post-6c7a643 source correction accepts the documented combined WordPress and
 named-entry declaration. Owner-local magic-link actions resolve the existing saved
 email from that target's native owner-state records. Conflicting alias defaults,
 missing/invalid addresses and per-entry denied addresses stop creation before mint.
+Saved defaults are read and resolved after all member and native-key writer locks
+are held. Identity refusals precede grant allocation. Final private pages are built
+and validated from those locked identities before any new journal save or
+gate/WordPress effect.
 This does not add an email body field, named-person admission, a guessed identity or
 a new execution grant. The selected address travels only in the private gate page;
 it is absent from the operation journal, audit and public response.

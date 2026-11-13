@@ -181,57 +181,61 @@ def _create(store, request, parent, rows):
     for gap in stack_page.coverage_all(contexts[0], contexts[1:]):
         gaps.append({"stack": gap.slug, "target": gap.remote, "hostname": gap.hostname,
                      "piece": "access", "code": gap.code, "fix": gap.guidance})
-    actions = {}
-    for member, context in zip(members, contexts):
-        rows = []
-        names = context.declaration["share"].get("stack_sign_in", [])
-        try:
-            saved = (_saved_email(member) if any(context.declaration["entries"][name]["mode"] == "magic_link"
-                                               for name in names) else None)
-        except Exception:
-            gaps.append({"stack": context.slug, "target": context.remote, "piece": "access",
-                "code": "share_email_unavailable", "fix": "restore one allowed saved email for this exact target"})
-            saved = None
-        for name in names:
-            entry = context.declaration["entries"][name]
-            action = {"entry": name}
-            if entry["mode"] == "magic_link":
-                try:
-                    action["email"] = login.resolve_email(entry, requested=None, replace_default=False,
-                        saved=saved, stdin=stack_page._NoPrompt(), stderr=io.StringIO()).address
-                except Exception:
-                    gaps.append({"stack": context.slug, "target": context.remote, "piece": "access",
-                        "code": "share_email_unavailable", "fix": "save an allowed login email for this exact target"})
-            rows.append(action)
-        actions[(context.remote, context.slug)] = rows
     if gaps:
         raise CoverageRefusal(gaps)
-    base_pages = stack_page.prepare_pages(contexts[0], contexts[1:], sign_ins=actions)
-    until = min(login.enabled_until_epoch(member.validated["login_service"]) for member in members)
-    requests = [share.LinkRequest("share", "stack", share.STACK_PAGE_PATH,
-                share.DEFAULT_TTL_SECONDS, None) for _ in members]
-    issued = time.time()
-    minted = [share.mint(item, now=issued, ends_at=until) for item in requests]
     row = {"id": "a-" + uuid.uuid4().hex, "remote": request.remote, "stack": request.stack,
-        "phase": "prepared", "expires_at": min(item.expires_at for item in minted),
-        "bindings": [_binding(member) for member in members], "grants": [
+        "phase": "prepared", "bindings": [_binding(member) for member in members], "grants": []}
+    with _held(members, row):
+        # Resolve identity before grant allocation. Keep final page validation
+        # under the same target/alias locks and before the first journal save.
+        actions = {}
+        for member, context in zip(members, contexts):
+            rows = []
+            names = context.declaration["share"].get("stack_sign_in", [])
+            try:
+                saved = (_saved_email(member) if any(context.declaration["entries"][name]["mode"] == "magic_link"
+                                                   for name in names) else None)
+            except Exception:
+                gaps.append({"stack": context.slug, "target": context.remote, "piece": "access",
+                    "code": "share_email_unavailable", "fix": "restore one allowed saved email for this exact target"})
+                saved = None
+            for name in names:
+                entry = context.declaration["entries"][name]
+                action = {"entry": name}
+                if entry["mode"] == "magic_link":
+                    try:
+                        action["email"] = login.resolve_email(entry, requested=None, replace_default=False,
+                            saved=saved, stdin=stack_page._NoPrompt(), stderr=io.StringIO()).address
+                    except Exception:
+                        gaps.append({"stack": context.slug, "target": context.remote, "piece": "access",
+                            "code": "share_email_unavailable", "fix": "save an allowed login email for this exact target"})
+                rows.append(action)
+            actions[(context.remote, context.slug)] = rows
+        if gaps:
+            raise CoverageRefusal(gaps)
+        base_pages = stack_page.prepare_pages(contexts[0], contexts[1:], sign_ins=actions)
+        until = min(login.enabled_until_epoch(member.validated["login_service"]) for member in members)
+        requests = [share.LinkRequest("share", "stack", share.STACK_PAGE_PATH,
+                    share.DEFAULT_TTL_SECONDS, None) for _ in members]
+        issued = time.time()
+        minted = [share.mint(item, now=issued, ends_at=until) for item in requests]
+        row.update({"expires_at": min(item.expires_at for item in minted), "grants": [
             {"id": item.link_id, "expires_at": item.expires_at, "status": "planned",
              "target": f"{request.remote}/{member.snapshot['project']}/{member.snapshot['environment']}",
-             "wordpress": bool(member.validated.get("autologin"))} for member, item in zip(members, minted)]}
-    # Final pages are bounded before the journal or any gate/key effect.
-    pages = []
-    for index, context in enumerate(contexts):
-        companions = [{"slug": child.slug,
-            "target": f"{child.remote}/{member.snapshot['project']}/{member.snapshot['environment']}",
-            "hostname": child.declaration["share"]["hostname"], "link_id": child_link.link_id,
-            "expires_at": child_link.expires_at, "token": child_link.token,
-            "title": prepared["title"], "hosts": prepared["hosts"], "notes": prepared["notes"]}
-            for child, child_link, member, prepared in zip(contexts[1:], minted[1:], members[1:], base_pages[1:])] if index == 0 else []
-        page = stack_page.build_v2(context, sign_in=actions[(context.remote, context.slug)], companions=companions)
-        pages.append(stack_page.with_key(page, minted[index].link_id))
-    for page, item in zip(pages, minted):
-        stack_page.gate_record(page, "share", item.link_id)
-    with _held(members, row):
+             "wordpress": bool(member.validated.get("autologin"))} for member, item in zip(members, minted)]})
+        # Final pages are bounded before the journal or any gate/key effect.
+        pages = []
+        for index, context in enumerate(contexts):
+            companions = [{"slug": child.slug,
+                "target": f"{child.remote}/{member.snapshot['project']}/{member.snapshot['environment']}",
+                "hostname": child.declaration["share"]["hostname"], "link_id": child_link.link_id,
+                "expires_at": child_link.expires_at, "token": child_link.token,
+                "title": prepared["title"], "hosts": prepared["hosts"], "notes": prepared["notes"]}
+                for child, child_link, member, prepared in zip(contexts[1:], minted[1:], members[1:], base_pages[1:])] if index == 0 else []
+            page = stack_page.build_v2(context, sign_in=actions[(context.remote, context.slug)], companions=companions)
+            pages.append(stack_page.with_key(page, minted[index].link_id))
+        for page, item in zip(pages, minted):
+            stack_page.gate_record(page, "share", item.link_id)
         store.save(row)
         for index in [*range(1, len(members)), 0]:
             member, item, page = members[index], minted[index], pages[index]

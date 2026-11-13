@@ -100,9 +100,12 @@ each link is for.
 The installed owner panel uses this same saved target default for magic-link actions
 on a stack page. It reads only the admitted target's native records from the owner's
 managed state. If aliases have conflicting defaults, or the address is missing,
-invalid or denied for an entry, creation stops before minting. A controller laptop's
-saved default is not an owner-server default. No email is inferred from Git, the
-Tailnet peer or an application account, and no email enters the share journal or audit.
+invalid or denied for an entry, creation stops before minting.
+Address selection and final page validation hold all target and alias writer locks,
+so a concurrent saved-default update cannot leave the page using an older identity.
+A controller laptop's saved default is not an owner-server default. No email is
+inferred from Git, the Tailnet peer or an application account, and no email enters
+the share journal or audit.
 
 `denied_emails` refuses listed addresses at issue, from every source, with
 `email_denied`. Use it for accounts that hold more access than a normal user, and for

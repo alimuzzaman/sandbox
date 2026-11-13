@@ -193,6 +193,110 @@ class ExecClientTests(unittest.TestCase):
         self.submit.assert_called_once()
         self.read.assert_not_called()
 
+    def lost_receipt(self, rows, *, provenance=None, interrupt=None):
+        """Submit loses its receipt; a fake transport answers the ledger lookup."""
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+        proof = {"server_cli.remote_name": "box", "server_cli.target_selector_digest": "sha256:" + "d" * 64,
+                 "server_cli.stdin_sha256": "e" * 64, "server_cli.absolute_deadline_at": deadline}
+        source = {"commit": "c" * 40, "identity": "sha256:" + "b" * 64}
+        self.submit.side_effect = execute.ServerCLIExecAcceptanceUnknown("original-exec", expected={
+            "remote_name": "box", "selector_digest": proof["server_cli.target_selector_digest"],
+            "provenance": proof, "source": source})
+        self.controls = []
+        def control(_transport, remote_name, argv, *, timeout=25):
+            self.controls.append(list(argv))
+            if interrupt is not None:
+                raise interrupt
+            if argv[0] == "job-list":
+                return {"ok": True, "jobs": rows}
+            if argv[0] == "job-status":
+                return {"ok": True, "job_id": argv[1], "request_id": "original-exec", "kind": "server-cli",
+                        "source_commit": source["commit"], "source_identity": source["identity"],
+                        "execution_policy_provenance_json": json.dumps(provenance or proof)}
+            raise AssertionError("lookup is read-only: " + argv[0])
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        self.enterContext(patch.object(RemoteJobTransport, "control", new=control))
+
+    MATCH = {"job_id": "f" * 32, "request_id": "original-exec", "kind": "server-cli",
+             "source_commit": "c" * 40, "source_identity": "sha256:" + "b" * 64}
+
+    def run_failure(self):
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            dispatch.dispatch_host_if_selected(self.args)
+        return json.loads(output.getvalue()), failure.exception.code
+
+    def test_lost_receipt_with_one_ledger_match_reports_the_original_job_result(self):
+        self.lost_receipt([self.MATCH])
+        result = self.invoke()
+        self.assertEqual(result["job_id"], "f" * 32)
+        self.assertEqual(result["request_id"], "original-exec")
+        self.assertEqual(result["stdout"], "hello\n")
+        self.assertEqual([argv[0] for argv in self.controls], ["job-list", "job-status"])
+        self.submit.assert_called_once()
+        recovered = self.read.call_args.args[1]
+        self.assertEqual(recovered["job_id"], "f" * 32)
+        self.legacy_submit.assert_not_called()
+
+    def test_lost_receipt_match_whose_result_is_unreadable_is_accepted_with_an_inspect_hint(self):
+        self.lost_receipt([self.MATCH])
+        self.read.side_effect = execute.ServerCLIExecObservationUnavailable({"job_id": "f" * 32})
+        result, code = self.run_failure()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["acceptance"], "accepted")
+        self.assertEqual(result["code"], "server_cli_exec_observation_unavailable")
+        self.assertEqual(result["job_id"], "f" * 32)
+        self.assertIn("sb job-status", result["hint"])
+        self.submit.assert_called_once()
+
+    def test_lost_receipt_without_one_exact_ledger_match_stays_unknown(self):
+        match = self.MATCH
+        cases = {"none": [], "two": [match, {**match, "job_id": "e" * 32}],
+                 "prefix": [{**match, "request_id": "original-exec-2"}],
+                 "other kind": [{**match, "kind": "test"}]}
+        for name, rows in cases.items():
+            with self.subTest(name=name):
+                self.lost_receipt(rows)
+                result, code = self.run_failure()
+                self.assertEqual((result["acceptance"], code), ("unknown", 1))
+                self.assertEqual(result["code"], "server_cli_exec_acceptance_unknown")
+                self.assertNotIn("job_id", result)
+                self.assertNotIn("job-start", [argv[0] for argv in self.controls])
+        self.read.assert_not_called()
+        self.assertEqual(self.submit.call_count, len(cases))
+
+    def test_lost_receipt_match_with_a_different_request_digest_stays_unknown(self):
+        self.lost_receipt([self.MATCH], provenance={"server_cli.remote_name": "box",
+            "server_cli.target_selector_digest": "sha256:" + "d" * 64, "server_cli.stdin_sha256": "0" * 64,
+            "server_cli.absolute_deadline_at": "2026-11-13T12:19:23+00:00"})
+        result, _code = self.run_failure()
+        self.assertEqual(result["acceptance"], "unknown")
+        self.assertNotIn("job_id", result)
+        self.read.assert_not_called()
+
+    def test_lost_receipt_lookup_timeout_stays_unknown(self):
+        import subprocess
+        self.lost_receipt([], interrupt=subprocess.TimeoutExpired("ssh", 15))
+        result, code = self.run_failure()
+        self.assertEqual((result["acceptance"], code), ("unknown", 1))
+        self.assertEqual(self.controls, [["job-list", "--limit", "50", "--kind", "server-cli"]])
+        self.read.assert_not_called()
+        self.submit.assert_called_once()
+
+    def test_interrupt_during_lookup_stays_unknown_with_interrupt_status(self):
+        self.lost_receipt([], interrupt=KeyboardInterrupt())
+        result, code = self.run_failure()
+        self.assertEqual((result["acceptance"], code), ("unknown", 130))
+        self.read.assert_not_called()
+
+    def test_interrupt_during_submit_is_not_looked_up(self):
+        self.lost_receipt([])
+        self.submit.side_effect = KeyboardInterrupt()
+        result, code = self.run_failure()
+        self.assertEqual((result["acceptance"], code), ("unknown", 130))
+        self.assertEqual(self.controls, [])
+        self.read.assert_not_called()
+
     def test_observation_failure_preserves_known_job_and_does_not_become_acceptance_unknown(self):
         self.read.side_effect = execute.ServerCLIExecObservationUnavailable(self.receipt)
         output = io.StringIO()

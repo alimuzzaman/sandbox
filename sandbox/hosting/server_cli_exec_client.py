@@ -48,6 +48,8 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
         "host_target_busy": "the target is being applied or reaped, or its last apply did not succeed; "
             "check sb host status before retrying",
         "host_target_invalid": "check --target, --name and --environment",
+        "server_cli_exec_observation_unavailable":
+            "inspect it with sb job-status JOB_ID --remote NAME; do not replay it",
     }
     if getattr(args, "name", None):
         # Stacks get their lifetime record from sb host stack up, never classify.
@@ -179,7 +181,7 @@ def dispatch_exec_if_selected(args) -> bool:
         _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
 
     from sandbox.application.server_cli_exec import (
-        submit_server_cli_exec, read_server_cli_exec_result,
+        submit_server_cli_exec, read_server_cli_exec_result, recover_server_cli_exec_acceptance,
         ServerCLIExecAcceptanceUnknown, ServerCLIExecObservationUnavailable)
     from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
     receipt = None
@@ -190,8 +192,16 @@ def dispatch_exec_if_selected(args) -> bool:
                 output_mode="artifact")
     except (ServerCLIUnavailable, AnonymousInputUnavailable):
         _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
-    except ServerCLIExecAcceptanceUnknown:
-        _fail(args, "server_cli_exec_acceptance_unknown", request_id, acceptance="unknown")
+    except ServerCLIExecAcceptanceUnknown as unknown:
+        # The receipt was lost, which is not a refusal. Ask the server's ledger
+        # once, read-only, for this exact request before reporting unknown.
+        try:
+            receipt = recover_server_cli_exec_acceptance(args.remote, unknown)
+        except KeyboardInterrupt:
+            _fail(args, "server_cli_exec_acceptance_unknown", request_id,
+                  acceptance="unknown", exit_code=130)
+        if receipt is None:
+            _fail(args, "server_cli_exec_acceptance_unknown", request_id, acceptance="unknown")
     except KeyboardInterrupt:
         _fail(args, "server_cli_exec_acceptance_unknown", request_id,
               acceptance="unknown", exit_code=130)

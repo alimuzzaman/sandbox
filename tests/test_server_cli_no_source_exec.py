@@ -185,6 +185,23 @@ class NoSourceClientTests(unittest.TestCase):
             self.invoke(terminated='timeout')
         self.assertEqual(len(self.calls), 1)
 
+    def test_unknown_acceptance_carries_the_submitted_request_for_a_ledger_lookup(self):
+        with self.assertRaises(execute.ServerCLIExecAcceptanceUnknown) as failure:
+            self.invoke(terminated='timeout')
+        parts = shlex.split(self.calls[0][0][-1])
+        selected = json.loads(parts[parts.index('--server-cli-exec-selector') + 1])
+        expected = failure.exception.expected
+        self.assertEqual(expected['remote_name'], 'box')
+        self.assertEqual(expected['selector_digest'], snapshot()['selector_digest'])
+        self.assertEqual(expected['source'], {'commit': snapshot()['source_commit'],
+            'identity': 'sha256:' + hashlib.sha256(snapshot()['source_dir'].encode()).hexdigest()})
+        proof = expected['provenance']
+        self.assertEqual(proof['server_cli.stdin_sha256'], selected['stdin_sha256'])
+        self.assertEqual(proof['server_cli.absolute_deadline_at'], selected['deadline_at'])
+        self.assertEqual(proof['server_cli.target_selector_digest'], snapshot()['selector_digest'])
+        self.assertEqual(proof['server_cli.remote_name'], 'box')
+        self.assertEqual(len(self.calls), 1)
+
     def test_explicit_preacceptance_refusal_remains_distinct(self):
         with self.assertRaises(ServerCLIUnavailable):
             self.invoke(payload={'ok': False, 'status': 'refused', 'code': 'server_cli_exec_unavailable'})

@@ -207,8 +207,11 @@ def receive_server_cli_exec(args, *, stdin_fd):
 
 class ServerCLIExecAcceptanceUnknown(RuntimeError):
     code = 'acceptance_unknown'
-    def __init__(self, request_id):
+    def __init__(self, request_id, *, expected=None):
         self.request_id = request_id
+        # What the one submission bound (remote, selector digest, provenance and
+        # source). Only a ledger row carrying exactly these may recover it.
+        self.expected = expected
         super().__init__('server exec acceptance is unknown; retain this request and inspect the server ledger before any replay')
 
 
@@ -281,6 +284,20 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             'target_metadata': validate_target_metadata({key: record[key] for key in
                 ('origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port') if key in record}),
             'stdin_sha256': original_input.binding['sha256'], 'stdin_size': original_input.binding['size']}
+        expected = {'server_cli.target_identity': owner.target_identity,
+            'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
+            'server_cli.remote_name': remote_name, 'server_cli.target_selector_digest': snapshot['selector_digest'],
+            'server_cli.exec_service': service, 'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
+            'server_cli.output_contract': selector['output_contract'],
+            'server_cli.stdin_sha256': original_input.binding['sha256'],
+            'server_cli.stdin_size': str(original_input.binding['size']),
+            'server_cli.absolute_deadline_at': deadline.isoformat()}
+        expected_source = {'commit': snapshot['source_commit'],
+            'identity': 'sha256:' + hashlib.sha256(snapshot['source_dir'].encode()).hexdigest()}
+        def unknown():
+            return ServerCLIExecAcceptanceUnknown(request_id, expected={'remote_name': remote_name,
+                'selector_digest': snapshot['selector_digest'], 'provenance': dict(expected),
+                'source': dict(expected_source)})
         command = (['--strict-runtime'] if strict_requested() else []) + [
             'job-start', '--local', '--server-cli', '--request-id', request_id,
             '--server-cli-exec-selector', json.dumps(selector, sort_keys=True, separators=(',', ':')),
@@ -291,34 +308,99 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             env={'HOME': str(Path.home()), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LANG': 'C.UTF-8'},
             stdin=original_input.fileno(), timeout=remaining())
     if result.termination_reason is not None or result.stdout_truncated or result.stderr_truncated:
-        raise ServerCLIExecAcceptanceUnknown(request_id)
+        raise unknown()
     try:
         receipt = json.loads(result.stdout)
     except (ValueError, TypeError):
-        raise ServerCLIExecAcceptanceUnknown(request_id) from None
+        raise unknown() from None
     if (isinstance(receipt, dict) and receipt.get('ok') is False
             and receipt.get('status') == 'refused' and 'job_id' not in receipt):
         raise ServerCLIUnavailable('installed server exec refused before job acceptance')
     if (result.returncode or not isinstance(receipt, dict) or receipt.get('ok') is not True
             or receipt.get('request_id') != request_id or receipt.get('selector_digest') != snapshot['selector_digest']
             or not isinstance(receipt.get('job_id'), str) or re.fullmatch(r'[0-9a-f]{32}', receipt['job_id']) is None):
-        raise ServerCLIExecAcceptanceUnknown(request_id)
+        raise unknown()
     retained_policy = receipt.get('execution_policy')
     proof = retained_policy.get('provenance') if isinstance(retained_policy, dict) else None
-    expected = {'server_cli.target_identity': owner.target_identity,
-        'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
-        'server_cli.remote_name': remote_name, 'server_cli.target_selector_digest': snapshot['selector_digest'],
-        'server_cli.exec_service': service, 'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
-        'server_cli.output_contract': selector['output_contract'],
-        'server_cli.stdin_sha256': original_input.binding['sha256'],
-        'server_cli.stdin_size': str(original_input.binding['size']),
-        'server_cli.absolute_deadline_at': deadline.isoformat()}
     source = receipt.get('source')
     if (not isinstance(proof, dict) or any(proof.get(key) != value for key, value in expected.items())
-            or not isinstance(source, dict) or source.get('commit') != snapshot['source_commit']
-            or source.get('identity') != 'sha256:' + hashlib.sha256(snapshot['source_dir'].encode()).hexdigest()):
-        raise ServerCLIExecAcceptanceUnknown(request_id)
+            or not isinstance(source, dict) or source.get('commit') != expected_source['commit']
+            or source.get('identity') != expected_source['identity']):
+        raise unknown()
     return receipt
+
+
+ACCEPTANCE_LOOKUP_SECONDS = 15
+
+
+def recover_server_cli_exec_acceptance(remote_name, unknown, *, budget_seconds=ACCEPTANCE_LOOKUP_SECONDS):
+    """The original job's receipt from the server ledger, else None. Read-only.
+
+    For a submission whose receipt was lost, list recent server-cli jobs once
+    and read the status of the one row carrying this exact request_id. Return a
+    receipt only if exactly one row matches and its retained provenance and
+    source equal what this client submitted. Never resubmits and never falls
+    back to the controller. The budget is checked against both clocks, because
+    the monotonic clock stops while a Mac sleeps.
+    """
+    from sandbox.core import _remote
+    from sandbox.application.server_cli import KIND
+    from sandbox.transports.remote_jobs import RemoteJobTransport
+    request_id = getattr(unknown, 'request_id', None)
+    expected = getattr(unknown, 'expected', None)
+    if not isinstance(request_id, str) or not request_id or not isinstance(expected, dict):
+        return None
+    proof, source, digest = expected.get('provenance'), expected.get('source'), expected.get('selector_digest')
+    if (expected.get('remote_name') != remote_name or not isinstance(proof, dict) or not proof
+            or not isinstance(source, dict) or not isinstance(digest, str)
+            or proof.get('server_cli.target_selector_digest') != digest
+            or proof.get('server_cli.remote_name') != remote_name):
+        return None
+    wall_stop, clock_stop = time.time() + budget_seconds, time.monotonic() + budget_seconds
+    def remaining():
+        value = min(wall_stop - time.time(), clock_stop - time.monotonic())
+        if value <= 0:
+            raise TimeoutError('acceptance lookup budget is spent')
+        return value
+    try:
+        record = _remote.get_remote(remote_name, budget_seconds=remaining())
+        if (not isinstance(record, dict) or record.get('joined') is not True
+                or record.get('control_transport') != 'tailscale'):
+            return None
+        transport = RemoteJobTransport(deploy=None, ssh_run=_remote.ssh_run,
+            remote_lookup=lambda name: record if name == remote_name else None,
+            remote_sb_path=_remote.remote_sb_path)
+        page = transport.control(remote_name, ['job-list', '--limit', '50', '--kind', KIND],
+                                 timeout=remaining())
+        rows = page.get('jobs') if isinstance(page, dict) and page.get('ok') is True else None
+        if not isinstance(rows, list):
+            return None
+        matches = [row for row in rows if isinstance(row, dict) and row.get('request_id') == request_id]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        job_id = row.get('job_id')
+        if (row.get('kind') != KIND or not isinstance(job_id, str)
+                or re.fullmatch(r'[0-9a-f]{32}', job_id) is None
+                or row.get('source_commit', source.get('commit')) != source.get('commit')
+                or row.get('source_identity', source.get('identity')) != source.get('identity')):
+            return None
+        state = transport.control(remote_name, ['job-status', job_id], timeout=remaining())
+        remaining()
+        if not isinstance(state, dict) or not isinstance(state.get('execution_policy_provenance_json'), str):
+            return None
+        retained = json.loads(state['execution_policy_provenance_json'])
+        if (state.get('ok') is not True or state.get('job_id') != job_id
+                or state.get('request_id') != request_id or state.get('kind') != KIND
+                or not isinstance(retained, dict)
+                or any(retained.get(key) != value for key, value in proof.items())
+                or state.get('source_commit') != source.get('commit')
+                or state.get('source_identity') != source.get('identity')):
+            return None
+    except Exception:
+        return None
+    return {'ok': True, 'job_id': job_id, 'request_id': request_id, 'selector_digest': digest,
+            'source': dict(source), 'execution_policy': {'provenance': retained}}
 
 
 def read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15):

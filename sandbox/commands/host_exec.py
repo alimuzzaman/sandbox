@@ -177,7 +177,8 @@ def _take_over_ended_exec_lease(request, path, owner, job_id):
     """The lease of an ended, stopped exec job on this target, taken over and audited."""
     from sandbox.application.server_cli_exec_recovery import take_over_ended_exec_lease
     target = request.owner_selection.target
-    # Opened first, so a takeover is never left out of the audit.
+    # Opened first: a takeover happens only once the audit file is open. A failed
+    # write of its line only warns, like the command's own audit line.
     with host_exec.AuditLog() as audit:
         taken = take_over_ended_exec_lease(path, owner=owner,
                                            target=f"{target.project}/{target.environment}")

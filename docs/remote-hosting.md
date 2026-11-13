@@ -1894,7 +1894,8 @@ working-directory or environment option, and none is added.
   `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
   `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else. A
   server-owner exec that takes over an ended exec job's target lease also appends a
-  `lease_takeover` line with `previous_job_id` and `job_id`
+  `lease_takeover` line with `previous_job_id` and `job_id`; if that write fails, exec
+  prints a warning and still runs
   ([`host_apply_lease_held`](#host_apply_lease_held)).
 
 Joined-owner exec retains binary output in private, original-job-bound artifacts.

@@ -523,6 +523,49 @@ class HostStoreTests(unittest.TestCase):
                            commit=COMMIT)
         self.assertEqual(done["result"]["record"]["commit"], COMMIT)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFOs")
+    def test_summary_reader_refuses_a_fifo_without_blocking(self):
+        import threading
+        path = self.home / "runtime" / "hosts" / "mockups" / "sandbox" / "summary.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        result = []
+        reader = threading.Thread(target=lambda: result.append(
+            hs._server_summary_commit(self.home, "mockups", "sandbox")), daemon=True)
+        reader.start()
+        reader.join(5)
+        self.assertFalse(reader.is_alive(), "summary reader blocked on a FIFO under the store lock")
+        self.assertEqual(result, [None])
+
+    def test_summary_reader_refuses_a_symlink_and_another_target(self):
+        real = self.write_summary(DEV_COMMIT)
+        self.assertEqual(hs._server_summary_commit(self.home, "mockups", "sandbox"), DEV_COMMIT)
+        moved = real.with_name("real.json")
+        real.rename(moved)
+        real.symlink_to(moved)
+        self.assertIsNone(hs._server_summary_commit(self.home, "mockups", "sandbox"))
+        real.unlink()
+        for project, environment, compose in (("other", "sandbox", None), ("mockups", "dev", None),
+                                              ("mockups", "sandbox", "sandbox-host-other-sandbox")):
+            with self.subTest(project=project, environment=environment, compose=compose):
+                real.write_text(json.dumps({"schema": 1, "project": project, "environment": environment,
+                    "compose_project": compose or hs.compose_project_for(project, environment),
+                    "commit": DEV_COMMIT, "last_apply": {"status": "succeeded"}}))
+                self.assertIsNone(hs._server_summary_commit(self.home, "mockups", "sandbox"))
+
+    def test_record_apply_skips_a_target_being_reaped(self):
+        self.write_summary(COMMIT)
+        self.run_op("classify", project="mockups", environment="sandbox", lifetime="hosted")
+        path = self.home / "runtime" / "target-lifetimes" / "sandbox-host-mockups-sandbox.json"
+        record = json.loads(path.read_text())
+        record["state"] = "reaping"
+        record["reap_run"] = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired"}
+        path.write_text(json.dumps(record))
+        self.write_summary(DEV_COMMIT)
+        result = self.run_op("record_apply", project="mockups", environment="sandbox", commit=DEV_COMMIT)
+        self.assertFalse(result["result"]["recorded"], result)
+        self.assertEqual(json.loads(path.read_text())["commit"], COMMIT)
+
     def test_record_merge_only_for_the_checked_commit(self):
         self.run_op("claim", record=stack_record())
         evidence = {"merged": True, "dev_branch": "dev", "dev_commit": DEV_COMMIT}

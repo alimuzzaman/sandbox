@@ -216,8 +216,8 @@ class ExecClientTests(unittest.TestCase):
     def test_server_selector_refusal_is_shown_with_its_code_and_hint(self):
         from sandbox.application.server_cli_targets import ServerTargetRefused
         self.args.name, self.args.target = None, "project/dev"
-        for code, hint in (("host_server_target_evidence_unavailable", "classify the target"),
-                           ("host_target_busy", "target busy"),
+        for code, hint in (("host_server_target_evidence_unavailable", "an unclassified target needs sb host classify"),
+                           ("host_target_busy", "being applied or reaped"),
                            ("host_target_invalid", "--target")):
             with self.subTest(code=code):
                 self.observe.side_effect = ServerTargetRefused(code)
@@ -243,7 +243,8 @@ class ExecClientTests(unittest.TestCase):
         with redirect_stderr(errors), self.assertRaises(SystemExit):
             dispatch.dispatch_host_if_selected(self.args)
         self.assertIn("host_server_target_evidence_unavailable:", errors.getvalue())
-        self.assertIn("hint: classify the target", errors.getvalue())
+        self.assertIn("hint: an unclassified target needs sb host classify", errors.getvalue())
+        self.assertNotIn("--lifetime hosted --confirm", errors.getvalue())
         self.submit.assert_not_called()
 
     def test_other_observation_failures_stay_generic_unavailable(self):

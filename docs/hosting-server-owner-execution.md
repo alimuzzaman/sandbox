@@ -44,7 +44,7 @@ commit to the applied one, without changing its lifetime or TTL. Classify takes
 the commit from the server's own `summary.json` when that shows a succeeded
 apply, so classifying from a controller with older local history still matches.
 Without a record, exec refuses with `host_server_target_evidence_unavailable`
-and a hint to classify the target. A busy target or one whose last apply did not
+and a hint: classify an unclassified target, keeping any lifetime it already has. A busy target or one whose last apply did not
 succeed refuses with `host_target_busy`. Non-joined targets keep their existing
 controller execution paths.
 

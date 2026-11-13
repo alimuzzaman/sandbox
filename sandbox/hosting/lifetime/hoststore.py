@@ -17,6 +17,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -1058,8 +1059,13 @@ def _server_summary_commit(home, project, environment):
     """
     path = Path(home).joinpath("runtime", "hosts", project, environment, "summary.json")
     try:
-        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # Non-blocking and regular-file only: this runs under the store lock, so a
+        # FIFO or device planted at the path must refuse instead of blocking.
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
             data = handle.read(SUMMARY_MAX_BYTES + 1)
         summary = json.loads(data.decode("utf-8")) if len(data) <= SUMMARY_MAX_BYTES else None
     except (OSError, UnicodeError, ValueError):

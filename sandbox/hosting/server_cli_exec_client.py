@@ -42,9 +42,11 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
     }
     hints = {
         "host_server_target_evidence_unavailable":
-            "classify the target (sb host classify --remote NAME --target PROJECT/ENVIRONMENT "
-            "--lifetime hosted --confirm), then retry",
-        "host_target_busy": "target busy; retry after its apply or cleanup finishes",
+            "an unclassified target needs sb host classify --remote NAME --target PROJECT/ENVIRONMENT "
+            "--lifetime hosted|temporary --confirm (keep its current lifetime if it has one); a "
+            "classified target needs a succeeded apply of its current commit; then retry",
+        "host_target_busy": "the target is being applied or reaped, or its last apply did not succeed; "
+            "check sb host status before retrying",
         "host_target_invalid": "check --target, --name and --environment",
     }
     payload = {"ok": False, "code": code, "acceptance": acceptance,

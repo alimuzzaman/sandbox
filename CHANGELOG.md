@@ -13,7 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `healthcheck.deadline_seconds` (60-600, default 60) sets how long `sb host apply` waits for the health path.
 
 ### Fixed
-- A hosted target with the managed `sandbox-login` gate (`share:` or `autologin.login_service`) and a `pushed_commit_sha` revision key now reaches ready. The gate receives each declared key from the apply's environment file, so its revision is proved like the application's services; an application service without the key still keeps the target out of ready. A revision key starting `SANDBOX_LOGIN_` is refused.
+- A hosted target with the managed `sandbox-login` gate (`share:` or `autologin.login_service`) and a `pushed_commit_sha` revision key now reaches ready. The gate receives each declared key from the apply's environment file, so its revision is proved like the application's services; an application service without the key still keeps the target out of ready. A revision key starting `SANDBOX_LOGIN_` is refused. As before, every apply of a new commit recreates the background services, the gate included, so its share links and sessions reset.
 - `sb wp` keeps piped stdin for the WP-CLI command instead of losing it to an internal probe. On a remote, with `--async` and under managed-native, commands that need stdin are refused up front, so `option update KEY` no longer risks writing an empty value.
 - `sb apply` and `sb ensure` refuse a change to a server the project declares with `apply_server_change_refused`, and no longer revert a prior `sb server` when the config declares none. Use `sb server`, which does not yet verify or roll back.
 - `sb snapshot list` refuses instead of saving a snapshot named `list`, and points to `sb snapshots`.

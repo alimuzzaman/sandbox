@@ -594,6 +594,22 @@ class GatedStackSourceRevisionTests(unittest.TestCase):
         self.assertEqual(classified["source_revision"]["state"], "degraded")
         self.assertFalse(hosting_cmd._host_observation_is_exact_ready(validated, classified, COMMIT))
 
+    def test_only_the_gate_stale_still_blocks_ready(self):
+        # Every application service is current; only the gate holds an old
+        # commit (an earlier container still running). That alone fails.
+        validated = self._validated()
+        observation = self._observe(validated, COMMIT)
+        gate_checks = [c for c in observation["revision_checks"] if c["service"] == "sandbox-login"]
+        self.assertTrue(gate_checks)
+        for check in gate_checks:
+            check["observed"] = "c" * 40
+        classified = hosting_cmd._classify_host_observation(validated, observation, COMMIT)
+        states = {(item["service"], item["state"]) for item in classified["source_revision"]["checks"]}
+        self.assertIn(("web", "match"), states)
+        self.assertNotIn(("sandbox-login", "match"), states)
+        self.assertEqual(classified["source_revision"]["state"], "degraded")
+        self.assertFalse(hosting_cmd._host_observation_is_exact_ready(validated, classified, COMMIT))
+
     def test_user_service_missing_the_revision_still_fails_readiness(self):
         classified = self._classify(self._validated(web_revision=False))
         states = {(item["service"], item["state"]) for item in classified["source_revision"]["checks"]}

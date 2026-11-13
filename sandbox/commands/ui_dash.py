@@ -651,8 +651,23 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
             sources.append(controller)
             # Lifetimes per remote come from `sb host stack list --remote R --json`,
             # fetched in the background; the page never waits for a remote.
-            remotes = sorted({target["remote"] for target in controller["targets"]})
-            lifetimes.update(_hosting_lifetimes().snapshot(remotes, now))
+            remotes = {target["remote"] for target in controller["targets"]}
+            if server_records is not None:
+                # Copied controller records can name an alias not registered on
+                # this owner. Exact server summaries already win in build_view.
+                # Keep registered remotes (including their uncarded lifetimes)
+                # and every controller target without an exact server record.
+                try:
+                    registered = remote_core.list_remotes()
+                except Exception:
+                    registered = None  # Unknown registration never hides rows.
+                if registered is not None:
+                    local_keys = {(t["remote"], t["project"], t["environment"])
+                                  for t in server_records["targets"]}
+                    remotes = {t["remote"] for t in controller["targets"]
+                               if t["remote"] in registered or
+                               (t["remote"], t["project"], t["environment"]) not in local_keys}
+            lifetimes.update(_hosting_lifetimes().snapshot(sorted(remotes), now))
         view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
                                      lifetimes=lifetimes, mail_inventory=mail_inventory)
         from sandbox.hosting import panel_access

@@ -149,6 +149,14 @@ that panel process. This in-memory tracking does not reconstruct an original job
 after a panel restart or establish why an older fetch failed. Local server rows
 and remote-only lifetime rows remain part of the combined inventory.
 
+On an owner server, copied controller records may still name the originating
+controller's remote alias. When that alias is not registered here and every
+controller target has an exact owner-local remote/project/environment match,
+the panel uses the owner-local records without fetching the missing alias.
+Registered remotes still fetch their full inventory, including lifetimes with
+no card. Unmatched controller targets and unknown registration state retain the
+remote lookup and its explicit unavailable result.
+
 ## Navigation on narrow screens
 
 Below 768px the sidebar opens from the Menu button instead of reserving 240px
@@ -160,3 +168,5 @@ visual and keyboard acceptance of the new drawer is still required.
 Console visibility and menu coverage independently restrict console focus:
 closing the menu never enables a collapsed console, and opening the console
 while covered does not move focus behind the menu.
+The Terminal button opens through its route callback once, preserving the
+original opener for focus restoration when the console closes.

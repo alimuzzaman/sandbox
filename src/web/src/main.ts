@@ -264,8 +264,8 @@ function boot(): void {
     if (!requireLocal("Terminal")) return;
     const inst = activeInstanceName() || (store.data.instances[0] && store.data.instances[0].name);
     if (!inst) { toast("create an instance first", "err"); return; }
+    // The route callback opens the terminal once and retains its real opener.
     navigate(instancePath(inst, true));
-    openTerminal(inst);
   };
 
   // Re-render whenever the route changes (link clicks, back/forward, navigate()).

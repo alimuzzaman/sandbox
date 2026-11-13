@@ -574,30 +574,33 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
         return []
     marker = ("SANDBOX_DURABLE_JOB_ID=" + job_id).encode()
     command_start: int | None = None
-    holders = []
-    for directory in _PROC.iterdir():
-        if not directory.name.isdigit() or int(directory.name) == os.getpid():
-            continue
-        try:
-            if directory.stat().st_uid != os.geteuid():
+    holders: set[int] = set()
+    # Twice, as the takeover's own scans do: a process that forks and exits
+    # while one pass runs leaves a child that only a later listing shows.
+    for _ in range(2):
+        for directory in _PROC.iterdir():
+            if not directory.name.isdigit() or int(directory.name) == os.getpid():
                 continue
-            environment = (directory / "environ").read_bytes()
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except OSError:
             try:
-                started = _start_ticks(directory)
+                if directory.stat().st_uid != os.geteuid():
+                    continue
+                environment = (directory / "environ").read_bytes()
             except (FileNotFoundError, ProcessLookupError):
-                continue  # it has exited since the listing
-            if command_start is None:
-                with suppress(OSError):  # the unreaped leader keeps its stat
-                    command_start = _start_ticks(_PROC / str(command_pid))
-            if command_start is None or started is None or started >= command_start:
-                return None
-            continue
-        if marker in environment.split(b"\0"):
-            holders.append(int(directory.name))
-    return holders
+                continue
+            except OSError:
+                try:
+                    started = _start_ticks(directory)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # it has exited since the listing
+                if command_start is None:
+                    with suppress(OSError):  # the unreaped leader keeps its stat
+                        command_start = _start_ticks(_PROC / str(command_pid))
+                if command_start is None or started is None or started >= command_start:
+                    return None
+                continue
+            if marker in environment.split(b"\0"):
+                holders.add(int(directory.name))
+    return sorted(holders)
 
 
 def _start_ticks(directory: Path) -> int | None:

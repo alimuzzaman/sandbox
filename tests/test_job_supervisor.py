@@ -883,3 +883,22 @@ class NormalExitCessationTests(unittest.TestCase):
                 "SELECT (SELECT count(*) FROM workspace_leases WHERE job_id=?)"
                 " + (SELECT count(*) FROM host_capacity_leases WHERE job_id=?)",
                 (snap["job_id"], snap["job_id"])).fetchone()[0], 0)
+
+    def test_a_holder_that_appears_while_a_pass_runs_is_still_found(self):
+        # A process naming the job forks a child and exits after the listing
+        # was taken: only a later listing shows the child.
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "4141").mkdir()
+        (root / "4141" / "environ").write_bytes(b"A=1\0")
+
+        class RacingProc(type(root)):
+            def iterdir(self):
+                entries = list(super().iterdir())
+                if not (root / "4242").exists():
+                    (root / "4242").mkdir()
+                    (root / "4242" / "environ").write_bytes(
+                        b"SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"\0")
+                return iter(entries)
+
+        with patch.object(supervisor, "_PROC", RacingProc(root)):
+            self.assertEqual(supervisor._job_environment_holders("a" * 32, 1), [4242])

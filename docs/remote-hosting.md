@@ -2777,8 +2777,8 @@ against the same target, took the lease while it ran, and none of its recorded
 processes or its process group still runs. The supervisor records that proof when it
 stops a job at its deadline, on a stall or on cancel, and when a job that ended by
 itself (`succeeded` or `failed`) left nothing running
-([remote-job-runtime.md](remote-job-runtime.md)). An `interrupted` job never records
-it. The check and the replacement happen under the lease's own lock, so two
+([remote-job-runtime.md](remote-job-runtime.md)). An `interrupted` job is never
+taken over. The check and the replacement happen under the lease's own lock, so two
 takers cannot both win, and `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` gets a
 `lease_takeover` line with both job ids. This ends the hand cleanup after an exec
 whose command reached its own `--timeout`. It proves the job's own processes

@@ -71,23 +71,25 @@ replacement process. A cancelling result still needs a terminal status observati
 A terminal job's `result_json` records whether its owned work is proven stopped:
 `owned_work_stopped`, `stop_error` and the `owned_descendants` the supervisor saw.
 A deadline, stall or cancel stop records `true` once the command's process group is
-empty. A job that ends by itself (`succeeded` or `failed`) records `true` only when,
-before the supervisor reaps the command, nothing in its process group or session
-still runs, no descendant it saw is still running, nothing still holds the job's
-output pipes and, on Linux, no same-user process still carries the job's
-`SANDBOX_DURABLE_JOB_ID`. A same-user process whose environment cannot be read
-(a non-dumpable one, such as OpenSSH's per-connection `sshd: owner@notty`) is
-skipped only when its `/proc/<pid>/stat` start time is earlier than the command's;
-one that started at or after the command records `false`
-(`process_environment_unavailable`), so an owner's SSH session that does not share
-a connection and opened while the job ran still blocks the proof. The environment
-scan has a 2 s limit, like each `ps` call: a scan that runs out records `false`
-(`process_environment_scan_timed_out`), and the job still ends and releases its
-leases as usual. Otherwise it records `false` with the reason in `unproven`; the lifecycle and exit code are unchanged. A process that left both the
-group and the session and also cleared its environment or changed user is not
-detected. `interrupted` jobs never record the proof. Exec lease takeover,
-`job-reconcile --job-id` and stack source repair rely on it, and each also checks
-for live processes itself.
+empty; a cancel that arrives after the group already exited by itself gets the
+full check below instead. A job that ends by itself (`succeeded` or `failed`)
+records `true` only when, before the supervisor reaps the command, nothing in its
+process group or session still runs, no descendant it saw is still running,
+nothing still holds the job's output pipes and, on Linux, no same-user process
+still carries the job's `SANDBOX_DURABLE_JOB_ID` in two scans of `/proc`. A
+same-user process whose environment cannot be read (a non-dumpable one, such as
+OpenSSH's per-connection `sshd: owner@notty`) is skipped only when its
+`/proc/<pid>/stat` start time is earlier than the command's; one that started at or
+after the command fails the check (`process_environment_unavailable`), so an
+owner's SSH session that does not share a connection and opened while the job ran
+still blocks the proof. The environment scan has a 2 s limit, like each `ps` call;
+one that runs out fails the check (`process_environment_scan_timed_out`), and the
+job still ends and releases its leases as usual. A failed check records `false`
+with the reason in `unproven`; the lifecycle and exit code are unchanged. A process
+that left both the group and the session and also cleared its environment or
+changed user is not detected. `interrupted` jobs never record the proof. Exec lease
+takeover, `job-reconcile --job-id` and stack source repair rely on it, and each
+also checks for live processes itself.
 
 The examples use the repository launcher (`./sb`). From another checkout, use
 the installed `sb` command; the command surface and selectors are the same.

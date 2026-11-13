@@ -1,22 +1,31 @@
 """A later exec takes over only the target lease of an ended, stopped exec job.
 
-The lease files and their lock are real; the job registry and the /proc
-cessation scan are synthetic.
+The lease files and their lock are real. Most tests use a synthetic registry;
+``SupervisorWrittenRowTests`` uses rows the real supervisor wrote. Without
+Linux /proc the cessation scan is patched.
 """
+import contextlib
 from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import secrets
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import patch
 
-from sandbox.application import server_cli_exec_recovery as recovery
+from sandbox.application import server_cli, server_cli_exec_recovery as recovery
 from sandbox.hosting import host_exec, target_lease
 from sandbox.hosting.target_resolution import ResolvedTarget
+from sandbox.jobs.models import JobSubmission, SourceIdentity
+from sandbox.jobs.registry import JobRepository
+from sandbox.jobs.scheduler import JobScheduler
+from sandbox.jobs.storage import JobStorage
+from tests.subprocess_support import synthetic_environment
 
 ENDED = "1" * 32
 NOW = datetime.now(timezone.utc)
@@ -82,19 +91,6 @@ class TakeOverEndedExecLeaseTests(unittest.TestCase):
     def assert_refused(self, registry, body):
         self.assertIsNone(self.take(registry))
         self.assertEqual(self.path.read_text(), body)
-
-    def test_an_ended_stopped_exec_jobs_lease_is_taken_over(self):
-        for lifecycle in sorted(recovery.ENDED_LIFECYCLES):
-            with self.subTest(lifecycle=lifecycle):
-                self.hold(recovery.exec_lease_owner(ENDED))
-                lease, previous = self.take(Registry(job(lifecycle=lifecycle)))
-                self.assertEqual(previous, ENDED)
-                self.assertEqual(lease["owner"], self.taker)
-                token, holder, since = self.path.read_text().split()
-                self.assertEqual((token, holder), (lease["token"], self.taker))
-                self.assertLessEqual(abs(int(since) - time.time()), 5)
-                self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-                self.assertFalse(Path(str(self.path) + ".new").exists())
 
     def test_a_running_jobs_lease_is_refused(self):
         body = self.hold(recovery.exec_lease_owner(ENDED))
@@ -177,6 +173,143 @@ class TakeOverEndedExecLeaseTests(unittest.TestCase):
         self.assertEqual(len(winners), 1)
         self.assertEqual(self.path.read_text().split()[1], winners[0])
         self.assertEqual(results[winners[0]][1], ENDED)
+
+
+class SupervisorWrittenRowTests(unittest.TestCase):
+    """Rows the real supervisor wrote, not hand-built ones.
+
+    Without Linux /proc the cessation scan is patched; on Linux it runs.
+    """
+
+    def setUp(self):
+        self.runtime = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        source = self.runtime / "source"
+        source.mkdir(mode=0o700)
+        (self.runtime / ".sandbox").mkdir(mode=0o700)
+        self.storage = JobStorage(self.runtime, free_disk_reserve=0)
+        self.repository = JobRepository(self.storage.root / "registry.sqlite3")
+        self.addCleanup(self.repository.close)
+        self.owner = server_cli.ServerCliOwner(os.geteuid(), str(self.runtime), str(self.runtime.parent),
+            str(self.runtime / "sb"), "c" * 24, "a" * 24, "b" * 24)
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+        self.proof = {"server_cli.target_identity": self.owner.target_identity,
+            "server_cli.ownership_marker": self.owner.ownership_marker,
+            "server_cli.runtime_revision": self.owner.runtime_revision,
+            "server_cli.remote_name": "box", "server_cli.exec_service": "wordpress",
+            "server_cli.exec_target": "project/dev", "server_cli.target_metadata": '{"front_door":"nginx"}',
+            "server_cli.target_selector_digest": "sha256:" + "d" * 64,
+            "server_cli.output_contract": "artifact.v1", "server_cli.absolute_deadline_at": deadline,
+            "server_cli.target_snapshot": json.dumps({"schema_version": 1, "origin_remote_name": "box",
+                "target_identity": self.owner.target_identity, "ownership_marker": self.owner.ownership_marker,
+                "runtime_revision": self.owner.runtime_revision, "name": "project", "copy_id": "1234abcd",
+                "source_dir": str(source), "compose_files": [str(source / "compose.yml")],
+                "native_keys": ["box/project/dev"], "selector_digest": "sha256:" + "d" * 64,
+                "source_commit": "1" * 40, "source_origin_commit": "2" * 40,
+                "project": "project", "environment": "dev",
+                "services": [{"name": "wordpress", "index": 1, "container_id": "f" * 64}]})}
+        self.source = source
+        self.path = Path(target_lease.lease_path(str(self.runtime), "project", "dev"))
+        os.close(os.open(str(self.path) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600))
+        if not Path("/proc/sys/kernel/random/boot_id").exists():
+            self.enterContext(patch.object(recovery, "_ceased", return_value={}))
+
+    def accept(self):
+        submission = JobSubmission("server-cli", str(self.source), "e" * 64, "local", "server-exec",
+            (self.owner.executable, "host", "exec", "--remote", "box"), 60,
+            SourceIdentity("sha256:" + "e" * 64, "1" * 40), request_id="exec-" + secrets.token_hex(4),
+            execution_policy_provenance=self.proof)
+        row, _ = self.repository.accept(submission)
+        JobScheduler(self.repository, min_free_disk_mb=0, min_free_memory_mb=0).acquire(row)
+        return row
+
+    def exec_job(self, script, deadline=30):
+        """An exec job the real supervisor ran and ended; ``exit 255`` is what
+        ``sb host exec`` exits with after its command's own ``--timeout``."""
+        argv = ("/bin/sh", "-c", script)
+        row = self.accept()
+        descriptor = self.storage.job_dir(row["job_id"], create=True) / "descriptor.json"
+        descriptor.write_text(json.dumps({
+            "job_id": row["job_id"], "registry_path": str(self.repository.path),
+            "runtime_dir": str(self.runtime), "argv": list(argv), "cwd": str(self.source),
+            "deadline_seconds": deadline, "cancel_grace_seconds": 1, "nonce_hash": "0" * 64,
+            "environment": dict(synthetic_environment()), "execution_runtime": "host",
+            "authoritative_context": {"job_id": row["job_id"]}}))
+        descriptor.chmod(0o600)
+        # Its own process, as job_service launches it, so its PID is gone afterwards.
+        subprocess.run([sys.executable, "-B", "-m", "sandbox.jobs.supervisor", str(descriptor)],
+                       cwd=Path(__file__).resolve().parents[1], check=False, timeout=60,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return self.repository.snapshot(row["job_id"])
+
+    def hold(self, row):
+        since = int(datetime.fromisoformat(row["started_at"].replace("Z", "+00:00")).timestamp())
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(descriptor, f"{secrets.token_hex(16)} {recovery.exec_lease_owner(row['job_id'])} {since}\n".encode())
+        os.close(descriptor)
+        return self.path.read_text()
+
+    def take(self):
+        return recovery.take_over_ended_exec_lease(self.path, owner=recovery.exec_lease_owner("2" * 32),
+                                                   target="project/dev", repository=self.repository)
+
+    def test_the_lease_of_an_ended_exec_is_taken_over(self):
+        for script, deadline, lifecycle in (("exit 255", 30, "failed"), ("exit 0", 30, "succeeded"),
+                                            ("sleep 30", 1, "timed_out")):
+            with self.subTest(lifecycle=lifecycle):
+                row = self.exec_job(script, deadline)
+                self.assertEqual(row["lifecycle"], lifecycle)
+                self.hold(row)
+                lease, previous = self.take()
+                self.assertEqual(previous, row["job_id"])
+                self.assertEqual(lease["owner"], recovery.exec_lease_owner("2" * 32))
+                token, holder, since = self.path.read_text().split()
+                self.assertEqual((token, holder), (lease["token"], lease["owner"]))
+                self.assertLessEqual(abs(int(since) - time.time()), 5)
+                self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+                self.assertFalse(Path(str(self.path) + ".new").exists())
+
+    def test_job_reconcile_accepts_an_exec_that_failed_by_itself(self):
+        row = self.exec_job("exit 255")
+        bound, _, stopped, _, _ = recovery._binding(self.repository, row["job_id"], self.owner)
+        self.assertEqual(bound["lifecycle"], "failed")
+        self.assertIs(stopped["owned_work_stopped"], True)
+
+    def test_an_exec_that_left_a_process_running_is_refused(self):
+        pid_path = self.runtime / "leftover.pid"
+        row = self.exec_job(
+            f"perl -e 'setpgrp(0,0); open F, \">\", shift; print F $$; close F; sleep 30'"
+            f" {pid_path} </dev/null >/dev/null 2>&1 & sleep .3; exit 255")
+        for _ in range(100):
+            if pid_path.exists() and pid_path.read_text().strip():
+                break
+            time.sleep(.03)
+        pid = int(pid_path.read_text())
+
+        def kill():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+        self.addCleanup(kill)
+        self.assertEqual(row["lifecycle"], "failed")
+        self.assertIs(json.loads(row["result_json"])["owned_work_stopped"], False)
+        body = self.hold(row)
+        self.assertIsNone(self.take())
+        self.assertEqual(self.path.read_text(), body)
+        with self.assertRaises(ValueError):
+            recovery._binding(self.repository, row["job_id"], self.owner)
+
+    def test_an_interrupted_exec_is_refused(self):
+        job_id = self.accept()["job_id"]
+        self.repository.transition(job_id, "running")
+        self.repository.put_process_identity(job_id, host_boot_id="boot", supervisor_pid=4241,
+            supervisor_start_identity="supervisor-start", supervisor_nonce_hash="0" * 64,
+            child_pid=4242, child_pgid=4242, child_start_identity="child-start")
+        # The transition status reconciliation makes (job_service.py) when the supervisor is lost.
+        self.repository.transition(job_id, "interrupted", termination_reason="supervisor_missing",
+            output_completeness="partial", result_json=json.dumps(
+                {"reconciled": True, "evidence": ["supervisor_missing"]}, sort_keys=True))
+        body = self.hold(self.repository.snapshot(job_id))
+        self.assertIsNone(self.take())
+        self.assertEqual(self.path.read_text(), body)
 
 
 class LeaseTakeoverAuditTests(unittest.TestCase):

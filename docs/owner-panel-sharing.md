@@ -11,6 +11,25 @@ is enabled. No separate operator login is required. Audit identifies the actor
 as `tailnet-panel`; it makes no claim about a named person. This policy does not
 authorize the paused 090 URL/network sharing system.
 
+The post-6c7a643 source correction accepts the documented combined WordPress and
+named-entry declaration. Owner-local magic-link actions resolve the existing saved
+email from that target's native owner-state records. Conflicting alias defaults,
+missing/invalid addresses and per-entry denied addresses stop creation before mint.
+Saved defaults are read and resolved after all member and native-key writer locks
+are held. Identity refusals precede grant allocation. Final private pages are built
+and validated from those locked identities before any new journal save or
+gate/WordPress effect.
+This does not add an email body field, named-person admission, a guessed identity or
+a new execution grant. The selected address travels only in the private gate page;
+it is absent from the operation journal, audit and public response.
+
+The correction needs a reviewed source update on the owner. Combined targets need
+a successful supported apply so the WordPress settings and gate binding enter the
+applied projection. No protocol or wire-envelope version changes. Existing targets
+without an owner-local saved email still refuse; a laptop default is not transferred.
+Source checks and review are recorded in the correction handback. Installed and
+Hub/admin runtime acceptance remain open until a coordinated acceptance pass.
+
 The HTTP handler, not a body field, selects owner-local execution on a server.
 Controller panels retain the controller resolver. An owner failure never falls
 back to controller history, a self-remote, SSH or an invented server job.

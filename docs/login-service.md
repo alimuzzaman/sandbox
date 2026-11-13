@@ -97,6 +97,16 @@ For an entry with `requires_email: true`:
 The address is personal data at rest in that state file. The output names the address
 each link is for.
 
+The installed owner panel uses this same saved target default for magic-link actions
+on a stack page. It reads only the admitted target's native records from the owner's
+managed state. If aliases have conflicting defaults, or the address is missing,
+invalid or denied for an entry, creation stops before minting.
+Address selection and final page validation hold all target and alias writer locks,
+so a concurrent saved-default update cannot leave the page using an older identity.
+A controller laptop's saved default is not an owner-server default. No email is
+inferred from Git, the Tailnet peer or an application account, and no email enters
+the share journal or audit.
+
 `denied_emails` refuses listed addresses at issue, from every source, with
 `email_denied`. Use it for accounts that hold more access than a normal user, and for
 any application that grants that access by person rather than by origin. It covers only
@@ -494,8 +504,8 @@ environments:
     host:
       primary: wp-{slug}.example.test
       aliases:
-        - {hostname: share-{slug}.example.test, mode: serve}
-        - {hostname: inbox-{slug}.example.test, mode: serve}
+        - {hostname: 'share-{slug}.example.test', mode: serve}
+        - {hostname: 'inbox-{slug}.example.test', mode: serve}
     deploy:
       allowed_branches: ['{ref_branch}']
       require_clean: true
@@ -541,8 +551,13 @@ environments:
 
 `$wordpress` is reserved, never an entry name or member of stack_sign_in. Route mapping
 hostname KEYS may use approved placeholders; entry names and inbox_sign_in stay literal.
-This is source-aligned documentation, not a parsed or applied fixture. Parser success
-would still not prove complete route coverage or installed support. Real WP/MySQL,
+WordPress's `user`, `service`, `request_path`, `container_path` and `ttl_seconds`
+may accompany `login_service` and `entries` in the same `autologin` block. Both
+integrations retain their existing validation; named entries alone do not enable
+WordPress login. The normalized WordPress settings also enter applied sharing facts.
+
+This is a declaration example, not an applied fixture. Parser success would still
+not prove complete route coverage or installed support. Real WP/MySQL,
 multisite, persistent cache, uniform 404/timing and browser runtime acceptance remain
 unverified.
 

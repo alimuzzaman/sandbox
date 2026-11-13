@@ -137,6 +137,24 @@ def _cleanup(store, request, row, grants):
     return {"ok": True, **_public(row), **counts}
 
 
+def _saved_email(grant):
+    """Read only the admitted target's existing owner-local login default."""
+    from sandbox.hosting.recovery.repository import RecoveryRepository
+    grant.require_current()
+    state = RecoveryRepository(Path(grant.owner.sandbox_home) / "runtime" / "hosts.json").load()
+    addresses = set()
+    for key in grant.snapshot["native_keys"]:
+        record = state["hosts"].get(key)
+        if not isinstance(record, dict):
+            raise gate._refuse("owner_share_target_changed")
+        saved = record.get(login.STATE_KEY)
+        if saved:
+            addresses.add(login.validate_email(saved))
+    if len(addresses) > 1:
+        raise gate._refuse("owner_share_email_ambiguous")
+    return next(iter(addresses), None)
+
+
 def _create(store, request, parent, rows):
     for previous in rows:
         if previous["phase"] in ("prepared", "minting", "cleanup_pending", "revoking"):
@@ -166,16 +184,24 @@ def _create(store, request, parent, rows):
     actions = {}
     for member, context in zip(members, contexts):
         rows = []
-        for name in context.declaration["share"].get("stack_sign_in", []):
+        names = context.declaration["share"].get("stack_sign_in", [])
+        try:
+            saved = (_saved_email(member) if any(context.declaration["entries"][name]["mode"] == "magic_link"
+                                               for name in names) else None)
+        except Exception:
+            gaps.append({"stack": context.slug, "target": context.remote, "piece": "access",
+                "code": "share_email_unavailable", "fix": "restore one allowed saved email for this exact target"})
+            saved = None
+        for name in names:
             entry = context.declaration["entries"][name]
             action = {"entry": name}
             if entry["mode"] == "magic_link":
                 try:
                     action["email"] = login.resolve_email(entry, requested=None, replace_default=False,
-                        saved=None, stdin=stack_page._NoPrompt(), stderr=io.StringIO()).address
+                        saved=saved, stdin=stack_page._NoPrompt(), stderr=io.StringIO()).address
                 except Exception:
                     gaps.append({"stack": context.slug, "target": context.remote, "piece": "access",
-                        "code": "share_email_unavailable", "fix": "declare the sign-in's allowed default email"})
+                        "code": "share_email_unavailable", "fix": "save an allowed login email for this exact target"})
             rows.append(action)
         actions[(context.remote, context.slug)] = rows
     if gaps:

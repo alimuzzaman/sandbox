@@ -426,7 +426,8 @@ def _autologin(env: dict) -> dict | None:
     if not isinstance(raw, dict):
         raise HostingError("autologin must be a mapping")
     from sandbox.hosting import login_service
-    if login_service.is_declared(raw):
+    raw = login_service.wordpress_declaration(raw)
+    if raw is None:
         return None
     user = str(raw.get("user") or "").strip()
     if not user or len(user) > 60 or any(ord(char) < 33 or ord(char) > 126 for char in user):

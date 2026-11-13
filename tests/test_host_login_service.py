@@ -102,6 +102,48 @@ def _valid():
 
 
 class DeclarationTests(unittest.TestCase):
+    def test_combined_wordpress_and_named_entries_survive_applied_projection(self):
+        environment = _environment(_login_block())
+        wordpress = {"user": "fixture-admin", "service": "web", "request_path": "/wp-login.php",
+                     "container_path": "/var/www/html/wp-content/mu-plugins/99-autologin.php",
+                     "ttl_seconds": 600}
+        environment["autologin"].update(wordpress)
+        environment["host"]["primary"] = "wp.example.test"
+        environment["host"]["aliases"].extend([
+            {"hostname": "app.example.test", "mode": "serve"},
+            {"hostname": "share.example.test", "mode": "serve"}])
+        environment["share"] = {"hostname": "share.example.test", "agent_mint": True,
+            "stack_sign_in": ["app", "inbox"], "inbox_sign_in": "inbox",
+            "route_sign_in": {"wp.example.test": "$wordpress", "app.example.test": "app"}}
+        validated = _validate(environment)
+        self.assertEqual(validated["autologin"], wordpress)
+        self.assertEqual(set(validated["login_service"]["entries"]), {"app", "inbox", "share"})
+        from sandbox.hosting.owner_share_record import build
+        applied = build(validated, {"copy_id": "1234abcd", "uses": []})
+        self.assertEqual(applied["validated"]["autologin"], wordpress)
+        self.assertEqual(applied["validated"]["login_service"]["share"]["route_sign_in"],
+                         environment["share"]["route_sign_in"])
+
+    def test_combined_wordpress_keeps_existing_validation(self):
+        wordpress = {"user": "fixture-admin", "service": "web", "request_path": "/wp-login.php",
+                     "container_path": "/var/www/html/wp-content/mu-plugins/99-autologin.php"}
+        for change, reason in (({"user": ""}, "autologin.user"),
+                               ({"container_path": "../unsafe.php"}, "autologin.container_path"),
+                               ({"request_path": "/wp-login.php?unsafe=1"}, "autologin.request_path"),
+                               ({"service": "../wordpress"}, "autologin.service")):
+            with self.subTest(reason=reason):
+                environment = _environment(_login_block())
+                environment["autologin"].update(wordpress | change)
+                with self.assertRaisesRegex(hosting.HostingError, reason):
+                    _validate(environment)
+
+    def test_named_only_entries_do_not_enable_wordpress_and_unknown_fields_refuse(self):
+        self.assertIsNone(_valid()["autologin"])
+        environment = _environment(_login_block())
+        environment["autologin"]["unrecognized"] = True
+        with self.assertRaisesRegex(hosting.HostingError, "unknown fields"):
+            _validate(environment)
+
     def assertRefused(self, mutate, code):
         environment = _environment(_login_block())
         mutate(environment)
@@ -185,8 +227,8 @@ class DeclarationTests(unittest.TestCase):
         })
         self.assertIsNone(validated["login_service"])
 
-    def test_refuses_mixed_forms(self):
-        self.assertRefused(lambda e: e["autologin"].update(user="admin"), "login_service_invalid")
+    def test_refuses_incomplete_wordpress_fields_with_named_entries(self):
+        self.assertRefused(lambda e: e["autologin"].update(user="admin"), "autologin.container_path")
 
     def test_refuses_entries_without_the_service(self):
         self.assertRefused(lambda e: e["autologin"].pop("login_service"), "login_service_invalid")

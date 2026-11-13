@@ -56,6 +56,7 @@ _SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_hos
 _CAPTURE_FIELDS = {"service", "adapter", "api_url", "username", "credential_secret"}
 _ENTRY_FIELDS = {"mode", "requires_email", "hostname", "path", "ttl_seconds", "magic_link", "landing_path",
                  "upstream"}
+_WORDPRESS_FIELDS = {"user", "service", "request_path", "container_path", "ttl_seconds"}
 _SHARE_FIELDS = {"hostname", "private", "agent_mint", "stack_sign_in", "route_sign_in", "inbox_sign_in", "linked_access"}
 _SHARE_SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_host_suffixes"}
 _MAGIC_FIELDS = {"request_url", "request_origin", "link_origin", "link_path", "link_pattern",
@@ -77,6 +78,16 @@ def _invalid(message: str) -> LoginServiceError:
 
 def is_declared(raw: object) -> bool:
     return isinstance(raw, dict) and ("entries" in raw or "login_service" in raw)
+
+
+def wordpress_declaration(raw: object) -> dict | None:
+    """Keep the existing WordPress fields alongside optional named entries."""
+    if not isinstance(raw, dict):
+        return None
+    if not is_declared(raw):
+        return raw
+    wordpress = {key: raw[key] for key in _WORDPRESS_FIELDS if key in raw}
+    return wordpress or None
 
 
 def _reject_unknown(raw: dict, allowed: set[str], where: str) -> None:
@@ -383,8 +394,9 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
         return None
     share_own = None
     if declared:
-        if set(raw) != {"login_service", "entries"}:
-            raise _invalid("autologin must hold exactly login_service and entries in this form")
+        _reject_unknown(raw, {"login_service", "entries"} | _WORDPRESS_FIELDS, "autologin")
+        if not {"login_service", "entries"} <= set(raw):
+            raise _invalid("autologin must hold login_service and entries in this form")
         service, entries = raw["login_service"], raw["entries"]
         if share is not None:
             share_own, _ = _share_block(share, declared_service=True)
@@ -437,7 +449,7 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
                                "inbox_gate entry")
     if share_own is not None:
         validate_route_sign_in(share_own, parsed, routes,
-                               wordpress=raw if not declared and isinstance(raw, dict) else None)
+                               wordpress=wordpress_declaration(raw))
     site_hosts = [entry["hostname"] for entry in parsed.values() if entry["mode"] == "site_gate"]
     if any(sum(1 for entry in parsed.values() if entry["hostname"] == host) > 1 for host in site_hosts):
         # The gate answers every path on its hostname, so nothing else may share it.

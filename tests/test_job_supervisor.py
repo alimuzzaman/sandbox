@@ -970,7 +970,8 @@ class NormalExitCessationTests(unittest.TestCase):
             (proc / "90600" / "stat").write_text("garbage")
             self.assertIsNone(self.holders(proc))
         with self.subTest("parent started after its child: a reused PID"):
-            self.assertIsNone(self.holders(proc_with((90600, 1120, 1))))
+            # Without the check the walk would go on to the old outsider 90550 and skip.
+            self.assertIsNone(self.holders(proc_with((90600, 1120, 90550), (90550, 800, 1))))
         with self.subTest("supervisor ancestry unreadable"):
             proc = proc_with((90600, 900, 1))
             (proc / "90001" / "stat").unlink()

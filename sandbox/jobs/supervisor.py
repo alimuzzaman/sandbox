@@ -586,9 +586,11 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
 
     A link that cannot be read, a parent that started after its child (its
     PID was reused) or a chain longer than 64 makes the scan ``None``, unless
-    P itself has exited meanwhile, which skips it. A parent PID reused during
-    the walk names a process that started after the command, so it can never
-    end the walk with a skip.
+    P itself has exited meanwhile, which skips it. The newer-parent check is
+    required: without it a reused parent PID would let the walk continue up an
+    unrelated chain to an old outsider and wrongly skip P. This assumes no
+    supervisor ancestor adopts a job orphan as a subreaper and then clears its
+    subreaper flag; nothing Sandbox runs under does that.
     """
     if not _PROC.is_dir():
         return []

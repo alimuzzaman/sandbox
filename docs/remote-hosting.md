@@ -2770,11 +2770,14 @@ target), then remove the lease file there by hand.
 Each server-owner job has a different holder, so a job never takes over a lease
 merely because it runs as the same Linux user. One case is taken over: a later
 server-owner `sb host exec` replaces a lease whose holder is the exec lease of a
-server-cli job in the server's own job registry when that job is terminal
-(`succeeded`, `failed`, `timed_out`, `cancelled` or `interrupted`), recorded
-`owned_work_stopped: true` with no stop error, ran against the same target, took the
-lease while it ran, and none of its recorded processes or its process group still
-runs. The check and the replacement happen under the lease's own lock, so two
+top-level server-cli job with no child jobs in the server's own job registry when
+that job is terminal, recorded `owned_work_stopped: true` with no stop error, ran
+against the same target, took the lease while it ran, and none of its recorded
+processes or its process group still runs. The supervisor records that proof when it
+stops a job at its deadline, on a stall or on cancel, and when a job that ended by
+itself (`succeeded` or `failed`) left nothing running
+([remote-job-runtime.md](remote-job-runtime.md)). An `interrupted` job never records
+it. The check and the replacement happen under the lease's own lock, so two
 takers cannot both win, and `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` gets a
 `lease_takeover` line with both job ids. This ends the hand cleanup after an exec
 whose command reached its own `--timeout`. It proves the job's own processes

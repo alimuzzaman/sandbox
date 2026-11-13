@@ -68,6 +68,20 @@ revalidates the original process identity and escalates to its owned group.
 A concurrent terminal transition returns its observed result without signaling a
 replacement process. A cancelling result still needs a terminal status observation.
 
+A terminal job's `result_json` records whether its owned work is proven stopped:
+`owned_work_stopped`, `stop_error` and the `owned_descendants` the supervisor saw.
+A deadline, stall or cancel stop records `true` once the command's process group is
+empty. A job that ends by itself (`succeeded` or `failed`) records `true` only when,
+before the supervisor reaps the command, nothing in its process group or session
+still runs, no descendant it saw is still running, nothing still holds the job's
+output pipes and, on Linux, no same-user process still carries the job's
+`SANDBOX_DURABLE_JOB_ID`. Otherwise it records `false` with the reason in
+`unproven`; the lifecycle and exit code are unchanged. A process that left both the
+group and the session and also cleared its environment or changed user is not
+detected. `interrupted` jobs never record the proof. Exec lease takeover,
+`job-reconcile --job-id` and stack source repair rely on it, and each also checks
+for live processes itself.
+
 The examples use the repository launcher (`./sb`). From another checkout, use
 the installed `sb` command; the command surface and selectors are the same.
 

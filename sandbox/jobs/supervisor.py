@@ -231,6 +231,7 @@ def run_descriptor(path: str | Path) -> int:
         leader_alive, group_running, active_descendants = True, True, []
         streams_eof = False
         stopped = True
+        group_exited = False
 
         while True:
             now = time.monotonic()
@@ -247,6 +248,7 @@ def run_descriptor(path: str | Path) -> int:
                 last_state_probe = now
 
             if not group_running:
+                group_exited = True
                 drained = _drain_selector(selector, output, max_duration=1.0)
                 streams_eof = drained and not bool(selector.get_map())
                 break
@@ -316,6 +318,11 @@ def run_descriptor(path: str | Path) -> int:
 
         if not stopped:
             raise RuntimeError("owned job work cessation could not be proven")
+        # A group that exited by itself was stopped by nothing, so prove its
+        # cessation here, while the unreaped leader still pins its group and
+        # session IDs against reuse.
+        unproven = (_normal_exit_unproven(command, job_id, observed_descendants, streams_eof)
+                    if group_exited else None)
         return_code = command.wait(timeout=1)
 
         release_authority = stopped
@@ -328,6 +335,11 @@ def run_descriptor(path: str | Path) -> int:
         output_completeness = "complete" if streams_eof else "partial"
         cessation = json.dumps({"owned_work_stopped": True, "stop_error": None,
             "owned_descendants": sorted(observed_descendants)})
+        if unproven is not None:
+            # Something the job started may still run: record that instead
+            # of the proof, so no lease takeover or recovery relies on it.
+            cessation = json.dumps({"owned_work_stopped": False, "stop_error": None,
+                "owned_descendants": sorted(observed_descendants), "unproven": unproven})
 
         if timed_out:
             terminal_exit_code = 124 if (return_code is None or return_code == 0) else return_code
@@ -358,7 +370,8 @@ def run_descriptor(path: str | Path) -> int:
         termination_reason = _child_termination_reason(return_code)
         repository.transition(job_id, target, exit_code=return_code,
             termination_reason=termination_reason,
-            output_completeness=output_completeness, integrity_sha256=integrity)
+            output_completeness=output_completeness, integrity_sha256=integrity,
+            result_json=cessation)
         return 0 if return_code == 0 else 1
     except BaseException as exc:
         release_authority = False
@@ -464,6 +477,81 @@ def _group_state(command: subprocess.Popen) -> tuple[bool, bool, list[int]]:
         else:
             active_descendants.append(pid)
     return leader_alive, (leader_alive or bool(active_descendants)), active_descendants
+
+
+_PROC = Path("/proc")
+
+
+def _normal_exit_unproven(command: subprocess.Popen, job_id: str, observed_descendants: set[int],
+                          streams_eof: bool) -> str | None:
+    """Why a group that exited by itself cannot be proven stopped, or ``None``.
+
+    The group is already empty. Call this before reaping the leader: its
+    zombie keeps the group and session IDs from being reused. A process that
+    left the group (``setsid``, job control, a double-fork daemon) still
+    counts when it holds the job's output pipes, stays in the job's session,
+    is a descendant the supervisor saw earlier, or (where ``/proc`` exists)
+    still carries this job's ``SANDBOX_DURABLE_JOB_ID``. A reused PID refuses
+    too. Not detected: a process that cleared its environment or changed user
+    after leaving both the group and the session, as on the stop paths.
+    """
+    if not streams_eof:
+        return "output_pipes_held"
+    try:
+        holders = _job_environment_holders(job_id)
+        if holders is None:
+            return "process_environment_unavailable"
+        if holders:
+            return "job_environment_running"
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True,
+            timeout=2, check=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"})
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                continue
+            pid, pgid = int(parts[0]), int(parts[1])
+            if parts[2].startswith("Z"):
+                continue
+            if pgid == command.pid:
+                return "group_member_running"
+            if pid in observed_descendants:
+                return "descendant_running"
+            try:
+                if os.getsid(pid) == command.pid:
+                    return "session_member_running"
+            except ProcessLookupError:
+                continue
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return "process_table_unavailable"
+    return None
+
+
+def _job_environment_holders(job_id: str) -> list[int] | None:
+    """Same-user PIDs whose environment names this job; ``None`` when unreadable.
+
+    Every durable child starts with ``SANDBOX_DURABLE_JOB_ID`` and its
+    descendants inherit it. Without ``/proc`` (macOS) nothing is scanned.
+    """
+    if not _PROC.is_dir():
+        return []
+    marker = ("SANDBOX_DURABLE_JOB_ID=" + job_id).encode()
+    holders = []
+    for directory in _PROC.iterdir():
+        if not directory.name.isdigit() or int(directory.name) == os.getpid():
+            continue
+        try:
+            if directory.stat().st_uid != os.geteuid():
+                continue
+            environment = (directory / "environ").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            return None
+        if marker in environment.split(b"\0"):
+            holders.append(int(directory.name))
+    return holders
 
 
 def _child_running(command: subprocess.Popen) -> bool:

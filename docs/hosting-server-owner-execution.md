@@ -109,7 +109,10 @@ physical lease. A timeout of the exec client does not prove container-side
 descendants stopped, so owner exec keeps that lease as well. The next owner exec
 on that target takes the lease over once the job registry shows the job terminal
 with `owned_work_stopped: true` and none of its recorded processes runs, and audits
-the takeover with both job ids. That proves the job's own processes stopped, not a
+the takeover with both job ids. A command that reached its own `--timeout` makes the
+exec exit 255, so its job ends `failed`; the supervisor records the proof for it
+only when nothing the job started still runs in its process group or session, holds
+its output, or (on Linux) still carries its job id. That proves the job's own processes stopped, not a
 command Docker left running in the container. Leases of applies, destroys and other
 controllers are never taken over (`docs/remote-hosting.md`, `host_apply_lease_held`).
 

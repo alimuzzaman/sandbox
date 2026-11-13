@@ -236,7 +236,11 @@ drift or changed plan refuse. The original lease holder must match the retained
 job, its acquisition time must fall within that job, and its file identity and
 content digest must still match under the native target and physical lease locks.
 Only that lease is retired after repeated cessation proof; its token is never
-returned. Intent and completion are appended to the original job's events. An
+returned. An exec whose command reached its own `--timeout` ends `failed` and carries
+the stopped-work proof when nothing it started still runs
+([remote-job-runtime.md](remote-job-runtime.md)), so this path accepts it; a later
+server-owner `host exec` on the target usually takes that lease over first
+([remote-hosting.md](remote-hosting.md#host_apply_lease_held)). Intent and completion are appended to the original job's events. An
 already absent lease is reported without mutation. An uncertain confirmation
 must be followed by a new plan for the same original job, never manual deletion.
 

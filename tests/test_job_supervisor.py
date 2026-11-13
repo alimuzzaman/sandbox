@@ -670,3 +670,116 @@ class FailureCleanupTests(unittest.TestCase):
             killpg.assert_called_once_with(12345, 0)
         with patch("sandbox.jobs.supervisor.os.killpg", side_effect=ProcessLookupError):
             self.assertTrue(_stop_failed_child(command, 0))
+
+
+class NormalExitCessationTests(unittest.TestCase):
+    """A job that ends by itself records the stop proof only when nothing it started still runs."""
+
+    def run_job(self, script, *, deadline=20):
+        temp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        repo = JobRepository(temp / "registry.sqlite")
+        self.addCleanup(repo.close)
+        storage = JobStorage(temp, free_disk_reserve=0)
+        argv = ["/bin/sh", "-c", script]
+        row, _ = repo.accept(JobSubmission("test", str(temp), "p", "local", "normal-exit",
+            tuple(argv), deadline, SourceIdentity("source")))
+        JobScheduler(repo, min_free_disk_mb=0, min_free_memory_mb=0).acquire(row)
+        descriptor = storage.job_dir(row["job_id"], create=True) / "descriptor.json"
+        descriptor.write_text(json.dumps({
+            "job_id": row["job_id"], "registry_path": str(repo.path), "runtime_dir": str(temp),
+            "argv": argv, "cwd": str(temp), "deadline_seconds": deadline,
+            "cancel_grace_seconds": 1, "nonce_hash": "0" * 64,
+            "environment": dict(synthetic_environment()), "execution_runtime": "host",
+            # Real descriptors always name the job; children inherit it.
+            "authoritative_context": {"job_id": row["job_id"]},
+        }))
+        descriptor.chmod(0o600)
+        run_descriptor(descriptor)
+        snap = repo.snapshot(row["job_id"])
+        return snap, json.loads(snap["result_json"] or "null")
+
+    def leftover(self, path):
+        """Kill a process a fixture left behind, by the PID it wrote."""
+        for _ in range(100):
+            if path.exists() and path.read_text().strip():
+                break
+            time.sleep(.03)
+        pid = int(path.read_text().strip())
+
+        def kill():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+        self.addCleanup(kill)
+        return pid
+
+    def test_a_job_that_ended_by_itself_records_its_owned_work_stopped(self):
+        for script, lifecycle, code in (("exit 0", "succeeded", 0), ("exit 255", "failed", 255),
+                                        ("(sleep .2) & exit 3", "failed", 3)):
+            with self.subTest(script=script):
+                snap, result = self.run_job(script)
+                self.assertEqual((snap["lifecycle"], snap["exit_code"]), (lifecycle, code))
+                self.assertEqual(result["owned_work_stopped"], True, result)
+                self.assertIsNone(result["stop_error"])
+                self.assertIsInstance(result["owned_descendants"], list)
+                self.assertNotIn("unproven", result)
+
+    def test_a_child_left_in_the_jobs_session_is_not_proven_stopped(self):
+        pid_path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "pid"
+        # A new process group in the same session, output closed: the group check alone misses it.
+        snap, result = self.run_job(
+            f"perl -e 'setpgrp(0,0); open F, \">\", shift; print F $$; close F; sleep 30'"
+            f" {pid_path} </dev/null >/dev/null 2>&1 & sleep .3; exit 255")
+        pid = self.leftover(pid_path)
+        os.kill(pid, 0)  # still running
+        self.assertEqual(snap["lifecycle"], "failed")
+        self.assertIs(result["owned_work_stopped"], False, result)
+        self.assertIn(result["unproven"], {"session_member_running", "descendant_running",
+                                           "job_environment_running"})
+
+    def test_a_child_holding_the_jobs_output_is_not_proven_stopped(self):
+        pid_path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "pid"
+        snap, result = self.run_job(
+            f"perl -e 'use POSIX; POSIX::setsid(); open F, \">\", shift; print F $$; close F; sleep 30'"
+            f" {pid_path} & sleep .3; exit 255")
+        self.leftover(pid_path)
+        self.assertEqual(snap["lifecycle"], "failed")
+        self.assertEqual(snap["output_completeness"], "partial")
+        self.assertIs(result["owned_work_stopped"], False, result)
+        self.assertEqual(result["unproven"], "output_pipes_held")
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs Linux /proc")
+    def test_a_double_fork_daemon_is_not_proven_stopped(self):
+        pid_path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "pid"
+        # New session, output closed, never seen in the group: only its environment names the job.
+        snap, result = self.run_job(
+            "perl -e 'use POSIX; fork and exit; POSIX::setsid(); fork and exit;"
+            " open STDIN, \"</dev/null\"; open STDOUT, \">/dev/null\"; open STDERR, \">/dev/null\";"
+            f" open F, \">\", shift; print F $$; close F; sleep 30' {pid_path}; sleep .3; exit 255")
+        self.leftover(pid_path)
+        self.assertIs(result["owned_work_stopped"], False, result)
+        self.assertEqual(result["unproven"], "job_environment_running")
+
+    def test_a_live_group_member_is_not_proven_stopped(self):
+        command = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(command.wait)
+        self.addCleanup(command.kill)
+        self.assertEqual(supervisor._normal_exit_unproven(command, "a" * 32, set(), True),
+                         "group_member_running")
+
+    def test_a_process_still_naming_the_job_is_found_by_its_environment(self):
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for pid, environment in (("4242", b"A=1\0SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"\0"),
+                                 ("4343", b"SANDBOX_DURABLE_JOB_ID=" + b"b" * 32 + b"\0"),
+                                 ("4444", b"SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"x\0")):
+            (proc / pid).mkdir()
+            (proc / pid / "environ").write_bytes(environment)
+        (proc / "self").mkdir()
+        with patch.object(supervisor, "_PROC", proc):
+            self.assertEqual(supervisor._job_environment_holders("a" * 32), [4242])
+            self.assertEqual(supervisor._job_environment_holders("c" * 32), [])
+            command = subprocess.Popen(["true"], start_new_session=True)
+            command.wait()
+            self.assertEqual(supervisor._normal_exit_unproven(command, "a" * 32, set(), True),
+                             "job_environment_running")
+        with patch.object(supervisor, "_PROC", proc / "missing"):
+            self.assertEqual(supervisor._job_environment_holders("a" * 32), [])

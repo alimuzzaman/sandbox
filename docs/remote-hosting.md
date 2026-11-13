@@ -820,11 +820,8 @@ Apply reports ready only when every primary and background service runs with the
 pushed commit under each `pushed_commit_sha` key, so forward the key on each of
 those services in your Compose file (for example
 `APP_SOURCE_REVISION: ${APP_SOURCE_REVISION:?}`). A service that lacks it keeps
-the target out of ready. The one exception is the managed `sandbox-login` gate that
-Sandbox adds for `share:` or `autologin.login_service`: Sandbox renders it from its own
-code, not from your commit, so it needs no key and is checked only for running and
-healthy. A Compose file that defines its own `sandbox-login` is refused at apply
-preflight (see [login-service.md](login-service.md)).
+the target out of ready. Sandbox forwards the keys itself to the managed
+`sandbox-login` gate (see [login-service.md](login-service.md)).
 
 Use `compose.background_services` for declared long-lived workers that must be built,
 recreated, and started with the web service. Keep one-shot migration/setup jobs in

@@ -787,6 +787,8 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         login_declaration = login_service.parse_declaration(
             env.get("autologin"), routes=routes, compose=compose, secrets=secrets,
             share=env.get("share"))
+        if login_declaration:
+            login_service.revision_keys(_pushed_revision_keys(deploy))
     except login_service.LoginServiceError as exc:
         raise HostingError(str(exc)) from None
     if login_service.is_private(login_declaration) and (env.get("cloudflare") or {}).get("proxied"):
@@ -1051,40 +1053,17 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     # Spec 081: the gate publishes its own managed loopback port, and the front
     # door sends every gate hostname there; the application keeps its port.
     from sandbox.hosting.owner_share_record import target_digest
+    # The gate is a background service, so delivery checks it for the pushed
+    # revision like every other one; it gets the keys the same way they do.
     return rendered + login_service.render_service(
         declaration, gate_port=login_service.gate_loopback_port(loopback_port),
-        target_digest=target_digest(validated))
+        target_digest=target_digest(validated),
+        source_revision_keys=_pushed_revision_keys(validated["deploy"]))
 
 
-def managed_gate_service(validated: dict) -> str | None:
-    """The background service Sandbox itself added for the login gate, if any.
-
-    Only a validation that parsed a gate declaration appends ``sandbox-login``, and
-    it appends it last. The name alone proves nothing: a manifest cannot name it
-    (``parse_declaration``), and apply preflight refuses a Compose file that defines it.
-    """
-    from sandbox.hosting import login_service
-    compose = validated["compose"]
-    background = list(compose.get("background_services") or [])
-    if (validated.get("login_service") and background
-            and background[-1] == login_service.SERVICE_NAME
-            and background.count(login_service.SERVICE_NAME) == 1
-            and compose["service"] != login_service.SERVICE_NAME):
-        return login_service.SERVICE_NAME
-    return None
-
-
-def source_revision_services(validated: dict) -> list[str]:
-    """Running services whose containers must hold each ``pushed_commit_sha`` key.
-
-    The managed gate is exempt. Sandbox renders it from its own runtime and the gate
-    declaration, never from the application commit, so the commit is the wrong proof
-    for it; its topology and health checks still apply.
-    """
-    compose = validated["compose"]
-    gate = managed_gate_service(validated)
-    return [service for service in (compose["service"], *compose.get("background_services", []))
-            if service != gate]
+def _pushed_revision_keys(deploy: dict) -> list[str]:
+    return sorted(key for key, provider in deploy.get("derived_environment", {}).items()
+                  if provider == "pushed_commit_sha")
 
 
 def resolve_environment(validated: dict, source_values: dict[str, str],

@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SERVICE_NAME = "sandbox-login"
+# The gate reads its settings from SANDBOX_LOGIN_* variables (runtime.py).
+RESERVED_ENVIRONMENT_PREFIX = "SANDBOX_LOGIN_"
+_REVISION_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 STATE_KEY = "login_default_email"
 LINK_PARAMETER = "sandbox_autologin"
 RECORD_SCHEMA = "sandbox.login-token.v1"
@@ -598,12 +601,33 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def render_service(declaration: dict, gate_port: int | None = None, *, target_digest: str | None = None) -> str:
+def revision_keys(keys) -> tuple[str, ...]:
+    """The declared ``pushed_commit_sha`` keys the gate carries, sorted.
+
+    Delivery proves every running service, this one included, holds the pushed
+    commit under each key. ``SANDBOX_LOGIN_*`` names are the gate's own settings,
+    so a manifest key there would replace them; it is refused.
+    """
+    result = tuple(sorted(keys))
+    for key in result:
+        if not isinstance(key, str) or not _REVISION_KEY_RE.fullmatch(key):
+            raise _invalid("source revision keys must be environment variable names")
+        if key.upper().startswith(RESERVED_ENVIRONMENT_PREFIX):
+            raise _invalid(f"deploy.derived_environment key {key} uses the {RESERVED_ENVIRONMENT_PREFIX} "
+                           f"prefix reserved for {SERVICE_NAME}")
+    return result
+
+
+def render_service(declaration: dict, gate_port: int | None = None, *, target_digest: str | None = None,
+                   source_revision_keys=()) -> str:
     """Render the Compose service block; it joins the override's ``services:``.
 
     With ``gate_port`` the service publishes on that loopback port only, so the front
-    door can send gate hostnames straight to it (spec 081).
+    door can send gate hostnames straight to it (spec 081). Each of
+    ``source_revision_keys`` is passed by reference from the apply's environment
+    file, the same value the application's own services receive.
     """
+    keys = revision_keys(source_revision_keys)
     source = _runtime_source()
     config = _b64(json.dumps(runtime_config(declaration, target_digest=target_digest), sort_keys=True, separators=(",", ":")).encode())
     probe = f"import urllib.request as u;u.urlopen('http://127.0.0.1:{HEALTH_PORT}/healthz',timeout=3)"
@@ -628,6 +652,7 @@ def render_service(declaration: dict, gate_port: int | None = None, *, target_di
         f'      SANDBOX_LOGIN_CONFIG: "{config}"',
         *([f'      SANDBOX_LOGIN_CAPTURE_CREDENTIAL: "${{{capture["credential_secret"]}}}"']
           if capture and capture["credential_secret"] else []),
+        *(f'      {key}: "${{{key}}}"' for key in keys),
         f"    command: {json.dumps(['python3', '-c', _LOADER, source])}",
         "    healthcheck:",
         f"      test: {json.dumps(['CMD', 'python3', '-c', probe])}",
@@ -657,17 +682,15 @@ def preflight_upstreams(declaration: dict, primary: str) -> list[str]:
 
 
 def preflight_command(prefix: str, capture_service: str | None, upstreams: list[str] = (),
-                      gate_port: int | None = None, *, user_prefix: str | None = None) -> str:
+                      gate_port: int | None = None) -> str:
     """A read-only remote probe; its output is counts, never Compose values.
 
     ``login_ports`` counts every published port of the login service except the one
-    managed loopback mapping ``127.0.0.1:<gate_port>:8080``. With ``user_prefix``
-    (Compose over the target's own files, without Sandbox's override),
-    ``login_user_defined`` says whether those files define the login service.
+    managed loopback mapping ``127.0.0.1:<gate_port>:8080``.
     """
     program = "\n".join((
         "import json,subprocess,sys",
-        "command,capture,login,upstreams,gate,user=sys.argv[1:7]",
+        "command,capture,login,upstreams,gate=sys.argv[1:6]",
         "upstreams=json.loads(upstreams)",
         "done=subprocess.run(command,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=60,check=True)",
         "services=json.loads(done.stdout)['services']",
@@ -680,17 +703,11 @@ def preflight_command(prefix: str, capture_service: str | None, upstreams: list[
         "login_ports=sum(1 for port in ports(login) if not managed(port))+host_network(login)",
         "upstream_missing=sum(1 for name in upstreams if name not in services)",
         "upstream_ports=sum(sum(1 for port in ports(name) if beyond_loopback(port))+host_network(name) for name in upstreams)",
-        "observed={'capture_present':(capture in services) if capture else True,'capture_ports':capture_ports,'login_ports':login_ports,'upstream_missing':upstream_missing,'upstream_ports':upstream_ports}",
-        "if user:",
-        " own=subprocess.run(user,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=60,check=True)",
-        " observed['login_user_defined']=1 if login in (json.loads(own.stdout).get('services') or {}) else 0",
-        "print(json.dumps(observed))",
+        "print(json.dumps({'capture_present':(capture in services) if capture else True,'capture_ports':capture_ports,'login_ports':login_ports,'upstream_missing':upstream_missing,'upstream_ports':upstream_ports}))",
     ))
     config = f"{prefix} --profile '*' config --format json"
-    user_config = f"{user_prefix} --profile '*' config --format json" if user_prefix else ""
     return shlex.join(["python3", "-c", program, config, capture_service or "", SERVICE_NAME,
-                       json.dumps(sorted(upstreams)), str(int(gate_port)) if gate_port else "",
-                       user_config])
+                       json.dumps(sorted(upstreams)), str(int(gate_port)) if gate_port else ""])
 
 
 def check_preflight(output: object) -> None:
@@ -700,14 +717,6 @@ def check_preflight(output: object) -> None:
             observed["capture_present"], observed["capture_ports"], observed["login_ports"])
     except (ValueError, KeyError, TypeError):
         raise LoginServiceError("login_service_preflight_failed", "the Compose topology could not be read") from None
-    user_defined = observed.get("login_user_defined", 0)
-    if not isinstance(user_defined, int) or isinstance(user_defined, bool):
-        raise LoginServiceError("login_service_preflight_failed", "the Compose topology could not be read")
-    if user_defined:
-        raise LoginServiceError(
-            "login_service_user_defined",
-            f"a Compose file defines {SERVICE_NAME}; Sandbox renders that service for the gate "
-            f"(share: or autologin.login_service), so remove it from compose.files")
     if not present:
         raise LoginServiceError("capture_not_in_project", "the capture service is not in this Compose project")
     if capture_ports:

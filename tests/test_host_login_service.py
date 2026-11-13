@@ -505,8 +505,7 @@ class PreflightTests(unittest.TestCase):
 
     def _run(self, output):
         with patch.object(hosting_cmd, "_remote_checked", return_value=output) as checked:
-            hosting_cmd._preflight_login_service({}, "docker compose", self.validated,
-                                                user_prefix="docker compose -f own.yml")
+            hosting_cmd._preflight_login_service({}, "docker compose", self.validated)
         return checked
 
     def test_clean_topology_passes_with_read_only_probe(self):
@@ -588,43 +587,6 @@ class PreflightProbeTests(unittest.TestCase):
         with self.assertRaises(login.LoginServiceError) as raised:
             login.check_preflight(self._probe(login_service={"ports": [self._port(host_ip="127.0.0.1")]}))
         self.assertEqual(raised.exception.code, "login_port_published")
-
-    def test_user_compose_file_defining_the_login_service_is_refused(self):
-        merged = {"services": {"capture": {}, login.SERVICE_NAME: {}}}
-        for own, expected in (({"web": {}, login.SERVICE_NAME: {}}, 1), ({"web": {}}, 0)):
-            with self.subTest(own=sorted(own)), tempfile.TemporaryDirectory() as directory:
-                fakes = []
-                for name, document in (("merged", merged), ("own", {"services": own})):
-                    Path(directory, f"{name}.json").write_text(json.dumps(document))
-                    fake = Path(directory, f"{name}.sh")
-                    fake.write_text(f"#!/bin/sh\nexec /bin/cat {Path(directory, name + '.json')}\n")
-                    fakes.append(f"/bin/sh {fake}")
-                command = shlex.split(login.preflight_command(fakes[0], "capture", user_prefix=fakes[1]))
-                done = run_test_process([sys.executable, *command[1:]], capture_output=True, text=True)
-                self.assertEqual(done.returncode, 0, done.stderr)
-                self.assertEqual(json.loads(done.stdout)["login_user_defined"], expected)
-                if expected:
-                    with self.assertRaises(login.LoginServiceError) as raised:
-                        login.check_preflight(done.stdout)
-                    self.assertEqual(raised.exception.code, "login_service_user_defined")
-                else:
-                    login.check_preflight(done.stdout)
-
-    def test_unreadable_user_compose_files_fail_closed(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config = Path(directory, "config.json")
-            config.write_text(json.dumps({"services": {"capture": {}}}))
-            fake = Path(directory, "compose.sh")
-            fake.write_text(f"#!/bin/sh\nexec /bin/cat {config}\n")
-            command = shlex.split(login.preflight_command(f"/bin/sh {fake}", "capture",
-                                                          user_prefix="/bin/false"))
-            done = run_test_process([sys.executable, *command[1:]], capture_output=True, text=True)
-        self.assertNotEqual(done.returncode, 0)
-        for value in ("1", True, None):
-            with self.subTest(value=value), self.assertRaises(login.LoginServiceError) as raised:
-                login.check_preflight(json.dumps({"capture_present": True, "capture_ports": 0,
-                                                  "login_ports": 0, "login_user_defined": value}))
-            self.assertEqual(raised.exception.code, "login_service_preflight_failed")
 
 
 class EmailResolutionTests(unittest.TestCase):
@@ -1071,8 +1033,7 @@ class SitePreflightTests(unittest.TestCase):
                           return_value=json.dumps({"capture_present": True, "capture_ports": 0,
                                                    "login_ports": 0, "upstream_missing": 0,
                                                    "upstream_ports": 0})) as checked:
-            hosting_cmd._preflight_login_service({}, "docker compose", validated,
-                                                user_prefix="docker compose -f own.yml")
+            hosting_cmd._preflight_login_service({}, "docker compose", validated)
         self.assertIn('["site"]', checked.call_args.args[1])
 
 

@@ -282,7 +282,13 @@ def _ended_exec_job(repository, holder, target):
 def _write_lease(path, token, owner):
     """The same body and mode the shell lease script writes, replaced atomically."""
     temporary = str(path) + ".new"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    # Unlink a leftover first and create exclusively, so a pre-placed hard
+    # link or symlink is replaced, never written through.
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
         os.write(descriptor, f"{token} {owner} {int(time.time())}\n".encode())

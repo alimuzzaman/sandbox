@@ -150,6 +150,20 @@ class TakeOverEndedExecLeaseTests(unittest.TestCase):
         body = self.hold(recovery.exec_lease_owner(ENDED), since=int(NOW.timestamp()) + 600)
         self.assert_refused(Registry(job()), body)
 
+    def test_a_pre_placed_new_file_is_replaced_not_written_through(self):
+        outside = self.path.parent / "outside"
+        outside.write_text("keep\n")
+        for link in (os.link, os.symlink):
+            with self.subTest(link=link.__name__):
+                self.hold(recovery.exec_lease_owner(ENDED))
+                temporary = Path(str(self.path) + ".new")
+                temporary.unlink(missing_ok=True)
+                link(outside, temporary)
+                lease, _ = self.take(Registry(job()))
+                self.assertEqual(outside.read_text(), "keep\n")
+                self.assertEqual(self.path.read_text().split()[:2], [lease["token"], self.taker])
+                self.assertFalse(temporary.exists() or temporary.is_symlink())
+
     def test_two_concurrent_takers_have_exactly_one_winner(self):
         self.hold(recovery.exec_lease_owner(ENDED))
         registry = Registry(job())

@@ -2987,6 +2987,10 @@ def _host_apply_argv(validated: dict, remote_name: str, args=None) -> list[str]:
     for name in ("allow_zone_ssl_change", "allow_record_overwrite", "purge_edge_cache", "json"):
         if getattr(args, name, False):
             argv.append("--" + name.replace('_', '-'))
+    # `--generate` is stored as `generate_secrets`; the nested child is where
+    # the secrets gate runs, so dropping it refuses with missing secrets.
+    if getattr(args, "generate_secrets", False):
+        argv.append("--generate")
     return argv
 
 

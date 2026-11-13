@@ -1,3 +1,4 @@
+import contextlib
 import copy
 from types import SimpleNamespace
 import unittest
@@ -21,6 +22,36 @@ class JoinedExecutionCapabilityTest(unittest.TestCase):
             downgraded = adopt_execution_capabilities('box', adopted, lambda argv: self.observed)
         self.assertNotIn(STACK_REF_CONTRACT, downgraded['capabilities'])
         self.assertEqual(writer.call_count, 2)
+
+    def test_every_contract_the_installed_server_can_advertise_is_adopted(self):
+        # The server and client ship from one revision; a contract the server
+        # advertises must never make its own client refuse every job.
+        from sandbox.application import server_cli
+        owner = SimpleNamespace(target_identity='c' * 24, ownership_marker='a' * 24,
+                                runtime_revision='b' * 24, executable='/x/sb', uid=1, home='/x')
+        available = [
+            'sandbox.application.server_cli_targets.installed_inspector',
+            'sandbox.application.server_cli_delivery.contract_available',
+            'sandbox.application.server_cli_exec.exec_contract_available',
+            'sandbox.application.server_cli_exec.capture_contract_available',
+            'sandbox.workspaces.content.source_content_available',
+            'sandbox.hosting.server_cli_dispatch.stack_ref_contract_available',
+            'sandbox.commands.preview_server.preview_contract_available',
+            'sandbox.application.server_cli_source_repair.contract_available',
+            'sandbox.hosting.publisher_proof.contract_available',
+        ]
+        with contextlib.ExitStack() as stack:
+            for target in available:
+                stack.enter_context(mock.patch(target, return_value=True))
+            stack.enter_context(mock.patch.object(server_cli, '_current_owner', return_value=owner))
+            stack.enter_context(mock.patch.object(server_cli, '_receiver_routing_metadata', return_value={}))
+            observed = server_cli.capabilities()
+        self.assertIn('job.publisher-proof.v1', observed['capabilities'])
+        with mock.patch('sandbox.core._remote.put_remote',
+                        side_effect=lambda name, **fields: {**self.record,
+                            'capabilities': fields['capabilities']}):
+            adopted = adopt_execution_capabilities('box', self.record, lambda argv: observed)
+        self.assertEqual(set(observed['capabilities']), set(adopted['capabilities']))
 
     def setUp(self):
         self.record = {'joined': True, 'provisioned': True, 'control_transport': 'tailscale',

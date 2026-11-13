@@ -31,8 +31,10 @@ def adopt_execution_capabilities(name, record, request):
     from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT
     from sandbox.hosting.server_cli_dispatch import STACK_REF_CONTRACT
     from sandbox.commands.preview_server import CONTRACT as PREVIEW_CONTRACT
+    from sandbox.hosting.publisher_proof import CONTRACT as PUBLISHER_PROOF_CONTRACT
     known = {'job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT,
-             'job.server-cli.v1', 'job.source-content.v1', STACK_REF_CONTRACT, PREVIEW_CONTRACT}
+             'job.server-cli.v1', 'job.source-content.v1', STACK_REF_CONTRACT, PREVIEW_CONTRACT,
+             PUBLISHER_PROOF_CONTRACT}
     if (observed.get('ok') is not True or not isinstance(values, list)
             or any(not isinstance(value, str) or value not in known for value in values)
             or len(set(values)) != len(values)

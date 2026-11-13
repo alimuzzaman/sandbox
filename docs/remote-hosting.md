@@ -2308,8 +2308,14 @@ The controller page's WordPress admin action posts exactly `{remote, stack}` to
 `/api/hosting/sign-in` with the panel's same-origin guard. It resolves the recorded
 rendered manifest and uses the same host writer lock as the CLI. A missing WordPress
 autologin declaration, inaccessible private route or unavailable remote refuses the
-action. This currently requires a controller with the rendered stack manifest.
-Server-local sign-in and public teammate access are not implemented by this endpoint.
+action. Controller panels require the rendered stack manifest. Server panels use
+the separate admitted owner-local target path described in
+[owner-panel sharing](owner-panel-sharing.md), including its installation prerequisites.
+The browser accepts only a successful response with a one-time WordPress fragment
+URL and typed expiry/user metadata. Invalid, failed or unparseable responses never
+navigate the new tab or display returned response details. An unconfirmed response
+does not trigger a retry. This response validation adds no owner-local execution
+authority; the owner-local admission and writer boundary applies separately.
 Unavailable actions show declaration, manifest, private-gate or controller guidance
 on both own and Shared stack sections before a click. The operation repeats these
 checks at mint time. Named CLI login also refuses a manifest whose project or

@@ -1986,7 +1986,11 @@ def manage(config, argv, state_dir, *, stdin, stdout, clock=time.time):
         return emit({"ok": False, "code": "site_entry_unknown"})
     if verb == "capabilities" and not extra:
         return emit({"ok": True, "capabilities": ["stack-page-v2", "stack-signin-pool-v1",
-                     "wordpress-claim-v1", "companion-status-v1"],
+                     "wordpress-claim-v1", "companion-status-v1", "owner-panel-gate-v1"],
+                     "config_digest": hashlib.sha256(json.dumps(config, sort_keys=True,
+                         separators=(",", ":")).encode()).hexdigest(),
+                     "panel_access_digest": config.get("panel_access_digest"),
+                     "panel_target_digest": config.get("panel_target_digest"),
                      "stack_schemas": [STACK_SCHEMA, STACK_SCHEMA_V2], "link_schemas": [SITE_LINK_SCHEMA]})
     store = SiteStore(state_dir, name, clock)
     store.ensure()

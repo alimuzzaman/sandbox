@@ -41,14 +41,46 @@ export async function postAction(
 // without this exact JSON body and panel header, or with an Origin other than
 // its own (contracts/panel-http.md). The result is never cached or kept.
 type ShareTarget = { remote: string; stack: string };
-export type SignInResult = { ok: true; url: string; expires_at: number; one_time: boolean; user: string } | ShareRefused;
+export type SignInResult = { ok: true; url: string; expires_at: number; one_time: true; user: string } | ShareRefused;
+
+function signInUnavailable(): ShareRefused {
+  return { ok: false, code: "sign_in_unavailable", message: "WordPress sign-in could not be confirmed. Check its status before requesting another link." };
+}
+
+// Only the immediate caller receives this URL. Malformed responses must never
+// reach navigation, the polling store, logs, or a reflected error message.
+function signInResponse(value: unknown): SignInResult {
+  if (typeof value !== "object" || value === null || !("ok" in value) || value.ok !== true
+      || !("url" in value) || typeof value.url !== "string" || value.url.length > 4096
+      || !("expires_at" in value) || typeof value.expires_at !== "number"
+      || !Number.isSafeInteger(value.expires_at) || value.expires_at <= 0
+      || !("one_time" in value) || value.one_time !== true
+      || !("user" in value) || typeof value.user !== "string"
+      || !/^[\x21-\x7e]{1,60}$/.test(value.user)) return signInUnavailable();
+  try {
+    const url = new URL(value.url);
+    if (url.protocol !== "https:" || url.username || url.password
+        || url.search !== "?sandbox_autologin=1" || !/^#[A-Za-z0-9_-]{43}$/.test(url.hash))
+      return signInUnavailable();
+    return { ok: true, url: url.href, expires_at: value.expires_at, one_time: true, user: value.user };
+  } catch {
+    return signInUnavailable();
+  }
+}
+
 export async function postSignIn(body: ShareTarget): Promise<SignInResult> {
-  const response = await fetch('/api/hosting/sign-in', {
-    method: 'POST', cache: 'no-store', credentials: 'same-origin', redirect: 'error',
-    headers: { 'content-type': 'application/json', 'x-sandbox-panel': 'share' },
-    body: JSON.stringify(body),
-  });
-  return await response.json() as SignInResult;
+  try {
+    const response = await fetch('/api/hosting/sign-in', {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin', redirect: 'error',
+      headers: { 'content-type': 'application/json', 'x-sandbox-panel': 'share' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) return signInUnavailable();
+    const value: unknown = await response.json();
+    return signInResponse(value);
+  } catch {
+    return signInUnavailable();
+  }
 }
 export function postShare(body: ShareTarget & { action: "create" }): Promise<ShareCreated | ShareRefused | SharePartial>;
 export function postShare(body: ShareTarget & { action: "list" }): Promise<ShareList | ShareRefused>;

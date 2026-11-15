@@ -100,7 +100,9 @@ class ExecClientTests(unittest.TestCase):
         self.assertEqual(self.read.call_count, 2)
         for call in self.read.call_args_list:
             self.assertEqual(call.args, ("box", self.receipt))
-            self.assertLessEqual(call.kwargs["budget_seconds"], 15)
+            # Each result read has its own finite budget, separate from the
+            # original effect deadline (docs/remote-transport-status.md).
+            self.assertEqual(call.kwargs["budget_seconds"], 60)
         self.submit.assert_called_once()
 
     def test_plain_capture_and_underlying_nonzero_exit_are_preserved(self):

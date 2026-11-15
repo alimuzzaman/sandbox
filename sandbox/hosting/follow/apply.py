@@ -6,6 +6,11 @@ runs the declared prepare step, then runs ``host stack up`` plan and confirm
 in-process: the same code, owner target and nested apply job a controller's
 dispatched ``host stack up`` uses. It waits for that apply job and records the
 outcome. It never removes or rolls back anything itself.
+
+Before prepare, before plan and again right before confirm it re-reads the
+target: a busy target ends the attempt as ``busy`` (the next poll tries the
+same heads again), and a stack removed or reaped meanwhile pauses the follow
+instead of being recreated.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,13 +28,19 @@ from typing import Callable
 
 from sandbox.hosting.follow import git
 from sandbox.hosting.follow import spec as follow_spec
+from sandbox.hosting.follow import tick as follow_tick
 from sandbox.hosting.follow.spec import FollowError
 from sandbox.hosting.follow.store import FollowStore, utc_now
 
-TERMINAL = frozenset({"succeeded", "failed", "timed_out", "cancelled", "interrupted"})
+TERMINAL = follow_tick.TERMINAL
 ACTOR = "follower"
 POLL_SECONDS = 5
+PREPARE_STOP_GRACE = 30
+# The job supervisor sends SIGKILL 20 s after SIGTERM; stop prepare well before.
+PREPARE_CANCEL_GRACE = 10
 _ATTEMPT = re.compile(r"^[0-9a-f]{16}$")
+# `host stack up` refusals that mean "someone else is changing this target now".
+BUSY_CODES = frozenset({"stack_apply_in_progress", "stack_submission_unknown", "stack_reaping"})
 
 
 def _redact(text: str) -> str:
@@ -36,19 +48,70 @@ def _redact(text: str) -> str:
     return _remote.redact_text(str(text))[:300]
 
 
-def stack_namespace(record: dict, template: Path, attempt_id: str, *, plan: bool) -> argparse.Namespace:
-    """The arguments a person's ``host stack up`` would carry."""
+def owner_target(remote_name: str | None, *, code: str, message: str):
+    """The retained server CLI job's owner context, or a FollowError.
+
+    A changed or unknown retained context (``OwnerTargetUnavailable``,
+    ``ServerCLIEffectUnknown``) is a refusal with that error's code, never a
+    traceback.
+    """
+    from sandbox.application.server_cli import ServerCLIEffectUnknown
+    from sandbox.hosting.server_cli_target import OwnerTargetUnavailable, selected_owner_target
+    try:
+        target = selected_owner_target(remote_name) if remote_name else None
+        if target is None:
+            raise FollowError(code, message)
+        return target.require_current()
+    except (OwnerTargetUnavailable, ServerCLIEffectUnknown) as exc:
+        raise FollowError(getattr(exc, "code", None) or "server_cli_owner_target_unavailable",
+                          f"the server CLI job's owner target is unavailable: {_redact(exc)}") from None
+
+
+def follow_source(record: dict, heads: dict) -> dict | None:
+    """The tracked branch and fetched head of the repository holding the template."""
+    repo = follow_spec.template_repo(record.get("template") or "")
+    branch = next((item["branch"] for item in record["repos"] if item["name"] == repo), None)
+    if repo is None or branch is None or not heads.get(repo):
+        return None
+    return {"branch": branch, "commit": heads[repo]}
+
+
+def stack_namespace(record: dict, template: Path, attempt_id: str, *, plan: bool,
+                    source: dict | None = None) -> argparse.Namespace:
+    """The arguments a person's ``host stack up`` would carry, plus the follow's source."""
     return argparse.Namespace(
         action="stack", image_action="up", stack_action="up", template=str(template),
         remote=record["remote"], name=record["name"], ref=record["ref"], owner=record["owner"],
         environment=record.get("environment"), lifetime=record.get("lifetime"), ttl=None, copy=None,
         port=None, generate_secrets=bool(record.get("generate")),
         request_id=f"follow-{record['name']}-{attempt_id}-apply", json=True,
-        server_cli_stack_ref=None, plan=plan, confirm=not plan)
+        server_cli_stack_ref=None, follow_source=source, plan=plan, confirm=not plan)
 
 
-def run_prepare(argv: list[str], *, cwd: Path, env: dict, timeout: int) -> None:
-    """Run the owner's prepare step without a shell; its output joins the job log."""
+class _Cancelled(Exception):
+    pass
+
+
+def _stop_group(process: subprocess.Popen, grace: float) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=grace)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def run_prepare(argv: list[str], *, cwd: Path, env: dict, timeout: int,
+                grace: float = PREPARE_STOP_GRACE, cancel_grace: float = PREPARE_CANCEL_GRACE) -> None:
+    """Run the owner's prepare step without a shell; its output joins the job log.
+
+    Prepare runs in its own process group, so a cancelled or timed-out attempt
+    job would not reach it. While it runs, SIGTERM and SIGINT stop its group
+    first, then end the attempt as ``follow_prepare_cancelled``.
+    """
     sys.stdout.flush()
     sys.stderr.flush()
     try:
@@ -56,19 +119,30 @@ def run_prepare(argv: list[str], *, cwd: Path, env: dict, timeout: int) -> None:
                                    start_new_session=True)
     except OSError as exc:
         raise FollowError("follow_prepare_unavailable", f"prepare could not start: {exc.strerror}") from None
+    previous: dict = {}
+    fired = []
+
+    def cancel(signum, _frame):
+        if not fired:
+            fired.append(signum)
+            raise _Cancelled(signum)
+
+    if threading.current_thread() is threading.main_thread():
+        for number in (signal.SIGTERM, signal.SIGINT):
+            previous[number] = signal.signal(number, cancel)
     try:
-        code = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=30)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-        raise FollowError("follow_prepare_timeout", f"prepare ran past its {timeout}s limit") from None
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _stop_group(process, grace)
+            raise FollowError("follow_prepare_timeout", f"prepare ran past its {timeout}s limit") from None
+        except _Cancelled:
+            _stop_group(process, cancel_grace)
+            raise FollowError("follow_prepare_cancelled",
+                              "the attempt job was stopped; its prepare step was stopped first") from None
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
     if code != 0:
         raise FollowError("follow_prepare_failed", f"prepare exited {code}")
 
@@ -84,12 +158,16 @@ def _default_job_view(job_id: str | None) -> dict | None:
 
 
 def _owner_context(remote_name: str):
-    from sandbox.hosting.server_cli_target import selected_owner_target
-    target = selected_owner_target(remote_name)
-    if target is None:
-        raise FollowError("follow_apply_requires_server_job",
-                          "host follow apply runs only inside the follow's own server CLI job")
-    return target.require_current()
+    return owner_target(remote_name, code="follow_apply_requires_server_job",
+                        message="host follow apply runs only inside the follow's own server CLI job")
+
+
+class _Stop(Exception):
+    """End the attempt without a failure: ``busy`` (retry next poll) or ``removed`` (pause)."""
+
+    def __init__(self, status: str, reason: str):
+        super().__init__(reason)
+        self.status, self.reason = status, reason
 
 
 class Attempt:
@@ -97,11 +175,14 @@ class Attempt:
                  stack_up: Callable = _default_stack_up, job_view: Callable = _default_job_view,
                  prepare: Callable = run_prepare, head: Callable = git.head,
                  environment: Callable | None = None, sleep: Callable = time.sleep,
-                 now: Callable = lambda: datetime.now(timezone.utc)):
+                 now: Callable = lambda: datetime.now(timezone.utc),
+                 stack_lookup: Callable = follow_tick.stack_record, busy: Callable = follow_tick.target_busy,
+                 lifetime: Callable = follow_tick.lifetime_state, home: Callable = follow_tick.sandbox_home):
         self.store = store or FollowStore()
         self.context_for, self.stack_up, self.job_view = context_for, stack_up, job_view
         self.prepare, self.head, self.sleep, self.now = prepare, head, sleep, now
         self.environment = environment or self._owner_environment
+        self.stack_lookup, self.busy, self.lifetime, self.home = stack_lookup, busy, lifetime, home
 
     @staticmethod
     def _owner_environment(context) -> dict:
@@ -129,12 +210,27 @@ class Attempt:
             outcome = {"status": "failed", "reason": None, "apply_job_id": None}
             try:
                 outcome.update(self._apply(record, context, attempt_id, heads))
+            except _Stop as stop:
+                outcome.update({"status": stop.status, "reason": stop.reason})
             except FollowError as exc:
                 outcome["reason"] = f"{exc.code}: {_redact(exc.message)}"
             except Exception as exc:  # stack up refusals and unexpected errors are an outcome
                 code = getattr(exc, "code", None) or type(exc).__name__
                 outcome["reason"] = f"{code}: {_redact(exc)}"
-            return self._finish(name, attempt_id, heads, outcome)
+                if code in BUSY_CODES:
+                    outcome["status"] = "busy"
+            return self._finish(name, attempt_id, heads, outcome, trigger=attempt.get("trigger"))
+
+    def _gate(self, record: dict) -> None:
+        """Stop unless the target still exists, is not being torn down and is free."""
+        stack = self.stack_lookup(record["remote"], record["name"])
+        gone, busy, _held = follow_tick.target_state(
+            stack, seen=bool(record["state"].get("stack_seen")), home=self.home(),
+            busy=self.busy, lifetime=self.lifetime)
+        if gone is not None:
+            raise _Stop("removed", gone)
+        if busy is not None:
+            raise _Stop("busy", busy)
 
     def _apply(self, record: dict, context, attempt_id: str, heads: dict) -> dict:
         name = record["name"]
@@ -144,6 +240,7 @@ class Attempt:
             if self.head(directory) != heads.get(repo):
                 raise FollowError("follow_source_changed",
                                   f"checkout {repo} is not at the attempt's commit {heads.get(repo, '')[:12]}")
+        self._gate(record)
         values = {"work_dir": work, "name": name, "repo_dirs": repo_dirs, "heads": heads}
         if record.get("prepare"):
             argv = [follow_spec.substitute(item, **values) for item in record["prepare"]]
@@ -155,18 +252,23 @@ class Attempt:
                 env[f"SANDBOX_FOLLOW_COMMIT_{key}"] = heads[repo]
             print(f"follow {name}: prepare {argv[0]}", flush=True)
             self.prepare(argv, cwd=work, env=env, timeout=int(record["prepare_timeout"]))
+            self._gate(record)
         template = Path(follow_spec.substitute(record["template"], **values)).resolve()
         if work.resolve() not in template.parents or not template.is_file():
             raise FollowError("follow_template_missing",
                               "the stack template is not a file inside the follow's checkouts")
-        planned = self.stack_up(stack_namespace(record, template, attempt_id, plan=True))
+        source = follow_source(record, heads)
+        planned = self.stack_up(stack_namespace(record, template, attempt_id, plan=True, source=source))
         apex = sorted(host for host in planned.get("hostnames") or [] if follow_spec.is_apex(host))
         if apex:
             raise FollowError("follow_apex_hostname_refused",
                               f"the stack would route apex names {', '.join(apex)}; refused")
         if planned.get("slug") != name:
             raise FollowError("follow_stack_mismatch", "the plan names a different stack")
-        result = self.stack_up(stack_namespace(record, template, attempt_id, plan=False))
+        # Prepare and plan can take long: someone may have removed the stack,
+        # cleanup may be reaping it, or another apply may hold it by now.
+        self._gate(record)
+        result = self.stack_up(stack_namespace(record, template, attempt_id, plan=False, source=source))
         apply_job = result.get("job_id")
         with self.store.lock(name):
             current = self.store.read(name)
@@ -187,11 +289,18 @@ class Attempt:
                 return {"status": "unknown", "reason": "follow_apply_wait_deadline", "apply_job_id": apply_job}
             self.sleep(POLL_SECONDS)
         if lifecycle != "succeeded":
-            return {"status": "failed", "apply_job_id": apply_job,
-                    "reason": f"stack_apply_{lifecycle}: exit {job.get('exit_code')}"}
+            reason = f"stack_apply_{lifecycle}: exit {job.get('exit_code')}"
+            busy, _held = self.busy(self.stack_lookup(record["remote"], name), home=self.home())
+            if busy is not None:
+                # The nested apply most likely met a lease taken after the last
+                # check (host_apply_lease_held): the next poll tries again.
+                return {"status": "busy", "apply_job_id": apply_job, "reason": f"{busy} after {reason}"}
+            return {"status": "failed", "apply_job_id": apply_job, "reason": reason}
         return {"status": "succeeded", "reason": None, "apply_job_id": apply_job}
 
-    def _finish(self, name: str, attempt_id: str, heads: dict, outcome: dict) -> dict:
+    def _finish(self, name: str, attempt_id: str, heads: dict, outcome: dict, *,
+                trigger: str | None = None) -> dict:
+        status = outcome["status"]
         with self.store.lock(name):
             record = self.store.read(name)
             if record is not None:
@@ -199,13 +308,21 @@ class Attempt:
                 attempt = state.get("attempt") or {}
                 if attempt.get("id") == attempt_id:
                     attempt.update({**outcome, "finished_at": utc_now()})
-                if outcome["status"] == "succeeded":
+                if status == "succeeded":
                     state.update({"applied": heads, "failed_heads": None})
+                elif status == "busy":
+                    # Not a failure: the next poll starts these heads again.
+                    if trigger == "retry":
+                        state["retry"] = True
+                elif status == "removed":
+                    state.update({"paused": True, "pause_reason": outcome["reason"]})
                 else:
                     state["failed_heads"] = heads
                 self.store.write(record)
             self.store.audit("attempt_finished", name, actor=ACTOR, attempt=attempt_id,
-                             status=outcome["status"], reason=outcome["reason"],
+                             status=status, reason=outcome["reason"],
                              apply_job_id=outcome.get("apply_job_id"))
-        return {"ok": outcome["status"] == "succeeded", "action": "follow-apply", "name": name,
+            if status == "removed" and record is not None:
+                self.store.audit("auto_pause", name, actor=ACTOR, reason=outcome["reason"])
+        return {"ok": status == "succeeded", "action": "follow-apply", "name": name,
                 "attempt": attempt_id, "heads": heads, **outcome}

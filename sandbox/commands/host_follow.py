@@ -27,14 +27,17 @@ def _store() -> FollowStore:
 
 def owner_context(args):
     """The retained server CLI job this command runs in, or a refusal."""
-    from sandbox.hosting.server_cli_target import selected_owner_target
-    remote_name = getattr(args, "remote", None)
-    target = selected_owner_target(remote_name) if remote_name else None
-    if target is None:
-        raise FollowError("follow_requires_joined_remote",
-                          "host follow runs on a joined (admitted Tailnet) remote: pass --remote with a "
-                          "joined registration")
-    return target.require_current()
+    from sandbox.hosting.follow.apply import owner_target
+    return owner_target(getattr(args, "remote", None), code="follow_requires_joined_remote",
+                        message="host follow runs on a joined (admitted Tailnet) remote: pass --remote "
+                                "with a joined registration")
+
+
+def _context(args):
+    """``owner_context``, remembered on ``args`` so a later refusal can be audited."""
+    context = owner_context(args)
+    args._follow_context = context
+    return context
 
 
 def _actor(context) -> str:
@@ -94,7 +97,7 @@ GITHUB_STEP = ("Add each public key in GitHub as a deploy key of its repository 
 
 
 def _add(args) -> dict:
-    context = owner_context(args)
+    context = _context(args)
     declaration = follow_spec.build(args, origin=context.origin_remote_name,
                                     routing=dict(context.target_metadata))
     store = _store()
@@ -112,19 +115,23 @@ def _add(args) -> dict:
                                   f"follow {name} has attempt {attempt.get('id')} running; replace it afterwards")
             record = {**declaration, "declared_at": (previous or {}).get("declared_at") or utc_now(),
                       "state": (previous or {}).get("state") or empty_state()}
-            store.write(record)
-            try:
-                timer = units.install(sb_path=context.owner.executable, sandbox_home=context.owner.sandbox_home)
-            except FollowError:
-                if previous is None:
-                    store.delete(name)
-                else:
-                    store.write(previous)
-                raise
+            # Under the units lock, a concurrent `remove` of the last other
+            # follow sees this record before it decides to drop the timer.
+            with store.units_lock():
+                store.write(record)
+                try:
+                    timer = units.install(sb_path=context.owner.executable,
+                                          sandbox_home=context.owner.sandbox_home)
+                except Exception:
+                    if previous is None:
+                        store.delete(name)
+                    else:
+                        store.write(previous)
+                    raise
             store.audit("replace" if previous else "add", name, actor=_actor(context),
                         owner=declaration["owner"],
                         repos=[f"{r['name']}={r['github']}@{r['branch']}" for r in declaration["repos"]])
-    except FollowError:
+    except Exception:
         for path in created:
             path.unlink(missing_ok=True)
             path.with_name(path.name + ".pub").unlink(missing_ok=True)
@@ -134,7 +141,7 @@ def _add(args) -> dict:
 
 
 def _key(args) -> dict:
-    context = owner_context(args)
+    context = _context(args)
     store = _store()
     name = _name(args)
     record = _read(store, name)
@@ -144,7 +151,7 @@ def _key(args) -> dict:
 
 
 def _status(args) -> dict:
-    context = owner_context(args)
+    context = _context(args)
     store = _store()
     names = [_name(args)] if getattr(args, "name", None) else store.names()
     follows = [_view(store, _read(store, name)) for name in names]
@@ -154,7 +161,7 @@ def _status(args) -> dict:
 
 
 def _set_state(args, event: str, change) -> dict:
-    context = owner_context(args)
+    context = _context(args)
     store = _store()
     name = _name(args)
     with store.lock(name):
@@ -184,7 +191,7 @@ def _run_now(args) -> dict:
 
 
 def _remove(args) -> dict:
-    context = owner_context(args)
+    context = _context(args)
     store = _store()
     name = _name(args)
     with store.lock(name):
@@ -195,7 +202,8 @@ def _remove(args) -> dict:
                               f"follow {name} has attempt {attempt.get('id')} running; remove it afterwards")
         store.delete(name)
         store.audit("remove", name, actor=_actor(context))
-    timer = units.remove() if not store.names() else {"timer": units.TIMER, "removed": False}
+    with store.units_lock():
+        timer = units.remove() if not store.names() else {"timer": units.TIMER, "removed": False}
     return {"ok": True, "action": "follow-remove", "name": name, "timer": timer,
             "kept": ["deploy keys", "the follow's clones (the stack's worktrees point into them)",
                      "the stack itself"]}
@@ -249,18 +257,42 @@ def _render(payload: dict) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
+def _audit_refusal(args, action: str, code: str) -> None:
+    """FR-012: a refused owner command leaves one audit line once its context is known."""
+    context = getattr(args, "_follow_context", None)
+    if context is None or action not in OWNER_ACTIONS:
+        return
+    name = getattr(args, "name", None)
+    try:
+        _store().audit("refused", name if isinstance(name, str) and name else "*", actor=_actor(context),
+                       command=action, code=code)
+    except Exception:  # noqa: BLE001 -- never mask the refusal itself
+        pass
+
+
+def _redact(text: object) -> str:
+    from sandbox.core import _remote
+    return _remote.redact_text(str(text))[:300]
+
+
 def cmd_host_follow(args) -> None:
     action = getattr(args, "image_action", None)
     if action not in HANDLERS:
         die("use `sb host follow add|status|pause|resume|remove|run-now|key`")
     try:
         payload = HANDLERS[action](args)
-    except FollowError as exc:
-        payload = {"ok": False, "code": exc.code, "error": exc.message}
+    except Exception as exc:  # noqa: BLE001 -- every refusal is one JSON line, never a traceback
+        if isinstance(exc, FollowError):
+            code, message = exc.code, exc.message
+        else:
+            code = "follow_internal_error"
+            message = f"{type(exc).__name__}: {_redact(exc)}"
+        _audit_refusal(args, action, code)
+        payload = {"ok": False, "code": code, "error": message}
         if getattr(args, "json", False) or action in ("tick", "apply"):
             print(json.dumps(payload, sort_keys=True))
             raise SystemExit(1)
-        die(f"{exc.code}: {exc.message}")
+        die(f"{code}: {message}")
         return
     if getattr(args, "json", False) or action in ("tick", "apply"):
         print(json.dumps(payload, sort_keys=True))

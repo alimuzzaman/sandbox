@@ -19,25 +19,33 @@ from sandbox.hosting.follow.spec import FollowError
 from sandbox.hosting.follow.store import FollowStore, utc_now
 
 ACTIVE = frozenset({"accepted", "queued", "running", "cancelling"})
+TERMINAL = frozenset({"succeeded", "failed", "timed_out", "cancelled", "interrupted"})
 IN_FLIGHT = frozenset({"submitting", "running"})
 ACTOR = "follower"
+# Polls (5 min apart) an attempt's job may go unanswered before it is settled.
+UNKNOWN_POLL_LIMIT = 12
+
+
+def redact(text: object) -> str:
+    from sandbox.core import _remote
+    return _remote.redact_text(str(text))[:300]
 
 
 # ------------------------------------------------------------------ decide
 
 def decide(state: dict, *, heads: dict | None, fetch_error: str | None, busy: str | None,
-           stack_present: bool) -> tuple[str, str]:
+           gone: str | None) -> tuple[str, str]:
     """(action, reason) for a follow with no attempt in flight. Pure.
 
-    Order: paused, fetch, removed stack, unchanged, failed heads, busy, start.
+    Order: paused, fetch, removed or reaped stack, unchanged, failed heads, busy, start.
     """
     if state.get("paused"):
         return "skip", "paused"
     if fetch_error is not None or heads is None:
         return "skip", "fetch_failed"
     retry = bool(state.get("retry"))
-    if state.get("stack_seen") and not stack_present:
-        return "pause", "stack_removed"
+    if gone is not None:
+        return "pause", gone
     if not retry and heads == state.get("applied"):
         return "skip", "up_to_date"
     if not retry and heads == state.get("failed_heads"):
@@ -59,6 +67,52 @@ def stack_record(remote_name: str, name: str) -> dict | None:
 def sandbox_home() -> str:
     from sandbox.core import _paths
     return str(Path(_paths.RUNTIME_DIR).parent)
+
+
+def lifetime_state(record: dict | None, *, home: str) -> str | None:
+    """The stack's lifetime record state on this host (``active``, ``reaping``,
+    ``reaped``), or None when there is no readable record.
+
+    Server cleanup marks a reaped stack here and leaves its stack registry
+    record until ``stack down``. Read-only: ``Store.peek`` takes no lock.
+    """
+    if not record:
+        return None
+    project, environment = record.get("project"), record.get("environment")
+    if not isinstance(project, str) or not isinstance(environment, str):
+        return None
+    from sandbox.hosting.lifetime import hoststore
+    compose_project = hoststore.compose_project_for(project, environment)
+    try:
+        listing = hoststore.Store(home).peek(int(time.time()))
+    except Exception:  # noqa: BLE001 -- unreadable means unknown, never "gone"
+        return None
+    for view in listing.get("records") or []:
+        if isinstance(view, dict) and view.get("compose_project") == compose_project:
+            state = view.get("state")
+            return state if isinstance(state, str) else None
+    return None
+
+
+def target_state(stack: dict | None, *, seen: bool, home: str, busy: Callable = None,
+                 lifetime: Callable = None) -> tuple[str | None, str | None, int | None]:
+    """(gone, busy, seconds held) for the follow's stack.
+
+    ``gone`` is ``stack_removed`` once a stack the follow applied has no stack
+    record (``stack down``), or ``stack_reaped`` when server cleanup reaped it.
+    A stack being torn down (``reaping``) is busy, not gone.
+    """
+    busy = busy or target_busy
+    lifetime = lifetime or lifetime_state
+    if stack is None:
+        return ("stack_removed" if seen else None), None, None
+    state = lifetime(stack, home=home)
+    if state == "reaped":
+        return "stack_reaped", None, None
+    if state == "reaping":
+        return None, "stack_reaping", None
+    reason, held = busy(stack, home=home)
+    return None, reason, held
 
 
 def target_busy(record: dict | None, *, home: str, now: float | None = None) -> tuple[str | None, int | None]:
@@ -135,12 +189,13 @@ class Tick:
                  capability: Callable = default_capability, job_view: Callable = default_job_view,
                  fetch: Callable = git.fetch, checkout: Callable = git.checkout,
                  stack_lookup: Callable = stack_record, busy: Callable = target_busy,
+                 lifetime: Callable = lifetime_state,
                  home: Callable = sandbox_home, budget_seconds: float = 600,
                  monotonic: Callable = time.monotonic):
         self.store = store or FollowStore()
         self.submit, self.capability, self.job_view = submit, capability, job_view
         self.fetch, self.checkout = fetch, checkout
-        self.stack_lookup, self.busy, self.home = stack_lookup, busy, home
+        self.stack_lookup, self.busy, self.lifetime, self.home = stack_lookup, busy, lifetime, home
         self.budget_seconds, self.monotonic = budget_seconds, monotonic
         self._capability = None
 
@@ -160,9 +215,19 @@ class Tick:
                 try:
                     results.append(self.one(name))
                 except FollowError as exc:
-                    results.append({"name": name, "action": "error", "reason": exc.code,
-                                    "error": exc.message})
+                    results.append(self._error(name, exc.code, exc.message))
+                except Exception as exc:  # noqa: BLE001 -- one follow never stops the others
+                    results.append(self._error(name, "follow_poll_error",
+                                               f"{type(exc).__name__}: {redact(exc)}"))
             return {"ok": True, "action": "follow-tick", "status": "ran", "follows": results}
+
+    def _error(self, name: str, code: str, message: str) -> dict:
+        """A follow whose poll raised: record it as its last check when possible."""
+        row = {"name": name, "action": "error", "reason": code, "error": message}
+        try:
+            return self._check(name, row)
+        except Exception:  # noqa: BLE001 -- the store itself may be the failure
+            return row
 
     def _check(self, name: str, row: dict) -> dict:
         """Record the poll's outcome in the follow's last check."""
@@ -195,6 +260,15 @@ class Tick:
             if attempt.get("status") == "submitting" and not attempt.get("job_id"):
                 # Acceptance was unknown: replay the identical request only.
                 replay = (attempt["id"], list(attempt["argv"]))
+            elif (attempt.get("job_id") and (job or {}).get("lifecycle") not in TERMINAL
+                    and int(attempt.get("unknown_polls") or 0) < UNKNOWN_POLL_LIMIT):
+                # The job registry gave no answer this time: keep the attempt
+                # and ask again on the next poll. A terminal job settles it, and
+                # so does an hour of no answer.
+                attempt["unknown_polls"] = int(attempt.get("unknown_polls") or 0) + 1
+                self.store.write(record)
+                row = {"name": name, "action": "skip", "reason": "attempt_state_unknown",
+                       "attempt": attempt["id"]}
             else:
                 lifecycle = (job or {}).get("lifecycle") or "unknown"
                 attempt.update({"status": "failed" if lifecycle != "succeeded" else "unknown",
@@ -263,7 +337,8 @@ class Tick:
                 fetch_error = exc.message
                 break
         stack = self.stack_lookup(record["remote"], name)
-        busy, held = self.busy(stack, home=self.home())
+        gone, busy, held = target_state(stack, seen=bool(record["state"].get("stack_seen")),
+                                        home=self.home(), busy=self.busy, lifetime=self.lifetime)
         pending = None
         with self.store.lock(name):
             record = self.store.read(name)
@@ -274,7 +349,7 @@ class Tick:
             if attempt and attempt.get("status") in IN_FLIGHT:
                 return {"name": name, "action": "skip", "reason": "attempt_running"}
             action, reason = decide(state, heads=None if fetch_error else heads, fetch_error=fetch_error,
-                                    busy=busy, stack_present=stack is not None)
+                                    busy=busy, gone=gone)
             row = {"name": name, "action": action, "reason": reason,
                    "heads": None if fetch_error else heads}
             if fetch_error:
@@ -306,7 +381,7 @@ class Tick:
             return {"action": "skip", "reason": code}
         try:
             for repo in record["repos"]:
-                self.checkout(self.store.repo_dir(name, repo["name"]), heads[repo["name"]])
+                self.checkout(self.store.repo_dir(name, repo["name"]), heads[repo["name"]], repo["branch"])
         except FollowError as exc:
             state["last_check"] = {"at": utc_now(), "action": "skip", "reason": exc.code, "error": exc.message}
             self.store.write(record)

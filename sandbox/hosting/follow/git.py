@@ -32,10 +32,17 @@ def _environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     return _remote.git_environment(overrides=overrides)
 
 
+# The line that names the cause, in order of preference. Git's last stderr line
+# after an SSH failure is boilerplate ("and the repository exists.").
+_TELLING = ("Permission denied", "Host key verification failed", "fatal:")
+
+
 def _detail(result: subprocess.CompletedProcess) -> str:
     from sandbox.core import _remote
-    lines = [line for line in (result.stderr or result.stdout or "").splitlines() if line.strip()]
-    return _remote.redact_text(lines[-1].strip() if lines else f"exit {result.returncode}")[:300]
+    lines = [line.strip() for line in (result.stderr or result.stdout or "").splitlines() if line.strip()]
+    chosen = next((line for marker in _TELLING for line in lines if marker in line),
+                  lines[-1] if lines else f"exit {result.returncode}")
+    return _remote.redact_text(chosen)[:300]
 
 
 def _run(argv: list[str], *, timeout: int = 60, env: dict[str, str] | None = None,

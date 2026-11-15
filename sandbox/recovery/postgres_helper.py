@@ -27,6 +27,9 @@ ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C.UTF-8"}
 LOCAL_DATABASE_PROFILES = frozenset({"lenzora-dev", "infisical"})
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_SCHEMA_BYTES = 8 * 1024 * 1024
+# Partitioned schemas (Infisical's audit log) exceed 10,000 columns; the byte
+# bound above is the real limit, this row bound only caps parsing work.
+MAX_SCHEMA_ROWS = 100000
 _TEMP_COUNTS_SQL = 'CREATE TEMP TABLE recovery_counts (name text, count bigint);\n'
 _INSPECTION_PHASES = {
     'request_validation', 'archive_validation', 'retained_request',
@@ -212,7 +215,7 @@ def _schema_projection(raw):
         rows = raw.get(kind)
         if type(rows) is not list:
             raise _schema_invalid(kind + '.shape')
-        if len(rows) > 10000:
+        if len(rows) > MAX_SCHEMA_ROWS:
             raise _schema_invalid(kind + '.row_bound')
         seen = set()
         for row in rows:

@@ -787,11 +787,11 @@ class NormalExitCessationTests(unittest.TestCase):
             self.assertEqual(supervisor._job_environment_holders("a" * 32, 1), [])
 
     @staticmethod
-    def fake_stat(directory, start, ppid=0):
+    def fake_stat(directory, start, ppid=0, state="S"):
         """A /proc/<pid>/stat with parent ``ppid`` (field 4) and start time ``start`` (field 22)."""
         directory.mkdir(exist_ok=True)
         (directory / "stat").write_text(
-            f"{directory.name} (a b) S {ppid} " + "0 " * 17 + f"{start} 0 0\n")
+            f"{directory.name} (a b) {state} {ppid} " + "0 " * 17 + f"{start} 0 0\n")
 
     def test_an_unreadable_process_counts_only_when_it_started_with_or_after_the_job(self):
         proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -987,6 +987,30 @@ class NormalExitCessationTests(unittest.TestCase):
                     target.write_bytes(b"SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"\0")
             with patch.object(supervisor.time, "sleep", becomes_the_job):
                 self.assertEqual(self.holders(proc), [90700])
+
+    def test_an_unreadable_zombie_does_not_count(self):
+        # On xspeed-dev the command's own unreaped zombie refuses the environ
+        # read; before this every normal exit there was unproven.
+        def zombie(proc, pid, start, ppid, threads):
+            self.fake_process(proc, pid, start, ppid)
+            self.fake_stat(proc / str(pid), start, ppid, state="Z")
+            for tid, state in threads:
+                self.fake_stat(proc / str(pid) / "task" / str(tid), start, ppid, state=state)
+
+        with self.subTest("the command's zombie"):
+            proc = self.lineage_proc()
+            (proc / str(self.COMMAND) / "environ").unlink()
+            zombie(proc, self.COMMAND, 1000, os.getpid(), [(self.COMMAND, "Z")])
+            self.assertEqual(self.holders(proc), [])
+        with self.subTest("a zombie child of the supervisor"):
+            proc = self.lineage_proc()
+            zombie(proc, 90700, 1010, os.getpid(), [(90700, "Z")])
+            self.assertEqual(self.holders(proc), [])
+        with self.subTest("a zombie leader with a live thread still counts"):
+            proc = self.lineage_proc()
+            zombie(proc, 90700, 1010, os.getpid(), [(90700, "Z"), (90701, "S")])
+            with patch.object(supervisor.time, "sleep"):
+                self.assertIsNone(self.holders(proc))
 
     def test_an_unreadable_process_whose_parents_cannot_be_traced_counts(self):
         def proc_with(*chain):

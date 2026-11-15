@@ -639,6 +639,11 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
                     stat = _parent_and_start(directory)
                 except (FileNotFoundError, ProcessLookupError):
                     continue  # it has exited since the listing
+                if _defunct(directory):
+                    # Its environment is gone, and some kernels refuse the read
+                    # (the command's own unreaped zombie on xspeed-dev); it runs
+                    # nothing, and its live children are listed themselves.
+                    continue
                 if command_start is None:
                     with suppress(OSError):  # the unreaped leader keeps its stat
                         command = _parent_and_start(_PROC / str(command_pid))
@@ -727,6 +732,33 @@ def _job_lineage(directory: Path, stat: tuple[int, int], command_start: int,
 
 def _exited(directory: Path) -> bool:
     return not (directory / "stat").exists()
+
+
+def _defunct(directory: Path) -> bool:
+    """Whether every thread of the process has exited (a zombie, or gone).
+
+    A zombie leader can still have live threads, so each task is checked.
+    Anything that cannot be read is not defunct.
+    """
+    def state(stat: Path) -> bytes | None:
+        try:
+            data = stat.read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            return b"X"
+        except OSError:
+            return None
+        fields = data[data.rfind(b")") + 2:].split()
+        return fields[0] if fields else None
+
+    if state(directory / "stat") not in (b"Z", b"X"):
+        return False
+    try:
+        tasks = list((directory / "task").iterdir())
+    except (FileNotFoundError, ProcessLookupError):
+        return True  # reaped since its stat was read
+    except OSError:
+        return False
+    return all(state(task / "stat") in (b"Z", b"X") for task in tasks)
 
 
 def _parent_and_start(directory: Path) -> tuple[int, int] | None:

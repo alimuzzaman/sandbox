@@ -1429,25 +1429,33 @@ class TestPushCommits(unittest.TestCase):
         self.assertNotIn("git stash", " ".join(push_args))
 
 
+def materialization_lease_stub():
+    """Patch the lease protocol so a mocked ssh_run sees plain wire commands.
+
+    Cases using it isolate reset/archive semantics. Protocol receipt and
+    disconnect behavior is covered without this stub in
+    test_remote_materialization_completion, including real Linux children.
+    """
+    from sandbox.core.remote_materialization import RemoteMaterializationLease
+
+    def mutation_fixture(lease, action, *, command=None, input_data=None, timeout=10):
+        if action == "run":
+            wire = command
+            lease.step += 1
+        else:
+            verb = "mkdir" if action == "acquire" else "rmdir"
+            wire = f"{verb} -- {lease.parent}/{lease.name}"
+        result = lease.transport(lease.remote, wire, timeout=timeout,
+                                 **({"input_data": input_data} if input_data is not None else {}))
+        return dict(schema_version=1, operation_id=lease.operation_id,
+                    state={"acquire": "idle", "run": "complete", "release": "released"}[action],
+                    step=lease.step, exit_code=result.returncode)
+    return patch.object(RemoteMaterializationLease, "_call", mutation_fixture)
+
+
 class TestCaptureAndApplyUncommitted(unittest.TestCase):
     def setUp(self):
-        # These older cases isolate reset/archive semantics. Protocol receipt
-        # and disconnect behavior is covered without this stub in
-        # test_remote_materialization_completion, including real Linux children.
-        from sandbox.core.remote_materialization import RemoteMaterializationLease
-        def mutation_fixture(lease, action, *, command=None, input_data=None, timeout=10):
-            if action == "run":
-                wire = command
-                lease.step += 1
-            else:
-                verb = "mkdir" if action == "acquire" else "rmdir"
-                wire = f"{verb} -- {lease.parent}/{lease.name}"
-            result = lease.transport(lease.remote, wire, timeout=timeout,
-                                     **({"input_data": input_data} if input_data is not None else {}))
-            return dict(schema_version=1, operation_id=lease.operation_id,
-                        state={"acquire": "idle", "run": "complete", "release": "released"}[action],
-                        step=lease.step, exit_code=result.returncode)
-        stub = patch.object(RemoteMaterializationLease, "_call", mutation_fixture)
+        stub = materialization_lease_stub()
         stub.start()
         self.addCleanup(stub.stop)
 

@@ -631,8 +631,10 @@ class TestHostingManifest(unittest.TestCase):
             self.assertNotIn("unrelated-outer.txt", diff_text)
             self.assertNotIn("unrelated-outer.txt", untracked)
 
-            with patch.object(remote, "ssh_run", return_value=subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout="", stderr="")) as ssh:
+            from tests.test_remote import materialization_lease_stub
+            with materialization_lease_stub(), patch.object(
+                    remote, "ssh_run", return_value=subprocess.CompletedProcess(
+                        args=[], returncode=0, stdout="", stderr="")) as ssh:
                 applied = remote.apply_uncommitted(
                     {"ssh": "ubuntu@example.test"}, "/srv/deploy/example-site", source,
                     diff_text, untracked,

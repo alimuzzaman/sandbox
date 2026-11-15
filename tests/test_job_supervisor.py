@@ -955,6 +955,39 @@ class NormalExitCessationTests(unittest.TestCase):
                     self.fake_process(proc, pid, start, ppid, environment)
                 self.assertEqual(self.holders(proc), expected)
 
+    def test_a_briefly_unreadable_child_of_the_supervisor_is_read_again(self):
+        # The supervisor's own short-lived helpers are unreadable while they exec
+        # or exit; live on xspeed-dev that alone made every normal exit unproven.
+        import shutil
+
+        def settles(proc, how):
+            def sleep(_seconds):
+                target = proc / "90700"
+                if how == "readable" and (target / "environ").is_dir():
+                    (target / "environ").rmdir()
+                    (target / "environ").write_bytes(b"A=1\0")
+                elif how == "exits" and target.exists():
+                    shutil.rmtree(target)
+            return sleep
+
+        for how, expected in (("readable", []), ("exits", []), ("stays", None)):
+            with self.subTest(how):
+                proc = self.lineage_proc()
+                self.fake_process(proc, 90700, 1010, os.getpid())
+                with patch.object(supervisor.time, "sleep", settles(proc, how)):
+                    self.assertEqual(self.holders(proc), expected)
+        with self.subTest("a settled reader that names the job still counts"):
+            proc = self.lineage_proc()
+            self.fake_process(proc, 90700, 1010, os.getpid())
+
+            def becomes_the_job(_seconds):
+                target = proc / "90700" / "environ"
+                if target.is_dir():
+                    target.rmdir()
+                    target.write_bytes(b"SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"\0")
+            with patch.object(supervisor.time, "sleep", becomes_the_job):
+                self.assertEqual(self.holders(proc), [90700])
+
     def test_an_unreadable_process_whose_parents_cannot_be_traced_counts(self):
         def proc_with(*chain):
             proc = self.lineage_proc()

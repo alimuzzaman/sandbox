@@ -560,6 +560,28 @@ def _environment_unproven(job_id: str, command_pid: int) -> str | None:
     return "job_environment_running" if holders else None
 
 
+# A process is briefly unreadable while it execs or exits (the supervisor's
+# own short-lived helpers are), so an unreadable one is read again before it
+# is judged; one that stays unreadable is non-dumpable.
+_ENVIRONMENT_RETRIES = (0.02, 0.05, 0.1)
+
+
+def _settled_environment(directory: Path) -> bytes | None:
+    """The process's environment, or ``None`` when it stays unreadable.
+
+    Raises ``FileNotFoundError``/``ProcessLookupError`` once it has exited.
+    """
+    for delay in _ENVIRONMENT_RETRIES:
+        time.sleep(delay)
+        try:
+            return (directory / "environ").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            raise
+        except OSError:
+            continue
+    return None
+
+
 def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
     """Same-user PIDs whose environment names this job; ``None`` when unreadable.
 
@@ -611,6 +633,8 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
+                environment = None
+            if environment is None:
                 try:
                     stat = _parent_and_start(directory)
                 except (FileNotFoundError, ProcessLookupError):
@@ -619,16 +643,23 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
                     with suppress(OSError):  # the unreaped leader keeps its stat
                         command = _parent_and_start(_PROC / str(command_pid))
                         command_start = command[1] if command else None
-                if command_start is None or stat is None:
-                    return None
-                if stat[1] < command_start:
+                if command_start is not None and stat is not None and stat[1] < command_start:
                     continue
-                lineage = _job_lineage(directory, stat, command_start, adopters, marker)
-                if lineage is None:
-                    return None
-                if lineage:
+                lineage = (None if command_start is None or stat is None
+                           else _job_lineage(directory, stat, command_start, adopters, marker))
+                if lineage is False:
+                    continue
+                # Only a process that would count is read again: one that was
+                # mid-exec or exiting reads normally or is gone a moment later.
+                try:
+                    environment = _settled_environment(directory)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if environment is None:
+                    if lineage is None:
+                        return None
                     holders.add(int(directory.name))
-                continue
+                    continue
             if marker in environment.split(b"\0"):
                 holders.add(int(directory.name))
     return sorted(holders)

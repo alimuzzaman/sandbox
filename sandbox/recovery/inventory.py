@@ -96,12 +96,22 @@ containers = []
 mounts = {}
 container_bindings = {}
 try:
-    result = subprocess.run(['docker','ps','--format','{{.Names}}'], capture_output=True, text=True, timeout=15)
+    result = subprocess.run(['docker','ps','--format','{{.Names}} {{.Label "com.docker.compose.project"}}'],
+                            capture_output=True, text=True, timeout=15)
     if result.returncode != 0:
         warnings.append('container discovery command failed')
-    containers = sorted(line for line in result.stdout.splitlines() if line.startswith('sandbox-host-'))
-    if containers:
-        inspected = subprocess.run(['docker','inspect',*containers], capture_output=True, text=True, timeout=20)
+    hosted, instances = [], []
+    for line in result.stdout.splitlines():
+        name, _, project = line.partition(' ')
+        if name.startswith('sandbox-host-'):
+            hosted.append(name)
+        elif project.startswith('sandbox-') and not project.startswith('sandbox-host-'):
+            # A Sandbox compose instance; only its PostgreSQL containers are kept below.
+            instances.append(name)
+    containers = sorted(hosted)
+    candidates = sorted(set(hosted) | set(instances))
+    if candidates:
+        inspected = subprocess.run(['docker','inspect',*candidates], capture_output=True, text=True, timeout=20)
         if inspected.returncode != 0:
             warnings.append('container mount discovery command failed')
         for item in json.loads(inspected.stdout or '[]'):
@@ -112,6 +122,13 @@ try:
                 key, separator, value = field.partition('=')
                 if separator and key in ('POSTGRES_DB', 'POSTGRES_USER'):
                     postgres[key] = value
+            if name not in hosted:
+                project = str(labels.get('com.docker.compose.project') or '')
+                # Recovery drill and reference containers are owner-labelled, never sources.
+                if (not postgres or 'sandbox.recovery.owner' in labels
+                        or not project.startswith('sandbox-') or project.startswith('sandbox-host-')):
+                    continue
+                containers = sorted({*containers, name})
             container_bindings[name] = {
                 'container_id': item.get('Id'), 'image_id': item.get('Image'),
                 'compose_project': labels.get('com.docker.compose.project'),

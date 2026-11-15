@@ -8,7 +8,7 @@ import shlex
 
 from sandbox.recovery.errors import RecoveryError
 from sandbox.recovery.postgres_contract import (
-    PostgresSource, RESTORE_INSPECTION_CODES, RESTORE_INSPECTION_PHASES,
+    LOCAL_DATABASE_PROFILES, PostgresSource, RESTORE_INSPECTION_CODES, RESTORE_INSPECTION_PHASES,
     RESTORE_INSPECTION_STATUSES, recovery_source,
     restore_inspection_result_matches_diagnostic,
 )
@@ -146,13 +146,13 @@ class RegisteredPostgresRecoveryTransport:
         source = recovery_source(source.as_mapping())
         if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'reopen-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
             raise RecoveryError('PostgreSQL request is invalid', 'request_invalid')
-        if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} and (source.profile != 'lenzora-dev' or target_volume is not None):
+        if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} and (source.profile not in LOCAL_DATABASE_PROFILES or target_volume is not None):
             raise RecoveryError('restore inspection is invalid', 'request_invalid')
         if (operation == 'reopen-restore' and (source.credential_reference is not None
                 or type(reopen_plan) is not dict or not reopen_plan)
                 or operation != 'reopen-restore' and reopen_plan is not None):
             raise RecoveryError('restore reopen is invalid', 'request_invalid')
-        if resume_capture and (operation != 'capture' or source.profile != 'lenzora-dev'):
+        if resume_capture and (operation != 'capture' or source.profile not in LOCAL_DATABASE_PROFILES):
             raise RecoveryError('capture resume is invalid', 'request_invalid')
         try:
             entry = self.lookup(source.remote)

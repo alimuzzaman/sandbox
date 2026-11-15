@@ -18,9 +18,9 @@ from .database import DatabaseCapture
 from .errors import RecoveryError
 from .integrity import sha256_file
 from .postgres_contract import (
-    PostgresSource,
+    LOCAL_DATABASE_PROFILES, SOURCE_PROFILES, PostgresSource,
     recovery_source, digest, valid_restore_inspection_diagnostic,
-    restore_inspection_result_matches_diagnostic,
+    restore_inspection_result_matches_diagnostic, valid_backup_id,
 )
 from .restore import verify_manifest
 from .postgres_helper import observation_matches, validate_schema_proof, _validate_capture_evidence
@@ -121,7 +121,7 @@ class PostgresRecovery:
     def _source_path(self, remote, profile):
         if not isinstance(remote, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', remote):
             raise RecoveryError('remote selector is invalid', 'source_binding_invalid')
-        if profile not in {'lenzora-dev', 'lenzora-prod', 'lenzora-prod-legacy', 'lenzora-prod-storage'}:
+        if profile not in SOURCE_PROFILES:
             raise RecoveryError('PostgreSQL profile is unsupported', 'source_binding_invalid')
         return self.root / 'sources' / f'{remote}-{profile}.json'
 
@@ -239,8 +239,10 @@ class PostgresRecovery:
         if not confirm: raise RecoveryError('capture requires confirmation', 'confirmation_required')
         if self.capture is None: raise RecoveryError('encrypted recovery is not configured', 'recovery_not_configured')
         source = self.source(remote, profile)
-        if resume and profile != 'lenzora-dev':
+        if resume and profile not in LOCAL_DATABASE_PROFILES:
             raise RecoveryError('only local development capture can resume', 'request_invalid')
+        if not valid_backup_id(profile, backup_id):
+            raise RecoveryError('backup ID does not follow this profile\'s naming', 'invalid_set_id')
         identity = self._request(source, 'capture', request_id, backup_id)
         receipt_path = self.root / 'captures' / (identity + '.json')
         retained = _read_owner_only_json(receipt_path)
@@ -355,7 +357,7 @@ class PostgresRecovery:
                 or (not reopen and reopen_plan is not None)):
             raise RecoveryError('restore operation is ambiguous', 'request_invalid')
         if not confirm and not inspect: raise RecoveryError('restore drill requires confirmation', 'confirmation_required')
-        if (inspect or verify or reopen) and (plan.get('profile') != 'lenzora-dev' or plan.get('target_volume') is not None):
+        if (inspect or verify or reopen) and (plan.get('profile') not in LOCAL_DATABASE_PROFILES or plan.get('target_volume') is not None):
             raise RecoveryError('inspection is only for an isolated development restore', 'request_invalid')
         source = self.source(plan['remote'], plan['profile'])
         if reopen and source.credential_reference is not None:

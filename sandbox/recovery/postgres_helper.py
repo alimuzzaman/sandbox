@@ -23,6 +23,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 # This helper is copied as source by the registered transport. Keep it stdlib-only.
 ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C.UTF-8"}
+# Mirrors postgres_contract.LOCAL_DATABASE_PROFILES; a parity test keeps them equal.
+LOCAL_DATABASE_PROFILES = frozenset({"lenzora-dev", "infisical"})
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_SCHEMA_BYTES = 8 * 1024 * 1024
 _TEMP_COUNTS_SQL = 'CREATE TEMP TABLE recovery_counts (name text, count bigint);\n'
@@ -277,7 +279,7 @@ def _validate_reference(record, binding, source, evidence):
                 or record['structure_digest'] != evidence['schema_structure_digest']):
             raise ValueError('schema_evidence_invalid')
     elif (record['structure_origin'] != 'legacy-live-capture-match'
-            or source.get('profile') != 'lenzora-dev' or source.get('credential_reference') is not None):
+            or source.get('profile') not in LOCAL_DATABASE_PROFILES or source.get('credential_reference') is not None):
         raise ValueError('schema_evidence_invalid')
     return record
 
@@ -659,7 +661,7 @@ def _reference_cleanup(source, name, identity, container_id):
 def _captured_structure(source, evidence):
     if _fingerprint_version(evidence) == 2:
         return evidence['schema_structure_digest'], 'capture-v2'
-    if source['profile'] != 'lenzora-dev' or source.get('credential_reference') is not None:
+    if source['profile'] not in LOCAL_DATABASE_PROFILES or source.get('credential_reference') is not None:
         raise ValueError('schema_reference_source_unavailable')
     inspect_source(source)
     original = schema_records(local_client(source), source['database'])
@@ -951,7 +953,7 @@ def _data_marker(container_id, name, maximum):
 def reopen_snapshot(source, name, major, *, stopped):
     row, volume = restore_target(source, name)
     config = row['Config']; host = row['HostConfig']; state = row['State']
-    if (source.get('profile') != 'lenzora-dev' or source.get('credential_reference') is not None
+    if (source.get('profile') not in LOCAL_DATABASE_PROFILES or source.get('credential_reference') is not None
             or config.get('Entrypoint') != ['sleep'] or config.get('Cmd') != ['3600']
             or config.get('User') not in ('', '0', 'root')
             or host.get('RestartPolicy', {}).get('Name') not in ('', 'no')
@@ -1043,7 +1045,7 @@ def _observe_reopened(source, evidence, plan):
 def reopen_restore(source, archive, work, name, slot, plan):
     plan = validate_reopen_plan(plan)
     evidence, _dump = restore_input(archive, work)
-    if (source.get('profile') != 'lenzora-dev' or source.get('credential_reference') is not None
+    if (source.get('profile') not in LOCAL_DATABASE_PROFILES or source.get('credential_reference') is not None
             or plan['native_request_id'] != slot.name or plan['target'] != name
             or plan['source_digest'] != _schema_digest(source) or plan['image_id'] != source['client_image_id']
             or plan['archive_digest'] != 'sha256:' + hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -1246,14 +1248,14 @@ def main():
         _INSPECTION_OPERATION = operation
     if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'reopen-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', identity):
         raise ValueError('request_invalid')
-    if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} and (source['profile'] != 'lenzora-dev' or request['target_volume'] is not None):
+    if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} and (source['profile'] not in LOCAL_DATABASE_PROFILES or request['target_volume'] is not None):
         raise ValueError('request_invalid')
     if operation == 'reopen-restore':
         validate_reopen_plan(reopen_plan)
         if source.get('credential_reference') is not None: raise ValueError('request_invalid')
     elif reopen_plan is not None:
         raise ValueError('request_invalid')
-    if resume and (operation != 'capture' or source['profile'] != 'lenzora-dev' or source['credential_reference'] is not None):
+    if resume and (operation != 'capture' or source['profile'] not in LOCAL_DATABASE_PROFILES or source['credential_reference'] is not None):
         raise ValueError('request_invalid')
     _set_inspection_phase('archive_validation')
     if type(request['credential_size']) is not int or not 0 <= request['credential_size'] <= 16384:

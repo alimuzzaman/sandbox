@@ -7,6 +7,23 @@ import re
 from .errors import RecoveryError
 
 
+# Database profiles whose client is a local in-container ``docker exec`` with no
+# external credential. Each allows isolated drill inspection, verification,
+# reopen and capture resume. ``postgres_helper`` keeps its own copy because it
+# is shipped standalone; a parity test keeps the two equal.
+LOCAL_DATABASE_PROFILES = frozenset({"lenzora-dev", "infisical"})
+DATABASE_PROFILES = LOCAL_DATABASE_PROFILES | {"lenzora-prod", "lenzora-prod-legacy"}
+SOURCE_PROFILES = DATABASE_PROFILES | {"lenzora-prod-storage"}
+# Profiles whose recovery sets carry a fixed, sortable name under the shared Drive
+# destination, so their sets never interleave with another profile's.
+BACKUP_ID_PATTERNS = {"infisical": re.compile(r"infisical-[0-9]{8}T[0-9]{4}Z")}
+
+
+def valid_backup_id(profile, backup_id):
+    pattern = BACKUP_ID_PATTERNS.get(profile)
+    return pattern is None or (type(backup_id) is str and pattern.fullmatch(backup_id) is not None)
+
+
 RESTORE_INSPECTION_DIAGNOSTIC_FIELDS = frozenset({
     "schema_version", "correlation_id", "source_digest", "archive_digest",
     "local_runtime_revision", "installed_runtime_revision",
@@ -138,7 +155,7 @@ class PostgresSource:
                 'profile', 'remote', 'compose_project', 'container_id', 'volume', 'image_id')):
             raise RecoveryError("source binding is invalid", "source_binding_invalid")
         if (type(source.schema_version) is not int or source.schema_version != 1
-                or source.profile not in {"lenzora-dev", "lenzora-prod", "lenzora-prod-legacy"}
+                or source.profile not in DATABASE_PROFILES
                 or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", source.remote)
                 or not re.fullmatch(r"[a-f0-9]{64}", source.container_id)
                 or not re.fullmatch(r"sha256:[a-f0-9]{64}", source.image_id)

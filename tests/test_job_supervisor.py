@@ -41,6 +41,13 @@ class SupervisorTests(unittest.TestCase):
                 self.assertEqual(environment["UNCHANGED"], "value")
             self.assertNotIn("SANDBOX_DURABLE_JOB_ID", environment)
 
+    def test_runner_drops_every_durable_child_context_key(self):
+        import tests
+        self.assertEqual(set(tests.DURABLE_CHILD_CONTEXT_KEYS),
+                         set(supervisor._CHILD_CONTEXT_KEYS.values()))
+        for key in tests.DURABLE_CHILD_CONTEXT_KEYS:
+            self.assertNotIn(key, os.environ)
+
     @staticmethod
     def _wait_terminal(service, job_id):
         for _ in range(200):

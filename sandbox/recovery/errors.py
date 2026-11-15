@@ -7,6 +7,7 @@ class RecoveryError(RuntimeError):
     def __init__(self, message: str, code: str = "recovery_error") -> None:
         super().__init__(message)
         self.code = code
+        self.detail = None
 
 
 _SECRET = re.compile(r"(?i)(token|password|passphrase|authorization|cookie|credential|secret)\s*[=:]\s*\S+")

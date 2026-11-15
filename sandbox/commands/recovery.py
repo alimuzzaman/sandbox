@@ -231,15 +231,16 @@ def _postgres(cfg, args, service):
             else: raise RecoveryError("PostgreSQL operation is required", "request_invalid")
         return result(True, "postgres", remote=args.remote, status=data.get("code", "planned"), data=data)
     except Exception as exc:
-        if isinstance(exc, RecoveryError):
-            # RecoveryError messages are fixed text; report the real reason.
-            message = ("no PostgreSQL source is registered for this profile; register its source binding before retrying"
-                       if exc.code == "source_binding_missing" else str(exc))
-            error = RecoveryError(message, exc.code)
-            error.detail = getattr(exc, "detail", None)
-        else:
-            error = RecoveryError("PostgreSQL recovery requires inspection; retained requests are preserved",
-                                  "postgres_recovery_failed")
+        code = exc.code if isinstance(exc, RecoveryError) else "postgres_recovery_failed"
+        # Messages stay fixed: only the transport's closed helper diagnostic,
+        # built from validated step and reason labels, is shown as-is.
+        detail = getattr(exc, "detail", None) if isinstance(exc, RecoveryError) else None
+        message = ("no PostgreSQL source is registered for this profile; register its source binding before retrying"
+                   if code == "source_binding_missing" else
+                   str(exc) if isinstance(detail, dict) and "step" in detail else
+                   "PostgreSQL recovery requires inspection; retained requests are preserved")
+        error = RecoveryError(message, code)
+        error.detail = detail if isinstance(detail, dict) else None
         return result(False, "postgres", remote=args.remote, error=error)
 
 

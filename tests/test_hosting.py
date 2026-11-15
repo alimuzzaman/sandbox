@@ -4721,6 +4721,7 @@ class TestRemotePreviewIdentity(unittest.TestCase):
         owner.patch.object(remote, "reconcile_remote_instance", return_value={"instance": "preview-demo"})
         owner.patch.object(remote, "activate_remote_plugin")
         owner.patch.object(remote, "configure_instance_https_route")
+        owner.patch.object(remote, "verify_instance_https_route")
         owner.patch.object(remote, "remove_instance_https_route")
         owner.patch.object(remote, "delete_remote_instance_for_label")
         return owner, args, config

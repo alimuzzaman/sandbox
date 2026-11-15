@@ -994,6 +994,7 @@ class NormalExitCessationTests(unittest.TestCase):
         def zombie(proc, pid, start, ppid, threads):
             self.fake_process(proc, pid, start, ppid)
             self.fake_stat(proc / str(pid), start, ppid, state="Z")
+            (proc / str(pid) / "task").mkdir()
             for tid, state in threads:
                 self.fake_stat(proc / str(pid) / "task" / str(tid), start, ppid, state=state)
 

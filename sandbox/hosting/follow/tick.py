@@ -104,8 +104,8 @@ def target_state(stack: dict | None, *, seen: bool, home: str, busy: Callable = 
     """
     busy = busy or target_busy
     lifetime = lifetime or lifetime_state
-    if stack is None:
-        return ("stack_removed" if seen else None), None, None
+    if stack is None and seen:
+        return "stack_removed", None, None
     state = lifetime(stack, home=home)
     if state == "reaped":
         return "stack_reaped", None, None

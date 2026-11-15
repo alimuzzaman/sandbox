@@ -955,39 +955,6 @@ class NormalExitCessationTests(unittest.TestCase):
                     self.fake_process(proc, pid, start, ppid, environment)
                 self.assertEqual(self.holders(proc), expected)
 
-    def test_a_briefly_unreadable_child_of_the_supervisor_is_read_again(self):
-        # The supervisor's own short-lived helpers are unreadable while they exec
-        # or exit; live on xspeed-dev that alone made every normal exit unproven.
-        import shutil
-
-        def settles(proc, how):
-            def sleep(_seconds):
-                target = proc / "90700"
-                if how == "readable" and (target / "environ").is_dir():
-                    (target / "environ").rmdir()
-                    (target / "environ").write_bytes(b"A=1\0")
-                elif how == "exits" and target.exists():
-                    shutil.rmtree(target)
-            return sleep
-
-        for how, expected in (("readable", []), ("exits", []), ("stays", None)):
-            with self.subTest(how):
-                proc = self.lineage_proc()
-                self.fake_process(proc, 90700, 1010, os.getpid())
-                with patch.object(supervisor.time, "sleep", settles(proc, how)):
-                    self.assertEqual(self.holders(proc), expected)
-        with self.subTest("a settled reader that names the job still counts"):
-            proc = self.lineage_proc()
-            self.fake_process(proc, 90700, 1010, os.getpid())
-
-            def becomes_the_job(_seconds):
-                target = proc / "90700" / "environ"
-                if target.is_dir():
-                    target.rmdir()
-                    target.write_bytes(b"SANDBOX_DURABLE_JOB_ID=" + b"a" * 32 + b"\0")
-            with patch.object(supervisor.time, "sleep", becomes_the_job):
-                self.assertEqual(self.holders(proc), [90700])
-
     def test_an_unreadable_zombie_does_not_count(self):
         # On xspeed-dev the command's own unreaped zombie refuses the environ
         # read; before this every normal exit there was unproven.
@@ -1010,8 +977,36 @@ class NormalExitCessationTests(unittest.TestCase):
         with self.subTest("a zombie leader with a live thread still counts"):
             proc = self.lineage_proc()
             zombie(proc, 90700, 1010, os.getpid(), [(90700, "Z"), (90701, "S")])
-            with patch.object(supervisor.time, "sleep"):
+            self.assertIsNone(self.holders(proc))
+        for state in ("D", "T", "R"):
+            with self.subTest(f"a zombie leader with a thread in state {state} still counts"):
+                proc = self.lineage_proc()
+                zombie(proc, 90700, 1010, os.getpid(), [(90700, "Z"), (90701, state)])
                 self.assertIsNone(self.holders(proc))
+        with self.subTest("a zombie whose threads cannot be listed still counts"):
+            proc = self.lineage_proc()
+            zombie(proc, 90700, 1010, os.getpid(), [])
+            (proc / "90700" / "task").rmdir()
+            (proc / "90700" / "task").write_bytes(b"")  # listing it fails
+            self.assertIsNone(self.holders(proc))
+        with self.subTest("a zombie listing no threads while it still exists counts"):
+            proc = self.lineage_proc()
+            zombie(proc, 90700, 1010, os.getpid(), [])
+            self.assertIsNone(self.holders(proc))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "reads the real /proc")
+    def test_the_real_unreaped_command_is_proven_stopped(self):
+        # The scan runs before the supervisor reaps the command, so its zombie
+        # is still listed; on xspeed-dev reading its environ is refused.
+        job = "b" * 32
+        child = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True,
+                                 env=dict(os.environ, SANDBOX_DURABLE_JOB_ID=job))
+        try:
+            os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+            self.assertTrue(supervisor._defunct(Path("/proc") / str(child.pid)))
+            self.assertEqual(supervisor._job_environment_holders(job, child.pid), [])
+        finally:
+            child.wait()
 
     def test_an_unreadable_process_whose_parents_cannot_be_traced_counts(self):
         def proc_with(*chain):

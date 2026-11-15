@@ -139,6 +139,9 @@ class TargetView(TypedDict):
     compose_project: str
     lifetime: pl.LifetimeView
     stack_slug: str | None  # from the lifetime record when there is no summary
+    ports: dict[str, int]  # declared in the manifest's ``ports``; never guessed
+    mailpit_port: int | None
+    mail_access: mail_panel.MailAccess
     servers: list[ServerRow]
 
 
@@ -432,6 +435,25 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
         return view
 
     known_instances = {site["instance"] for site in known if site["instance"]}
+
+    def mailpit_of(target: pr.TargetSummary) -> int | None:
+        ports = target["stack"].get("ports") if target["stack"] else target.get("ports")
+        return (ports or {}).get("mailpit")
+
+    # Stack ports are allocated apart, so only declared (unobserved) ports can
+    # collide. Two rows on this server claiming one Mailpit upstream means at
+    # least one claim is wrong: neither row links the inbox as its own.
+    claims: dict[int, int] = {}
+    for source, target in chosen.values():
+        port = mailpit_of(target)
+        if source == "this-server" and port:
+            claims[port] = claims.get(port, 0) + 1
+
+    def mail_for(port: int | None, source: Source) -> mail_panel.MailAccess:
+        if port and source == "this-server" and claims.get(port, 0) > 1:
+            return {"status": "unavailable", "reason": "shared_port", "upstream": f"127.0.0.1:{port}"}
+        return mail_panel.access(port, same_server=source == "this-server", inventory=mail_inventory)
+
     route_hosts = {route["hostname"] for _, target in chosen.values() for route in target["routes"]}
     stacks: list[StackView] = []
     targets: list[TargetView] = []
@@ -507,8 +529,7 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             "commit": stack.get("commit") or (target["commit"] or ""),
             "template": stack.get("template") or "", "ports": ports,
             "mailpit_port": ports.get("mailpit"), "loopback_port": target["loopback_port"],
-            "mail_access": mail_panel.access(ports.get("mailpit"), same_server=source == "this-server",
-                                             inventory=mail_inventory),
+            "mail_access": mail_for(ports.get("mailpit"), source),
             "created_at": stack.get("created_at"), "ttl_expires_at": stack.get("ttl_expires_at"),
             "last_apply": _apply_view(target["last_apply"]),  # type: ignore[typeddict-item]
             "compose_project": compose_project,
@@ -526,6 +547,7 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
         name = f"{target['project']} · {target['environment']}"
         lifetime = lifetime_for(source, target["remote"], target["project"], target["environment"],
                                 name, target["compose_project"])
+        declared = dict(target.get("ports") or {})
         targets.append({
             "key": f"{target['remote']}/{target['project']}/{target['environment']}",
             "page_path": target_page_path(source, target["remote"], target["project"],
@@ -535,6 +557,8 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             "loopback_port": target["loopback_port"], "last_apply": _apply_view(target["last_apply"]),
             "recorded": True, "compose_project": target["compose_project"], "lifetime": lifetime,
             "stack_slug": lifetime["slug"] if lifetime["kind"] == "stack" else None,
+            "ports": declared, "mailpit_port": declared.get("mailpit"),
+            "mail_access": mail_for(declared.get("mailpit"), source),
             "servers": servers,
         })
     recorded_pairs = {(target["project"], target["environment"])
@@ -553,7 +577,9 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
                         "source": "this-server", "project": project, "environment": environment,
                         "commit": lifetime["commit"], "loopback_port": None, "last_apply": None,
                         "recorded": False, "compose_project": compose_project, "lifetime": lifetime,
-                        "stack_slug": stack_slug, "servers": []})
+                        "stack_slug": stack_slug, "ports": {}, "mailpit_port": None,
+                        "mail_access": mail_for(None, "this-server"),
+                        "servers": []})
 
     # Lifetime records with no card of their own (a copy whose summary is gone,
     # or a target only the record knows) are still listed, never hidden.

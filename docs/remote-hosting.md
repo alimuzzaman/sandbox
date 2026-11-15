@@ -2766,6 +2766,32 @@ must bind the same tailnet IPv4 as the panel listener; a loopback-bound panel
 cannot establish this scope and shows access records unavailable. Discovery does not
 provision names or repair certificates. A TTL appears once stacks have one. The page has no actions.
 
+A hosted site without a stack has no ports Sandbox allocated, so its Mailpit upstream
+comes only from its manifest. Declare the fixed loopback port its own Compose publishes
+on the environment:
+
+```yaml
+environments:
+  production:
+    ports:
+      mailpit: 8026   # the host side of "127.0.0.1:8026:8025" in your Compose file
+```
+
+`ports` maps 1 to 32 names (a lowercase letter, then lowercase letters, digits and
+hyphens) to distinct ports from 1 to 65535. A port in a range Sandbox allocates
+(18000-18999 for targets and stacks, 21000-21999 for login gates) is refused, so a
+site cannot claim a port Sandbox gave another target or stack. A rendered stack
+manifest cannot use it, because its ports come from `stack.ports`. Sandbox does not
+publish, reserve or probe these ports. The next `sb host apply` copies them into the
+target's `summary.json`, and the site's card then shows its Mailpit upstream with the
+same **Open inbox** rules as a stack: one managed tailnet name for that exact upstream
+(`sb host tailnet-name add --remote R <name> --upstream 127.0.0.1:8026`), a matching
+activation, a valid certificate and the panel's tailnet IPv4. Without the declaration
+the card has no Mailpit field, even when a managed name or a hostname looks like the
+site's inbox. When two stacks or sites on the server claim the same Mailpit upstream,
+neither links it (`shared_port`). On a controller the declared port is not recorded,
+so a controller-only hosted site shows no inbox.
+
 On a server it is built only from files on that server:
 
 - `sb host apply` writes `runtime/hosts/<project>/<environment>/summary.json` under the

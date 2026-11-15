@@ -16,7 +16,7 @@ SECRET = "planted-secret-value-9876543210"
 
 
 def summary(project="xspeed-hub-demo", environment="staging", *, slug="demo", remote="xspeed-dev",
-            routes=None, status="succeeded", ttl=None, ports=None):
+            routes=None, status="succeeded", ttl=None, ports=None, declared_ports=None):
     stack = None
     if slug:
         stack = {"slug": slug, "ref": "feature/demo", "ref_branch": "feature/demo", "commit": COMMIT,
@@ -36,6 +36,7 @@ def summary(project="xspeed-hub-demo", environment="staging", *, slug="demo", re
         "commit": COMMIT,
         "last_apply": {"status": status, "started_at": 10, "finished_at": 20, "request_id": "req-1"},
         "stack": stack,
+        "ports": declared_ports,
     })
 
 
@@ -47,6 +48,90 @@ def link(hostname="wp-demo.example.test", slug="demo", instance="sandbox-wp-demo
 def server(targets=(), links=(), legacy=(), partial=()):
     return pv.server_source({"targets": list(targets), "links": list(links), "legacy": list(legacy),
                              "partial_reasons": list(partial)})
+
+
+MAIL_URL = "https://mail-setup-plan.example.test/mail/"
+
+
+def inventory(*names):
+    return {"available": True, "partial": False,
+            "names": [{"upstream": upstream, "url": url} for upstream, url in names]}
+
+
+def plain(project="setup-plan", *, declared_ports=None, hostname="setup-plan.example.test"):
+    return summary(project, "production", slug=None, declared_ports=declared_ports,
+                   routes=[{"hostname": hostname, "mode": "serve", "primary": True}])
+
+
+class HostedMailAccessTest(unittest.TestCase):
+    """A hosted (non-stack) row links its inbox only from a declared Mailpit port."""
+
+    def test_declared_mailpit_port_with_a_managed_name_is_ready(self):
+        view = pv.build_view([server([plain(declared_ports={"mailpit": 8026})])],
+                             mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))
+        (target,) = view["targets"]
+        self.assertEqual(target["ports"], {"mailpit": 8026})
+        self.assertEqual(target["mailpit_port"], 8026)
+        self.assertEqual(target["mail_access"],
+                         {"status": "ready", "url": MAIL_URL, "upstream": "127.0.0.1:8026"})
+
+    def test_without_the_declaration_a_matching_name_never_establishes_access(self):
+        # The managed name and the route hostname both look like this site's
+        # inbox, but nothing declared the port: no guess links it.
+        view = pv.build_view([server([plain(hostname="mail-setup-plan.example.test")])],
+                             mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))
+        (target,) = view["targets"]
+        self.assertEqual(target["ports"], {})
+        self.assertIsNone(target["mailpit_port"])
+        self.assertEqual(target["mail_access"], {"status": "unavailable", "reason": "no_port", "upstream": None})
+
+    def test_declared_port_keeps_every_access_check(self):
+        target = plain(declared_ports={"mailpit": 8026})
+        cases = [
+            (None, "inventory_unavailable"),
+            ({"available": True, "partial": True, "names": []}, "inventory_partial"),
+            (inventory(), "not_found"),
+            (inventory(("127.0.0.1:8027", MAIL_URL)), "not_found"),
+            (inventory(("127.0.0.1:8026", None)), "not_ready"),
+            (inventory(("127.0.0.1:8026", MAIL_URL), ("127.0.0.1:8026", MAIL_URL)), "ambiguous"),
+        ]
+        for mail, reason in cases:
+            with self.subTest(reason=reason):
+                (row,) = pv.build_view([server([target])], mail_inventory=mail)["targets"]
+                self.assertEqual(row["mail_access"],
+                                 {"status": "unavailable", "reason": reason, "upstream": "127.0.0.1:8026"})
+
+    def test_a_controller_row_cannot_use_this_servers_names(self):
+        controller = {"source": "controller", "targets": [plain(declared_ports={"mailpit": 8026})],
+                      "legacy": [], "links": [], "partial_reasons": []}
+        (row,) = pv.build_view([controller], mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))["targets"]
+        self.assertEqual(row["mail_access"]["reason"], "not_same_server")
+
+    def test_two_rows_claiming_one_port_link_neither(self):
+        view = pv.build_view([server([plain(declared_ports={"mailpit": 8026}),
+                                      plain("other-site", declared_ports={"mailpit": 8026},
+                                            hostname="other.example.test")])],
+                             mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))
+        self.assertEqual([row["mail_access"] for row in view["targets"]],
+                         [{"status": "unavailable", "reason": "shared_port", "upstream": "127.0.0.1:8026"}] * 2)
+
+    def test_legacy_rows_have_no_port(self):
+        view = pv.build_view([server(legacy=[{"project": "legacy", "environment": "production"}])],
+                             mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))
+        (row,) = view["targets"]
+        self.assertEqual((row["ports"], row["mailpit_port"], row["mail_access"]["reason"]), ({}, None, "no_port"))
+
+    def test_stack_row_is_unchanged_beside_a_declared_target(self):
+        stack_url = "https://mail-demo.example.test/mail/"
+        names = inventory(("127.0.0.1:18142", stack_url), ("127.0.0.1:8026", MAIL_URL))
+        alone = pv.build_view([server([summary()])], mail_inventory=names)["stacks"]
+        both = pv.build_view([server([summary(), plain(declared_ports={"mailpit": 8026})])],
+                             mail_inventory=names)
+        self.assertEqual(both["stacks"], alone)
+        (stack,) = both["stacks"]
+        self.assertEqual((stack["mailpit_port"], stack["ports"]), (18142, {"mailpit": 18142}))
+        self.assertEqual(stack["mail_access"],
+                         {"status": "ready", "url": stack_url, "upstream": "127.0.0.1:18142"})
 
 
 class StackViewTest(unittest.TestCase):

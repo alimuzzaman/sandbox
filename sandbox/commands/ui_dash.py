@@ -643,7 +643,8 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
             desired_upstreams = sorted({
                 f"127.0.0.1:{port}"
                 for target in server_records["targets"]
-                for port in [((target.get("stack") or {}).get("ports") or {}).get("mailpit")]
+                for port in [((target.get("stack") or {}).get("ports") or {}).get("mailpit"),
+                             (target.get("ports") or {}).get("mailpit")]
                 if type(port) is int and 1 <= port <= 65535
             })
             mail_inventory = mail_panel.read_server(upstreams=desired_upstreams, bound_host=bound_host)

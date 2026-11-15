@@ -91,6 +91,33 @@ class BuildSummaryTest(unittest.TestCase):
                                           last_apply=LAST)
         self.assertIsNone(summary["stack"])
 
+    def test_plain_target_carries_its_declared_ports(self):
+        declared = dict(validated(stack=False), ports={"mailpit": 8026})
+        summary = pr.build_target_summary(declared, "r", RUNTIME, commit=COMMIT, last_apply=LAST)
+        self.assertEqual(summary["ports"], {"mailpit": 8026})
+        self.assertEqual(set(summary), {"schema", "remote", "project", "environment", "compose_project",
+                                        "loopback_port", "healthcheck_path", "routes", "commit",
+                                        "last_apply", "stack", "ports"})
+        self.assertEqual(pr.parse_target_summary(json.loads(pr.encode_record(summary))), summary)
+        bare = pr.build_target_summary(validated(stack=False), "r", RUNTIME, commit=COMMIT, last_apply=LAST)
+        self.assertNotIn("ports", bare)
+
+    def test_a_stack_keeps_its_ports_in_stack_facts_only(self):
+        stacked = dict(validated(), ports={"mailpit": 8026})
+        summary = pr.build_target_summary(stacked, "r", RUNTIME, commit=COMMIT, last_apply=LAST)
+        self.assertNotIn("ports", summary)
+        self.assertEqual(summary["stack"]["ports"], {"mailpit": 18142})
+        raw = json.loads(pr.encode_record(summary))
+        with self.assertRaisesRegex(pr.RecordError, "stack.ports"):
+            pr.parse_target_summary(dict(raw, ports={"mailpit": 8026}))
+
+    def test_declared_ports_are_validated_on_read(self):
+        raw = json.loads(pr.encode_record(pr.build_target_summary(
+            validated(stack=False), "r", RUNTIME, commit=COMMIT, last_apply=LAST)))
+        for ports in ({"Mailpit": 8026}, {"mailpit": 0}, {"mailpit": "8026"}, {"mailpit": True}, ["mailpit"]):
+            with self.subTest(ports=ports), self.assertRaises(pr.RecordError):
+                pr.parse_target_summary(dict(raw, ports=ports))
+
     def test_invalid_input_is_refused(self):
         broken = validated()
         broken["routes"] = []

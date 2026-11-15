@@ -90,6 +90,9 @@ class TargetSummary(TypedDict):
     commit: str | None
     last_apply: LastApply
     stack: StackFacts | None
+    # A plain target's declared ``ports`` (its own Compose's loopback ports).
+    # Absent when none are declared; a stack's ports stay in ``stack.ports``.
+    ports: NotRequired[dict[str, int]]
     owner_share: NotRequired[dict]
 
 
@@ -291,6 +294,10 @@ def parse_target_summary(data: object) -> TargetSummary:
         "last_apply": _last_apply(data.get("last_apply")),
         "stack": _stack_facts(data["stack"]) if data.get("stack") is not None else None,
     }
+    if data.get("ports"):
+        if result["stack"] is not None:
+            raise RecordError("a stack's ports belong in stack.ports")
+        result["ports"] = _ports(data["ports"])
     if data.get("owner_share") is not None:
         from sandbox.hosting.owner_share_record import parse
         result["owner_share"] = parse(data["owner_share"])
@@ -369,6 +376,8 @@ def build_target_summary(validated: dict, remote_name: str, runtime: dict, *,
         "routes": routes, "commit": commit, "last_apply": dict(last_apply),
         "stack": build_stack_facts(stack, stack_record) if isinstance(stack, dict) else None,
     }
+    if not isinstance(stack, dict) and validated.get("ports"):
+        raw["ports"] = dict(validated["ports"])
     from sandbox.hosting.owner_share_record import build
     access = build(validated, stack_record)
     if access is not None:

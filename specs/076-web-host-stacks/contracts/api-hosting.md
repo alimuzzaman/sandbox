@@ -40,6 +40,20 @@ contents, credentials, network probes, SSH, DNS lookup, or provisioning are used
 remains necessary to establish current reachability. Existing access gates and
 health checks are unchanged.
 
+### Hosted targets (2026-11-15)
+
+Each `targets[]` entry adds `ports`, `mailpit_port` and `mail_access`, decided
+by the same function and codes as a stack. `ports` comes only from the
+environment's declared `ports` mapping in `sandbox.hosting.yml`, copied into
+`summary.json` at apply (top-level `ports`, absent when none are declared; a
+summary with both `stack` and `ports` is refused). Legacy targets and
+controller-sourced targets have `ports: {}` and `no_port`. A name pattern, a
+route hostname or a managed name alone never sets a port. One more code,
+`shared_port`, is checked first for `this-server` rows: when more than one
+stack or target on this server claims the same Mailpit port, every such row is
+unavailable with that upstream. The panel asks the inventory for every
+declared hosted Mailpit upstream as well as every stack's.
+
 # Contract: `sb deploy --stack <slug>`
 
 - Requires `--remote` and `--expose`. Refusals happen before any remote effect and exit 1. With `--json` they print `{"ok": false, "error_code": "<code>", "error": "..."}`:

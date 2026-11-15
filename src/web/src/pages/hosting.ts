@@ -223,10 +223,11 @@ const MAIL_UNAVAILABLE: Record<Extract<HostingStack["mail_access"], { status: "u
   not_found: "No managed tailnet name matches this Mailpit port.",
   not_ready: "The matching name has missing, expired or changed proxy/certificate records.",
   ambiguous: "Multiple managed names match this Mailpit port.",
+  shared_port: "More than one stack or hosted site on this server claims this Mailpit port.",
 };
 
-function mailAccess(stack: HostingStack): string {
-  const access = stack.mail_access;
+function mailAccess(item: { mail_access?: HostingStack["mail_access"] }): string {
+  const access = item.mail_access;
   if (!access) return `<span class="${theme.quiet}">Inbox access records unavailable.</span>`;
   const upstream = access.upstream ? `<code>${esc(access.upstream)}</code>` : "";
   if (access.status === "ready") {
@@ -267,6 +268,7 @@ function targetRow(target: HostingTarget): string {
       <div class="text-[12px] sm:text-right">${applyLine(target.last_apply, target.recorded ? null : target.commit)}${lifetimeLine(target.lifetime)}</div>
     </header>
     ${target.recorded ? `<div class="px-2 pb-2">${serversTable(target.servers, "No hostnames recorded.")}</div>` : note}
+    ${target.recorded && target.mailpit_port ? `<dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">${field("Mailpit", mailAccess(target))}</dl>` : ""}
   </section>`;
 }
 

@@ -110,12 +110,20 @@ for low-level callers too. `remote provision --force` cannot replace a joined
 Tailnet registration; use the supported lifecycle commands instead.
 
 Control protocol 26 adds `sb host login-url --here` (contract
-`host.login-url-here.v1`, `sandbox/hosting/server_login_url.py`): one SSH control
-call from a joined controller to the installed owner, which mints a WordPress
-autologin link for a target the server records and answers with one JSON line
-carrying the link, the contract, `target_identity` and `ownership_marker`. The
-controller shows the link only when those match its registration. An older runtime
-answers with a parser error and the controller says to migrate.
+`host.login-url-here.v1`, `sandbox/hosting/server_login_url.py`). The installed
+runtime lists the contract under `host_login_url_capabilities` in `job-capabilities`
+(a key of its own: `capabilities` admits only contracts every controller knows). A
+joined controller reads that first and refuses a runtime without it, then sends only
+its token's SHA-256 to the installed owner. The owner installs the hash for a stack
+it records and answers with one JSON line: `login_base` (the link without its
+`#token`), `token_sha256`, the contract, `target_identity` and `ownership_marker`.
+The controller shows the link only when those match its request and registration.
+
+The protocol 26 shape file also records payload keys that earlier merges changed
+under 25 without a bump: `server_cli_apply_capabilities` and
+`source_repair_capabilities` in server-CLI capabilities,
+`recover_server_cli_exec_acceptance`, `job_policy` and `parent_job_id`. Read 26 as
+covering those too, not as a login-url change only.
 
 Control protocol 25 adds optional `tailscale_host` to receiver-owned server-CLI
 routing metadata and its retained provenance. It is emitted only for a unique

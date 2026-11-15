@@ -187,6 +187,7 @@ def capabilities() -> dict:
     from sandbox.application.server_cli_source_repair import contract_available as source_repair_available
     from sandbox.hosting.source_repair import CONTRACT as SOURCE_REPAIR_CONTRACT
     from sandbox.hosting.publisher_proof import contract_available as publisher_proof_available, CONTRACT as PUBLISHER_PROOF_CONTRACT
+    from sandbox.hosting.server_login_url import CONTRACT as LOGIN_URL_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
@@ -196,6 +197,8 @@ def capabilities() -> dict:
             'server_exec_capabilities': [EXEC_CONTRACT] if exec_contract_available() else [],
             'server_exec_capture_capabilities': [CAPTURE_CONTRACT] if capture_contract_available() else [],
             'server_cli_apply_capabilities': [SOURCE_BRANCH_CONTRACT, NESTED_APPLY_CONTRACT] if source_branch_contract_available() else [],
+            # Its own key: `capabilities` admits only contracts every controller knows.
+            'host_login_url_capabilities': [LOGIN_URL_CONTRACT],
             'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +
                 (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
                  and source_content_available() else []) +

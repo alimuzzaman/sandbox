@@ -1115,11 +1115,16 @@ def render_autologin_mu_plugin(token_hash: str, user: str, expires_at: int) -> s
     return render_plugin()
 
 
-def autologin_url(validated: dict, token: str, expires_at: int) -> str:
+def autologin_base(validated: dict) -> str:
+    """The sign-in link without its ``#token`` fragment."""
     primary = next(route["hostname"] for route in validated["routes"] if route.get("primary"))
     query = urllib.parse.urlencode({"sandbox_autologin": "1"})
     request_path = validated.get("autologin", {}).get("request_path", "/")
-    return f"https://{primary}{request_path}?{query}#{token}"
+    return f"https://{primary}{request_path}?{query}"
+
+
+def autologin_url(validated: dict, token: str, expires_at: int) -> str:
+    return f"{autologin_base(validated)}#{token}"
 
 
 def render_compose_command(validated: dict, source_dir: str, override_path: str) -> str:

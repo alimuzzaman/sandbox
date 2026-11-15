@@ -4770,11 +4770,15 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
 
 def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
                           state: dict, ttl_seconds: int | None,
-                          save_state=None, *, run=None, home: str | None = None) -> dict:
+                          save_state=None, *, run=None, home: str | None = None,
+                          token_hash: str | None = None) -> dict:
     """Install one hashed token and return its link; the token goes nowhere else.
 
     ``run(command, timeout)`` and ``home`` default to the remote over SSH. The
-    installed owner passes a local runner and its own home (``--here``).
+    installed owner passes a local runner and its own home (``--here``), plus
+    the ``token_hash`` its controller made: the token then never exists here,
+    and the result carries ``login_base`` (the link without ``#token``) for
+    the controller to complete.
     """
     if run is None:
         def run(command, timeout):
@@ -4789,12 +4793,18 @@ def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
     host_state = state.get("hosts", {}).get(key)
     if not isinstance(host_state, dict):
         raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
-    token = secrets.token_urlsafe(32)
+    if token_hash is None:
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+    else:
+        token = None
+        if not isinstance(token_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", token_hash):
+            raise hosting.HostingError("autologin hash must be SHA-256 hex")
+    # Built before any effect, so a manifest without a primary route installs nothing.
+    login_base = hosting.autologin_base(validated)
     issued_at = int(time.time())
     expires_at = issued_at + ttl
-    plugin = hosting.render_autologin_mu_plugin(
-        hashlib.sha256(token.encode()).hexdigest(), config["user"], expires_at,
-    )
+    plugin = hosting.render_autologin_mu_plugin(token_hash, config["user"], expires_at)
     home = remote.resolve_sandbox_home(entry) if home is None else home
     source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
@@ -4815,13 +4825,12 @@ def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
     ), 60)
     run(f"{prefix} exec -T {service} test -s {shlex.quote(target)}", 30)
     from sandbox.hosting.autologin import register_script
-    registration = register_script(target, hashlib.sha256(token.encode()).hexdigest(),
-                                   config["user"], issued_at, expires_at)
+    registration = register_script(target, token_hash, config["user"], issued_at, expires_at)
     run(f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", 60)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
     (save_state or hosting.save_host_state)(state)
-    return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
-            "one_time": True, "user": config["user"]}
+    link = {"url": f"{login_base}#{token}"} if token is not None else {"login_base": login_base}
+    return {**link, "expires_at": expires_at, "one_time": True, "user": config["user"]}
 
 
 def _issue_host_login_link(validated: dict, entry: dict, remote_name: str, state: dict,

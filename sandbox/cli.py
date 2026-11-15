@@ -1129,6 +1129,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host stack reap, host login-url: run on this host itself (the remote side of the --remote form)")
     host_p.add_argument("--trigger", default=None, choices=["scheduled_routine", "stack_reap", "safe_tier"],
         help=argparse.SUPPRESS)
+    # host login-url --here: the controller's token hash; the token stays on the controller.
+    host_p.add_argument("--token-sha256", dest="token_sha256", default=None, help=argparse.SUPPRESS)
     host_p.add_argument("--checkout", action="append", default=None, metavar="PATH",
         help="host stack sweep: a local checkout to check merges in (repeatable; recorded stacks' checkouts are used too)")
     host_p.add_argument("--per-owner", dest="per_owner", type=int, default=None, metavar="N",

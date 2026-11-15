@@ -1373,21 +1373,36 @@ For a stack or recorded target, select it by name instead of a project directory
 
 On a joined Tailnet remote the server ran `host stack up` and `host apply`, so the
 stack record, its rendered manifest and the hosting state are the server's, not the
-controller's. There `login-url --name|--target` makes one control call to the
-installed runtime, `sb host login-url --here`, which resolves the target in the
-server's records, installs the token hash and records the issue under the target's
-writer lock, and answers with one JSON line on the SSH channel. The controller
-prints the link on its own stdout and nowhere else; the link is never in argv, a
-durable job, a log, an audit line or a state file. Both sides refuse inside a
-durable job (`job_output_refused`), because job output is stored. A connection that
-never opened is tried up to three times; a timeout after it opened is not retried,
-because a link may already have been issued (run the command again for a fresh
-one). This path issues the WordPress `autologin` link only: `--service`, `--email`,
-`--list`, `--revoke` and `--uses` refuse with `login_url_server_unsupported`, and a
-target without WordPress autologin refuses with `autologin_not_declared` (use
-`sb host share create` for a share gate link). A runtime older than control
-protocol 26 cannot answer; migrate it with `sb remote service migrate <remote>
---confirm`. `--project-dir` on a joined remote still takes the controller path.
+controller's. There `login-url --name|--target` works in two control calls. First it
+reads the installed runtime's `job-capabilities`: the reply must carry the
+registration's `target_identity` and `ownership_marker` and list
+`host.login-url-here.v1` under `host_login_url_capabilities`. A runtime older than
+control protocol 26 lacks it, so the controller refuses with
+`login_url_server_unavailable` and `sb remote service migrate <remote> --confirm`
+before anything is issued. A registration without a recorded identity or marker
+refuses the same way; re-join or refresh it. Then the controller makes the token,
+keeps it, and sends only its SHA-256 to `sb host login-url --here --token-sha256 <hash>`.
+The installed owner checks that `--remote` is not one of its own remotes, resolves
+the stack in its own records (a target that is not a recorded stack refuses with
+`login_url_target_not_stack`), installs the hash and records the user and expiry
+under the target's writer lock, and answers with one JSON line holding the link
+without its `#token` fragment. The controller adds the fragment and prints the link
+on its own stdout and nowhere else. The token never crosses the SSH channel, and the
+link is never in argv, a durable job, a log, an audit line or a state file. Both
+sides refuse inside a durable job (`job_output_refused`), because job output is
+stored; that check reads `SANDBOX_DURABLE_JOB_ID` only.
+
+A connection that never opened is tried up to three times. A timeout is also
+retried: the retry sends the same hash, which installs the same entry, so it cannot
+issue a second link. An exit 255 after the session opened is not retried. If the
+server fails after it installed the hash it answers
+`login_url_failed_after_install`; no link is shown, and the installed entry expires
+unused. This path issues the WordPress `autologin` link only: `--service`,
+`--email`, `--list`, `--revoke` and `--uses` refuse with
+`login_url_server_unsupported`, and a target without WordPress autologin refuses
+with `autologin_not_declared` (use `sb host share create` for a share gate link).
+`--project-dir` with `--name` or `--target` on a joined remote refuses with
+`host_target_invalid`; `--project-dir` alone still takes the controller path.
 
 For a project that is not WordPress, `autologin` can instead declare a Sandbox login
 service with named entries. See [login-service.md](login-service.md).

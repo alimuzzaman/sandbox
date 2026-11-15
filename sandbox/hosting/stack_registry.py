@@ -72,6 +72,10 @@ class StackRecord(TypedDict, total=False):
     updated_at: int
     last_apply: LastApply
     sites: list[SiteLinkRef]
+    # Spec 089: a follow's tracked branch and fetched head when its ref is an
+    # overlay on that branch (the lifetime record names this branch).
+    source_branch: str
+    source_commit: str
     # Spec 077: a mirror of the remote's lifetime record for this copy.
     copy_id: str
     owner: dict

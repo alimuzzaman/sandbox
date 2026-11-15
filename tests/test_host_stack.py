@@ -1179,6 +1179,58 @@ class StackCommandTests(unittest.TestCase):
             host_stack._up(self.args("up", plan=True, lifetime="permanent", ttl="3d"))
         self.assertEqual(caught.exception.code, "stack_ttl_invalid")
 
+    def _overlay_on_dev(self) -> tuple[str, str]:
+        """``dev`` at the initial commit and ``sandbox-env/dev`` one commit on top."""
+        _git(self.hub, "branch", "dev")
+        _git(self.hub, "checkout", "--quiet", "-b", "sandbox-env/dev")
+        (self.hub / "overlay.txt").write_text("overlay\n")
+        _git(self.hub, "add", "overlay.txt")
+        _git(self.hub, "commit", "--quiet", "-m", "overlay")
+        return self.head, _git(self.hub, "rev-parse", "HEAD")
+
+    def test_a_follow_overlay_descending_from_dev_may_be_the_hosted_dev_stack(self):
+        """Spec 089: the lifetime follows the template repository's tracked branch."""
+        dev_head, overlay = self._overlay_on_dev()
+        args = self.args("up", confirm=True, lifetime="hosted", ref="sandbox-env/dev", name="dev")
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(args)  # a person's overlay ref is not the dev branch
+        self.assertEqual(caught.exception.code, "stack_lifetime_invalid")
+        args.follow_source = {"branch": "dev", "commit": dev_head}
+        with patch.object(host_stack, "_submit", return_value="job-follow"):
+            result = host_stack._up(args)
+        self.assertEqual((result["lifetime"], result["canonical"]), ("hosted", True))
+        self.assertEqual((result["ref"], result["ref_branch"], result["commit"]),
+                         ("sandbox-env/dev", "sandbox-env/dev", overlay))
+        self.assertEqual((result["source_branch"], result["source_commit"]), ("dev", dev_head))
+        local = stack_registry.read()["stacks"][stack_registry.record_key("r", "dev")]
+        self.assertEqual((local["ref_branch"], local["source_branch"], local["source_commit"]),
+                         ("sandbox-env/dev", "dev", dev_head))
+        [remote] = [record for record in self.remote_records().values() if record.stack.slug == "dev"]
+        self.assertEqual((remote.stack.ref, remote.stack.ref_branch, remote.stack.commit),
+                         ("sandbox-env/dev", "dev", overlay))
+        self.assertTrue(remote.stack.canonical)
+
+    def test_a_follow_ref_that_does_not_descend_from_the_tracked_head_is_refused(self):
+        _dev_head, overlay = self._overlay_on_dev()
+        _git(self.hub, "checkout", "--quiet", "--orphan", "unrelated")
+        _git(self.hub, "commit", "--quiet", "-m", "unrelated")
+        args = self.args("up", confirm=True, ref="dev", name="dev",
+                         follow_source={"branch": "dev", "commit": overlay})
+        with patch.object(host_stack, "_submit") as submit, \
+                self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(args)
+        self.assertEqual(caught.exception.code, host_stack.SOURCE_UNRELATED)
+        submit.assert_not_called()
+        self.assertEqual(self.remote_records(), {})
+        args.ref, args.follow_source = "unrelated", {"branch": "dev", "commit": self.head}
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(args)
+        self.assertEqual(caught.exception.code, host_stack.SOURCE_UNRELATED)
+        args.follow_source = {"branch": "dev", "commit": "not-a-commit"}
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(args)
+        self.assertEqual(caught.exception.code, host_stack.REF_UNRESOLVED)
+
     def test_ttl_and_owner_checks(self):
         with patch.object(host_stack, "_submit", return_value="job-1"):
             host_stack._up(self.args("up", confirm=True))

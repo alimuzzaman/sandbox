@@ -718,6 +718,45 @@ class StackCommandTests(unittest.TestCase):
         base.update(values)
         return SimpleNamespace(**base)
 
+    def test_wordpress_stack_up_names_the_site_and_the_login_command_never_a_link(self):
+        """Feedback 3234ad2b: the operator learns how to get the autologin link."""
+        data = _yaml(TEMPLATE)
+        data["environments"]["sandbox"]["autologin"] = {
+            "user": "xsadmin", "service": "web", "ttl_seconds": 900,
+            "container_path": "/var/www/html/wp-content/mu-plugins/99-sandbox-host-autologin.php"}
+        with patch.object(host_stack, "load_template", return_value=stack_template.parse_template(data)), \
+                patch.object(host_stack, "_submit", return_value="job-wp"):
+            result = host_stack._up(self.args("up", confirm=True))
+        text = host_stack._render_text(result)
+        self.assertEqual(result["site_url"], "https://hub-demo.example.test/")
+        self.assertEqual(result["login_url_command"], "sb host login-url --remote r --name demo --confirm")
+        self.assertIn("  site: https://hub-demo.example.test/", text)
+        self.assertIn("once job job-wp succeeds, run `sb host login-url --remote r --name demo --confirm`", text)
+        for shown in (text, json.dumps(result)):
+            self.assertNotIn("sandbox_autologin", shown)
+
+    def test_stack_up_without_autologin_names_the_site_only(self):
+        with patch.object(host_stack, "_submit", return_value="job-plain"):
+            result = host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(result["site_url"], "https://hub-demo.example.test/")
+        self.assertNotIn("login_url_command", result)
+        self.assertNotIn("admin login", host_stack._render_text(result))
+
+    def test_joined_stack_up_hint_reads_the_committed_template(self):
+        data = _yaml(TEMPLATE)
+        data["environments"]["sandbox"]["autologin"] = {
+            "user": "xsadmin", "container_path": "/var/www/html/wp-content/mu-plugins/a.php"}
+        import yaml
+        hub = self.runtime.checkout(yaml.safe_dump(data), name="wp")
+        args = self.args("up", template=str(hub / "sandbox.hosting.yml"), remote="xspeed-dev")
+        hint = host_stack.dispatched_login_hint(args, _git(hub, "rev-parse", "HEAD"))
+        self.assertIn("`sb host login-url --remote xspeed-dev --name demo --confirm`", hint)
+        unnamed = host_stack.dispatched_login_hint(
+            self.args("up", template=str(hub / "sandbox.hosting.yml"), remote="xspeed-dev", name=None),
+            _git(hub, "rev-parse", "HEAD"))
+        self.assertIn("sb host stack list --remote xspeed-dev", unnamed)
+        self.assertIsNone(host_stack.dispatched_login_hint(self.args("up"), self.head))
+
     def test_uses_missing_or_self_refuses_before_effects_in_plan_and_confirm(self):
         for name, code in (("missing", "stack_uses_missing"), ("demo", "stack_uses_self")):
             data = _yaml(TEMPLATE)

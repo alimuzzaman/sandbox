@@ -1126,7 +1126,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--force-owner", dest="force_owner", action="store_true",
         help="host stack down/ttl, host classify: act on a stack or target another owner holds (recorded)")
     host_p.add_argument("--here", action="store_true",
-        help="host stack reap: run on this host itself (the remote side of `stack reap --remote`)")
+        help="host stack reap, host login-url: run on this host itself (the remote side of the --remote form)")
     host_p.add_argument("--trigger", default=None, choices=["scheduled_routine", "stack_reap", "safe_tier"],
         help=argparse.SUPPRESS)
     host_p.add_argument("--checkout", action="append", default=None, metavar="PATH",

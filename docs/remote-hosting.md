@@ -1364,6 +1364,31 @@ new link replaces the previous unused link. Treat the returned URL like a passwo
 to `compose.service` for stacks where WordPress is also the public service.
 `request_path` selects the public route that reaches WordPress; it defaults to `/`.
 
+For a stack or recorded target, select it by name instead of a project directory:
+
+```bash
+./sb host login-url --remote myvps --name cfe-expiry-1111 --confirm
+./sb host login-url --remote myvps --target xspeed-hub-cfe-expiry-1111/sandbox --confirm
+```
+
+On a joined Tailnet remote the server ran `host stack up` and `host apply`, so the
+stack record, its rendered manifest and the hosting state are the server's, not the
+controller's. There `login-url --name|--target` makes one control call to the
+installed runtime, `sb host login-url --here`, which resolves the target in the
+server's records, installs the token hash and records the issue under the target's
+writer lock, and answers with one JSON line on the SSH channel. The controller
+prints the link on its own stdout and nowhere else; the link is never in argv, a
+durable job, a log, an audit line or a state file. Both sides refuse inside a
+durable job (`job_output_refused`), because job output is stored. A connection that
+never opened is tried up to three times; a timeout after it opened is not retried,
+because a link may already have been issued (run the command again for a fresh
+one). This path issues the WordPress `autologin` link only: `--service`, `--email`,
+`--list`, `--revoke` and `--uses` refuse with `login_url_server_unsupported`, and a
+target without WordPress autologin refuses with `autologin_not_declared` (use
+`sb host share create` for a share gate link). A runtime older than control
+protocol 26 cannot answer; migrate it with `sb remote service migrate <remote>
+--confirm`. `--project-dir` on a joined remote still takes the controller path.
+
 For a project that is not WordPress, `autologin` can instead declare a Sandbox login
 service with named entries. See [login-service.md](login-service.md).
 
@@ -1554,6 +1579,16 @@ sections, recorded inbox links and delivered revision evidence. A controller wit
 recorded inbox names shows the supported setup command. One-link teammate access
 and per-click sign-in are separate spec 088 work; this declaration alone does not
 grant access.
+
+`stack up` reports the stack's site (`site_url`, and `site:` in text). When the
+template's environment declares WordPress `autologin`, it also reports
+`login_url_command`, the one command that prints the one-time admin link once the
+apply job it submitted succeeds, for example
+`sb host login-url --remote myvps --name demo --confirm`. It never prints the link
+itself: no link exists until the apply finishes, and on a joined remote `stack up`
+runs as a server job whose output is stored. A joined remote's controller prints the
+same hint on stderr after the job receipt (with `sb host stack list` first when the
+name is generated).
 
 For spec 088 one-link access, declare complete per-route/inbox access on parent and
 every direct used stack. See the [worked stack template](login-service.md#worked-stack-template)

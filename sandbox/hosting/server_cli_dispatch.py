@@ -158,6 +158,12 @@ def bound_source_branch(checkout):
 
 
 def dispatch_host_if_selected(args) -> bool:
+    if getattr(args, "action", None) == "login-url" and getattr(args, "here", False):
+        # The installed owner's side of a joined remote's login-url. It runs
+        # before configuration writers and answers with one JSON line.
+        from sandbox.hosting.server_login_url import run_here
+        run_here(args)
+        return True
     from sandbox.application.server_cli_source_repair import dispatch_if_selected
     if dispatch_if_selected(args):
         return True
@@ -320,4 +326,10 @@ def _dispatch_host_if_selected(args) -> bool:
         _failure(args, "server_cli_acceptance_unknown" if unknown else "server_cli_execution_unavailable",
                  unknown=unknown, receipt=receipt)
     print(json.dumps(receipt, sort_keys=True))
+    if action == 'stack' and stack_action == 'up' and source_ref is not None:
+        from sandbox.commands.host_stack import dispatched_login_hint
+        hint = dispatched_login_hint(args, source_ref)
+        if hint:
+            # stderr, so the receipt on stdout stays the one JSON document.
+            print(hint, file=sys.stderr)
     return True

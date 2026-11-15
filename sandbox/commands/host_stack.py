@@ -638,7 +638,8 @@ def _up(args) -> dict:
                 "ports": ports, "manifest": validated["manifest_path"], "source_root": source_root,
                 "template": str(template_path), "submission": submission, "job_id": job_id,
                 "request_id": request_id, "secrets_missing": sorted(missing),
-                "generated_name": generated, "repo": repo, **_lifetime_fields(stored)}
+                "generated_name": generated, "repo": repo, **_lifetime_fields(stored),
+                **_site_fields(validated, remote_name, slug)}
 
     request_id = getattr(args, "request_id", None) or f"stack-{slug}-{ref.commit[:12]}-{secrets.token_hex(3)}"
     from sandbox.commands import hosting as hosting_cmd
@@ -768,6 +769,48 @@ def _up(args) -> dict:
     if sweep is not None:
         payload["sweep"] = sweep
     return payload
+
+
+def dispatched_login_hint(args, ref_commit: str) -> str | None:
+    """For a joined remote's `stack up`: how to get the autologin link, or None.
+
+    The server runs this `stack up`, so the controller prints only its receipt.
+    Read the committed template here (no remote call) to say what comes next.
+    """
+    try:
+        checkout, relpath = template_checkout(Path(args.template).expanduser().resolve())
+        template = load_template(checkout, relpath, ref_commit)
+        environment = _select_environment(template, getattr(args, "environment", None))
+        declared = ((template.raw.get("environments") or {}).get(environment) or {}).get("autologin")
+        from sandbox.hosting import login_service
+        if not isinstance(declared, dict) or login_service.wordpress_declaration(declared) is None:
+            return None
+    except Exception:  # noqa: BLE001 -- a hint never changes the submission's result
+        return None
+    from sandbox.hosting.server_login_url import follow_up_command
+    name = getattr(args, "name", None)
+    if name:
+        command = f"`{follow_up_command(args.remote, name)}`"
+    else:
+        command = (f"`sb host stack list --remote {args.remote}` for the generated name, then "
+                   f"`{follow_up_command(args.remote, '<name>')}`")
+    return ("admin login: once the stack's apply job succeeds (see this job's output), run "
+            f"{command} in your terminal for a one-time WordPress login link")
+
+
+def _site_fields(validated: dict, remote_name: str, slug: str) -> dict:
+    """The site URL, and for WordPress autologin the command that prints its link.
+
+    `stack up` only submits the apply, so no link can exist yet; and on a joined
+    remote this output is stored as job output, where a link must never land.
+    """
+    primary = next((route["hostname"] for route in validated.get("routes") or []
+                    if route.get("primary")), None)
+    fields = {"site_url": f"https://{primary}/" if primary else None}
+    if validated.get("autologin"):
+        from sandbox.hosting.server_login_url import follow_up_command
+        fields["login_url_command"] = follow_up_command(remote_name, slug)
+    return fields
 
 
 def _release_fresh_claim(store, claimed: dict, compose_project: str) -> None:
@@ -1111,6 +1154,7 @@ def _render_text(payload: dict) -> str:
              f"  lifetime: {payload.get('lifetime')} ({payload.get('lifetime_source')})"
              f"{' canonical' if payload.get('canonical') else ''}, expires {_when(payload.get('expires_at'))}",
              f"  hosts: {', '.join(payload['hostnames'])}",
+             *([f"  site: {payload['site_url']}"] if payload.get("site_url") else []),
              f"  uses: {', '.join(payload.get('uses') or []) or 'none'}",
              f"  ports: {ports}",
              f"  manifest: {payload['manifest']}"]
@@ -1122,6 +1166,10 @@ def _render_text(payload: dict) -> str:
     else:
         lines.append(f"  submitted job {payload['job_id']} (request {payload['request_id']}); "
                      f"follow with `sb job-status {payload['job_id']}`")
+    if payload.get("login_url_command"):
+        when = "the apply job succeeds" if payload["mode"] == "plan" else f"job {payload['job_id']} succeeds"
+        lines.append(f"  admin login: once {when}, run `{payload['login_url_command']}` "
+                     "in your terminal for a one-time WordPress login link")
     return "\n".join(lines)
 
 

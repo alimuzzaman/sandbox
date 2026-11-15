@@ -4768,9 +4768,17 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
     return result
 
 
-def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
+def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
                           state: dict, ttl_seconds: int | None,
-                          save_state=None) -> dict:
+                          save_state=None, *, run=None, home: str | None = None) -> dict:
+    """Install one hashed token and return its link; the token goes nowhere else.
+
+    ``run(command, timeout)`` and ``home`` default to the remote over SSH. The
+    installed owner passes a local runner and its own home (``--here``).
+    """
+    if run is None:
+        def run(command, timeout):
+            return _remote_checked(entry, command, timeout=timeout)
     config = validated.get("autologin")
     if not config:
         raise hosting.HostingError("this hosting environment does not declare autologin")
@@ -4787,7 +4795,7 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     plugin = hosting.render_autologin_mu_plugin(
         hashlib.sha256(token.encode()).hexdigest(), config["user"], expires_at,
     )
-    home = remote.resolve_sandbox_home(entry)
+    home = remote.resolve_sandbox_home(entry) if home is None else home
     source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     prefix = _compose_prefix(validated, source_dir, f"{runtime_dir}/compose.override.yml",
@@ -4801,15 +4809,15 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
         f'cat > "$temporary"; chmod 0644 "$temporary"; mv "$temporary" {shlex.quote(target)}'
     )
     service = shlex.quote(config.get("service") or validated["compose"]["service"])
-    _remote_checked(entry, (
+    run((
         f"printf %s {shlex.quote(payload)} | base64 -d | {prefix} exec -T {service} "
         f"sh -c {shlex.quote(install)}"
-    ), timeout=60)
-    _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
+    ), 60)
+    run(f"{prefix} exec -T {service} test -s {shlex.quote(target)}", 30)
     from sandbox.hosting.autologin import register_script
     registration = register_script(target, hashlib.sha256(token.encode()).hexdigest(),
                                    config["user"], issued_at, expires_at)
-    _remote_checked(entry, f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", timeout=60)
+    run(f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", 60)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
     (save_state or hosting.save_host_state)(state)
     return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
@@ -8754,6 +8762,13 @@ def cmd_host(cfg, args) -> None:
         from sandbox.commands.host_share import cmd_host_share
         cmd_host_share(args)
         return
+    if args.action == "login-url" and getattr(args, "remote", None):
+        # A joined remote records its targets on the server: mint there.
+        from sandbox.hosting import server_login_url
+        joined_entry = remote.get_remote(args.remote)
+        if server_login_url.selected(args, joined_entry):
+            server_login_url.run_from_controller(args, joined_entry)
+            return
     if getattr(args, "stack", None) is not None or getattr(args, "share_path", None) is not None \
             or getattr(args, "share_id", None) is not None or getattr(args, "entry", None) is not None:
         die("--stack, --path, --entry and a link id are only accepted by `host share`")

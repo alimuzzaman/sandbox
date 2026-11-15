@@ -109,6 +109,14 @@ legacy bearer remains stored locally. The shared installer enforces that rule
 for low-level callers too. `remote provision --force` cannot replace a joined
 Tailnet registration; use the supported lifecycle commands instead.
 
+Control protocol 26 adds `sb host login-url --here` (contract
+`host.login-url-here.v1`, `sandbox/hosting/server_login_url.py`): one SSH control
+call from a joined controller to the installed owner, which mints a WordPress
+autologin link for a target the server records and answers with one JSON line
+carrying the link, the contract, `target_identity` and `ownership_marker`. The
+controller shows the link only when those match its registration. An older runtime
+answers with a parser error and the controller says to migrate.
+
 Control protocol 25 adds optional `tailscale_host` to receiver-owned server-CLI
 routing metadata and its retained provenance. It is emitted only for a unique
 Tailnet IPv4 address observed on the local `tailscale0` interface. Public

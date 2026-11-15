@@ -30,6 +30,15 @@
       "dependencies": ["lenzora-prod"], "metadata": {"rationale": "production /app/storage is persistent application data"}
     },
     {
+      "id": "infisical", "scope": "production", "source_type": "database",
+      "allowed_roots": ["registered-postgresql-source"], "sources": ["postgresql-infisical-database"],
+      "capture_mode": "logical", "consistency": "pg-dump-consistent-snapshot",
+      "excludes": ["application-env-file", "containers", "images", "caches", "logs"],
+      "sensitivity": "encrypted", "restore_target": "isolated-postgresql-volume",
+      "verification": "database-import-and-observation-match", "retention_class": "production",
+      "dependencies": [], "metadata": {"rationale": "Infisical PostgreSQL database for the hosted compose instance; the application ENCRYPTION_KEY is not in this set and stays owner-held"}
+    },
+    {
       "id": "alimuzzaman-site", "scope": "production", "source_type": "git",
       "allowed_roots": ["host-manifest:alimuzzaman-me"], "sources": ["git-remote-and-pinned-revision"],
       "capture_mode": "provenance", "consistency": "clean-git-checkout",

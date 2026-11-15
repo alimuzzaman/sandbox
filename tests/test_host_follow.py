@@ -4,7 +4,12 @@ Every collaborator that would touch the network, systemd, GitHub or a real
 stack is a fake: ssh-keygen is emulated, the job contract and stack up are
 recorded calls, and each test has its own temporary store and SANDBOX_HOME.
 """
+import contextlib
+import io
 import json
+import os
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -22,10 +27,11 @@ from sandbox.commands import host_follow  # noqa: E402
 from sandbox.commands import host_stack  # noqa: E402
 from sandbox.hosting.follow import git, units  # noqa: E402
 from sandbox.hosting.follow import tick as follow_tick  # noqa: E402
-from sandbox.hosting.follow.apply import Attempt  # noqa: E402
+from sandbox.hosting.follow import apply as follow_apply  # noqa: E402
+from sandbox.hosting.follow.apply import Attempt, run_prepare  # noqa: E402
 from sandbox.hosting.follow.spec import FollowError  # noqa: E402
 from sandbox.hosting.follow.store import FollowStore  # noqa: E402
-from tests.subprocess_support import run_test_process  # noqa: E402
+from tests.subprocess_support import run_test_process, synthetic_environment  # noqa: E402
 
 PRIVATE_MARKER = "PRIVATE KEY"
 HEAD_A = "a" * 40
@@ -321,6 +327,7 @@ class TickTests(FollowCase):
         self.submitted, self.checked_out = [], []
         self.stack = None
         self.busy_reason = (None, None)
+        self.lifetime_value = None
         self.jobs = {}
 
     def fetch(self, repo, github, branch, *, key, known_hosts):
@@ -339,9 +346,10 @@ class TickTests(FollowCase):
     def tick(self, **overrides):
         options = {"submit": self.submit, "capability": lambda: CAPABILITY,
                    "job_view": lambda job_id: self.jobs.get(job_id), "fetch": self.fetch,
-                   "checkout": lambda repo, commit: self.checked_out.append((Path(repo).name, commit)),
+                   "checkout": lambda repo, commit, branch=None: self.checked_out.append((Path(repo).name, commit)),
                    "stack_lookup": lambda _remote, _name: self.stack,
-                   "busy": lambda _record, home: self.busy_reason, "home": lambda: str(self.home)}
+                   "busy": lambda _record, home: self.busy_reason,
+                   "lifetime": lambda _record, home: self.lifetime_value, "home": lambda: str(self.home)}
         options.update(overrides)
         return follow_tick.Tick(self.store, **options).run()["follows"][0]
 
@@ -514,6 +522,65 @@ class TickTests(FollowCase):
         self.assertEqual(self.store.audit_path.stat().st_mode & 0o777, 0o600)
         self.assert_no_private_material(self.store.audit_path.read_text())
 
+    # Review fixes S2(b), S5 and M1 in the poll.
+
+    def test_a_reaped_stack_pauses_its_follow_and_a_reaping_one_is_busy(self):
+        self.stack = {"project": "p", "environment": "e"}
+        self.lifetime_value = "reaping"
+        row = self.tick()
+        self.assertEqual((row["action"], row["reason"]), ("skip", "stack_reaping"))
+        self.lifetime_value = "reaped"
+        row = self.tick()
+        self.assertEqual((row["action"], row["reason"]), ("pause", "stack_reaped"))
+        self.assertEqual((self.state()["paused"], self.state()["pause_reason"]), (True, "stack_reaped"))
+        self.assertEqual(self.submitted, [])
+
+    def test_lifetime_state_reads_this_hosts_lifetime_record(self):
+        from sandbox.hosting.lifetime import hoststore
+        listing = {"records": [{"compose_project": "sandbox-host-other-e", "state": "active"},
+                               {"compose_project": "sandbox-host-p-e", "state": "reaped"}]}
+        with patch.object(hoststore.Store, "peek", return_value=listing) as peek:
+            self.assertEqual(follow_tick.lifetime_state({"project": "p", "environment": "e"},
+                                                        home=str(self.home)), "reaped")
+            self.assertIsNone(follow_tick.lifetime_state({"project": "q", "environment": "e"},
+                                                         home=str(self.home)))
+        self.assertEqual(peek.call_count, 2)
+        with patch.object(hoststore.Store, "peek", side_effect=OSError("unreadable")):
+            self.assertIsNone(follow_tick.lifetime_state({"project": "p", "environment": "e"},
+                                                         home=str(self.home)))
+        self.assertIsNone(follow_tick.lifetime_state(None, home=str(self.home)))
+
+    def test_an_unexpected_error_in_one_follow_is_recorded_and_the_others_still_poll(self):
+        self.add(name="staging")
+
+        def lookup(_remote, name):
+            if name == "dev":
+                raise OSError("stack registry unreadable")
+            return None
+        options = {"submit": self.submit, "capability": lambda: CAPABILITY, "job_view": lambda _j: None,
+                   "fetch": self.fetch, "checkout": lambda *a, **k: None, "stack_lookup": lookup,
+                   "busy": lambda _r, home: (None, None), "lifetime": lambda _r, home: None,
+                   "home": lambda: str(self.home)}
+        result = follow_tick.Tick(self.store, **options).run()
+        rows = {row["name"]: row for row in result["follows"]}
+        self.assertEqual((rows["dev"]["action"], rows["dev"]["reason"]), ("error", "follow_poll_error"))
+        self.assertIn("OSError", rows["dev"]["error"])
+        self.assertEqual(self.store.read("dev")["state"]["last_check"]["reason"], "follow_poll_error")
+        self.assertEqual(rows["staging"]["reason"], "submitted")
+        self.assertEqual(len(self.submitted), 1)
+
+    def test_an_unanswered_job_view_keeps_the_attempt_then_settles_after_the_limit(self):
+        self.tick()
+        for _ in range(follow_tick.UNKNOWN_POLL_LIMIT):
+            row = self.tick()  # self.jobs has no answer for job-1
+            self.assertEqual((row["action"], row["reason"]), ("skip", "attempt_state_unknown"))
+            self.assertEqual(self.state()["attempt"]["status"], "running")
+            self.assertIsNone(self.state()["failed_heads"])
+        row = self.tick()
+        self.assertEqual(row["action"], "settled")
+        self.assertEqual(self.state()["attempt"]["reason"], "attempt_ended_without_outcome:unknown")
+        self.assertEqual(len(self.submitted), 1)
+
 
 class AttemptTests(FollowCase):
     def setUp(self):
@@ -532,6 +599,9 @@ class AttemptTests(FollowCase):
         self.calls, self.prepared = [], []
         self.plan_hosts = ["dev.xspeedcdn.online"]
         self.lifecycles = ["running", "succeeded"]
+        self.stack = {"project": "p", "environment": "e"}
+        self.busy_answers = []  # popped per target check; (None, None) once empty
+        self.lifetime_value = None
 
     def stack_up(self, namespace):
         self.calls.append(namespace)
@@ -543,12 +613,17 @@ class AttemptTests(FollowCase):
         return {"lifecycle": self.lifecycles.pop(0) if len(self.lifecycles) > 1 else self.lifecycles[0],
                 "exit_code": 1}
 
+    def busy(self, _record, home):
+        return self.busy_answers.pop(0) if self.busy_answers else (None, None)
+
     def run_attempt(self):
         attempt = Attempt(self.store, context_for=lambda _remote: self.context, stack_up=self.stack_up,
                           job_view=self.job_view,
                           prepare=lambda argv, **kw: self.prepared.append((argv, kw)),
                           head=lambda directory: self.heads[Path(directory).name],
-                          environment=lambda _context: {"PATH": "/usr/bin"}, sleep=lambda _s: None)
+                          environment=lambda _context: {"PATH": "/usr/bin"}, sleep=lambda _s: None,
+                          stack_lookup=lambda _remote, _name: self.stack, busy=self.busy,
+                          lifetime=lambda _record, home: self.lifetime_value, home=lambda: str(self.home))
         return attempt.run("xspeed-dev", "dev", self.attempt_id)
 
     def test_a_successful_attempt_prepares_plans_confirms_waits_and_records_applied_heads(self):
@@ -602,6 +677,294 @@ class AttemptTests(FollowCase):
         with self.assertRaises(FollowError) as raised:
             attempt.run("xspeed-dev", "dev", "f" * 16)
         self.assertEqual(raised.exception.code, "follow_attempt_mismatch")
+
+    # Review fixes S1, S2(a) and S3 inside the attempt job.
+
+    def test_a_target_that_turns_busy_before_confirm_is_a_skip_retried_next_poll(self):
+        self.busy_answers = [(None, None), (None, None), ("stack_apply_active", None)]
+        result = self.run_attempt()
+        self.assertEqual((result["status"], result["reason"]), ("busy", "stack_apply_active"))
+        self.assertEqual([call.plan for call in self.calls], [True], "confirm never ran")
+        state = self.store.read("dev")["state"]
+        self.assertIsNone(state["failed_heads"])
+        self.assertIsNone(state["applied"])
+        self.assertEqual(state["attempt"]["status"], "busy")
+        row = follow_tick.Tick(self.store, submit=lambda argv: "job-2", capability=lambda: CAPABILITY,
+                               job_view=lambda _job: None, fetch=lambda *a, **k: HEAD_A,
+                               checkout=lambda *a, **k: None, stack_lookup=lambda *_a: self.stack,
+                               busy=lambda _r, home: (None, None), lifetime=lambda _r, home: None,
+                               home=lambda: str(self.home)).run()["follows"][0]
+        self.assertEqual((row["action"], row["reason"]), ("start", "submitted"))
+
+    def test_a_busy_target_before_prepare_skips_prepare(self):
+        self.busy_answers = [("target_lease_held", 12)]
+        result = self.run_attempt()
+        self.assertEqual(result["status"], "busy")
+        self.assertEqual((self.prepared, self.calls), ([], []))
+
+    def test_a_busy_refusal_from_stack_up_is_a_skip_and_keeps_a_run_now_retry(self):
+        with self.store.lock("dev"):
+            record = self.store.read("dev")
+            record["state"]["attempt"]["trigger"] = "retry"
+            self.store.write(record)
+
+        def refusing(namespace):
+            self.calls.append(namespace)
+            if namespace.plan:
+                return {"slug": "dev", "hostnames": ["dev.xspeedcdn.online"]}
+            raise host_stack.StackCommandError(host_stack.APPLY_IN_PROGRESS, "apply job j is running")
+        self.stack_up = refusing
+        result = self.run_attempt()
+        self.assertEqual(result["status"], "busy")
+        self.assertTrue(result["reason"].startswith("stack_apply_in_progress"))
+        state = self.store.read("dev")["state"]
+        self.assertIsNone(state["failed_heads"])
+        self.assertTrue(state["retry"], "the owner's run-now is still owed")
+
+    def test_a_nested_apply_that_fails_while_the_target_is_busy_is_a_skip(self):
+        self.lifecycles = ["failed"]
+        self.busy_answers = [(None, None), (None, None), (None, None), ("target_lease_held", 3)]
+        result = self.run_attempt()
+        self.assertEqual(result["status"], "busy")
+        self.assertIn("stack_apply_failed", result["reason"])
+        self.assertIsNone(self.store.read("dev")["state"]["failed_heads"])
+
+    def test_a_stack_removed_during_the_attempt_pauses_the_follow_and_is_never_recreated(self):
+        with self.store.lock("dev"):
+            record = self.store.read("dev")
+            record["state"]["stack_seen"] = True
+            self.store.write(record)
+
+        def removed_after_plan(namespace):
+            self.calls.append(namespace)
+            if namespace.plan:
+                self.stack = None  # `host stack down` while the plan ran
+                return {"slug": "dev", "hostnames": ["dev.xspeedcdn.online"]}
+            raise AssertionError("confirm must not run for a removed stack")
+        self.stack_up = removed_after_plan
+        result = self.run_attempt()
+        self.assertEqual((result["status"], result["reason"]), ("removed", "stack_removed"))
+        state = self.store.read("dev")["state"]
+        self.assertEqual((state["paused"], state["pause_reason"]), (True, "stack_removed"))
+        self.assertIsNone(state["failed_heads"])
+        self.assertEqual(self.audit_events()[-2:], ["attempt_finished", "auto_pause"])
+
+    def test_a_stack_reaped_or_reaping_during_the_attempt(self):
+        self.lifetime_value = "reaped"
+        result = self.run_attempt()
+        self.assertEqual((result["status"], result["reason"]), ("removed", "stack_reaped"))
+        self.assertTrue(self.store.read("dev")["state"]["paused"])
+        self.assertEqual(self.calls, [])
+
+    def test_the_attempt_passes_the_template_repositorys_tracked_branch_as_its_source(self):
+        self.run_attempt()
+        self.assertEqual([call.follow_source for call in self.calls],
+                         [{"branch": "dev", "commit": HEAD_A}] * 2)
+        record = self.store.read("dev")
+        self.assertIsNone(follow_apply.follow_source({**record, "template": "{dir}/stack.yml"}, self.heads))
+
+
+class ReviewCommandTests(FollowCase):
+    """Review fixes S4, M4 and M5 in the owner commands."""
+
+    def run_command(self, args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as raised:
+            host_follow.cmd_host_follow(args)
+        self.assertEqual(raised.exception.code, 1)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertNotIn("Traceback", out.getvalue())
+        return json.loads(lines[0])
+
+    def test_an_unexpected_error_is_one_json_refusal(self):
+        self.add()
+        with patch.object(self.store, "audit_tail", side_effect=OSError(13, "Permission denied")):
+            payload = self.run_command(owner_args("status"))
+        self.assertEqual(payload["ok"], False)
+        self.assertEqual(payload["code"], "follow_internal_error")
+        self.assertIn("PermissionError", payload["error"])
+
+    def test_a_refused_owner_command_is_audited_with_its_code(self):
+        self.add()
+        host_follow._pause(owner_args("pause"))
+        payload = self.run_command(owner_args("run-now"))
+        self.assertEqual(payload["code"], "follow_paused")
+        line = json.loads(self.store.audit_path.read_text().splitlines()[-1])
+        self.assertEqual((line["event"], line["command"], line["code"], line["actor"]),
+                         ("refused", "run-now", "follow_paused", "job:job-owner-1"))
+
+    def test_the_timer_changes_under_the_units_lock(self):
+        held = []
+
+        def probe(*_args, **_kwargs):
+            with self.store._flock("units", blocking=False) as acquired:
+                held.append(not acquired)
+            return {"timer": units.TIMER, "changed": True, "removed": True}
+        with patch.object(units, "install", side_effect=probe), patch.object(units, "remove", side_effect=probe):
+            self.add()
+            host_follow._remove(owner_args("remove"))
+        self.assertEqual(held, [True, True])
+
+
+class OwnerTargetTests(unittest.TestCase):
+    def test_a_changed_retained_context_is_a_json_refusal_not_a_traceback(self):
+        from sandbox.hosting.server_cli_target import OwnerTargetUnavailable
+        from sandbox.application.server_cli import ServerCLIEffectUnknown
+        for error, code in ((OwnerTargetUnavailable("retained context changed"),
+                             "server_cli_owner_target_unavailable"),
+                            (ServerCLIEffectUnknown("effect unknown"), "server_cli_effect_unknown")):
+            def require_current(error=error):
+                raise error
+            target = SimpleNamespace(require_current=require_current)
+            with self.subTest(code=code), \
+                    patch("sandbox.hosting.server_cli_target.selected_owner_target", return_value=target):
+                with self.assertRaises(FollowError) as raised:
+                    follow_apply._owner_context("xspeed-dev")
+                self.assertEqual(raised.exception.code, code)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                    host_follow.cmd_host_follow(owner_args("status"))
+                payload = json.loads(out.getvalue().splitlines()[-1])
+                self.assertEqual((payload["ok"], payload["code"]), (False, code))
+
+
+class GitCommandShapeTests(unittest.TestCase):
+    """The real fetch and checkout argv, with every subprocess faked (no network)."""
+
+    def test_fetch_uses_the_follow_key_the_pinned_host_key_and_one_refspec(self):
+        calls = []
+
+        def run(argv, *, timeout=60, env=None, cwd=None):
+            calls.append((list(argv), dict(env or {})))
+            stdout = HEAD_A + "\n" if "rev-parse" in argv else ""
+            return subprocess.CompletedProcess(argv, 1 if argv[-2:] == ["get-url", "origin"] else 0, stdout, "")
+        with tempfile.TemporaryDirectory() as directory, patch.object(git, "_run", side_effect=run):
+            repo, key, known = Path(directory) / "repo", Path(directory) / "keys" / "k", Path(directory) / "kh"
+            self.assertEqual(git.fetch(repo, "WPDevelopers/xspeed-hub", "dev", key=key, known_hosts=known), HEAD_A)
+        prefix = ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo)]
+        argvs = [argv for argv, _env in calls]
+        self.assertIn(prefix + ["remote", "add", "origin", "git@github.com:WPDevelopers/xspeed-hub.git"], argvs)
+        [(fetch, env)] = [(argv, env) for argv, env in calls if "fetch" in argv]
+        self.assertEqual(fetch, prefix + ["fetch", "--no-tags", "--quiet", "origin",
+                                          "+refs/heads/dev:refs/remotes/origin/dev"])
+        ssh = shlex.split(env["GIT_SSH_COMMAND"])
+        self.assertEqual(ssh[:3], ["ssh", "-i", str(key)])
+        options = {ssh[index + 1] for index, item in enumerate(ssh) if item == "-o"}
+        self.assertTrue({"IdentitiesOnly=yes", "IdentityAgent=none", "PasswordAuthentication=no",
+                         f"UserKnownHostsFile={known}", "GlobalKnownHostsFile=/dev/null",
+                         "StrictHostKeyChecking=yes", "BatchMode=yes"} <= options, options)
+        self.assertEqual(ssh[-2:], ["-F", "/dev/null"])
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_checkout_names_the_tracked_branch(self):
+        self.assertEqual(git.checkout_argv(HEAD_A, "dev"), ["checkout", "--quiet", "--force", "-B", "dev", HEAD_A])
+        self.assertEqual(git.checkout_argv(HEAD_A, None), ["checkout", "--quiet", "--detach", "--force", HEAD_A])
+        with self.assertRaises(FollowError):
+            git.checkout_argv(HEAD_A, "-f")
+
+    def test_a_named_checkout_makes_head_resolve_to_the_tracked_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            env = {"HOME": directory, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                   "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test"}
+            for argv in (["init", "--quiet", "--initial-branch=main"],
+                         ["commit", "--quiet", "--allow-empty", "-m", "one"]):
+                run_test_process(["git", "-C", str(repo), *argv], env=env, capture_output=True, check=True)
+            commit = run_test_process(["git", "-C", str(repo), "rev-parse", "HEAD"], env=env,
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            git.checkout(repo, commit, "dev")
+            self.assertEqual(git.head(repo), commit)
+            self.assertEqual(host_stack.resolve_ref(repo, "HEAD").ref_branch, "dev")
+
+    def test_key_files_of_different_repositories_never_collide(self):
+        keys = Path("/srv/keys")
+        first, second = git.key_path(keys, "o/x"), git.key_path(keys, "o/x.pub")
+        self.assertNotEqual(first, second)
+        self.assertNotIn(second, (first, first.with_name(first.name + ".pub")))
+        self.assertNotIn(first, (second, second.with_name(second.name + ".pub")))
+        self.assertEqual(git.key_path(keys, "O/X"), first)
+        self.assertRegex(first.name, r"^github-[0-9a-f]{32}$")
+
+
+class UnitTextTests(unittest.TestCase):
+    def test_the_service_and_timer_text(self):
+        rendered = units.render(sb_path="/srv/sandbox/sb", sandbox_home="/srv/home")
+        service, timer = rendered[units.SERVICE].splitlines(), rendered[units.TIMER].splitlines()
+        for line in ("Type=oneshot", "UMask=0077", f"TimeoutStartSec={units.TICK_BUDGET_SECONDS + 120}s",
+                     "Environment=SANDBOX_HOME=/srv/home",
+                     "ExecStart=/srv/sandbox/sb host follow tick --here --json"):
+            self.assertIn(line, service)
+        for line in ("OnBootSec=2min", "OnUnitActiveSec=5min", f"Unit={units.SERVICE}",
+                     "WantedBy=timers.target"):
+            self.assertIn(line, timer)
+        for unsafe in ("relative/sb", "/srv/sb; rm -rf /", "/srv/s b"):
+            with self.subTest(unsafe=unsafe), self.assertRaises(FollowError):
+                units.render(sb_path=unsafe, sandbox_home="/srv/home")
+
+
+class PrepareRunnerTests(unittest.TestCase):
+    """run_prepare against real fake scripts: no shell, exit codes, timeout and cancel."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.work = Path(self.directory.name)
+        self.env = dict(synthetic_environment())
+
+    def script(self, body):
+        path = self.work / "prepare.py"
+        path.write_text("import os, signal, sys, time\n" + body)
+        return [sys.executable, "-I", str(path)]
+
+    def test_arguments_reach_the_program_without_a_shell(self):
+        argv = self.script("open('out.txt', 'w').write('\\n'.join(sys.argv[1:]) + '\\n' + os.getcwd())\n")
+        run_prepare(argv + ["$HOME", "a b;c", "*"], cwd=self.work, env=self.env, timeout=60)
+        lines = (self.work / "out.txt").read_text().splitlines()
+        self.assertEqual(lines[:3], ["$HOME", "a b;c", "*"])
+        self.assertEqual(Path(lines[3]).resolve(), self.work.resolve())
+
+    def test_a_non_zero_exit_fails_with_its_code(self):
+        with self.assertRaises(FollowError) as raised:
+            run_prepare(self.script("sys.exit(3)\n"), cwd=self.work, env=self.env, timeout=60)
+        self.assertEqual((raised.exception.code, raised.exception.message),
+                         ("follow_prepare_failed", "prepare exited 3"))
+
+    def test_a_prepare_past_its_limit_is_stopped(self):
+        started = time.monotonic()
+        with self.assertRaises(FollowError) as raised:
+            run_prepare(self.script("time.sleep(60)\n"), cwd=self.work, env=self.env, timeout=1, grace=2)
+        self.assertEqual(raised.exception.code, "follow_prepare_timeout")
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_a_cancelled_attempt_job_stops_prepare_first(self):
+        # The fake prepare plays the job supervisor: it sends SIGTERM to the
+        # attempt process (its parent), then would run for a minute.
+        argv = self.script("time.sleep(0.5)\nopen('pid', 'w').write(str(os.getpid()))\n"
+                           "os.kill(os.getppid(), signal.SIGTERM)\ntime.sleep(60)\n")
+        before = signal.getsignal(signal.SIGTERM)
+        started = time.monotonic()
+        with self.assertRaises(FollowError) as raised:
+            run_prepare(argv, cwd=self.work, env=self.env, timeout=120, cancel_grace=2)
+        self.assertEqual(raised.exception.code, "follow_prepare_cancelled")
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before, "the handler is restored")
+        pid = int((self.work / "pid").read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+class ApexTests(unittest.TestCase):
+    def test_a_registrable_domain_is_an_apex(self):
+        from sandbox.hosting.follow.spec import is_apex
+        for name in ("xspeedcdn.online", "example.com", "example.co.uk", "example.com.bd", "EXAMPLE.CO.UK."):
+            with self.subTest(name=name):
+                self.assertTrue(is_apex(name))
+        for name in ("dev.xspeedcdn.online", "dev.example.co.uk", "a.b.example.com", "co.example.io"):
+            with self.subTest(name=name):
+                self.assertFalse(is_apex(name))
 
 
 if __name__ == "__main__":

@@ -1007,7 +1007,7 @@ class NormalExitCessationTests(unittest.TestCase):
         # is still listed; on xspeed-dev reading its environ is refused.
         job = "b" * 32
         child = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True,
-                                 env=dict(os.environ, SANDBOX_DURABLE_JOB_ID=job))
+                                 env=synthetic_environment({"SANDBOX_DURABLE_JOB_ID": job}))
         try:
             os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
             self.assertTrue(supervisor._defunct(Path("/proc") / str(child.pid)))

@@ -136,6 +136,10 @@ class _HostingOwnerFixture:
                    return_value={"target_identity": "a" * 24})
         self.patch.object(hosting_cmd.remote, "get_remote", return_value=self.entry)
         self.patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox")
+        # The host port probe is an SSH read; give apply a fresh, empty,
+        # schema-valid observation of the physical target instead.
+        self.patch.object(hosting_cmd, "_host_port_observation",
+                          side_effect=lambda *_args: _empty_port_observation())
         self.patch.object(hosting_cmd.remote, "_remote_mcp_runtime_revision", return_value="c" * 24)
         self.patch.object(hosting_cmd, "_secret_status", return_value=({}, []))
         self.prepare = self.patch.object(hosting_cmd, "_prepare_host_apply", return_value=None)
@@ -190,6 +194,28 @@ class _HostingOwnerFixture:
             environment=self.validated["environment"])
         return DeliveryRepository(self.home).lookup_request(
             request_scope(target), self.context["request_id"])
+
+
+def _empty_port_observation():
+    from sandbox.hosting import ports
+    return ports.validate_snapshot({
+        "version": 1, "complete": True,
+        "identity": {"target": "machine-1", "uid": 1000, "home": "/srv/sandbox"},
+        "engine_id": "engine-1", "observed_at": time.time(),
+        "listeners": [], "publications": [], "reservations": [],
+        "end": "sandbox.ports.v1.complete"})
+
+
+def _observed_runtime(**extra):
+    """A runtime as cmd_host builds it after the host port observation."""
+    runtime = {
+        "compose_override": "services: {}\n", "environment": "EXAMPLE=value\n",
+        "compose_project": "example-site-production", "loopback_port": 18000,
+        "port_identity": {"target": "machine-1", "uid": 1000, "home": "/home/sandbox"},
+        "port_engine_id": "engine-1",
+    }
+    runtime.update(extra)
+    return runtime
 
 
 def _manifest(aliases=None):
@@ -1107,10 +1133,7 @@ class TestHostingManifest(unittest.TestCase):
                 "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
             ))
             validated = hosting.validate_manifest(directory)
-        runtime = {
-            "compose_override": "services: {}\n",
-            "environment": "EXAMPLE=value\n",
-        }
+        runtime = _observed_runtime()
         remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
@@ -1132,7 +1155,7 @@ class TestHostingManifest(unittest.TestCase):
                 "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
         )) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         remote_checked.return_value = '{"schema_version":1,"status":"succeeded"}'
 
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
@@ -1148,7 +1171,7 @@ class TestHostingManifest(unittest.TestCase):
                 "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
         )) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
 
         for status in ("failed", "running", "foreign", "ambiguous"):
             with self.subTest(status=status):
@@ -1174,7 +1197,7 @@ class TestHostingManifest(unittest.TestCase):
                 "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
         )) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
 
         with self.assertRaisesRegex(
                 RuntimeError, "initializer setup has foreign evidence "
@@ -1369,11 +1392,13 @@ class TestHostingManifest(unittest.TestCase):
                 "container_port: 8080", "container_port: 8080\n      background_services: [worker]"
             ))
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertTrue(commands[0].endswith(" build --with-dependencies web worker"))
         self.assertIn("up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[1])
+        # The recreating up runs only under the Caddy and nginx locks.
+        self.assertIn('"flock", "-w", "30", "%s"' % hosting_cmd._CADDY_LOCK_PATH, commands[1])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -1390,7 +1415,7 @@ class TestHostingManifest(unittest.TestCase):
                 "      background_services: [worker]\n      init_services: [setup]",
             ))
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
@@ -1426,7 +1451,7 @@ class TestHostingManifest(unittest.TestCase):
         preflight.side_effect = RuntimeError(
             "no-build image preflight failed: web has no explicit existing image"
         )
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
 
         with self.assertRaisesRegex(RuntimeError, "no-build image preflight failed"):
             hosting_cmd._run_compose(
@@ -1444,7 +1469,7 @@ class TestHostingManifest(unittest.TestCase):
             "container_port: 8080", "container_port: 8080\n      build: false",
         )) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
 
         hosting_cmd._run_compose(
             {}, validated, "/srv/example", "/srv/runtime", runtime,
@@ -1574,7 +1599,7 @@ class TestHostingManifest(unittest.TestCase):
             self, remote_checked, _write):
         with self._write(_manifest()) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         build_command = remote_checked.call_args_list[0].args[1]
         probe = hosting_cmd._build_context_probe_command("/srv/example")
@@ -1586,7 +1611,7 @@ class TestHostingManifest(unittest.TestCase):
     def test_default_compose_apply_requests_a_fresh_build(self, remote_checked, _write):
         with self._write(_manifest()) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertTrue(commands[0].endswith(" build --with-dependencies web"))
@@ -1602,7 +1627,7 @@ class TestHostingManifest(unittest.TestCase):
             "      service: web\n      init_services: [migrate]\n",
         )) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
 
         hosting_cmd._run_compose(
             {}, validated, "/srv/example", "/srv/runtime", runtime,
@@ -1630,7 +1655,7 @@ class TestHostingManifest(unittest.TestCase):
     def test_targeted_compose_refuses_without_exact_runtime_proof(self, remote_checked, _write):
         with self._write(_manifest()) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
 
         with self.assertRaisesRegex(RuntimeError, "requires exact source, config, and topology"):
             hosting_cmd._run_compose(
@@ -1713,7 +1738,7 @@ class TestHostingManifest(unittest.TestCase):
     def test_compose_progress_is_phase_visible_and_log_is_forwarded(self, remote_checked, _write):
         with self._write(_manifest()) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         progress = []
         hosting_cmd._run_compose(
             {}, validated, "/srv/example", "/srv/runtime", runtime,
@@ -1888,7 +1913,7 @@ class TestHostingManifest(unittest.TestCase):
         )
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
-        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        runtime = _observed_runtime()
         remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         build_calls = [call for call in remote_checked.call_args_list
@@ -5197,6 +5222,9 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
              patch.object(hosting_cmd, "_guarded_host_apply_plan", return_value={"records": []}), \
              patch.object(hosting_cmd.hosting, "load_host_state", return_value={"hosts": {"remote1/proj/production": {"hosting_operation": {"request_id": "req-prev-12345"}}}}), \
              patch.object(hosting_cmd.hosting, "desired_runtime", return_value={}), \
+             patch.object(hosting_cmd, "_host_port_observation", return_value={
+                 "identity": {"target": "machine-1", "uid": 1000, "home": "/home/sandbox"},
+                 "engine_id": "engine-1"}), \
              patch.object(hosting_cmd, "_apply_host", side_effect=exc), \
              patch.object(hosting_cmd, "die", side_effect=SystemExit(1)) as mock_die:
             with self.assertRaises(SystemExit):

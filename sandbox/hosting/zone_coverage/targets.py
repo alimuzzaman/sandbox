@@ -124,6 +124,13 @@ def decide(
     ):
         return {"mode": "exact"}
 
+    # Names under cloudflare.external_dns are outside every DNS decision. A target
+    # whose every name is external has no record to cover or manage.
+    external = set(hosting.external_dns_hostnames(validated))
+    managed_routes = [r for r in (validated.get("routes") or []) if r["hostname"] not in external]
+    if external and not managed_routes:
+        return {"mode": "exact"}
+
     # 2. Store list fails: refuse coverage_store_unavailable.
     if store_client is None:
         store_client = ZoneCoverageClient(entry)
@@ -142,7 +149,7 @@ def decide(
     # 3. Find the covered zone: a listed zone equal to a route's hostname or a suffix of it after a dot.
     route_hostnames = {
         models.normalize_hostname(r["hostname"])
-        for r in (validated.get("routes") or [])
+        for r in managed_routes
     }
     matching_zone_item = _find_matching_zone(route_hostnames, listed_zones)
     if matching_zone_item is None or matching_zone_item.get("state") == "retired":
@@ -208,8 +215,8 @@ def decide(
     origin_ipv4 = entry.get("origin_ipv4") or (entry.get("address") if ":" not in (entry.get("address") or "") else None)
     origin_ipv6 = entry.get("origin_ipv6") or (entry.get("address") if ":" in (entry.get("address") or "") else None)
     addresses = [a for a in [origin_ipv4, origin_ipv6] if a]
-    all_routes_adopted = bool(addresses) and bool(validated.get("routes"))
-    for r in (validated.get("routes") or []):
+    all_routes_adopted = bool(addresses) and bool(managed_routes)
+    for r in managed_routes:
         r_name = models.normalize_hostname(r["hostname"])
         for a in addresses:
             wanted_type = "AAAA" if ":" in a else "A"

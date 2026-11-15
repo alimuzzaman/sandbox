@@ -554,6 +554,47 @@ def _basic_auth(env: dict) -> dict | None:
     return result
 
 
+def _external_dns(cf: dict, routes: list[dict], *, proxied: bool) -> list[str] | None:
+    """``cloudflare.external_dns``: declared hostnames whose DNS Sandbox never manages.
+
+    Absent stays absent (``None``) so existing manifests keep their digests. Each
+    entry must be an exact declared route hostname, listed once. Proxied hosting
+    is refused: its Origin CA certificate and strict SSL rely on the proxied
+    record Sandbox writes.
+    """
+    if "external_dns" not in cf:
+        return None
+    value = cf.get("external_dns")
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise HostingError("cloudflare.external_dns must be a list of declared hostnames")
+    declared = {route["hostname"] for route in routes}
+    names: list[str] = []
+    for item in value:
+        try:
+            hostname = normalize_hostname(item, wildcard=False)
+        except HostingError:
+            raise HostingError(
+                f"cloudflare.external_dns entry {item!r} must be one exact hostname "
+                "(no wildcard)") from None
+        if hostname not in declared:
+            raise HostingError(
+                f"cloudflare.external_dns lists {hostname}, which is not a declared host "
+                "route (host.primary or host.aliases)")
+        if hostname in names:
+            raise HostingError(f"cloudflare.external_dns lists {hostname} twice")
+        names.append(hostname)
+    if names and proxied:
+        raise HostingError(
+            "cloudflare.external_dns requires DNS-only hosting (proxied: false); proxied "
+            "hosting needs the proxied record Sandbox manages")
+    return sorted(names)
+
+
+def external_dns_hostnames(validated: dict) -> list[str]:
+    """Route hostnames whose DNS records are managed outside Sandbox."""
+    return list((validated.get("cloudflare") or {}).get("external_dns") or [])
+
+
 def _basic_auth_route_pattern(path_template: str) -> str:
     segments = path_template.removeprefix("/").split("/")
     rendered = [
@@ -757,6 +798,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             raise HostingError("cloudflare.dns must be auto or exact")
     if public_acme and any(route["hostname"].startswith("*.") for route in routes):
         raise HostingError("public ACME does not support wildcard routes without a DNS challenge")
+    external_dns = _external_dns(cf, routes, proxied=bool(cf.get("proxied")))
     basic_auth = _basic_auth(env)
     if public_acme and basic_auth and basic_auth.get("bypass_ips"):
         raise HostingError("basic_auth.bypass_ips requires Cloudflare proxied hosting")
@@ -768,6 +810,8 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     except EdgeCacheError as exc:
         raise HostingError(f"cloudflare.cache_purge is invalid ({exc.code})") from None
     cf = {**cf, "cache_purge": cache_purge}
+    if external_dns is not None:
+        cf["external_dns"] = external_dns
     # Spec 081: nothing hosted is indexed unless the environment says
     # `indexing: public`. Under the default, both front doors add
     # `X-Robots-Tag: noindex, nofollow, noarchive` to every response and `robots`
@@ -795,6 +839,12 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         raise HostingError("login_service_invalid: share.private needs cloudflare.proxied: false, "
                            "so no Cloudflare cache can keep serving pages from before the site went "
                            "private")
+    if external_dns and login_service.is_private(login_declaration):
+        # Sandbox cannot see what serves an externally managed name, so it cannot
+        # promise that no cache keeps serving pages from before the site went private.
+        raise HostingError("login_service_invalid: share.private cannot be combined with "
+                           "cloudflare.external_dns; Sandbox cannot check what fronts "
+                           + ", ".join(external_dns))
     if basic_auth and login_service.is_private(login_declaration):
         raise HostingError("login_service_invalid: share.private answers every non-gate hostname "
                            "with 404, so basic_auth has nothing to protect; remove one of them")
@@ -1346,15 +1396,20 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
 def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | None = None) -> dict:
     addresses = [a for a in [origin_ipv4, origin_ipv6] if a]
     proxied = validated["cloudflare"]["proxied"]
+    external = set(external_dns_hostnames(validated))
     if (validated.get("dns_coverage") or {}).get("mode") == "shared":
         records = []
     else:
         records = [{"hostname": r["hostname"], "address": a, "proxied": proxied,
                     "mode": r["mode"], "target": r.get("target")}
-                   for r in validated["routes"] for a in addresses]
-    return {"project": validated["project"], "environment": validated["environment"],
+                   for r in validated["routes"] if r["hostname"] not in external
+                   for a in addresses]
+    plan = {"project": validated["project"], "environment": validated["environment"],
             "warnings": _fingerprint_warnings(validated["deploy"], validated["secrets"]),
             "routes": validated["routes"], "records": records,
             "certificate_hostnames": [r["hostname"] for r in validated["routes"]],
             "ssl_mode": "strict" if proxied else None,
             "edge_cache_purge": (validated.get("cloudflare") or {}).get("cache_purge")}
+    if external:
+        plan["external_dns"] = sorted(external)
+    return plan

@@ -48,6 +48,7 @@ _ALLOWED_PATHS = (
     ("project",),
     ("environments", "*", "host", "primary"),
     ("environments", "*", "host", "aliases", "*", "hostname"),
+    ("environments", "*", "cloudflare", "external_dns", "*"),
     ("environments", "*", "deploy", "allowed_branches", "*"),
     ("environments", "*", "secrets", "values", "*"),
     ("environments", "*", "secrets", "generated", "*"),
@@ -196,7 +197,8 @@ def _scan(node: object, path: tuple, ports: tuple[str, ...]) -> None:
         raise StackTemplateError(
             TEMPLATE_INVALID,
             f"{_display(path)} contains a brace pattern; placeholders are allowed only in "
-            "project, host.primary, alias hostnames, deploy.allowed_branches, "
+            "project, host.primary, alias hostnames, cloudflare.external_dns entries, "
+            "deploy.allowed_branches, "
             "secrets.values values, secrets.generated source names, share.hostname and "
             "approved autologin entry hostname/magic-link fields")
 

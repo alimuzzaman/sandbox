@@ -101,6 +101,18 @@ development capture; restore, production and storage uncertainty cannot resume.
 Snapshot capture creates its session-local temporary accumulator before importing
 the read-only transaction, so it performs no forbidden DDL inside that transaction.
 
+When the helper stops, the result stays `acceptance_unknown` and the request stays
+retained, but `error.detail` says where it stopped: `step` (for example
+`source_inspection`, `database_observation`, `snapshot`, `dump`), `helper_code` (a
+fixed reason such as `operation_failed`, `schema_metadata_invalid` or `timeout`),
+and, when known, `check` (the schema bound that refused, such as
+`columns.row_bound`) or `command` and `exit` (the tool that failed, such as `psql`
+exit 2). The message repeats them. The helper never reports rows, SQL errors or
+command output. A helper run that names nothing reports `helper_code`
+`helper_exited` with its exit code (255 is usually SSH), or `empty_response`.
+Schema metadata may have up to 100,000 column and 100,000 constraint rows within
+8 MiB, enough for a partitioned schema such as Infisical's audit log.
+
 `inspect-restore` compares a retained isolated development restore with its exact
 encrypted backup. It requires the same plan, archive, owner-labelled container
 and volume, no network or ports, no other volume consumer, and no active importer.

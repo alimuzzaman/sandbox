@@ -494,7 +494,7 @@ class ServiceDeadlineTests(_Base):
         self.issue("app", "m" * 43, email="person@example.test")
         gate = self.public.gate
         gate.config["enabled_until_epoch"] = int(self.now) + 10
-        def late_sign_in(_settings, _email):
+        def late_sign_in(_settings, _email, *, source_is_current=None):
             self.now += 20
             return VERIFY
         gate.sign_in = late_sign_in
@@ -1164,11 +1164,19 @@ class SiteOperatorTests(_SiteBase):
         for fields in ({"uses": 21}, {"uses": 0}, {"uses": True},
                        {"expires_at": int(self.now) + 31 * 86400}, {"entry": "other"}, {"id": "l-x"},
                        {"id": "l-0123456789ab"}, {"extra": 1}, {"token_sha256": "zz"},
-                       {"scope": "/a/../b/"}, {"scope": "a/"}, {"kind": "other"}, {"kind": "stack"},
+                       {"scope": "/a/../b/"}, {"scope": "a/"}, {"kind": "other"},
                        {"schema": "sandbox.site-link.v1"}):
             with self.subTest(fields=fields):
                 self.assertEqual(self.manage("mint", "mockup", stdin=record(**fields))["code"],
                                  "site_record_invalid")
+        # Spec 088: a stack link is refused by the applied opt-out before its
+        # stack page is read; once enabled, a link without a page is invalid.
+        self.assertEqual(self.manage("mint", "mockup", stdin=record(kind="stack"))["code"],
+                         "agent_mint_not_enabled")
+        self.config["panel_share"] = {"agent_mint": True}
+        self.assertEqual(self.manage("mint", "mockup", stdin=record(kind="stack"))["code"],
+                         "site_record_invalid")
+        del self.config["panel_share"]
         self.assertEqual(self.manage("mint", "mockup", stdin="not json")["code"], "site_record_invalid")
         for _ in range(runtime.SITE_MAX_LINKS):
             self.mint()

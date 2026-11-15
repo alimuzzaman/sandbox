@@ -108,7 +108,8 @@ def _inspection_response(source, request_id, archive, payload, runtime_status):
 
 _HELPER_FAILURE = re.compile(
     r'postgres_recovery_failed code=([a-z_]{1,48}) step=([a-z_]{1,32})'
-    r'(?: command=([a-z][a-z._-]{0,31}) exit=(-?[0-9]{1,3}))?')
+    r'(?: command=([a-z][a-z._-]{0,31}) exit=(-?[0-9]{1,3}))?'
+    r'(?: detail=([a-z_]{1,24}(?:\.[a-z_]{1,24})?))?')
 
 
 def _helper_failure(result, payload):
@@ -125,12 +126,15 @@ def _helper_failure(result, payload):
         elif isinstance(returncode, int) and returncode != 0:
             error.detail = {'helper_code': 'helper_exited', 'exit': returncode}
         return error
-    code, step, command, status = match.groups()
+    code, step, command, status, check = match.groups()
     detail = {'helper_code': code, 'step': step}
     text = f'PostgreSQL helper stopped at {step} ({code}'
     if command is not None:
         detail.update(command=command, exit=int(status))
         text += f'; {command} exited {int(status)}'
+    if check is not None:
+        detail['check'] = check
+        text += f'; check {check}'
     error = RecoveryError(text + '); the retained request is preserved', 'acceptance_unknown')
     error.detail = detail
     return error

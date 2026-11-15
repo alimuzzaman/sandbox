@@ -68,6 +68,7 @@ _FAILURE_REASONS = {
 _FAILURE_COMMANDS = {'psql', 'pg_dump', 'pg_restore', 'pg_ctl', 'tar', 'sh', 'docker-entrypoint.sh'}
 _FAILURE_STEP = 'request_validation'
 _FAILURE_COMMAND = None
+_FAILURE_DETAIL = None
 _SCHEMA_FIELDS_SQL = r'''
  'constraints', (SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',con.conname,'definition',pg_get_constraintdef(con.oid),'validated',con.convalidated) ORDER BY c.relname,con.conname),'[]') FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
  'columns', (SELECT coalesce(json_agg(json_build_object('table',table_name,'column',column_name,'type',data_type,'nullable',is_nullable) ORDER BY table_name,ordinal_position),'[]') FROM information_schema.columns WHERE table_schema='public')
@@ -103,6 +104,8 @@ def _failure_line(error):
     line = 'postgres_recovery_failed code=' + reason + ' step=' + _FAILURE_STEP
     if _FAILURE_COMMAND is not None:
         line += ' command=%s exit=%d' % _FAILURE_COMMAND
+    if reason == 'schema_metadata_invalid' and _FAILURE_DETAIL is not None:
+        line += ' detail=' + _FAILURE_DETAIL
     return line + '\n'
 
 
@@ -192,35 +195,44 @@ def sql(client, database, query):
         data=query.encode(), timeout=300).decode().strip()
 
 
+def _schema_invalid(detail):
+    # The detail is a fixed label, never a schema name or value.
+    global _FAILURE_DETAIL
+    _FAILURE_DETAIL = detail
+    return ValueError('schema_metadata_invalid')
+
+
 def _schema_projection(raw):
     if type(raw) is not dict:
-        raise ValueError('schema_metadata_invalid')
+        raise _schema_invalid('schema_shape')
     projected = {}
     for kind, identity, fields in (
             ('constraints', 'name', {'table', 'name', 'definition', 'validated'}),
             ('columns', 'column', {'table', 'column', 'type', 'nullable'})):
         rows = raw.get(kind)
-        if type(rows) is not list or len(rows) > 10000:
-            raise ValueError('schema_metadata_invalid')
+        if type(rows) is not list:
+            raise _schema_invalid(kind + '.shape')
+        if len(rows) > 10000:
+            raise _schema_invalid(kind + '.row_bound')
         seen = set()
         for row in rows:
             if type(row) is not dict or set(row) != fields:
-                raise ValueError('schema_metadata_invalid')
-            for field in fields:
+                raise _schema_invalid(kind + '.row_shape')
+            for field in sorted(fields):
                 value = row[field]
                 if field == 'validated':
-                    if type(value) is not bool: raise ValueError('schema_metadata_invalid')
+                    if type(value) is not bool: raise _schema_invalid(kind + '.' + field)
                 elif (type(value) is not str or not value
                         or len(value.encode()) > (65536 if field == 'definition' else 128)):
-                    raise ValueError('schema_metadata_invalid')
+                    raise _schema_invalid(kind + '.' + field)
             if kind == 'columns' and row['nullable'] not in {'YES', 'NO'}:
-                raise ValueError('schema_metadata_invalid')
+                raise _schema_invalid(kind + '.nullable')
             key = (row['table'], row[identity])
-            if key in seen: raise ValueError('schema_metadata_invalid')
+            if key in seen: raise _schema_invalid(kind + '.duplicate')
             seen.add(key)
         projected[kind] = rows
     if len(canonical(projected)) > MAX_SCHEMA_BYTES:
-        raise ValueError('schema_metadata_invalid')
+        raise _schema_invalid('schema_size_bound')
     return projected
 
 
@@ -1465,10 +1477,10 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
 
 
 def safe_main():
-    global _INSPECTION_OPERATION, _INSPECTION_PHASE, _FAILURE_STEP, _FAILURE_COMMAND
+    global _INSPECTION_OPERATION, _INSPECTION_PHASE, _FAILURE_STEP, _FAILURE_COMMAND, _FAILURE_DETAIL
     _INSPECTION_OPERATION = None
     _INSPECTION_PHASE = 'request_validation'
-    _FAILURE_STEP, _FAILURE_COMMAND = 'request_validation', None
+    _FAILURE_STEP, _FAILURE_COMMAND, _FAILURE_DETAIL = 'request_validation', None, None
     try: main()
     except Exception as error:
         if _INSPECTION_OPERATION == 'inspect-restore':

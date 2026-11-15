@@ -6,6 +6,7 @@ or prints the private half.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -60,7 +61,13 @@ def _run(argv: list[str], *, timeout: int = 60, env: dict[str, str] | None = Non
 # ------------------------------------------------------------------ keys
 
 def key_id(github: str) -> str:
-    return github.lower().replace("/", "__")
+    """One fixed-length file name per repository URL.
+
+    A readable ``owner__repo`` name let ``o/x.pub``'s private key share a path
+    with ``o/x``'s public key. A hash of the URL never ends in ``.pub``.
+    """
+    url = f"git@github.com:{github.lower()}.git"
+    return "github-" + hashlib.sha256(url.encode()).hexdigest()[:32]
 
 
 def key_path(keys_dir: Path, github: str) -> Path:
@@ -177,9 +184,21 @@ def head(repo: Path) -> str | None:
     return commit if _COMMIT.fullmatch(commit) else None
 
 
-def checkout(repo: Path, commit: str) -> None:
+def checkout_argv(commit: str, branch: str | None) -> list[str]:
+    """``checkout`` arguments: the tracked branch's name at the fetched commit.
+
+    A named local branch lets ``--ref HEAD`` resolve to that branch, so a stack
+    of the template's dev branch can be hosted. Without one, HEAD is detached.
+    """
+    if branch is None:
+        return ["checkout", "--quiet", "--detach", "--force", commit]
+    from sandbox.hosting.follow.spec import validate_branch
+    return ["checkout", "--quiet", "--force", "-B", validate_branch(branch), commit]
+
+
+def checkout(repo: Path, commit: str, branch: str | None = None) -> None:
     if not _COMMIT.fullmatch(commit or ""):
         raise FollowError("follow_checkout_failed", "checkout needs an exact commit")
-    result = _git(Path(repo), "checkout", "--quiet", "--detach", "--force", commit, timeout=300)
+    result = _git(Path(repo), *checkout_argv(commit, branch), timeout=300)
     if result.returncode != 0 or head(repo) != commit:
         raise FollowError("follow_checkout_failed", f"checkout of {commit[:12]} failed: {_detail(result)}")

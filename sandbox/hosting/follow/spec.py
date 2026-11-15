@@ -41,6 +41,12 @@ def validate_name(value: object) -> str:
     return value
 
 
+def validate_branch(value: object) -> str:
+    if not isinstance(value, str):
+        raise FollowError("follow_branch_invalid", "a branch name must be text")
+    return _branch(value)
+
+
 def _branch(value: str) -> str:
     if (not BRANCH_RE.fullmatch(value) or value.startswith(("-", "/")) or value.endswith(("/", ".", ".lock"))
             or ".." in value or "//" in value or "/." in value or value == "HEAD"):
@@ -165,7 +171,30 @@ def job_timeout(spec: dict) -> int:
     return int(spec["prepare_timeout"]) + APPLY_ALLOWANCE_SECONDS
 
 
+def template_repo(template: str) -> str | None:
+    """The ``--repo`` whose checkout holds the stack template, or None for ``{dir}``."""
+    match = re.match(r"\{repo:([a-z0-9-]+)\}", template or "")
+    return match.group(1) if match else None
+
+
+# Second-level labels that country-code registries sell names under
+# (example.co.uk, example.com.bd). Sandbox ships no public suffix list, so a
+# two-letter top-level domain under one of these labels is treated as a
+# public suffix.
+_SECOND_LEVEL_SUFFIXES = frozenset({
+    "ac", "co", "com", "edu", "firm", "gen", "go", "gob", "gouv", "gov", "govt", "info", "biz",
+    "ltd", "mil", "ne", "net", "nic", "nom", "or", "org", "plc", "sch", "web",
+})
+
+
+def registrable_domain(hostname: str) -> str:
+    """The name a registrant owns: ``a.b.example.co.uk`` -> ``example.co.uk``."""
+    labels = [label for label in hostname.strip().strip(".").lower().split(".") if label]
+    size = 3 if (len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL_SUFFIXES) else 2
+    return ".".join(labels[-size:])
+
+
 def is_apex(hostname: str) -> bool:
-    """A bare registrable name (``example.com``): never a stack hostname here."""
-    labels = [label for label in hostname.strip(".").split(".") if label]
-    return len(labels) <= 2
+    """A bare registrable name (``example.com``, ``example.co.uk``): never a stack hostname here."""
+    labels = [label for label in hostname.strip().strip(".").lower().split(".") if label]
+    return len(labels) <= 2 or ".".join(labels) == registrable_domain(hostname)

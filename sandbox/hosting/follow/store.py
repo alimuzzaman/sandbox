@@ -4,11 +4,11 @@ Layout under ``$SANDBOX_HOME/runtime/hosting/follow`` (every directory 0700,
 every file 0600)::
 
     follows/<name>.json   declaration plus state
-    audit.jsonl           one line per owner command, attempt start and outcome
-    keys/<owner>__<repo>  deploy keys (the private file is never read here)
+    audit.jsonl           one line per owner command (refusals too), attempt start and outcome
+    keys/github-<hash>    deploy keys, one per repository URL (the private file is never read here)
     known_hosts           the pinned GitHub host key
     work/<name>/repos/    the follow's own clones
-    locks/                host, per-follow state and per-follow apply locks
+    locks/                host, timer units, per-follow state and per-follow apply locks
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from sandbox.hosting.follow.spec import FollowError, NAME_RE
 SCHEMA = 1
 AUDIT_EVENTS = frozenset({
     "add", "replace", "remove", "pause", "resume", "run_now", "key", "status",
-    "attempt_started", "attempt_submitted", "attempt_finished", "auto_pause",
+    "attempt_started", "attempt_submitted", "attempt_finished", "auto_pause", "refused",
 })
 
 
@@ -126,6 +126,14 @@ class FollowStore:
     def host_lock(self):
         """Non-blocking: one poll at a time on this host."""
         return self._flock("tick", blocking=False)
+
+    @contextlib.contextmanager
+    def units_lock(self) -> Iterator[None]:
+        """Serialize "is any follow left?" with installing or removing the timer."""
+        with self._flock("units", blocking=True, timeout=60) as acquired:
+            if not acquired:
+                raise FollowError("follow_store_busy", "the follower timer is being changed; try again")
+            yield
 
     def apply_lock(self, name: str, *, wait: float = 0.0):
         """Held by an attempt job for its whole run; a probe holds it for an instant."""

@@ -1634,8 +1634,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         if getattr(args, "tailnet_hostname", None) is not None:
             host_p.error(f"unrecognized arguments: {args.tailnet_hostname} "
                          "(a hostname argument is only accepted by `host tailnet-name`)")
-        if getattr(args, "image_action", None) in {"add", "renew", "remove"}:
+        if (getattr(args, "image_action", None) in {"add", "renew", "remove"}
+                and not (args.action == "follow" and args.image_action != "renew")):
             host_p.error(f"{args.image_action} is only available with `host tailnet-name`")
+        if (getattr(args, "image_action", None) in {"pause", "resume", "run-now", "key", "tick", "apply"}
+                and args.action != "follow"):
+            host_p.error(f"{args.image_action} is only available with `host follow`")
         if getattr(args, "image_action", None) in {"create", "revoke"} and args.action != "share":
             host_p.error(f"{args.image_action} is only available with `host share`")
     if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:

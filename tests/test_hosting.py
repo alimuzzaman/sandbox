@@ -4561,7 +4561,7 @@ class TestCloudflareClient(unittest.TestCase):
 
 class TestRemotePreviewIdentity(unittest.TestCase):
     @contextmanager
-    def _preview_owners(self, root, *, kind="wordpress"):
+    def _preview_owners(self, root, *, kind="wordpress", relation="created"):
         """Keep the real attempt, receipt joins, store, and route aggregator."""
         from sandbox.delivery import exposure, routes
         from sandbox.delivery.models import canonical_digest, now
@@ -4599,7 +4599,7 @@ class TestRemotePreviewIdentity(unittest.TestCase):
                     "schema_version", "operation_id", "request_id", "job_id",
                     "intent_digest", "project_identity", "project_root_digest", "label")},
                 "instance_id": "preview-demo", "instance_incarnation_id": incarnation,
-                "relation": "reused", "owner_commit_at": stamp,
+                "relation": relation, "owner_commit_at": stamp,
                 "completion": "succeeded", "completed_at": stamp, "result_code": None,
             })
             return {"ok": True, "schema_version": 1,
@@ -4764,6 +4764,18 @@ class TestRemotePreviewIdentity(unittest.TestCase):
         self.assertIn("https://", payload["preview"]["login_url"])
         ports.set_url.assert_called_once()
         self.assertTrue(payload["delivery"]["delivery_succeeded"], payload)
+
+    def test_preview_refuses_a_reused_instance_and_keeps_it(self):
+        owner, args, _ = self._preview_fixture()
+        output = io.StringIO()
+        with self._preview_owners(owner.root, relation="reused") as ports, redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                preview.cmd_preview(None, args)
+        payload = json.loads(output.getvalue())
+        self.assertIn("preview_requires_original_created_instance", payload["error"])
+        self.assertFalse(payload["delivery"]["delivery_succeeded"])
+        ports.set_url.assert_not_called()
+        remote.delete_remote_instance_for_label.assert_not_called()
 
     def test_preview_identity_is_stable_and_namespaced(self):
         first = preview.preview_identity("/tmp/example", "fix/login", "login")

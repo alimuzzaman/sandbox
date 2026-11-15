@@ -214,7 +214,10 @@ def _dispatch_host_if_selected(args) -> bool:
                            "refresh-front-door", "destroy"} or
                 (action == "apply" and getattr(args, "confirm", False)) or
                 (action == "stack" and stack_action in {
-                    "up", "list", "down", "ttl", "sweep", "reap", "limits"}))
+                    "up", "list", "down", "ttl", "sweep", "reap", "limits"}) or
+                # Spec 089: owner follow commands act on the remote's own store.
+                (action == "follow" and stack_action in {
+                    "add", "status", "pause", "resume", "remove", "run-now", "key"}))
     if not selected:
         return False
     args._server_cli_request_id = (getattr(args, "_server_cli_request_id", None)

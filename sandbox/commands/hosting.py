@@ -8785,6 +8785,13 @@ def cmd_host(cfg, args) -> None:
         from sandbox.commands.host_share import cmd_host_share
         cmd_host_share(args)
         return
+    if args.action == "follow":
+        from sandbox.commands.host_follow import cmd_host_follow
+        cmd_host_follow(args)
+        return
+    if any(getattr(args, field, None) is not None
+           for field in ("follow_repo", "stack_template", "prepare", "prepare_timeout", "attempt")):
+        die("--repo, --stack-template, --prepare, --prepare-timeout and --attempt are only accepted by `host follow`")
     if args.action == "login-url" and getattr(args, "remote", None):
         # A joined remote records its targets on the server: mint there.
         from sandbox.hosting import server_login_url
@@ -9444,7 +9451,7 @@ def cmd_host(cfg, args) -> None:
 
 def _host_predispatch_policy(args) -> bool:
     """Keep observation recovery ahead of compatibility state writers."""
-    return getattr(args, "action", None) in {"recover", "stage", "image", "plan", "apply", "stack"}
+    return getattr(args, "action", None) in {"recover", "stage", "image", "plan", "apply", "stack", "follow"}
 
 
 register_specs((CommandSpec(

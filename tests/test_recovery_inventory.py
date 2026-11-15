@@ -51,6 +51,53 @@ class TestRecoveryInventory(unittest.TestCase):
             "postgres": {"POSTGRES_DB": "lenzora", "POSTGRES_USER": "postgres"}})
         self.assertNotIn("private-canary", json.dumps(result))
 
+    def test_compose_instance_databases_are_listed_without_drills_or_application_containers(self):
+        def row(name, project, env, labels=None, cid="c"):
+            return {"Name": "/" + name, "Id": cid * 64, "Image": "sha256:" + "d" * 64,
+                    "State": {"Running": True},
+                    "Config": {"Labels": {"com.docker.compose.project": project, **(labels or {})}, "Env": env},
+                    "Mounts": [{"Type": "volume", "Name": project + "_pg_data",
+                                "Destination": "/var/lib/postgresql/data", "RW": True}]}
+        rows = {
+            "sandbox-host-site-db-1": row("sandbox-host-site-db-1", "sandbox-host-site",
+                                          ["POSTGRES_DB=site"], cid="a"),
+            "sandbox-infisical-db-1": row("sandbox-infisical-db-1", "sandbox-infisical",
+                ["POSTGRES_DB=infisical", "POSTGRES_USER=infisical", "POSTGRES_PASSWORD=private-canary"], cid="b"),
+            "sandbox-infisical-backend-1": row("sandbox-infisical-backend-1", "sandbox-infisical",
+                                               ["ENCRYPTION_KEY=private-canary"], cid="e"),
+            "sandbox-owned-db-1": row("sandbox-owned-db-1", "sandbox-owned", ["POSTGRES_DB=x"],
+                                      labels={"sandbox.recovery.owner": "sandbox-owned-db-1"}, cid="f"),
+        }
+        listing = ("sandbox-host-site-db-1 sandbox-host-site\nsandbox-infisical-db-1 sandbox-infisical\n"
+                   "sandbox-infisical-backend-1 sandbox-infisical\nsandbox-owned-db-1 sandbox-owned\n"
+                   "sandbox-recovery-restore-" + "1" * 24 + " \nunrelated-db-1 other\n")
+        inspected = []
+        def fake_command(argv, **kwargs):
+            if argv[1] == "ps": return CompletedProcess(argv, 0, listing, "")
+            inspected.append(argv[2:])
+            return CompletedProcess(argv, 0, json.dumps([rows[name] for name in argv[2:]]), "")
+        def fake_ssh(entry, command, **kwargs):
+            argv = shlex.split(command)
+            output = io.StringIO()
+            with patch("sys.argv", ["python3", argv[3]]), \
+                    patch("subprocess.run", side_effect=fake_command), contextlib.redirect_stdout(output):
+                exec(argv[2], {"__name__": "__main__"})
+            return CompletedProcess([], 0, output.getvalue(), "")
+        with tempfile.TemporaryDirectory() as home, \
+                patch("sandbox.core._remote.get_remote", return_value={"provisioned": True}), \
+                patch("sandbox.core._remote.resolve_sandbox_home", return_value=home), \
+                patch("sandbox.core._remote.ssh_run", side_effect=fake_ssh):
+            result = SandboxRemoteInventory().discover("xcloud-london")
+        self.assertEqual(inspected, [sorted(rows)])
+        self.assertEqual(result["managed_containers"], ["sandbox-host-site-db-1", "sandbox-infisical-db-1"])
+        self.assertEqual(sorted(result["container_bindings"]), result["managed_containers"])
+        self.assertEqual(result["container_bindings"]["sandbox-infisical-db-1"], {
+            "container_id": "b" * 64, "image_id": "sha256:" + "d" * 64,
+            "compose_project": "sandbox-infisical", "running": True,
+            "postgres": {"POSTGRES_DB": "infisical", "POSTGRES_USER": "infisical"}})
+        self.assertEqual(result["mounts"]["sandbox-infisical-db-1"][0]["name"], "sandbox-infisical_pg_data")
+        self.assertNotIn("private-canary", json.dumps(result))
+
     def test_remote_plan_uses_read_only_inventory_dependency(self):
         inventory = FakeInventory()
         payload = RecoveryService(RecoveryCatalog(1, ()), inventory=inventory).plan(remote="test")

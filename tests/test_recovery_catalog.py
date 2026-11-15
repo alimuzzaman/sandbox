@@ -11,7 +11,8 @@ class TestRecoveryCatalog(unittest.TestCase):
     def test_shipped_catalog_is_valid_and_exact(self):
         catalog = load_catalog(Path(__file__).parents[1] / "config" / "recovery-profiles.json")
         self.assertEqual(set(catalog.by_id()), {
-            "control-plane", "lenzora-prod", "lenzora-prod-storage", "alimuzzaman-site", "amarsonar-bangla-prod",
+            "control-plane", "lenzora-prod", "lenzora-prod-storage", "infisical", "alimuzzaman-site",
+            "amarsonar-bangla-prod",
         })
 
     def test_unknown_fields_fail_closed(self):

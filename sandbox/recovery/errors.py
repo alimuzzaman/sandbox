@@ -36,5 +36,6 @@ def result(ok: bool, action: str, *, remote: str | None = None,
         "data": redact(data or {}),
         "error": None if error is None else {
             "code": error.code, "message": redact(str(error)), "retryable": False,
+            **({"detail": redact(error.detail)} if isinstance(getattr(error, "detail", None), dict) else {}),
         },
     }

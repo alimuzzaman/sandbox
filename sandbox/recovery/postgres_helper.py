@@ -53,10 +53,57 @@ _INSPECTION_CODES = {
 }
 _INSPECTION_OPERATION = None
 _INSPECTION_PHASE = 'request_validation'
+# A failed non-inspection request names one closed step, reason and command on
+# stderr so the controller can say where it stopped. Never rows or messages.
+_FAILURE_STEPS = {
+    'request_validation', 'retained_request', 'source_inspection', 'snapshot',
+    'database_observation', 'dump', 'archive', 'restore', 'result',
+}
+_FAILURE_REASONS = {
+    'operation_failed', 'output_bound', 'schema_metadata_invalid', 'snapshot_unavailable',
+    'dump_invalid', 'image_unavailable', 'credential_invalid', 'credential_binding_changed',
+    'acceptance_unknown', 'restore_unavailable', 'timeout', 'output_invalid', 'request_busy',
+    'io_failed', 'internal_error',
+}
+_FAILURE_COMMANDS = {'psql', 'pg_dump', 'pg_restore', 'pg_ctl', 'tar', 'sh', 'docker-entrypoint.sh'}
+_FAILURE_STEP = 'request_validation'
+_FAILURE_COMMAND = None
 _SCHEMA_FIELDS_SQL = r'''
  'constraints', (SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',con.conname,'definition',pg_get_constraintdef(con.oid),'validated',con.convalidated) ORDER BY c.relname,con.conname),'[]') FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
  'columns', (SELECT coalesce(json_agg(json_build_object('table',table_name,'column',column_name,'type',data_type,'nullable',is_nullable) ORDER BY table_name,ordinal_position),'[]') FROM information_schema.columns WHERE table_schema='public')
 '''
+
+
+def _set_failure_step(step):
+    global _FAILURE_STEP
+    if step in _FAILURE_STEPS:
+        _FAILURE_STEP = step
+
+
+def _failure_command(argv, returncode):
+    tool = next((item for item in argv if item in _FAILURE_COMMANDS), None)
+    if tool is None:
+        tool = 'docker-' + argv[1] if len(argv) > 1 and argv[0] == 'docker' and re.fullmatch(r'[a-z]{1,16}', argv[1]) else 'command'
+    return tool, max(-255, min(255, int(returncode)))
+
+
+def _failure_line(error):
+    if type(error) is ValueError and str(error) in _FAILURE_REASONS:
+        reason = str(error)
+    elif isinstance(error, subprocess.TimeoutExpired):
+        reason = 'timeout'
+    elif isinstance(error, (ValueError, KeyError, TypeError, IndexError)):
+        reason = 'output_invalid'
+    elif isinstance(error, BlockingIOError):
+        reason = 'request_busy'
+    elif isinstance(error, OSError):
+        reason = 'io_failed'
+    else:
+        reason = 'internal_error'
+    line = 'postgres_recovery_failed code=' + reason + ' step=' + _FAILURE_STEP
+    if _FAILURE_COMMAND is not None:
+        line += ' command=%s exit=%d' % _FAILURE_COMMAND
+    return line + '\n'
 
 
 def _set_inspection_phase(phase):
@@ -87,9 +134,11 @@ def _request_binding_error(saved, expected):
 
 
 def run(argv, *, data=None, timeout=60, output=None):
+    global _FAILURE_COMMAND
     result = subprocess.run(argv, input=data, stdout=output or subprocess.PIPE,
         stderr=subprocess.DEVNULL, env=ENV, timeout=timeout, check=False)
     if result.returncode != 0:
+        _FAILURE_COMMAND = _failure_command(argv, result.returncode)
         raise ValueError("operation_failed")
     if output is None and len(result.stdout) > MAX_ARCHIVE:
         raise ValueError("output_bound")
@@ -557,6 +606,7 @@ def capture(source, client, work):
         return source['profile'] != 'lenzora-prod-legacy' or not bool(run(
             ['docker', 'ps', '-q', '--filter', 'label=com.docker.compose.project=sandbox-host-lenzora-production']).strip())
     before_quiescent = quiescent()
+    _set_failure_step('snapshot')
     hold = subprocess.Popen([*client, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--dbname", source["database"]],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ENV)
     try:
@@ -568,7 +618,9 @@ def capture(source, client, work):
         if not re.fullmatch(r"[0-9A-Fa-f-]{1,128}", snapshot):
             raise ValueError("snapshot_unavailable")
         prefix = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT '" + snapshot + "';\n"
+        _set_failure_step('database_observation')
         evidence = observation(client, source["database"], prefix)
+        _set_failure_step('dump')
         dump = work / "database.dump"
         with dump.open("xb") as output:
             os.chmod(dump, 0o600)
@@ -581,6 +633,7 @@ def capture(source, client, work):
         evidence['captured_quiescent'] = before_quiescent and quiescent()
         evidence["source_digest"] = "sha256:" + hashlib.sha256(canonical(source)).hexdigest()
         private_write(work / "evidence.json", canonical(evidence))
+        _set_failure_step('archive')
         archive = work / "capture.tar"
         with tarfile.open(archive, "x") as tar:
             for name in ("database.dump", "evidence.json"):
@@ -1271,6 +1324,7 @@ def main():
     root = Path(request['root'])
     if not root.is_absolute() or '..' in root.parts: raise ValueError('path_unsafe')
     _set_inspection_phase('retained_request')
+    _set_failure_step('retained_request')
     if operation not in {'status', 'inspect-restore', 'verify-restore', 'reopen-restore'}: root.mkdir(parents=True, mode=0o700, exist_ok=True)
     if root.is_symlink() or root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise ValueError('path_unsafe')
@@ -1360,6 +1414,7 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
             sys.stdout.buffer.write(canonical(result))
         return
     storage = source['profile'] == 'lenzora-prod-storage'
+    _set_failure_step('source_inspection')
     if operation != 'restore':
         inspect_source(source)
     else:
@@ -1380,8 +1435,11 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
                 result_file.rename(destination)
                 sys.stdout.buffer.write(destination.read_bytes())
             elif operation == 'observe':
-                result = {'schema_version': 1, 'ok': True, 'code': 'observed', 'source': inspect_source(source),
+                inspected = inspect_source(source)
+                _set_failure_step('database_observation')
+                result = {'schema_version': 1, 'ok': True, 'code': 'observed', 'source': inspected,
                     'observation': observation(client, source['database'])}
+                _set_failure_step('result')
                 private_write(slot / 'result.json', canonical(result))
                 sys.stdout.buffer.write(canonical(result))
             elif operation == 'capture':
@@ -1389,6 +1447,7 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
                 archive.rename(slot / 'capture.tar')
                 sys.stdout.buffer.write((slot / 'capture.tar').read_bytes())
             else:
+                _set_failure_step('restore')
                 private_write(work / 'input.tar', archive_bytes)
                 result = restore(source, work / 'input.tar', work, 'sandbox-recovery-restore-' + identity[:24],
                     request['target_volume'], credential, slot=slot)
@@ -1406,9 +1465,10 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
 
 
 def safe_main():
-    global _INSPECTION_OPERATION, _INSPECTION_PHASE
+    global _INSPECTION_OPERATION, _INSPECTION_PHASE, _FAILURE_STEP, _FAILURE_COMMAND
     _INSPECTION_OPERATION = None
     _INSPECTION_PHASE = 'request_validation'
+    _FAILURE_STEP, _FAILURE_COMMAND = 'request_validation', None
     try: main()
     except Exception as error:
         if _INSPECTION_OPERATION == 'inspect-restore':
@@ -1446,7 +1506,7 @@ def safe_main():
                 'restore_data_invalid', 'reopen_plan_changed', 'reopen_pending', 'reopen_history_invalid',
                 'restore_database_unavailable', 'restore_verification_failed', 'request_invalid',
                 'archive_changed', 'source_changed', 'path_unsafe'}:
-            sys.stderr.write('postgres_recovery_failed\n')
+            sys.stderr.write(_failure_line(error))
             return 1
         sys.stdout.buffer.write(canonical({'schema_version': 1, 'ok': False, 'code': code}))
     return 0

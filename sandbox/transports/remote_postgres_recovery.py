@@ -106,6 +106,36 @@ def _inspection_response(source, request_id, archive, payload, runtime_status):
     return json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
 
 
+_HELPER_FAILURE = re.compile(
+    r'postgres_recovery_failed code=([a-z_]{1,48}) step=([a-z_]{1,32})'
+    r'(?: command=([a-z][a-z._-]{0,31}) exit=(-?[0-9]{1,3}))?')
+
+
+def _helper_failure(result, payload):
+    """Name the helper's closed failure step; anything else stays unknown."""
+    error = RecoveryError('PostgreSQL operation requires retained-request inspection', 'acceptance_unknown')
+    returncode = getattr(result, 'returncode', 1)
+    stderr = getattr(result, 'stderr', b'')
+    if isinstance(stderr, str): stderr = stderr.encode('utf-8', 'replace')
+    lines = stderr[-4096:].decode('ascii', 'replace').strip().splitlines() if isinstance(stderr, bytes) else []
+    match = _HELPER_FAILURE.fullmatch(lines[-1].strip()) if lines and returncode == 1 else None
+    if match is None:
+        if returncode == 0 and isinstance(payload, bytes) and not payload:
+            error.detail = {'helper_code': 'empty_response'}
+        elif isinstance(returncode, int) and returncode != 0:
+            error.detail = {'helper_code': 'helper_exited', 'exit': returncode}
+        return error
+    code, step, command, status = match.groups()
+    detail = {'helper_code': code, 'step': step}
+    text = f'PostgreSQL helper stopped at {step} ({code}'
+    if command is not None:
+        detail.update(command=command, exit=int(status))
+        text += f'; {command} exited {int(status)}'
+    error = RecoveryError(text + '); the retained request is preserved', 'acceptance_unknown')
+    error.detail = detail
+    return error
+
+
 class RegisteredPostgresRecoveryTransport:
     def __init__(self, *, cfg, project_root, state_root, lookup=None, status=None,
                  resolve_home=None, process=None, broker=None):
@@ -251,7 +281,7 @@ class RegisteredPostgresRecoveryTransport:
                     return _inspection_bytes(source, request_id, archive,
                         phase='transport', status='unknown', code=code,
                         runtime_status=status)
-                raise RecoveryError('PostgreSQL operation requires retained-request inspection', 'acceptance_unknown')
+                raise _helper_failure(result, payload)
             if operation == 'inspect-restore':
                 return _inspection_response(source, request_id, archive, payload, status)
             return payload

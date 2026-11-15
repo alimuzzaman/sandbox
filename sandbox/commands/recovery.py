@@ -231,12 +231,16 @@ def _postgres(cfg, args, service):
             else: raise RecoveryError("PostgreSQL operation is required", "request_invalid")
         return result(True, "postgres", remote=args.remote, status=data.get("code", "planned"), data=data)
     except Exception as exc:
-        code = exc.code if isinstance(exc, RecoveryError) else "postgres_recovery_failed"
-        message = ("no PostgreSQL source is registered for this profile; register its source binding before retrying"
-                   if code == "source_binding_missing" else
-                   "PostgreSQL recovery requires inspection; retained requests are preserved")
-        return result(False, "postgres", remote=args.remote,
-                      error=RecoveryError(message, code))
+        if isinstance(exc, RecoveryError):
+            # RecoveryError messages are fixed text; report the real reason.
+            message = ("no PostgreSQL source is registered for this profile; register its source binding before retrying"
+                       if exc.code == "source_binding_missing" else str(exc))
+            error = RecoveryError(message, exc.code)
+            error.detail = getattr(exc, "detail", None)
+        else:
+            error = RecoveryError("PostgreSQL recovery requires inspection; retained requests are preserved",
+                                  "postgres_recovery_failed")
+        return result(False, "postgres", remote=args.remote, error=error)
 
 
 def cmd_recovery(_cfg, args) -> None:

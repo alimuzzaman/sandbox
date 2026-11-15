@@ -38,6 +38,7 @@ POLL_SECONDS = 5
 PREPARE_STOP_GRACE = 30
 # The job supervisor sends SIGKILL 20 s after SIGTERM; stop prepare well before.
 PREPARE_CANCEL_GRACE = 10
+PREPARE_POLL_SECONDS = 0.1
 _ATTEMPT = re.compile(r"^[0-9a-f]{16}$")
 # `host stack up` refusals that mean "someone else is changing this target now".
 BUSY_CODES = frozenset({"stack_apply_in_progress", "stack_submission_unknown", "stack_reaping"})
@@ -88,20 +89,39 @@ def stack_namespace(record: dict, template: Path, attempt_id: str, *, plan: bool
         server_cli_stack_ref=None, follow_source=source, plan=plan, confirm=not plan)
 
 
-class _Cancelled(Exception):
-    pass
+def _exited(process: subprocess.Popen) -> bool:
+    """True once prepare's leader has exited, without reaping it.
+
+    An unreaped leader keeps its pid, so ``killpg(process.pid)`` can only reach
+    prepare's own process group.
+    """
+    try:
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def _wait(process: subprocess.Popen, until: float, fired: list) -> bool:
+    """Wait until the leader exits (True), a stop signal fired or the deadline passed."""
+    while not _exited(process):
+        if fired or time.monotonic() >= until:
+            return False
+        time.sleep(PREPARE_POLL_SECONDS)
+    return True
 
 
 def _stop_group(process: subprocess.Popen, grace: float) -> None:
+    """SIGTERM prepare's group, SIGKILL it after the grace period, then reap the leader."""
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=grace)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+    except ProcessLookupError:
+        pass
+    _wait(process, time.monotonic() + grace, [])
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
 
 
 def run_prepare(argv: list[str], *, cwd: Path, env: dict, timeout: int,
@@ -109,8 +129,11 @@ def run_prepare(argv: list[str], *, cwd: Path, env: dict, timeout: int,
     """Run the owner's prepare step without a shell; its output joins the job log.
 
     Prepare runs in its own process group, so a cancelled or timed-out attempt
-    job would not reach it. While it runs, SIGTERM and SIGINT stop its group
-    first, then end the attempt as ``follow_prepare_cancelled``.
+    job would not reach it. While it runs, SIGTERM and SIGINT only mark the
+    attempt cancelled; the wait then stops prepare's group (SIGTERM, SIGKILL
+    after the grace period) and ends the attempt as ``follow_prepare_cancelled``.
+    A signal that lands during a timeout stop or just after prepare exits is
+    handled the same way, so the outcome is always a ``FollowError``.
     """
     sys.stdout.flush()
     sys.stderr.flush()
@@ -120,31 +143,34 @@ def run_prepare(argv: list[str], *, cwd: Path, env: dict, timeout: int,
     except OSError as exc:
         raise FollowError("follow_prepare_unavailable", f"prepare could not start: {exc.strerror}") from None
     previous: dict = {}
-    fired = []
+    fired: list = []
 
     def cancel(signum, _frame):
-        if not fired:
-            fired.append(signum)
-            raise _Cancelled(signum)
+        fired.append(signum)
 
     if threading.current_thread() is threading.main_thread():
         for number in (signal.SIGTERM, signal.SIGINT):
             previous[number] = signal.signal(number, cancel)
+    timed_out = False
     try:
-        try:
-            code = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _stop_group(process, grace)
-            raise FollowError("follow_prepare_timeout", f"prepare ran past its {timeout}s limit") from None
-        except _Cancelled:
-            _stop_group(process, cancel_grace)
-            raise FollowError("follow_prepare_cancelled",
-                              "the attempt job was stopped; its prepare step was stopped first") from None
+        exited = _wait(process, time.monotonic() + timeout, fired)
+        timed_out = not exited and not fired
+        if fired or timed_out:
+            _stop_group(process, cancel_grace if fired else grace)
+        else:
+            process.wait()
     finally:
+        if process.returncode is None:
+            _stop_group(process, grace)
         for number, handler in previous.items():
             signal.signal(number, handler)
-    if code != 0:
-        raise FollowError("follow_prepare_failed", f"prepare exited {code}")
+    if timed_out:
+        raise FollowError("follow_prepare_timeout", f"prepare ran past its {timeout}s limit")
+    if fired:
+        raise FollowError("follow_prepare_cancelled",
+                          "the attempt job was stopped; its prepare step was stopped first")
+    if process.returncode != 0:
+        raise FollowError("follow_prepare_failed", f"prepare exited {process.returncode}")
 
 
 def _default_stack_up(namespace: argparse.Namespace) -> dict:

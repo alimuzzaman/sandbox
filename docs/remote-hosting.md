@@ -2032,7 +2032,8 @@ tries the same heads again (a `run-now` retry stays requested). The same happens
 when the nested apply fails while the target is busy (a lease taken in between). If the
 stack was removed or reaped meanwhile, the attempt ends as `removed` and pauses the
 follow. Cancelling or stopping the attempt job stops the prepare step's process group
-first (`follow_prepare_cancelled`). Otherwise it waits for the apply job and records
+first (SIGTERM, then SIGKILL 10 s later; `follow_prepare_cancelled`), also when the
+stop lands while a timed-out prepare is being stopped or just as it exits. Otherwise it waits for the apply job and records
 `succeeded` (the heads become the applied heads) or `failed` with a reason. The follower never
 removes or rolls back anything: after a failed apply the stack is exactly as a failed
 `host stack up` leaves it. Failed heads are not tried again until a branch moves or the

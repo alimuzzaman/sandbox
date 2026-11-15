@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from argparse import Namespace
@@ -947,6 +948,8 @@ class PrepareRunnerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "follow_prepare_timeout")
         self.assertLess(time.monotonic() - started, 30)
 
+    @unittest.skipUnless(threading.current_thread() is threading.main_thread(),
+                         "the prepare cancel handler is installed only on the main thread")
     def test_a_cancelled_attempt_job_stops_prepare_first(self):
         # The fake prepare plays the job supervisor: it sends SIGTERM to the
         # attempt process (its parent), then would run for a minute.
@@ -962,6 +965,66 @@ class PrepareRunnerTests(unittest.TestCase):
         pid = int((self.work / "pid").read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def assert_gone(self, pid):
+        """The process no longer runs (a zombie waiting for its reaper counts as gone)."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            stat = Path(f"/proc/{pid}/stat")
+            with contextlib.suppress(OSError):
+                if stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                    return
+            time.sleep(0.1)
+        self.fail(f"process {pid} still runs")
+
+    @unittest.skipUnless(threading.current_thread() is threading.main_thread(),
+                         "the prepare cancel handler is installed only on the main thread")
+    def test_a_cancel_during_the_timeout_stop_still_kills_the_prepare_group(self):
+        # Prepare ignores the group SIGTERM and, on receiving it, plays the job
+        # supervisor by stopping the attempt process mid-cleanup.
+        argv = self.script("open('pid', 'w').write(str(os.getpid()))\n"
+                           "signal.signal(signal.SIGTERM, lambda *_: os.kill(os.getppid(), signal.SIGTERM))\n"
+                           "time.sleep(60)\ntime.sleep(60)\n")
+        before = signal.getsignal(signal.SIGTERM)
+        started = time.monotonic()
+        with self.assertRaises(FollowError) as raised:
+            run_prepare(argv, cwd=self.work, env=self.env, timeout=1, grace=2, cancel_grace=2)
+        self.assertEqual(raised.exception.code, "follow_prepare_timeout")
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before, "the handler is restored")
+        self.assert_gone(int((self.work / "pid").read_text()))
+
+    @unittest.skipUnless(threading.current_thread() is threading.main_thread(),
+                         "the prepare cancel handler is installed only on the main thread")
+    def test_a_cancel_just_after_prepare_exits_is_recorded_and_kills_its_group(self):
+        # Prepare leaves a child in its group that ignores SIGTERM, then exits 0.
+        # The stop signal lands right as its exit is seen.
+        child = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open('ready', 'w'); time.sleep(60)"
+        argv = self.script("import subprocess\n"
+                           f"kid = subprocess.Popen([sys.executable, '-I', '-c', {child!r}])\n"
+                           "while not os.path.exists('ready'):\n    time.sleep(0.05)\n"
+                           "open('pid', 'w').write(str(kid.pid))\n")
+        real_exited = follow_apply._exited
+
+        def exited_then_stopped(process):
+            done = real_exited(process)
+            if done:
+                os.kill(os.getpid(), signal.SIGTERM)
+            return done
+
+        before = signal.getsignal(signal.SIGTERM)
+        started = time.monotonic()
+        with patch.object(follow_apply, "_exited", side_effect=exited_then_stopped), \
+                self.assertRaises(FollowError) as raised:
+            run_prepare(argv, cwd=self.work, env=self.env, timeout=60, grace=2, cancel_grace=2)
+        self.assertEqual(raised.exception.code, "follow_prepare_cancelled")
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before, "the handler is restored")
+        self.assert_gone(int((self.work / "pid").read_text()))
 
 
 class ApexTests(unittest.TestCase):

@@ -10,11 +10,11 @@ Recovery evidence accepts up to 1 MiB of JSON, 10,000 entries per collection,
 are rejected. Database table inventories do not use the image-plan service cap.
 
 The source descriptor is owner-only JSON with a closed schema. PostgreSQL binds
-`schema_version=1`, `profile` (`lenzora-dev`, `lenzora-prod`, or
+`schema_version=1`, `profile` (`lenzora-dev`, `infisical`, `lenzora-prod`, or
 `lenzora-prod-legacy`), registered `remote`, `compose_project`, full observed
 `container_id`, exact `volume`, `database`, `role`, observed source `image_id`,
 and `client_image_id`. Both images are local content IDs (`sha256:...`), never
-moving tags; the local profile requires the same image. A legacy external source
+moving tags; the local profiles (`lenzora-dev`, `infisical`) require the same image. A legacy external source
 also names a registered `credential_reference` and, for final transfer, a
 `target_password_reference` matching the destination hosting password; other database sources set both
 to null. Select a client major compatible with the observed server; a newer
@@ -25,6 +25,35 @@ alongside its mounts. These bounded records expose the full container and image
 IDs, Compose project, running state, and only the non-secret `POSTGRES_DB` and
 `POSTGRES_USER` fields when present. They never expose other environment values.
 Use the same container record and observed mount when preparing a source.
+Besides `sandbox-host-*` containers, the inventory lists the PostgreSQL containers
+(those with `POSTGRES_DB` or `POSTGRES_USER`) of Sandbox compose instances, whose
+Compose project starts with `sandbox-`. Containers labelled
+`sandbox.recovery.owner` (restore drills and schema references) are never listed.
+Listing is discovery only. A source binding still has to pass the exact container,
+image, project and volume checks before any capture.
+
+### The `infisical` profile
+
+`infisical` binds the Infisical database of the `sandbox-infisical` compose
+instance (service `db`, volume mounted at `/var/lib/postgresql/data`). It behaves
+like `lenzora-dev`: the client is a local `docker exec --user postgres` into the
+source container, both credential references are null, and `client_image_id`
+equals `image_id`. Restore is an isolated drill into a new owned volume;
+`inspect-restore`, `verify-restore`, `reopen-restore` and `--resume-capture` are
+allowed, and `--target-volume` is refused. Its slot is `{remote}-infisical`, so it
+never shares a slot with a Lenzora profile on the same remote.
+
+Capture refuses an `infisical` backup ID that is not `infisical-YYYYMMDDTHHMMZ`
+(UTC, for example `infisical-20261116T0300Z`) with `invalid_set_id`, before any
+request is recorded. Its sets therefore sort apart from Lenzora's under the shared
+destination (`gdrive:hermes-full-recovery/sets/<backup_id>/`), and each manifest
+records `profiles: ["infisical"]`.
+
+The set holds only the database. Infisical encrypts its stored secrets with the
+application's `ENCRYPTION_KEY`, and a restored database cannot be decrypted
+without it. No recovery path captures that key or `AUTH_SECRET`. The owner keeps
+them in an off-host store and takes a new capture after rotating the key.
+Recurring captures are not scheduled yet.
 For the legacy external database, bind the production application container and
 its `/app/storage` volume; it can be stopped for the final quiescent capture.
 The brokered database client is separate from that application container.
@@ -43,14 +72,27 @@ only that observed volume read-only in an owned, networkless reader.
 ./sb recovery data --postgres-operation capture --remote REMOTE --profile PROFILE --request-id CAPTURE_ID --backup-id BACKUP_ID --confirm --json
 ./sb recovery data --postgres-operation restore-plan --remote REMOTE --profile PROFILE --request-id RESTORE_ID --backup-id BACKUP_ID --json
 ./sb recovery data --postgres-operation restore --remote REMOTE --profile PROFILE --restore-plan PLAN.json --confirm --json
-./sb recovery data --postgres-operation inspect-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --json
-./sb recovery data --postgres-operation reopen-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --reopen-plan REOPEN.json --confirm --json
-./sb recovery data --postgres-operation verify-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --confirm --json
+./sb recovery data --postgres-operation inspect-restore --remote REMOTE --profile LOCAL_PROFILE --restore-plan PLAN.json --json
+./sb recovery data --postgres-operation reopen-restore --remote REMOTE --profile LOCAL_PROFILE --restore-plan PLAN.json --reopen-plan REOPEN.json --confirm --json
+./sb recovery data --postgres-operation verify-restore --remote REMOTE --profile LOCAL_PROFILE --restore-plan PLAN.json --confirm --json
 ./sb recovery data --postgres-operation readiness --remote REMOTE --profile PROFILE [--target-volume VOLUME] --json
 ```
 
+`LOCAL_PROFILE` is `lenzora-dev` or `infisical`.
+
+With `--json`, every command prints a JSON envelope: `{"ok", "action", "remote", "status",
+"data", "error"}`. `restore-plan` puts the plan in `data`, and `--restore-plan`
+needs that bare plan, so save `data` and not the whole envelope. A saved envelope
+is refused with `restore_plan_changed`. Keep the file owner-only:
+
+```sh
+umask 077
+./sb recovery data --postgres-operation restore-plan --remote REMOTE --profile PROFILE --request-id RESTORE_ID --backup-id BACKUP_ID --json > ENVELOPE.json
+jq -e '.ok' ENVELOPE.json && jq '.data' ENVELOPE.json > PLAN.json
+```
+
 `status` inspects the original retained request without consuming database credentials
-or returning archive bytes. An incomplete local `lenzora-dev` capture can be resumed
+or returning archive bytes. An incomplete local (`lenzora-dev` or `infisical`) capture can be resumed
 with its same request and backup IDs plus `--resume-capture --confirm`, after status
 reports `retained_without_result`. The helper locks the request directory, checks
 the exact original request and source, and returns an existing archive unchanged.
@@ -100,7 +142,7 @@ Reopening is a write operation: PostgreSQL startup may perform crash recovery
 on the retained files. A natural exit (0) or an explicitly stopped, non-OOM
 container exit (137) can be planned; the full stopped state is digest-bound.
 An existing verified restore receipt refuses reopening. Startup is permitted
-on the isolated restored cluster. It is limited to local `lenzora-dev` drills;
+on the isolated restored cluster. It is limited to local `lenzora-dev` and `infisical` drills;
 production, legacy transfers and storage cannot use it. A reopen intent is
 retained under the original request before effects. Repeating the exact plan
 only recovers positive running/database evidence; it never repeats an uncertain

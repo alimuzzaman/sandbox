@@ -1140,7 +1140,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host follow add: command run on the remote before each stack up, without a shell; "
              "{dir}, {name}, {repo:NAME} and {commit:NAME} are filled in")
     host_p.add_argument("--prepare-timeout", dest="prepare_timeout", type=int, default=None, metavar="SECONDS",
-        help="host follow add: time limit for --prepare (60-3600, default 1200)")
+        help="host follow add: time limit for --prepare (60-7200, default 1200)")
     host_p.add_argument("--attempt", default=None, help=argparse.SUPPRESS)
     host_p.add_argument("--checkout", action="append", default=None, metavar="PATH",
         help="host stack sweep: a local checkout to check merges in (repeatable; recorded stacks' checkouts are used too)")

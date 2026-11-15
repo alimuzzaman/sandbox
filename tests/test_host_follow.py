@@ -28,6 +28,7 @@ from sandbox.commands import host_stack  # noqa: E402
 from sandbox.hosting.follow import git, units  # noqa: E402
 from sandbox.hosting.follow import tick as follow_tick  # noqa: E402
 from sandbox.hosting.follow import apply as follow_apply  # noqa: E402
+from sandbox.hosting.follow import spec as follow_spec  # noqa: E402
 from sandbox.hosting.follow.apply import Attempt, run_prepare  # noqa: E402
 from sandbox.hosting.follow.spec import FollowError  # noqa: E402
 from sandbox.hosting.follow.store import FollowStore  # noqa: E402
@@ -170,6 +171,7 @@ class OwnerCommandTests(FollowCase):
                  ({"stack_template": "/etc/stack.yml"}, "follow_template_invalid"),
                  ({"prepare": "run {repo:missing}"}, "follow_placeholder_invalid"),
                  ({"prepare_timeout": 5}, "follow_prepare_invalid"),
+                 ({"prepare_timeout": 7201}, "follow_prepare_invalid"),
                  ({"owner": None}, "follow_owner_missing"))
         for fields, code in cases:
             with self.subTest(code=code), self.assertRaises(FollowError) as raised:
@@ -179,6 +181,12 @@ class OwnerCommandTests(FollowCase):
         self.assertFalse(self.store.keys.exists() and any(self.store.keys.iterdir()))
         self.assertEqual(self.installs, [])
         self.assertEqual(self.audit_events(), [])
+
+    def test_the_prepare_limit_accepts_the_spec_maximum_of_7200_seconds(self):
+        self.assertTrue(self.add(prepare_timeout=7200)["ok"])
+        record = self.store.read("dev")
+        self.assertEqual(record["prepare_timeout"], 7200)
+        self.assertEqual(follow_spec.job_timeout(record), 7200 + follow_spec.APPLY_ALLOWANCE_SECONDS)
 
     def test_a_failed_timer_install_rolls_back_the_new_declaration_and_keys(self):
         with patch.object(units, "install", side_effect=FollowError("follow_timer_failed", "no")), \

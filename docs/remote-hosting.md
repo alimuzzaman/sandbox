@@ -1966,7 +1966,7 @@ one is the source of the attempt job. `--prepare` is one command line, split lik
 shell would but run without one, with `{dir}` (the follow's directory), `{name}`,
 `{repo:NAME}` (a clone) and `{commit:NAME}` (its head) filled in; it also gets
 `SANDBOX_FOLLOW_DIR`, `SANDBOX_FOLLOW_REPO_<NAME>` and `SANDBOX_FOLLOW_COMMIT_<NAME>`, and
-`--prepare-timeout` (60-3600 s, default 1200) bounds it. `--stack-template` must start
+`--prepare-timeout` (60-7200 s, default 1200) bounds it. `--stack-template` must start
 with `{dir}` or `{repo:NAME}` and resolve inside the follow's directory after the
 prepare step ran. `--ref`, `--owner` (required), `--environment`, `--lifetime` and
 `--generate` are passed to `host stack up` unchanged. Running `add` again for a name

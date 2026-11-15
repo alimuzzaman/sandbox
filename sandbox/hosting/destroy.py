@@ -208,14 +208,28 @@ def _coverage_claims(record: dict | None) -> list[dict]:
     return shared_claims(record)
 
 
+def _dns_external(record: dict | None) -> list[str]:
+    """Names the target declared as externally managed DNS (``cloudflare.external_dns``)."""
+    value = (record or {}).get("dns_external")
+    if not isinstance(value, list):
+        return []
+    return sorted({item.strip().rstrip(".").lower() for item in value
+                   if isinstance(item, str) and item.strip()})
+
+
 def _target_dns_records(record: dict | None) -> list[dict]:
     zones = {claim["zone"] for claim in _coverage_claims(record)}
+    external = set(_dns_external(record))
     records = []
     for item in (record or {}).get("records") or []:
         if not isinstance(item, dict) or not item.get("zone_id"):
             continue
         names = [row.get("name") for row in (item.get("applied"), item.get("previous")) if isinstance(row, dict)]
         if any(name == "*." + zone for name in names for zone in zones):
+            continue
+        # Destroy never deletes, edits or restores a record at an external name,
+        # including one an earlier apply wrote before the name became external.
+        if any(isinstance(name, str) and name.rstrip(".").lower() in external for name in names):
             continue
         records.append(item)
     return records
@@ -297,6 +311,9 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
     }
     if shared_coverage_retained is not None:
         res["shared_coverage_retained"] = shared_coverage_retained
+    external = _dns_external(record)
+    if external:
+        res["dns_external"] = external
     return res
 
 
@@ -631,6 +648,8 @@ def render(result: dict, *, confirmed: bool) -> str:
     for row in result["dns_records"]:
         note = "" if row.get("verifiable") else " (applied before verification; check it by hand)"
         lines.append(f"  DNS {row['action']} {row['record_id']}{note}")
+    for hostname in result.get("dns_external") or []:
+        lines.append(f"  DNS for {hostname} is managed outside Sandbox; left untouched")
     lines.append(f"  origin certificate {'yes' if result['origin_certificate'] else 'none recorded'}")
     lines.append(f"  local state entry {'yes' if result['state_entry'] else 'no'}")
     if result["other_environments"]:

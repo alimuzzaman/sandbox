@@ -310,6 +310,9 @@ def _emit(data: dict, as_json: bool) -> None:
     for route in data.get("routes", []):
         suffix = f" -> {route['target']}" if route.get("target") else ""
         print(f"  {route['mode']}: {route['hostname']}{suffix}")
+    external = data.get("external_dns") or (data.get("cloudflare") or {}).get("external_dns")
+    if external:
+        print("  DNS managed outside Sandbox (never written): " + ", ".join(external))
 
 
 def _validate_all_environments(project_dir: str | Path) -> list[dict]:
@@ -2847,6 +2850,8 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
     cache_purge = (validated.get("cloudflare") or {}).get("cache_purge") or {}
     if cache_purge.get("enabled") is True:
         intent["cache_purge"] = cache_purge
+    if plan.get("external_dns"):
+        intent["external_dns"] = list(plan["external_dns"])
     dns_coverage = validated.get("dns_coverage") or {}
     if dns_coverage.get("mode") == "shared":
         intent["dns_coverage"] = {"mode": "shared", "zone": dns_coverage["zone"]}
@@ -4349,6 +4354,8 @@ def _continue_host_edge_only_unleased(validated: dict, entry: dict, remote_name:
             "caddy_name": caddy_name, "edge": edge_state,
             "front_door_declaration": front_door_refresh.declaration_digest(validated),
         }
+        if edge_intent.get("external_dns"):
+            result["record"]["dns_external"] = list(edge_intent["external_dns"])
         if edge.mode != "caddy":
             result["record"]["front_door"] = edge.mode
 
@@ -5999,6 +6006,13 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         "runtime": {"state": "pending"},
         "edge": {"state": "pending"},
     }
+    # Recorded before any effect: host destroy reads it and never touches these
+    # names' DNS records, even after a failed apply.
+    external_dns = hosting.external_dns_hostnames(validated)
+    if external_dns:
+        state["hosts"][key]["dns_external"] = external_dns
+    else:
+        state["hosts"][key].pop("dns_external", None)
     durable_save(state)
     stream_progress = None
     if progress is not None:
@@ -9414,6 +9428,9 @@ def cmd_host(cfg, args) -> None:
         evidence["edge_cache_purge"] = result["edge_cache_purge"]
     if result.get("coverage_binding") is not None:
         evidence["coverage_binding"] = result["coverage_binding"]
+    external_dns = hosting.external_dns_hostnames(validated)
+    if external_dns:
+        evidence["external_dns"] = external_dns
     if args.json:
         print(json.dumps(evidence))
     else:
@@ -9421,6 +9438,8 @@ def cmd_host(cfg, args) -> None:
             f"applied {validated['project']} / {validated['environment']} to {args.remote} "
             f"at {result['commit']} (remote_selection=explicit)"
         )
+        if external_dns:
+            info("DNS managed outside Sandbox (left untouched): " + ", ".join(external_dns))
 
 
 def _host_predispatch_policy(args) -> bool:

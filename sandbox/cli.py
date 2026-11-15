@@ -1074,10 +1074,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="print the result as JSON (for the MCP server)")
 
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, refresh only the front-door route (`host refresh-front-door`), sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`), or make share links (`host share create|list|revoke`)")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "refresh-front-door", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share"])
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "refresh-front-door", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name", "classify", "share", "follow"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke", "repair-source"],
-        help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, `host tailnet-name add|list|renew|remove`, or `host share create|list|revoke ID|all`; `host image recover` is distinct from failed-apply `host recover`")
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove", "ttl", "sweep", "reap", "limits", "create", "revoke", "repair-source", "pause", "resume", "run-now", "key", "tick", "apply"],
+        help="immutable image action, `host stack up|list|down|ttl|sweep|reap|limits`, `host tailnet-name add|list|renew|remove`, `host share create|list|revoke ID|all`, or `host follow add|status|pause|resume|remove|run-now|key`; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("tailnet_hostname", nargs="?", default=None, metavar="FQDN",
         help="host tailnet-name add|renew|remove: the full hostname (refused for other host actions)")
     host_p.add_argument("--upstream", default=None, metavar="HOST:PORT",
@@ -1126,11 +1126,22 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--force-owner", dest="force_owner", action="store_true",
         help="host stack down/ttl, host classify: act on a stack or target another owner holds (recorded)")
     host_p.add_argument("--here", action="store_true",
-        help="host stack reap, host login-url: run on this host itself (the remote side of the --remote form)")
+        help="host stack reap, host login-url, host follow tick: run on this host itself (the remote side of the --remote form)")
     host_p.add_argument("--trigger", default=None, choices=["scheduled_routine", "stack_reap", "safe_tier"],
         help=argparse.SUPPRESS)
     # host login-url --here: the controller's token hash; the token stays on the controller.
     host_p.add_argument("--token-sha256", dest="token_sha256", default=None, help=argparse.SUPPRESS)
+    host_p.add_argument("--repo", dest="follow_repo", action="append", default=None,
+        metavar="NAME=OWNER/REPO@BRANCH",
+        help="host follow add: a GitHub repository and the branch to follow (repeatable; the first is the job source)")
+    host_p.add_argument("--stack-template", dest="stack_template", default=None, metavar="PATH",
+        help="host follow add: the stack template on the remote, starting with {dir} or {repo:NAME}")
+    host_p.add_argument("--prepare", default=None, metavar="COMMAND",
+        help="host follow add: command run on the remote before each stack up, without a shell; "
+             "{dir}, {name}, {repo:NAME} and {commit:NAME} are filled in")
+    host_p.add_argument("--prepare-timeout", dest="prepare_timeout", type=int, default=None, metavar="SECONDS",
+        help="host follow add: time limit for --prepare (60-7200, default 1200)")
+    host_p.add_argument("--attempt", default=None, help=argparse.SUPPRESS)
     host_p.add_argument("--checkout", action="append", default=None, metavar="PATH",
         help="host stack sweep: a local checkout to check merges in (repeatable; recorded stacks' checkouts are used too)")
     host_p.add_argument("--per-owner", dest="per_owner", type=int, default=None, metavar="N",
@@ -1623,8 +1634,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         if getattr(args, "tailnet_hostname", None) is not None:
             host_p.error(f"unrecognized arguments: {args.tailnet_hostname} "
                          "(a hostname argument is only accepted by `host tailnet-name`)")
-        if getattr(args, "image_action", None) in {"add", "renew", "remove"}:
+        if (getattr(args, "image_action", None) in {"add", "renew", "remove"}
+                and not (args.action == "follow" and args.image_action != "renew")):
             host_p.error(f"{args.image_action} is only available with `host tailnet-name`")
+        if (getattr(args, "image_action", None) in {"pause", "resume", "run-now", "key", "tick", "apply"}
+                and args.action != "follow"):
+            host_p.error(f"{args.image_action} is only available with `host follow`")
         if getattr(args, "image_action", None) in {"create", "revoke"} and args.action != "share":
             host_p.error(f"{args.image_action} is only available with `host share`")
     if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:

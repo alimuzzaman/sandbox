@@ -1927,6 +1927,133 @@ a new copy.
 Stacks created before this release have no record: they are unclassified and
 protected until their controller re-runs `up`, which claims them.
 
+### Following branches (`sb host follow`, spec 089)
+
+A follow keeps one stack on a joined remote running the heads of declared GitHub
+branches. It runs on the remote: a `systemd --user` timer polls every 5 minutes, so no
+controller has to be online, and GitHub needs no webhook.
+
+```sh
+sb host follow add --remote xspeed-dev --name dev \
+  --repo setup=OWNER/xspeed-dev-setup@main \
+  --repo hub=WPDevelopers/xspeed-hub@dev \
+  --repo free=WPDevelopers/xspeed@dev --repo pro=WPDevelopers/xspeed-pro@dev \
+  --prepare '{repo:setup}/stacks/follow-prepare.sh dev {repo:hub} {repo:free} {repo:pro}' \
+  --stack-template '{dir}/worktrees/hub-dev/sandbox.full.hosting.yml' \
+  --ref sandbox-env/dev --owner xspeed-dev --generate
+sb host follow status  --remote R [--name NAME] [--json]
+sb host follow pause   --remote R --name NAME
+sb host follow resume  --remote R --name NAME
+sb host follow run-now --remote R --name NAME
+sb host follow key     --remote R --name NAME
+sb host follow remove  --remote R --name NAME
+```
+
+Each command runs on the remote as a server CLI durable job (like `host stack up`), and
+each one, `status` included, appends a line to the remote's follow audit
+(`$SANDBOX_HOME/runtime/hosting/follow/audit.jsonl`); a command refused after its job
+context is known appends a `refused` line with its code. Every refusal or error prints
+one `{"ok": false, "code": ..., "error": ...}` line (`--json`, `tick`, `apply`) or one
+`code: message` line, never a traceback; an unexpected one is `follow_internal_error`,
+and a changed retained job context keeps its own code
+(`server_cli_owner_target_unavailable`). Only joined (admitted Tailnet)
+remotes are supported; anything else is refused with `follow_requires_joined_remote`
+before a write. The remote's runtime must be migrated to a release with this feature.
+
+**The declaration.** `--name` is the stack slug. Each `--repo NAME=OWNER/REPO@BRANCH`
+(1-8, GitHub only) is cloned into the follow's own directory on the remote; the first
+one is the source of the attempt job. `--prepare` is one command line, split like a
+shell would but run without one, with `{dir}` (the follow's directory), `{name}`,
+`{repo:NAME}` (a clone) and `{commit:NAME}` (its head) filled in; it also gets
+`SANDBOX_FOLLOW_DIR`, `SANDBOX_FOLLOW_REPO_<NAME>` and `SANDBOX_FOLLOW_COMMIT_<NAME>`, and
+`--prepare-timeout` (60-7200 s, default 1200) bounds it. `--stack-template` must start
+with `{dir}` or `{repo:NAME}` and resolve inside the follow's directory after the
+prepare step ran. `--ref`, `--owner` (required), `--environment`, `--lifetime` and
+`--generate` are passed to `host stack up` unchanged. Running `add` again for a name
+replaces the declaration and keeps its state. One follow per stack name.
+
+**Branch and lifetime.** Each clone is checked out on a local branch named after its
+tracked branch, at the fetched head, so the default `--ref HEAD` names that branch.
+When the template is under `{repo:NAME}`, the stack's lifetime follows that repository's
+tracked branch: `--ref` must be its fetched head or a commit that descends from it (for
+example an overlay branch the prepare step committed on top), or the attempt fails with
+`stack_source_unrelated`. `--lifetime hosted` then works when that tracked branch is the
+template's `dev_branch`. The stack record keeps `ref` and its branch and adds
+`source_branch` and `source_commit`; the remote lifetime record names the tracked
+branch as the stack's branch. A `{dir}` template keeps the plain `host stack up` rule:
+hosted only when `--ref` itself names the dev branch.
+
+**Deploy keys.** `add` (and `key`) creates one ed25519 key per repository with
+`ssh-keygen` in `follow/keys/` (0700, private file 0600, named `github-<hash>` after a
+hash of the repository URL, so no two repositories share a file) and prints only the public key
+and its fingerprint, with the GitHub page to add it at: Settings > Deploy keys, leave
+"Allow write access" unchecked. The private file never leaves the remote, and Sandbox
+never reads it; `ssh` uses it with `IdentitiesOnly`, no agent, batch mode and GitHub's
+published host key pinned in the follow's own `known_hosts` (`StrictHostKeyChecking=yes`;
+a rotated GitHub key fails closed until Sandbox is updated). Keys are shared by follows
+of the same repository and are kept by `remove`. The prepare step runs as the same
+Linux user and could read them: it is owner-declared code, so review it.
+
+**Each poll** holds a host-wide lock (an overlapping poll exits) and, per follow, in
+this order: an attempt still running is left alone; a finished attempt job that did not
+record its outcome is recorded as failed from its lifecycle; an attempt whose job the
+job registry cannot answer for is kept (`attempt_state_unknown`) and asked about again,
+for up to 12 polls (about an hour), before it is recorded as failed; then it fetches
+the tracked branches (`fetch_failed` is recorded and retried on the next poll) and
+decides. An unexpected error in one follow is recorded as that follow's last check
+(`follow_poll_error`) and the poll goes on with the next follow.
+
+| Reason | What happens |
+|---|---|
+| `paused` | nothing |
+| `stack_removed` | the follow had applied the stack and its stack record is gone (`stack down`): the follow pauses itself; it never recreates it |
+| `stack_reaped` | server cleanup reaped the stack (its lifetime record on the remote says `reaped`): the follow pauses itself |
+| `up_to_date` | heads equal the last applied heads |
+| `waiting_after_failure` | heads equal the heads of the last failed attempt |
+| `target_lease_held`, `stack_apply_active`, `stack_apply_outcome_unknown`, `stack_reaping` | busy: skipped, checked again next poll; a lease is never broken |
+| `heads_changed`, `retry_requested` | an attempt starts |
+
+Nothing counts as applied after `add`, so the first poll applies once. Starting an
+attempt checks every clone out at its fetched head, records the attempt (heads, request
+id and the exact `job-start` argv), and submits one top-level server CLI job,
+`host follow apply --attempt ID`, with the origin remote name and routing the `add` job
+carried. An unknown acceptance is replayed with the identical argv and request id only.
+
+**The attempt job** holds the follow's apply lock, checks that it is the recorded
+attempt and the clones are still at its heads, runs the prepare step, then runs `host
+stack up` in its own job context, the same code a dispatched `host stack up` runs:
+`--plan` first (an apex hostname, meaning a registrable domain such as `xspeedcdn.com`
+or `example.co.uk`, refuses the attempt with `follow_apex_hostname_refused`), then
+`--confirm`, whose apply is the nested job a person's would be. Before the prepare step,
+after it and again right before `--confirm`, the attempt re-reads its target. If the
+target became busy, the attempt ends as `busy`: that is not a failure, and the next poll
+tries the same heads again (a `run-now` retry stays requested). The same happens when
+`host stack up` refuses because another apply is running or its outcome is unknown, and
+when the nested apply fails while the target is busy (a lease taken in between). If the
+stack was removed or reaped meanwhile, the attempt ends as `removed` and pauses the
+follow. Cancelling or stopping the attempt job stops the prepare step's process group
+first (SIGTERM, then SIGKILL 10 s later; `follow_prepare_cancelled`), also when the
+stop lands while a timed-out prepare is being stopped or just as it exits. Otherwise it waits for the apply job and records
+`succeeded` (the heads become the applied heads) or `failed` with a reason. The follower never
+removes or rolls back anything: after a failed apply the stack is exactly as a failed
+`host stack up` leaves it. Failed heads are not tried again until a branch moves or the
+owner runs `run-now`. A canonical stack's apply also runs the stack merge sweep
+(spec 077), as a person's would.
+
+**Owner controls.** `pause` stops new attempts (one already running finishes and is
+recorded) and `resume` re-enables them without retrying failed heads. `run-now` sets a
+one-shot retry, which also re-applies unchanged heads, and starts a poll at once; it is
+refused for a paused follow (`follow_paused`). `remove` is refused while an attempt runs
+(`follow_attempt_running`), deletes the declaration and, with the last follow, the
+timer, and keeps the stack, the keys and the clones (the stack's worktrees point into
+them). `status` shows the tracked branches, key fingerprints, applied and failed heads,
+the last attempt with its job ids, and the last poll's reason.
+
+**Files.** Under `$SANDBOX_HOME/runtime/hosting/follow/`: `follows/<name>.json`,
+`audit.jsonl`, `keys/`, `known_hosts`, `work/<name>/repos/<repo>`, `locks/`. Timer:
+`~/.config/systemd/user/sandbox-stack-follow.{service,timer}` (needs user lingering;
+`follow_timer_unavailable` otherwise).
+
 ### Running a command in a hosted service (`sb host exec`, spec 074)
 
 ```bash

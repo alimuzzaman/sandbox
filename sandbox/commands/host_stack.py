@@ -36,6 +36,7 @@ SUBMISSION_UNKNOWN = "stack_submission_unknown"
 DESTROY_FAILED = "stack_destroy_failed"
 PROBE_UNAVAILABLE = "stack_port_probe_unavailable"
 SECRETS_MISSING = "stack_secrets_missing"
+SOURCE_UNRELATED = "stack_source_unrelated"
 REMOTE_UNKNOWN = "stack_remote_unknown"
 
 ACTIVE_LIFECYCLES = frozenset({"accepted", "queued", "running", "cancelling"})
@@ -449,18 +450,52 @@ def _caller(checkout: Path, args) -> dict:
     return lifetime_client.controller_owner(naming.owner_label(checkout, getattr(args, "owner", None)))
 
 
-def _requested_lifetime(args, ref: StackRef, dev_branch: str) -> tuple[str, str, int | None, bool]:
-    """(lifetime, source, ttl_seconds, new_ttl) from the flags; hosted only for dev."""
+def follow_lineage(args, checkout: Path, ref: StackRef) -> dict | None:
+    """A follow attempt's source (spec 089): its template repository's tracked branch.
+
+    Only ``host follow apply`` sets ``follow_source`` (in-process; no CLI flag
+    carries it). The ref, such as an overlay branch a prepare step built, must
+    descend from the tracked branch's fetched head. The stack's lifetime then
+    follows the tracked branch: an overlay on ``dev`` may be the hosted ``dev``
+    stack, an unrelated ref is refused.
+    """
+    source = getattr(args, "follow_source", None)
+    if source is None:
+        return None
+    branch = source.get("branch") if isinstance(source, dict) else None
+    commit = source.get("commit") if isinstance(source, dict) else None
+    if (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch)
+            or branch.startswith("-") or not isinstance(commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        raise StackCommandError(REF_UNRESOLVED, "the follow's source branch or commit is malformed")
+    try:
+        _git(checkout, "merge-base", "--is-ancestor", commit, ref.commit)
+    except RuntimeError:
+        raise StackCommandError(
+            SOURCE_UNRELATED,
+            f"--ref {ref.ref!r} ({ref.commit[:12]}) does not descend from the followed {branch} "
+            f"head {commit[:12]}") from None
+    return {"branch": branch, "commit": commit}
+
+
+def _requested_lifetime(args, ref: StackRef, dev_branch: str,
+                        branch: str | None = None) -> tuple[str, str, int | None, bool]:
+    """(lifetime, source, ttl_seconds, new_ttl) from the flags; hosted only for dev.
+
+    ``branch`` is the branch the stack runs: the ref's own, or a follow's
+    tracked branch (``follow_lineage``).
+    """
     lifetime = getattr(args, "lifetime", None)
     ttl_text = getattr(args, "ttl", None)
+    branch = ref.ref_branch if branch is None else branch
     if lifetime is not None and lifetime not in hoststore.LIFETIMES:
         raise StackCommandError(hoststore.LIFETIME_INVALID,
                                 "--lifetime must be temporary, hosted or permanent")
-    if lifetime == "hosted" and ref.ref_branch != dev_branch:
+    if lifetime == "hosted" and branch != dev_branch:
         raise StackCommandError(
             hoststore.LIFETIME_INVALID,
             f"--lifetime hosted is only for the dev branch {dev_branch}; {ref.ref!r} is "
-            f"{ref.ref_branch or 'a detached commit'}")
+            f"{branch or 'a detached commit'}")
     effective = lifetime or "temporary"
     try:
         ttl = hoststore.parse_ttl(ttl_text) if ttl_text is not None else None
@@ -558,7 +593,12 @@ def _up(args) -> dict:
     from sandbox.hosting.server_cli_dispatch import resolve_stack_ref
     ref = resolve_stack_ref(args, checkout)
     template = load_template(checkout, relpath, ref.commit)
-    lifetime, lifetime_source, ttl, new_ttl = _requested_lifetime(args, ref, template.dev_branch)
+    lineage = follow_lineage(args, checkout, ref)
+    lifetime, lifetime_source, ttl, new_ttl = _requested_lifetime(
+        args, ref, template.dev_branch, lineage["branch"] if lineage else None)
+    # The lifetime record names the branch the stack runs; for a follow that is
+    # its tracked branch, while the stack record keeps the ref and its branch.
+    lifetime_ref = StackRef(ref.ref, ref.commit, lineage["branch"]) if lineage else ref
     caller = _caller(checkout, args)
     repo = naming.repo_identity(checkout)
     store = _store(entry, caller)
@@ -623,7 +663,7 @@ def _up(args) -> dict:
     def lifetime_request(previous: dict | None, ports: dict, hostnames: list[str]) -> dict:
         copy_id, explicit_copy = _copy_id(args, previous)
         draft = _draft(project=project, environment=environment, slug=slug, copy_id=copy_id,
-                       caller=caller, repo=repo, ref=ref, dev_branch=template.dev_branch,
+                       caller=caller, repo=repo, ref=lifetime_ref, dev_branch=template.dev_branch,
                        lifetime=lifetime, source=lifetime_source, ttl=ttl, template_path=template_path,
                        ports=ports, hostnames=hostnames, front_door=front_door, now=store.now())
         legacy = bool(previous) and not (previous or {}).get("copy_id")
@@ -639,6 +679,7 @@ def _up(args) -> dict:
                 "template": str(template_path), "submission": submission, "job_id": job_id,
                 "request_id": request_id, "secrets_missing": sorted(missing),
                 "generated_name": generated, "repo": repo, **_lifetime_fields(stored),
+                **({"source_branch": lineage["branch"], "source_commit": lineage["commit"]} if lineage else {}),
                 **_site_fields(validated, remote_name, slug)}
 
     request_id = getattr(args, "request_id", None) or f"stack-{slug}-{ref.commit[:12]}-{secrets.token_hex(3)}"
@@ -734,6 +775,7 @@ def _up(args) -> dict:
             "ttl_seconds": stored.get("ttl_seconds"), "expires_at": stored.get("expires_at"),
             "repo": repo, "dev_branch": template.dev_branch,
             "canonical": bool(stored.get("canonical")),
+            **({"source_branch": lineage["branch"], "source_commit": lineage["commit"]} if lineage else {}),
         }
         # Ports are held from here on, even if the submission below fails.
         registry.put(record)

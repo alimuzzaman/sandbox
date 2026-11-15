@@ -4694,6 +4694,15 @@ class TestRemotePreviewIdentity(unittest.TestCase):
     def _preview_fixture(self):
         owner = _HostingOwnerFixture(self, remote_name="preview")
         (owner.root / "sandbox.config.json").write_text('{"slug":"demo","plugins":{"demo":"."}}')
+        # DNS reads back what this run created; custody needs exactly that record.
+        created = []
+        def create_address(_zone_id, name, address, **_kwargs):
+            record = {"id": "preview-record-1", "type": "A", "name": name, "content": address}
+            created.append(record)
+            return record
+        owner.client.create_address.side_effect = create_address
+        owner.client.records.side_effect = lambda _zone_id, name, *_args, **_kwargs: [
+            record for record in created if record["name"] == name]
         args = types.SimpleNamespace(action="create", json=True, confirm=True,
             ttl_hours=24, remote="preview", project_dir=str(owner.root), name=None,
             base_domain="sandbox.asb.bd", request_id="preview/request-a")

@@ -1163,6 +1163,45 @@ Omit `dns` for the default, or set it to `auto` or `exact`; an explicit `null` i
   - Using image activation (`host image ...`).
   - The operator explicitly wants a dedicated per-target DNS record.
 
+#### Hostnames with DNS managed elsewhere (`cloudflare.external_dns`)
+
+When another system owns a hostname's DNS (for example a DNS-only CNAME to a CDN or
+Cloudflare-for-SaaS edge that proxies back to the Sandbox origin with the `Host` header
+kept), list it under `cloudflare.external_dns`:
+
+```yaml
+cloudflare:
+  proxied: false
+  tls: acme
+  external_dns:
+    - wp-demo.example.test      # must be host.primary or a host.aliases hostname
+```
+
+For each listed name:
+
+- `host apply` never creates, updates, adopts or deletes its DNS records and skips the
+  conflicting-CNAME and drift checks for it. The nginx route, the ACME certificate (the
+  HTTP-01 challenge must still reach the origin through the external DNS) and the health
+  check work as for any other route.
+- Zone coverage ignores it: it is never a shared-coverage name, and a target whose every
+  name is external makes no coverage decision at all.
+- The target's state records it under `dns_external` before any effect. `host destroy`
+  (and `host stack down`, and the lifetime reaper) never deletes, edits or restores a
+  record at that name, including an address record an earlier apply wrote before the
+  name became external. A record Sandbox owned that is already gone fails neither apply
+  nor destroy.
+- `host plan`, `host validate` and `host apply` name it (`external_dns` in JSON; a
+  "DNS managed outside Sandbox" line in text), and `host destroy` lists it as left
+  untouched.
+
+Every other name keeps the usual rules: wildcard routes, drift and ownership checks, and
+the conflicting-CNAME refusal still apply to it. Validation refuses an entry that is not a
+declared route hostname, a wildcard, a duplicate, a non-list value, `proxied: true`
+(proxied hosting relies on the proxied record Sandbox writes for its Origin CA and strict
+SSL) and `share.private` (Sandbox cannot check what fronts an external name, so it cannot
+promise no cache keeps serving it). Stack templates may use placeholders in the entries,
+for example `- wp-{slug}.example.test`.
+
 #### Overwriting Drifted DNS Records (`--allow-record-overwrite`)
 
 When applying host configuration (`sb host apply`), if an existing DNS record on Cloudflare differs from the target's desired IP or was created outside Sandbox, apply refuses by default (`managed_record_drift` or `record_not_owned`). Passing `--allow-record-overwrite` permits updating/overwriting the drifted record. The override applies only to a record already owned by the target. Covered exact-record recovery uses the recorded intent and refuses managed drift; it does not accept an overwrite override. Redirect CNAME updates follow the same ownership check.

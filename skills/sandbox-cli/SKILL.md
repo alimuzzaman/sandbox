@@ -517,6 +517,7 @@ before protected effects.
 
 - Stage 2: hosted targets under an enabled zone use shared wildcard coverage without writing per-target DNS records. Targets bind as dependents in the remote's zone coverage store.
 - Target DNS mode: `cloudflare.dns: auto | exact` in `sandbox.hosting.yml` (default: `auto`). `exact` is required for apex domains, multi-route targets, image activation, or explicit individual records.
+- `cloudflare.external_dns: [hostname, ...]` (DNS-only targets) lists declared route hostnames whose DNS another system owns: apply and destroy never write, adopt or delete their records.
 - Overwriting drifted records: `sb host apply --allow-record-overwrite` permits `managed_record_drift`, never `record_not_owned`.
 - Target destroy: `sb host destroy` removes the target's routes and releases the dependent in the store, while retaining the shared `*.zone` record and fallback catch-all file.
 - Fallback route (`/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`) returns generic 404 (`noindex`) and is protected: `sb remote edge --remove-route` refuses it.

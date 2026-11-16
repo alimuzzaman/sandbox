@@ -29,6 +29,7 @@ from pathlib import Path
 from .errors import RecoveryError
 
 PLAN_SECONDS = 24 * 3600
+PLAN_SCHEMA = 2
 _PLAN_ID_RE = re.compile(r"rp_[0-9a-f]{32}")
 _PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
@@ -109,6 +110,9 @@ class PruneStore:
         body = {key: value for key, value in record.items() if key not in {"plan_id", "expires_at"}}
         if record.get("plan_id") != plan_id or plan_id_for(body) != plan_id:
             raise RecoveryError("retention plan does not match its id", "invalid_retention_plan")
+        if record.get("schema_version") != PLAN_SCHEMA:
+            raise RecoveryError("retention plan uses an unsupported format; plan again",
+                                "retention_plan_unsupported")
         if not allow_expired and record.get("expires_at", 0) <= self.clock():
             raise RecoveryError("retention plan expired; plan again", "retention_plan_expired")
         return record
@@ -147,7 +151,6 @@ class PruneStore:
     def append(self, plan_id: str, event: dict) -> None:
         journals = self._journals()
         path = journals / f"{plan_id}.jsonl"
-        created = not path.exists()
         line = json.dumps({**event, "plan_id": plan_id,
                            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
                           sort_keys=True) + "\n"
@@ -157,10 +160,10 @@ class PruneStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        if created:
-            # Make the new journal's directory entries durable before any delete.
-            for directory in (journals, journals.parent, journals.parent.parent):
-                _fsync_dir(directory)
+        # Every append re-syncs the directory entries, so a retry after a crash
+        # or fsync failure still makes the journal durable before any delete.
+        for directory in (journals, journals.parent, journals.parent.parent):
+            _fsync_dir(directory)
 
 
 def _fsync_dir(path: Path) -> None:
@@ -174,7 +177,7 @@ def _fsync_dir(path: Path) -> None:
 def plan_body(destination: str, profile: str, keep_count: int, inventory: dict) -> dict:
     """The exact, content-bound facts a confirmed prune must still find."""
     return {
-        "schema_version": 1, "destination": destination, "profile": profile,
+        "schema_version": PLAN_SCHEMA, "destination": destination, "profile": profile,
         "keep_count": keep_count,
         "protected_sets": list(inventory["protected_sets"]),
         "candidates": [{"id": item["id"], "ciphertext_sha256": item["ciphertext_sha256"],
@@ -190,14 +193,15 @@ def _ordered(keys) -> list[str]:
 
 
 def apply_prune(store: PruneStore, plan: dict, fresh: dict, drive, *, recheck,
-                protected_present, remnant_matches) -> dict:
+                protected_present, remnant_matches, current_keys) -> dict:
     """Delete the planned candidates after the fresh inventory confirms them.
 
     ``recheck(set_id)`` re-verifies one candidate immediately before its
     deletes and returns its current object keys. ``protected_present()``
     re-lists the destination and confirms every protected manifest is still
-    there. ``remnant_matches(key, digest)`` checks a surviving ciphertext on
-    resume. Anything unexpected refuses before the next delete.
+    there with its verified ciphertext. ``current_keys(set_id)`` lists a set's
+    objects now. ``remnant_matches(key, digest)`` checks a surviving ciphertext
+    on resume. Anything unexpected refuses before the next delete.
     """
     plan_id = plan["plan_id"]
     planned = {item["id"]: item for item in plan["candidates"]}
@@ -225,7 +229,7 @@ def apply_prune(store: PruneStore, plan: dict, fresh: dict, drive, *, recheck,
             item = planned[set_id]
             if set_id in started:
                 approved = set(started[set_id]["objects"])
-                remaining = set(fresh["objects"].get(set_id, ()))
+                remaining = set(current_keys(set_id))
                 manifest = f"sets/{set_id}/manifest.json"
                 if set_id not in fresh_candidates:
                     # Resume: only remnants of the approved set may remain.

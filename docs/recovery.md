@@ -170,20 +170,24 @@ is no longer verified, a candidate's ciphertext changed, a new verified set appe
 verified set would be deleted. One apply runs at a time per controller (`retention_locked` otherwise). Right before each
 candidate's deletes, apply verifies that set again (manifest, profile, ciphertext digest and object,
 and exactly its manifest plus ciphertext with no other object) and re-lists the destination to
-confirm every protected manifest is still there. It then appends an `intent` line naming the exact
+confirm every protected manifest is still there and every protected ciphertext is still listed at
+its verified size. It then appends an `intent` line naming the exact
 object keys and ciphertext digest to `$SANDBOX_HOME/recovery/retention/deletions/<plan_id>.jsonl`,
 fsynced together with its directory entries, before deleting anything. It deletes the manifest
 first and then the ciphertext (`rclone deletefile`, never `purge`), removes the emptied folder, and
 appends an `outcome` line. If a run stops partway, the set is left without a manifest, so nothing
 treats it as restorable. Rerun with the same plan id to finish it. A started set may then lack its
-manifest, but only the objects its intent named may remain, and a remaining ciphertext must still
+manifest, but a listing taken right before its deletes may show only the objects its intent named, and a remaining ciphertext must still
 match the planned digest. Anything else refuses with `stale_retention_plan`. Sets without a manifest
 show up under `unclassified` as `incomplete_no_manifest` and are never deleted. Other refusals:
 `confirmation_required`, `retention_plan_unknown`, `retention_plan_expired`,
-`retention_plan_mismatch`, `missing_passphrase` and `drive_delete_failed`. There is no MCP form.
+`retention_plan_mismatch`, `retention_plan_unsupported` (a plan from an older format: plan again),
+`retention_locked`, `missing_passphrase` and `drive_delete_failed`. There is no MCP form.
 
 Limit: Drive offers no conditional delete, so a writer that replaces a candidate's object in the
-moment between its recheck and its delete is not detected. Captures never do this: they write new
+moment between its recheck and its delete is not detected, and the protected check compares listed
+sizes, not bytes, so a same-size corruption of a protected ciphertext during the run is caught only
+by the next plan's full verification. Captures never do this: they write new
 set ids and upload with `--immutable`.
 
 The matching MCP tools are `recovery_capture`, `recovery_capture_status`, `recovery_promote`, and

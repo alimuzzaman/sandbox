@@ -405,7 +405,8 @@ class RecoveryService:
                 skipped.append({"id": set_id, "reason": "passphrase_not_current" if not current
                                 else "invalid_created_at"})
                 continue
-            digests[set_id] = (manifest["ciphertext_sha256"], manifest["ciphertext_object"])
+            digests[set_id] = (manifest["ciphertext_sha256"], manifest["ciphertext_object"],
+                               manifest["ciphertext_size"])
             observed.append({"id": set_id, "prefix": "sets/", "status": "complete", "verified": True,
                              "passphrase_current": True, "created_at": manifest.get("created_at")})
         plan = build_retention_plan("sets/", tuple(observed), keep_count=keep_count)
@@ -416,6 +417,8 @@ class RecoveryService:
                             "ciphertext_object": digests[set_id][1]}
                            for set_id in plan.candidates],
             "newest_verified": newest, "skipped": skipped,
+            "protected_objects": {set_id: (digests[set_id][1], digests[set_id][2])
+                                  for set_id in plan.protected_sets},
             "objects": {set_id: tuple(paths) for set_id, paths in by_set.items()},
         }
 
@@ -435,9 +438,16 @@ class RecoveryService:
             raise RecoveryError("a candidate set holds unexpected objects", "stale_retention_plan")
         return keys
 
-    def _protected_present(self, protected: list) -> bool:
-        paths = {_listing_path(item) for item in self.drive.list("")}
-        return all(f"sets/{set_id}/manifest.json" in paths for set_id in protected)
+    def _protected_present(self, protected: dict) -> bool:
+        """Every protected manifest and ciphertext is still listed at its verified size."""
+        sizes = {_listing_path(item): item.get("Size") for item in self.drive.list("")}
+        return all(f"sets/{set_id}/manifest.json" in sizes and sizes.get(key) == size
+                   for set_id, (key, size) in protected.items())
+
+    def _current_keys(self, set_id: str) -> tuple[str, ...]:
+        return tuple(path for item in self.drive.list("")
+                     if (path := _listing_path(item)).startswith(f"sets/{set_id}/")
+                     and not item.get("IsDir"))
 
     def _remnant_matches(self, key: str, digest: str) -> bool:
         from .integrity import sha256_file
@@ -482,8 +492,9 @@ class RecoveryService:
                 outcome = apply_prune(
                     store, plan, fresh, self.drive,
                     recheck=lambda set_id: self._prune_recheck(set_id, profile, plan),
-                    protected_present=lambda: self._protected_present(plan["protected_sets"]),
+                    protected_present=lambda: self._protected_present(fresh["protected_objects"]),
                     remnant_matches=self._remnant_matches,
+                    current_keys=self._current_keys,
                 )
                 return result(True, "retention", remote=remote, status="pruned", data={
                     "profile": profile, "keep_count": keep_count, **outcome,

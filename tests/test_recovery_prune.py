@@ -163,6 +163,47 @@ class PruneTests(unittest.TestCase):
         self.assertNotIn("sets/infisical-01/archive.bin", self.drive.objects)
         self.assertIn("sets/infisical-02/archive.bin", self.drive.objects)
 
+    def test_resume_relists_and_refuses_a_set_completed_again(self):
+        plan_id = self.prune()["data"]["plan_id"]
+        self.interrupt_after_manifest(plan_id)
+        original = self.service._current_keys
+
+        def recreated(set_id):
+            self.drive.objects.setdefault(f"sets/{set_id}/manifest.json", b"{}")
+            return original(set_id)
+
+        with patch.object(self.service, "_current_keys", side_effect=recreated):
+            outcome = self.prune(plan_id=plan_id, confirm=True)
+        self.assertEqual(outcome["error"]["code"], "stale_retention_plan")
+        self.assertIn("sets/infisical-01/archive.bin", self.drive.objects)
+
+    def test_protected_ciphertext_loss_mid_run_stops_the_prune(self):
+        plan_id = self.prune()["data"]["plan_id"]
+        original = self.service._protected_present
+
+        def corrupted(protected):
+            self.drive.objects["sets/infisical-04/archive.bin"] = b"truncated"
+            return original(protected)
+
+        with patch.object(self.service, "_protected_present", side_effect=corrupted):
+            outcome = self.prune(plan_id=plan_id, confirm=True)
+        self.assertEqual(outcome["error"]["code"], "stale_retention_plan")
+        self.assertIn("sets/infisical-01/manifest.json", self.drive.objects)
+
+    def test_older_plan_format_refuses_explicitly(self):
+        planned = self.prune()["data"]
+        path = self.state / "retention/plans" / f"{planned['plan_id']}.json"
+        record = json.loads(path.read_text())
+        body = {k: v for k, v in record.items() if k not in {"plan_id", "expires_at"}}
+        body["schema_version"] = 1
+        from sandbox.recovery.prune import plan_id_for
+        old_id = plan_id_for(body)
+        (self.state / "retention/plans" / f"{old_id}.json").write_text(
+            json.dumps({**body, "plan_id": old_id, "expires_at": record["expires_at"]}))
+        os.chmod(self.state / "retention/plans" / f"{old_id}.json", 0o600)
+        self.assertEqual(self.prune(plan_id=old_id, confirm=True)["error"]["code"],
+                         "retention_plan_unsupported")
+
     def test_manifestless_sets_are_reported_and_never_candidates(self):
         data = self.prune()["data"]
         self.assertIn({"id": "infisical-00", "reason": "incomplete_no_manifest"}, data["unclassified"])

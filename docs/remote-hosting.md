@@ -3017,8 +3017,12 @@ lock, the lease file's holder and token match one `host_apply_lease_acquired` ev
 that job for the same lease path and target, with no `host_apply_lease_released` for
 that token; the job is terminal and not `interrupted`, recorded
 `owned_work_stopped: true` with no stop error, took the lease between its start and
-finish, and none of its recorded processes, its process group or any child job still
-runs. The ended job gets a `host_apply_lease_taken_over` event naming the new job, and
+finish, and none of its recorded processes, its process group or any descendant job
+still runs. That proves the job's own processes stopped, not a build or container
+Docker or BuildKit may still be running for it; check `docker ps` and the build
+before re-applying when that matters. The lease path is compared after normalizing
+its spelling. The new holder's `host_apply_lease_acquired` is written before the lease
+file, so a death between the two still leaves the record. The ended job gets a `host_apply_lease_taken_over` event naming the new job, and
 the operation prints `took over the target lease of ended job <id>`. This also ends
 the lease an apply keeps when its completion is withheld (effect unknown): it never
 releases its lease itself. Taking the lease does not clear persisted host-state fences:

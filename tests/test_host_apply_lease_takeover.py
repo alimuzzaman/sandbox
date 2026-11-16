@@ -163,6 +163,38 @@ class TakeOverEndedApplyLeaseTests(unittest.TestCase):
         self.recorded(registry, token)
         self.assert_refused(registry, body)
 
+    def test_an_unfinished_grandchild_is_refused(self):
+        token, body = self.hold()
+        registry = Registry(job(), job("3" * 32, parent=DEAD),
+                            job("5" * 32, lifecycle="running", parent="3" * 32))
+        self.recorded(registry, token)
+        self.assert_refused(registry, body)
+
+    def test_a_record_of_the_same_path_spelled_differently_is_matched(self):
+        token, _ = self.hold()
+        registry = Registry(job())
+        self.recorded(registry, token, path=str(self.path.parent) + "//./" + self.path.name)
+        self.assertEqual(self.take(registry)[1], DEAD)
+
+    def test_the_new_holder_is_recorded_before_the_lease_is_written(self):
+        token, body = self.hold()
+        registry = Registry(job())
+        self.recorded(registry, token)
+        with patch.object(recovery, "_write_lease", side_effect=OSError("disk full")):
+            with self.assertRaises(target_lease.LeaseUnavailable):
+                self.take(registry)
+        self.assertEqual(self.path.read_text(), body)
+        acquired = [payload for job_id, kind, payload in registry.events
+                    if job_id == TAKER and kind == leases.ACQUIRED]
+        self.assertEqual(len(acquired), 1)
+        self.assertEqual(acquired[0]["holder"], self.taker)
+        lease, _ = self.take(registry)
+        self.assertTrue(lease["recorded"])
+        self.assertIn({"holder": self.taker, "token": lease["token"], "path": str(self.path),
+                       "target": "project/dev"},
+                      [payload for job_id, kind, payload in registry.events
+                       if job_id == TAKER and kind == leases.ACQUIRED])
+
     def test_a_nested_apply_whose_parent_still_runs_is_taken_over(self):
         # A stack-up follower keeps running; only the nested apply holds the lease.
         token, _ = self.hold()
@@ -209,6 +241,15 @@ class AcquireAndReleaseRecordTests(unittest.TestCase):
         lease = leases.acquire_owner_lease(self.entry, "/h/.sandbox/x.lease", "project", "dev", self.run_lease())
         leases.release_owner_lease(lease, self.run_lease(code=1))
         self.assertEqual([kind for _, kind, _ in self.registry.events], [leases.ACQUIRED])
+
+    def test_a_taken_over_lease_is_recorded_once(self):
+        lease = {"path": "/h/.sandbox/x.lease", "token": "t" * 32,
+                 "owner": leases.apply_lease_owner(DEAD), "recorded": True}
+        with patch.object(leases, "take_over_ended_apply_lease", return_value=(lease, None)):
+            taken = leases.acquire_owner_lease(self.entry, "/h/.sandbox/x.lease", "project", "dev",
+                                               self.run_lease(code=target_lease.HELD_EXIT))
+        self.assertNotIn("recorded", taken)
+        self.assertEqual(self.registry.events, [])
 
     def test_a_held_lease_without_proof_still_refuses(self):
         with patch.object(leases, "take_over_ended_apply_lease", return_value=None):

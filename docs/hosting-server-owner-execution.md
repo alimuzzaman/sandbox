@@ -113,8 +113,9 @@ the takeover with both job ids. A command that reached its own `--timeout` makes
 exec exit 255, so its job ends `failed`; the supervisor records the proof for it
 only when nothing the job started still runs in its process group or session, holds
 its output, or (on Linux) still carries its job id. That proves the job's own processes stopped, not a
-command Docker left running in the container. Leases of applies, destroys and other
-controllers are never taken over (`docs/remote-hosting.md`, `host_apply_lease_held`).
+command Docker left running in the container. Exec never takes over the lease of an apply,
+destroy or other controller; a later server-owner apply takes over an ended apply's
+recorded lease by its own rule (`docs/remote-hosting.md`, `host_apply_lease_held`).
 
 The client's absolute deadline is the requested `--timeout` plus 25 seconds:
 the 10-second kill grace and 15 seconds to release the lease and publish the

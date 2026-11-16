@@ -43,6 +43,14 @@ native writer keys, exact gate and WordPress container ids, and the running gate
 source/configuration digest. Both types refuse serialization. Owner metadata and
 target inspection alone cannot construct an admitted request.
 
+`bind` takes the one full owner-target snapshot and one `docker inspect` of every
+bound container (id, running, Compose labels, command). Each effect re-checks once,
+just before it starts: same owner, same applied server summary, an active lifetime
+record for the same copy and commit, and the same bound containers. Nothing is
+re-checked after the effect, which ran by full container id. The WordPress admin
+click skips the gate's running-config query, because its effect runs only in the
+WordPress container; that grant refuses every gate verb (list, mint, revoke).
+
 The outward operations remain create/list/revoke. Their private adapter accepts
 only fixed gate verbs and fixed WordPress install/remove/admin programs. It has
 no arbitrary command, process callback, caller path, environment or actor input.
@@ -74,8 +82,8 @@ required integration inputs; this slice does not edit hosting.py.
 
 The owner path uses target_lease's actual cross-controller lease file protocol and
 RecoveryRepository target effect locks for all native keys. Direct targets are
-locked in stable order. Currentness is checked after locking, before effects and
-before returning a URL. Apply/recovery ownership refuses sharing.
+locked in stable order. Currentness is checked under those locks, right before
+each effect. Apply/recovery ownership refuses sharing.
 
 `owner_share_store` owns a private SQLite journal with a 256-operation bound,
 one reserved listing or session-revocation slot and fsynced commits. Opening the journal prunes confirmed

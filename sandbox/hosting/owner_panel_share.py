@@ -67,8 +67,7 @@ def _held(grants, row):
             # Separate port instances permit multiple targets in stable order.
             held.enter_context(repository.target_mutation_port("login-url", timeout_seconds=5)
                                .target_mutation_transaction(key))
-        for grant in grants:
-            grant.require_current()
+        # No re-check here: every effect under these locks re-checks in _execute.
         try:
             yield
         finally:
@@ -370,7 +369,7 @@ def wordpress_admin(request: gate.PanelRequest):
     """The same admitted create authority, narrowed to the applied WP declaration."""
     if type(request) is not gate.PanelRequest or request._seal is not gate._SEAL or request.action != "create":
         raise gate._refuse("panel_request_refused")
-    parent = gate.bind(request)
+    parent = gate.bind(request, gate_verbs=False)
     wp = parent.validated.get("autologin")
     if not wp or login.is_private(parent.validated["login_service"]):
         raise gate._refuse("sign_in_unavailable")
@@ -393,7 +392,6 @@ def wordpress_admin(request: gate.PanelRequest):
             gate._execute(parent, "wp_admin", row, store, grant_id=grant_id,
                 wordpress={"token_hash": hashlib.sha256(token.encode()).hexdigest(),
                            "issued_at": issued, "expires_at": expires})
-            parent.require_current()
             row["phase"] = "admin-completed"
             store.save(row)
             _audit(store, request, "sign_in", outcome="ok", expires_at=expires)

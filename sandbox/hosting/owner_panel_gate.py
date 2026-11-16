@@ -70,18 +70,53 @@ def _environment(owner):
     return owner_environment(owner)
 
 
-def _inspect(owner, container):
-    if not re.fullmatch(r"[0-9a-f]{12,64}", container):
+# One projection per bound container: identity, liveness, the Compose labels
+# the full snapshot selected it by, and its command (the gate's loader proof).
+_BOUND = ('[{{json .Id}},{{json .State.Running}},'
+          '{{json (index .Config.Labels "com.docker.compose.project")}},'
+          '{{json (index .Config.Labels "com.docker.compose.service")}},'
+          '{{json (index .Config.Labels "com.docker.compose.container-number")}},'
+          '{{json .Config.Cmd}}]')
+
+
+def _observe_bound(owner, snapshot):
+    """One `docker inspect` of every container the full snapshot bound.
+
+    Returns a comparable tuple of (service, index, full id, command). A missing,
+    stopped, relabelled or replaced container refuses; the caller compares the
+    tuple to the one taken at bind, so any restart into a new id also refuses.
+    """
+    from sandbox.hosting.lifetime.hoststore import compose_project_for
+    rows = [(r["name"], r["index"], r["container_id"]) for r in snapshot["services"]]
+    if not rows or len(rows) > 64 or any(not re.fullmatch(r"[0-9a-f]{12,64}", ident) for _, _, ident in rows):
         raise _refuse()
-    result = subprocess.run(["docker", "inspect", "--format", "{{json .Id}} {{json .Config.Cmd}}", container],
+    result = subprocess.run(["docker", "inspect", "--format", _BOUND, *(ident for _, _, ident in rows)],
         cwd=owner.home, env=_environment(owner), capture_output=True, text=True, timeout=10)
-    if result.returncode or result.stderr or len(result.stdout) > 262144:
+    if result.returncode or result.stderr or len(result.stdout) > 1048576:
+        raise _refuse("owner_share_target_changed")
+    lines = result.stdout.splitlines()
+    if len(lines) != len(rows):
+        raise _refuse("owner_share_target_changed")
+    project = compose_project_for(snapshot["project"], snapshot["environment"])
+    observed = []
+    for (service, index, ident), line in zip(rows, lines):
+        try:
+            full_id, running, label_project, label_service, number, command = json.loads(line)
+        except (ValueError, TypeError):
+            raise _refuse() from None
+        if (not isinstance(full_id, str) or not re.fullmatch(r"[0-9a-f]{64}", full_id)
+                or not full_id.startswith(ident) or running is not True
+                or label_project != project or label_service != service or number != str(index)):
+            raise _refuse("owner_share_target_changed")
+        observed.append((service, index, full_id, json.dumps(command)))
+    return tuple(observed)
+
+
+def _first(observed, service):
+    matches = [row for row in observed if row[0] == service and row[1] == 1]
+    if len(matches) != 1:
         raise _refuse()
-    identifier, command = result.stdout.strip().split(" ", 1)
-    identifier, command = json.loads(identifier), json.loads(command)
-    if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
-        raise _refuse()
-    return identifier, command
+    return matches[0][2], json.loads(matches[0][3])
 
 
 @dataclass(frozen=True, slots=True, init=False, repr=False)
@@ -92,6 +127,8 @@ class GateGrant:
     summary: dict = field(repr=False)
     gate_id: str
     wordpress_id: str | None
+    containers: tuple = field(repr=False)
+    gate_verbs: bool
     _seal: object = field(repr=False)
 
     def __reduce__(self):
@@ -106,25 +143,49 @@ class GateGrant:
         return "share"
 
     def require_current(self):
+        """Prove the bound target and containers are unchanged since bind.
+
+        bind() took the one full server-target snapshot. Every later re-check
+        repeats the cheap facts that snapshot rested on: the same installed
+        owner, the same applied server summary, an active lifetime record for
+        the same copy, and one inspect of every bound container returning the
+        same ids, labels and commands. _execute calls it once, right before an
+        effect; apply, destroy and recovery change the summary or the
+        containers, and cannot run meanwhile because the effect holds the
+        target lease and mutation lock (owner_panel_share._held).
+        """
         if self._seal is not _SEAL or self.request._seal is not _SEAL or current_owner() != self.owner:
             raise _refuse()
-        from sandbox.application.server_cli_targets import inspect_current_server_target
-        observed = inspect_current_server_target(origin_remote_name=self.request.remote,
-            name=self.summary["stack"]["slug"])
-        if observed != self.snapshot:
+        from sandbox.hosting.lifetime.hoststore import Store, compose_project_for
+        home = Path(self.owner.sandbox_home)
+        project, environment = self.snapshot["project"], self.snapshot["environment"]
+        try:
+            summary = panel_records.parse_target_summary(panel_records._read_json(
+                Path(panel_records.summary_path(str(home), project, environment))))
+        except (OSError, ValueError):
+            raise _refuse("owner_share_target_changed") from None
+        if summary != self.summary:
             raise _refuse("owner_share_target_changed")
-        for service, index, ident in ((r["name"], r["index"], r["container_id"]) for r in observed["services"]):
-            if index == 1 and service == "sandbox-login":
-                full_id, command = _inspect(self.owner, ident)
-                if full_id != self.gate_id or command != ["python3", "-c", login._LOADER, login._runtime_source()]:
-                    raise _refuse("owner_share_gate_changed")
-            wp = self.validated.get("autologin")
-            if wp and index == 1 and service == (wp.get("service") or self.validated["compose"]["service"]):
-                if _inspect(self.owner, ident)[0] != self.wordpress_id:
-                    raise _refuse("owner_share_gate_changed")
+        compose_project = compose_project_for(project, environment)
+        inventory = Store(home).peek(int(time.time()))
+        lifetimes = [item for item in inventory["records"] if item.get("compose_project") == compose_project]
+        if (inventory.get("truncated") or len(lifetimes) != 1
+                or any(item.get("compose_project") == compose_project for item in inventory.get("invalid", ()))
+                or lifetimes[0].get("state") != "active" or lifetimes[0].get("reap_run") is not None
+                or lifetimes[0].get("copy_id") != self.snapshot["copy_id"]
+                or lifetimes[0].get("commit") != self.snapshot["source_origin_commit"]):
+            raise _refuse("owner_share_target_changed")
+        if _observe_bound(self.owner, self.snapshot) != self.containers:
+            raise _refuse("owner_share_gate_changed")
 
 
-def bind(request: PanelRequest, slug: str | None = None) -> GateGrant:
+def bind(request: PanelRequest, slug: str | None = None, *, gate_verbs: bool = True) -> GateGrant:
+    """Issue the grant from one full target snapshot and one container binding.
+
+    gate_verbs=False (the WordPress admin click) skips the gate's running-config
+    query: that effect runs only in the WordPress container. Such a grant can
+    never run a gate verb (_execute refuses list/mint/revoke for it).
+    """
     if type(request) is not PanelRequest or request._seal is not _SEAL:
         raise _refuse("panel_request_refused")
     from sandbox.application.server_cli_targets import inspect_current_server_target
@@ -149,33 +210,33 @@ def bind(request: PanelRequest, slug: str | None = None) -> GateGrant:
     gate = [row for row in snapshot["services"] if row["name"] == "sandbox-login" and row["index"] == 1]
     if len(gate) != 1 or declaration["entries"].get("share", {}).get("mode") != "site_gate":
         raise _refuse()
-    gate_id, command = _inspect(owner, gate[0]["container_id"])
+    containers = _observe_bound(owner, snapshot)
+    gate_id, command = _first(containers, "sandbox-login")
     if command != ["python3", "-c", login._LOADER, login._runtime_source()]:
         raise _refuse("owner_share_upgrade_required")
     wordpress_id = None
     wp = access["validated"].get("autologin")
     if wp:
-        services = [row for row in snapshot["services"] if row["index"] == 1
-                    and row["name"] == (wp.get("service") or access["validated"]["compose"]["service"])]
-        if len(services) != 1:
-            raise _refuse()
-        wordpress_id = _inspect(owner, services[0]["container_id"])[0]
+        wordpress_id = _first(containers, wp.get("service") or access["validated"]["compose"]["service"])[0]
     result = object.__new__(GateGrant)
     for key, value in (("request", request), ("owner", owner), ("snapshot", snapshot), ("summary", summary),
-                       ("gate_id", gate_id), ("wordpress_id", wordpress_id), ("_seal", _SEAL)):
+                       ("gate_id", gate_id), ("wordpress_id", wordpress_id), ("containers", containers),
+                       ("gate_verbs", gate_verbs is True), ("_seal", _SEAL)):
         object.__setattr__(result, key, value)
+    if not result.gate_verbs:
+        return result
     reply = _capabilities(result)
     if (reply.get("config_digest") != access["gate_config_digest"]
             or reply.get("panel_access_digest") != digest(declaration)
             or reply.get("panel_target_digest") != access["target_digest"]
             or "owner-panel-gate-v1" not in reply.get("capabilities", [])):
         raise _refuse("owner_share_upgrade_required")
-    result.require_current()
     return result
 
 
 def _capabilities(grant):
-    grant.require_current()
+    # Only bind() calls this, directly after observing the bound containers.
+    # It is a read-only query; every effect re-checks in _execute.
     result = subprocess.run(["docker", "exec", grant.gate_id, "python3", "-c", login._LOADER,
         login._runtime_source(), "site", "capabilities", grant.entry], cwd=grant.owner.home,
         env=_environment(grant.owner), capture_output=True, text=True, timeout=15)
@@ -193,6 +254,8 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
     """
     if type(grant) is not GateGrant or grant._seal is not _SEAL:
         raise _refuse()
+    if verb in ("list", "mint", "revoke") and grant.gate_verbs is not True:
+        raise _refuse()
     if verb == "list":
         if grant.request.action not in ("list", "revoke"):
             raise _refuse()
@@ -204,6 +267,8 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
             raise _refuse()
     else:
         raise _refuse()
+    # The one re-check per effect: a target or container swapped since bind
+    # refuses here, before the child starts.
     grant.require_current()
     data = json.dumps(payload, sort_keys=True).encode() if payload is not None else b""
     if len(data) > 786432:
@@ -263,7 +328,8 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
         stdout, stderr = child.communicate(b"\x01" + data, timeout=30)
         if child.returncode or stderr or len(stdout) > 1048576:
             raise _refuse("owner_share_effect_unknown")
-        grant.require_current()
+        # No re-check after the effect: it ran by full container id, which only
+        # the bound container answers, and proving it afterwards changes nothing.
         if verb.startswith("wp_"):
             reply = {"ok": True}
         else:

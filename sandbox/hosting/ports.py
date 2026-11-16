@@ -362,28 +362,32 @@ def inspect_one(cid):
     return rows
 def scan():
     # Facts cover every container running in the first list OR the re-list, so
-    # nothing that ran during the scan is silently left out. A container that
-    # leaves the running list but still exists (a restart loop drops in and out
-    # every few seconds) keeps the publications it showed: conservative, it
-    # comes back on the same ports. One that appears is inspected too; if it is
-    # already removed again it publishes nothing. A listed container removed
-    # outright (a recreate may hand its port to a new id) restarts the scan.
+    # nothing that ran during the scan is silently left out. Any listed
+    # container removed outright (a recreate may hand its port to a new id)
+    # restarts the scan. One that leaves the running list but still exists (a
+    # restart loop drops in and out every few seconds) keeps its host ports
+    # only as an unknown-owner reservation with no container addresses: its
+    # stale facts can refuse a port but never prove socket ownership.
     first=listed()
-    publications=[]
+    rows={}
     for cid in first:
-        rows=inspect_one(cid)
-        if rows is None: raise Churn()
-        publications.extend(rows)
+        found=inspect_one(cid)
+        if found is None: raise Churn()
+        rows[cid]=found
     second=listed()
     for cid in second:
-        if cid in first: continue
-        publications.extend(inspect_one(cid) or [])
+        if cid in rows: continue
+        found=inspect_one(cid)
+        if found is None: raise Churn()
+        rows[cid]=found
     for cid in first:
         if cid in second: continue
         code,_,err=attempt(['docker','inspect','--format','{{json .Id}}',cid])
         if code:
             if vanished(cid,code,err): raise Churn()
             fail()
+        rows[cid]=[dict(row,project='unknown:'+cid,service='unknown',container_addresses=[]) for row in rows[cid]]
+    publications=[row for cid in rows for row in rows[cid]]
     if len(publications)>ROWS: fail()
     return publications
 def settled_scan():

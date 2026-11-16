@@ -3892,10 +3892,12 @@ refuse. Valid exact primary publications retain their port, including saved
 aliases proven by retained physical machine evidence. Unknown owners reserve ports.
 Interface-qualified addresses are normalized while reserving the same TCP number.
 The Docker scan lists running containers twice and takes publications from every
-container in either list. One that leaves the list but still exists (a restart
-loop) keeps the publications it showed; one removed outright (Docker's own
+container in either list. Any listed container removed outright (Docker's own
 "no such object" reply for that id) restarts the scan from a fresh list, and churn
-that does not settle within eight scans refuses. Any other Docker failure still
+that does not settle within eight scans refuses. One that leaves the list but
+still exists (a restart loop) keeps its host ports only as an unknown-owner
+reservation without container addresses, so its stale facts can refuse a port but
+never prove socket ownership. Any other Docker failure still
 refuses. The exec-target snapshot restarts its project's list/inspect/re-list the
 same way whenever a container vanishes or the re-list differs.
 For IPv6, both `[address%interface]` and the `[address]%interface` form emitted

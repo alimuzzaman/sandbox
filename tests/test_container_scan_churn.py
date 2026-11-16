@@ -15,7 +15,7 @@ from sandbox.hosting import ports
 from sandbox.hosting import server_target_selection as selection
 from sandbox.hosting.target_resolution import TargetRefusal
 
-A, B, C = "a" * 64, "b" * 64, "c" * 64
+A, B, C, D = "a" * 64, "b" * 64, "c" * 64, "d" * 64
 
 
 def _probe():
@@ -60,12 +60,29 @@ class PortProbeScanTests(unittest.TestCase):
         self.assertEqual([row["container"] for row in publications], [A])
         self.assertEqual(calls.count(["docker", "ps"]), 3)
 
-    def test_a_restart_loop_leaving_the_list_keeps_its_ports_without_a_rescan(self):
+    def test_a_restart_loop_leaving_the_list_reserves_its_ports_as_unknown(self):
         # ocp-trial wp-setup in `Restarting (1)` dropped in and out of docker ps.
         probe, calls = self.scan([[A, B], [A]], self.ok)
-        publications = probe["settled_scan"]()
-        self.assertEqual(sorted(row["container"] for row in publications), [A, B])
+        publications = {row["container"]: row for row in probe["settled_scan"]()}
+        self.assertEqual(sorted(publications), [A, B])
+        self.assertEqual(publications[A]["project"], "p")
+        self.assertEqual((publications[B]["project"], publications[B]["service"],
+                          publications[B]["container_addresses"]), ("unknown:" + B, "unknown", []))
         self.assertEqual(calls.count(["docker", "ps"]), 2)
+
+    def test_a_departed_owner_cannot_vouch_for_its_old_port(self):
+        # The expected owner stops after its inspect; a foreign container may
+        # take its port and address. Its stale row must refuse, not accept.
+        probe, _ = self.scan([[A], []], self.ok)
+        publications = probe["settled_scan"]()
+        port = publications[0]["port"]
+        snapshot = {"version": 1, "complete": True, "identity": {"target": "t", "uid": 1, "home": "/h"},
+                    "engine_id": "e", "observed_at": 0, "publications": publications,
+                    "listeners": [{"address": "127.0.0.1", "port": port, "container": None}],
+                    "reservations": [], "end": "sandbox.ports.v1.complete"}
+        snapshot = ports.validate_snapshot(snapshot, now=0)
+        with self.assertRaises(ports.PortObservationError):
+            ports.check_pair(snapshot, port, {"project": "p", "service": "web", "container_port": 80})
 
     def test_a_container_entering_the_list_is_inspected_too(self):
         probe, calls = self.scan([[A], [A, C]], self.ok)
@@ -73,10 +90,15 @@ class PortProbeScanTests(unittest.TestCase):
         self.assertEqual(sorted(row["container"] for row in publications), [A, C])
         self.assertEqual(calls.count(["docker", "ps"]), 2)
 
-    def test_a_container_entering_and_already_removed_publishes_nothing(self):
-        probe, _ = self.scan([[A], [A, C]], lambda cid: (
-            (1, "", f"error: no such object: {cid}\n") if cid == C else self.ok(cid)))
-        self.assertEqual([row["container"] for row in probe["settled_scan"]()], [A])
+    def test_a_container_entering_and_already_removed_rescans_and_keeps_its_replacement(self):
+        # C vanishes before its inspect and D takes its port: D must be counted.
+        probe, calls = self.scan([[A], [A, C], [A, D], [A, D]], lambda cid: (
+            (1, "", f"error: no such object: {cid}\n") if cid == C else
+            (0, _item(cid, 9000), "") if cid == D else self.ok(cid)))
+        publications = probe["settled_scan"]()
+        self.assertEqual(sorted((row["container"], row["port"]) for row in publications),
+                         [(A, 8097), (D, 9000)])
+        self.assertEqual(calls.count(["docker", "ps"]), 4)
 
     def test_a_listed_container_removed_outright_restarts_the_scan(self):
         removed = {B}

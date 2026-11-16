@@ -378,6 +378,10 @@ class RecoveryService:
                 by_set.setdefault(set_id, []).append(path)
         observed, digests, skipped = [], {}, []
         for set_id in sorted(set_id for set_id, paths in by_set.items()
+                             if f"sets/{set_id}/manifest.json" not in paths):
+            # Interrupted upload or prune; profile unknown, never deletable here.
+            skipped.append({"id": set_id, "reason": "incomplete_no_manifest"})
+        for set_id in sorted(set_id for set_id, paths in by_set.items()
                              if f"sets/{set_id}/manifest.json" in paths):
             try:
                 # Cheap profile filter first, so other profiles' sets are not
@@ -401,18 +405,46 @@ class RecoveryService:
                 skipped.append({"id": set_id, "reason": "passphrase_not_current" if not current
                                 else "invalid_created_at"})
                 continue
-            digests[set_id] = manifest["ciphertext_sha256"]
+            digests[set_id] = (manifest["ciphertext_sha256"], manifest["ciphertext_object"])
             observed.append({"id": set_id, "prefix": "sets/", "status": "complete", "verified": True,
                              "passphrase_current": True, "created_at": manifest.get("created_at")})
         plan = build_retention_plan("sets/", tuple(observed), keep_count=keep_count)
         newest = plan.protected_sets[-1] if plan.protected_sets else None
         return {
             "protected_sets": plan.protected_sets,
-            "candidates": [{"id": set_id, "ciphertext_sha256": digests[set_id]}
+            "candidates": [{"id": set_id, "ciphertext_sha256": digests[set_id][0],
+                            "ciphertext_object": digests[set_id][1]}
                            for set_id in plan.candidates],
             "newest_verified": newest, "skipped": skipped,
             "objects": {set_id: tuple(paths) for set_id, paths in by_set.items()},
         }
+
+    def _prune_recheck(self, set_id: str, profile: str, plan: dict) -> tuple[str, ...]:
+        """Re-verify one candidate right before deleting it; return its object keys."""
+        from .restore import verify_manifest
+        expected = next(item for item in plan["candidates"] if item["id"] == set_id)
+        manifest = verify_manifest(self.drive, set_id)
+        if (manifest.get("profiles") != [profile]
+                or manifest["ciphertext_sha256"] != expected["ciphertext_sha256"]
+                or manifest["ciphertext_object"] != expected["ciphertext_object"]):
+            raise RecoveryError("a candidate set changed since planning", "stale_retention_plan")
+        keys = tuple(path for item in self.drive.list("")
+                     if (path := _listing_path(item)).startswith(f"sets/{set_id}/")
+                     and not item.get("IsDir"))
+        if set(keys) != {f"sets/{set_id}/manifest.json", expected["ciphertext_object"]}:
+            raise RecoveryError("a candidate set holds unexpected objects", "stale_retention_plan")
+        return keys
+
+    def _protected_present(self, protected: list) -> bool:
+        paths = {_listing_path(item) for item in self.drive.list("")}
+        return all(f"sets/{set_id}/manifest.json" in paths for set_id in protected)
+
+    def _remnant_matches(self, key: str, digest: str) -> bool:
+        from .integrity import sha256_file
+        with tempfile.TemporaryDirectory(prefix="sandbox-recovery-prune-") as directory:
+            target = Path(directory) / "object"
+            self.drive.get_file(key, target)
+            return sha256_file(target) == digest
 
     def retention_prune(self, profile: str, *, keep_count: int, state_root: Path,
                         plan_id: str | None = None, confirm: bool = False,
@@ -447,7 +479,12 @@ class RecoveryService:
                         or plan.get("keep_count") != keep_count):
                     raise RecoveryError("retention plan selectors differ", "retention_plan_mismatch")
                 fresh = self._profile_inventory(profile, keep_count)
-                outcome = apply_prune(store, plan, fresh, self.drive)
+                outcome = apply_prune(
+                    store, plan, fresh, self.drive,
+                    recheck=lambda set_id: self._prune_recheck(set_id, profile, plan),
+                    protected_present=lambda: self._protected_present(plan["protected_sets"]),
+                    remnant_matches=self._remnant_matches,
+                )
                 return result(True, "retention", remote=remote, status="pruned", data={
                     "profile": profile, "keep_count": keep_count, **outcome,
                     "requires_confirmation": False,

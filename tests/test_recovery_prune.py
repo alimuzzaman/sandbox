@@ -114,6 +114,60 @@ class PruneTests(unittest.TestCase):
         self.assertTrue(resumed["ok"], resumed)
         self.assertEqual(self.sets(), ["hermes-01", "infisical-00", "infisical-04", "infisical-05"])
 
+    def interrupt_after_manifest(self, plan_id):
+        original = self.drive.delete
+        calls = []
+
+        def failing(key):
+            calls.append(key)
+            if len(calls) == 2:
+                raise RecoveryError("Drive operation failed", "drive_delete_failed")
+            original(key)
+
+        with patch.object(self.drive, "delete", side_effect=failing):
+            self.prune(plan_id=plan_id, confirm=True)
+
+    def test_resume_refuses_a_changed_remnant_or_unapproved_object(self):
+        plan_id = self.prune()["data"]["plan_id"]
+        self.interrupt_after_manifest(plan_id)
+        self.drive.objects["sets/infisical-01/archive.bin"] = b"replaced"
+        self.assertEqual(self.prune(plan_id=plan_id, confirm=True)["error"]["code"],
+                         "stale_retention_plan")
+        self.drive.objects["sets/infisical-01/archive.bin"] = b"ciphertext-infisical-01"
+        self.drive.objects["sets/infisical-01/late.bin"] = b"new"
+        self.assertEqual(self.prune(plan_id=plan_id, confirm=True)["error"]["code"],
+                         "stale_retention_plan")
+        self.assertIn("sets/infisical-01/archive.bin", self.drive.objects)
+
+    def test_unexpected_object_in_a_candidate_refuses_before_any_delete(self):
+        plan_id = self.prune()["data"]["plan_id"]
+        self.drive.objects["sets/infisical-01/extra.bin"] = b"unplanned"
+        outcome = self.prune(plan_id=plan_id, confirm=True)
+        self.assertEqual(outcome["error"]["code"], "stale_retention_plan")
+        self.assertIn("sets/infisical-01/manifest.json", self.drive.objects)
+
+    def test_protected_set_vanishing_mid_prune_stops_further_deletes(self):
+        plan_id = self.prune()["data"]["plan_id"]
+        original = self.service._protected_present
+        checks = []
+
+        def vanishing(protected):
+            checks.append(1)
+            if len(checks) == 2:
+                del self.drive.objects["sets/infisical-05/manifest.json"]
+            return original(protected)
+
+        with patch.object(self.service, "_protected_present", side_effect=vanishing):
+            outcome = self.prune(plan_id=plan_id, confirm=True)
+        self.assertEqual(outcome["error"]["code"], "stale_retention_plan")
+        self.assertNotIn("sets/infisical-01/archive.bin", self.drive.objects)
+        self.assertIn("sets/infisical-02/archive.bin", self.drive.objects)
+
+    def test_manifestless_sets_are_reported_and_never_candidates(self):
+        data = self.prune()["data"]
+        self.assertIn({"id": "infisical-00", "reason": "incomplete_no_manifest"}, data["unclassified"])
+        self.assertNotIn("infisical-00", data["candidates"])
+
     def test_newest_verified_set_is_never_a_candidate_and_expired_plans_refuse(self):
         planned = self.prune(keep_count=1)["data"]
         self.assertEqual(planned["protected_sets"], ("infisical-05",))

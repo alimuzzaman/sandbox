@@ -22,6 +22,7 @@ import os
 import re
 import stat
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -112,22 +113,41 @@ class PruneStore:
             raise RecoveryError("retention plan expired; plan again", "retention_plan_expired")
         return record
 
-    def journaled(self, plan_id: str) -> set[str]:
+    def journaled(self, plan_id: str) -> dict[str, dict]:
+        """Started sets of a plan: the exact objects each intent approved."""
         path = self._journals() / f"{plan_id}.jsonl"
         if not path.exists():
-            return set()
-        started = set()
+            return {}
+        started: dict[str, dict] = {}
         for line in path.read_text("utf-8").splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(event, dict) and event.get("phase") == "intent":
-                started.add(event.get("set_id"))
+            if (isinstance(event, dict) and event.get("phase") == "intent"
+                    and isinstance(event.get("set_id"), str)
+                    and isinstance(event.get("objects"), list)):
+                started.setdefault(event["set_id"], event)
         return started
 
+    @contextmanager
+    def locked(self):
+        """One prune apply at a time on this controller."""
+        import fcntl
+        descriptor = os.open(self._journals() / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise RecoveryError("another retention prune is running", "retention_locked") from None
+            yield
+        finally:
+            os.close(descriptor)
+
     def append(self, plan_id: str, event: dict) -> None:
-        path = self._journals() / f"{plan_id}.jsonl"
+        journals = self._journals()
+        path = journals / f"{plan_id}.jsonl"
+        created = not path.exists()
         line = json.dumps({**event, "plan_id": plan_id,
                            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
                           sort_keys=True) + "\n"
@@ -137,6 +157,18 @@ class PruneStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        if created:
+            # Make the new journal's directory entries durable before any delete.
+            for directory in (journals, journals.parent, journals.parent.parent):
+                _fsync_dir(directory)
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def plan_body(destination: str, profile: str, keep_count: int, inventory: dict) -> dict:
@@ -145,43 +177,79 @@ def plan_body(destination: str, profile: str, keep_count: int, inventory: dict) 
         "schema_version": 1, "destination": destination, "profile": profile,
         "keep_count": keep_count,
         "protected_sets": list(inventory["protected_sets"]),
-        "candidates": [{"id": item["id"], "ciphertext_sha256": item["ciphertext_sha256"]}
+        "candidates": [{"id": item["id"], "ciphertext_sha256": item["ciphertext_sha256"],
+                        "ciphertext_object": item["ciphertext_object"]}
                        for item in inventory["candidates"]],
     }
 
 
-def apply_prune(store: PruneStore, plan: dict, fresh: dict, drive) -> dict:
-    """Delete the planned candidates after the fresh inventory confirms them."""
+def _ordered(keys) -> list[str]:
+    # The manifest goes first: an interrupted prune leaves an incomplete set
+    # that no restore or later plan treats as verified.
+    return sorted(keys, key=lambda key: (not key.endswith("/manifest.json"), key))
+
+
+def apply_prune(store: PruneStore, plan: dict, fresh: dict, drive, *, recheck,
+                protected_present, remnant_matches) -> dict:
+    """Delete the planned candidates after the fresh inventory confirms them.
+
+    ``recheck(set_id)`` re-verifies one candidate immediately before its
+    deletes and returns its current object keys. ``protected_present()``
+    re-lists the destination and confirms every protected manifest is still
+    there. ``remnant_matches(key, digest)`` checks a surviving ciphertext on
+    resume. Anything unexpected refuses before the next delete.
+    """
     plan_id = plan["plan_id"]
-    planned = {item["id"]: item["ciphertext_sha256"] for item in plan["candidates"]}
-    started = store.journaled(plan_id)
+    planned = {item["id"]: item for item in plan["candidates"]}
     fresh_candidates = {item["id"]: item["ciphertext_sha256"] for item in fresh["candidates"]}
     fresh_protected = set(fresh["protected_sets"])
     newest = fresh.get("newest_verified")
-    if not set(plan["protected_sets"]) <= fresh_protected:
-        raise RecoveryError("a planned protected set is no longer verified", "stale_retention_plan")
-    if newest is None or newest in planned:
-        raise RecoveryError("the newest verified set would be deleted", "stale_retention_plan")
-    for set_id, digest in planned.items():
-        if set_id in fresh_candidates:
-            if fresh_candidates[set_id] != digest:
-                raise RecoveryError("a candidate set changed since planning", "stale_retention_plan")
-        elif set_id not in started or set_id in fresh_protected:
-            raise RecoveryError("retention candidates are stale", "stale_retention_plan")
-    if set(fresh_candidates) - set(planned):
-        raise RecoveryError("retention candidates changed since planning", "stale_retention_plan")
-    deleted = []
-    for set_id in sorted(planned):
-        store.append(plan_id, {"phase": "intent", "set_id": set_id,
-                               "ciphertext_sha256": planned[set_id]})
-        keys = sorted((key for key in fresh["objects"].get(set_id, ())
-                       if key.startswith(f"sets/{set_id}/")),
-                      key=lambda key: (not key.endswith("/manifest.json"), key))
-        # The manifest goes first: an interrupted prune leaves an incomplete
-        # set that no restore or later plan treats as verified.
-        for key in keys:
-            drive.delete(key)
-        drive.remove_empty_dir(f"sets/{set_id}")
-        store.append(plan_id, {"phase": "outcome", "set_id": set_id, "objects": len(keys)})
-        deleted.append(set_id)
+    with store.locked():
+        started = store.journaled(plan_id)
+        if not set(plan["protected_sets"]) <= fresh_protected:
+            raise RecoveryError("a planned protected set is no longer verified", "stale_retention_plan")
+        if newest is None or newest in planned:
+            raise RecoveryError("the newest verified set would be deleted", "stale_retention_plan")
+        for set_id, item in planned.items():
+            if set_id in fresh_protected:
+                raise RecoveryError("a candidate set is now protected", "stale_retention_plan")
+            if set_id in fresh_candidates:
+                if fresh_candidates[set_id] != item["ciphertext_sha256"]:
+                    raise RecoveryError("a candidate set changed since planning", "stale_retention_plan")
+            elif set_id not in started:
+                raise RecoveryError("retention candidates are stale", "stale_retention_plan")
+        if set(fresh_candidates) - set(planned):
+            raise RecoveryError("retention candidates changed since planning", "stale_retention_plan")
+        deleted = []
+        for set_id in sorted(planned):
+            item = planned[set_id]
+            if set_id in started:
+                approved = set(started[set_id]["objects"])
+                remaining = set(fresh["objects"].get(set_id, ()))
+                manifest = f"sets/{set_id}/manifest.json"
+                if set_id not in fresh_candidates:
+                    # Resume: only remnants of the approved set may remain.
+                    if manifest in remaining or not remaining <= approved:
+                        raise RecoveryError("a started set changed since its intent", "stale_retention_plan")
+                    for key in remaining:
+                        if key == item["ciphertext_object"] and not remnant_matches(
+                                key, item["ciphertext_sha256"]):
+                            raise RecoveryError("a started set changed since its intent",
+                                                "stale_retention_plan")
+                    keys = _ordered(remaining)
+                else:
+                    keys = _ordered(recheck(set_id))
+                    if not set(keys) <= approved:
+                        raise RecoveryError("a started set changed since its intent", "stale_retention_plan")
+            else:
+                keys = _ordered(recheck(set_id))
+                store.append(plan_id, {"phase": "intent", "set_id": set_id, "objects": keys,
+                                       "ciphertext_sha256": item["ciphertext_sha256"]})
+            if not protected_present():
+                raise RecoveryError("a protected set disappeared during the prune", "stale_retention_plan")
+            for key in keys:
+                drive.delete(key)
+            drive.remove_empty_dir(f"sets/{set_id}")
+            store.append(plan_id, {"phase": "outcome", "set_id": set_id, "objects": len(keys)})
+            deleted.append(set_id)
     return {"plan_id": plan_id, "deleted": deleted, "kept": sorted(fresh_protected)}

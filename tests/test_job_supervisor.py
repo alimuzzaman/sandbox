@@ -1032,6 +1032,9 @@ class NormalExitCessationTests(unittest.TestCase):
             ("in the supervisor's own cgroup", self.SESSION, None),
             ("below the supervisor's cgroup", self.SESSION + "/child", None),
             ("under the user's manager (systemd-run --user)", manager + "/app.slice/run-1.scope", None),
+            ("the user's manager itself", manager, None),
+            ("a name that only extends the manager's", manager + "-x", []),
+            ("outside the supervisor's cgroup namespace", "/../../x", []),
             ("a cgroup that cannot be read", None, None),
         )
         for name, path, expected in cases:
@@ -1052,7 +1055,11 @@ class NormalExitCessationTests(unittest.TestCase):
 
     def test_a_failed_apply_beside_a_new_container_hands_its_lease_over(self):
         """b3ad3e8d: an apply that ends failed with its rollback withheld keeps its
-        target lease, so the next apply's takeover rests on the exit proof alone."""
+        target lease, so the next apply's takeover rests on the exit proof alone.
+
+        The real command is not in the fake /proc, so in the second arm the scan
+        refuses for want of its start time; the parent walk to init is pinned by
+        ``test_an_unreadable_process_outside_the_jobs_cgroups_does_not_count``."""
         from sandbox.application import server_cli_apply_lease as leases
         from sandbox.application import server_cli_exec_recovery as recovery
         from sandbox.hosting import target_lease

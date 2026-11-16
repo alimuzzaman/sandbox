@@ -86,12 +86,12 @@ the user manager's `user@<uid>.service`: a fork inherits its parent's cgroup and
 unprivileged process cannot move into another login session's scope or a system
 cgroup, so a container's process (`docker-<id>.scope`, such as a renderer's
 non-dumpable `chrome` running as the owner's UID), a system service's, or a
-concurrent job's in its own SSH session is never the job's. Before this, such a
-container starting while a job ran left about 4% of normal exits on xspeed-dev
-unproven, and a failed apply's target lease stuck. Unreadable, cgroup v1 or hybrid
-paths, or an unknown supervisor cgroup, leave the walk below to decide. Like a
-container running as another user, a container the job asked Docker for is not
-counted. Otherwise its parent chain (field 4 of
+concurrent job's in its own SSH session is never the job's. This assumes the
+supervisor runs where Sandbox starts it (an SSH session scope or a `systemctl
+--user` unit), with no other delegated cgroup above it. Unreadable, cgroup v1 or
+hybrid paths, or an unknown supervisor cgroup, leave the walk below to decide.
+Container processes never carry the job's ID, so a container the job started,
+readable or not, is not counted. Otherwise its parent chain (field 4 of
 each `stat`) decides. Only the supervisor's own ancestors, the supervisor, the
 command and init can adopt an orphaned job process, so walking up from its
 parent: reaching one of those fails the check (`process_environment_unavailable`);

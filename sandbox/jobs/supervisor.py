@@ -494,9 +494,9 @@ def _normal_exit_unproven(command: subprocess.Popen, job_id: str, observed_desce
     is a descendant the supervisor saw earlier, or (where ``/proc`` exists)
     still carries this job's ``SANDBOX_DURABLE_JOB_ID``. A reused PID refuses
     too. Not detected: a process that cleared its environment or changed user
-    after leaving both the group and the session, as on the stop paths, or one
-    a privileged manager started outside the job's cgroups (a container the
-    job asked Docker for).
+    after leaving both the group and the session, as on the stop paths, or a
+    container the job asked Docker for: container processes never carry the
+    job's ID, so readable or not, they are not counted.
     """
     if not streams_eof:
         return "output_pipes_held"
@@ -591,10 +591,9 @@ def _job_environment_holders(job_id: str, command_pid: int) -> list[int] | None:
     parent's cgroup, and an unprivileged process can move only within what
     its user was delegated. A container's process (``docker-<id>.scope``,
     placed there by containerd, adopted by init), a system service's, or
-    another login session's (a concurrent job's, a Tailscale SSH incubator)
-    is never the job's own fork. On xspeed-dev such processes (a renderer
-    container's non-dumpable ``chrome`` runs as the owner's UID) left about
-    4% of normal exits unproven, and a failed apply's target lease stuck.
+    another login session's (a concurrent job's)
+    is never the job's own fork (a renderer container's non-dumpable
+    ``chrome`` runs as the owner's UID on xspeed-dev).
 
     A link that cannot be read, a parent that started after its child (its
     PID was reused) or a chain longer than 64 makes the scan ``None``, unless
@@ -658,7 +657,11 @@ _LINEAGE_DEPTH = 64
 
 
 def _cgroup(directory: Path) -> str | None:
-    """A process's cgroup v2 path, or ``None`` (unreadable, v1 or hybrid)."""
+    """A process's cgroup v2 path, or ``None`` (unreadable, v1 or hybrid).
+
+    Stricter than ``_linux_cgroup_path``: on a hybrid host the unified path
+    alone does not show where a process sits, so no conclusion is drawn.
+    """
     try:
         lines = (directory / "cgroup").read_text().splitlines()
     except (OSError, UnicodeDecodeError):
@@ -674,6 +677,12 @@ def _job_cgroups() -> tuple[str, ...] | None:
     The supervisor's own cgroup subtree (forks inherit it, and a delegated
     subtree is where a descendant may move itself) and its user manager's
     (``systemd-run --user``, a tmux server). ``None`` turns the cgroup rule off.
+
+    This assumes no cgroup delegated to the user lies above the supervisor's
+    own other than ``user@<uid>.service``: true for SSH session scopes and
+    ``systemctl --user`` units, where Sandbox runs supervisors. A supervisor
+    in a child of another delegated subtree (a ``Delegate=yes`` system unit)
+    would let a job move a process into a sibling this rule skips.
     """
     own = _cgroup(_PROC / str(os.getpid()))
     if own is None:

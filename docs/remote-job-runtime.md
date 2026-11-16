@@ -656,8 +656,9 @@ the registry only grows: job evidence reads copy the whole database and its WAL 
 memory and refuse above 256 MiB (it was 32 MiB until a busy server's registry crossed
 it and every nested apply refused with `recovery_context_invalid`). The host also runs
 this sweep by default: each job that releases its slot on the host's own registry then
-cleans at most 10 terminal jobs finished more than 7 days ago (the same rules, the
-same bookmark), so a host nobody runs `job-retention` on still catches up. It also prunes, at most 10 at a
+looks at no more than 10 candidates and cleans those finished more than 7 days ago
+(the same rules and full cleanup as `job-retention`, the same bookmark; policy-retained
+CI rows are looked at again, so the scan budget keeps one release short), so a host nobody runs `job-retention` on still catches up. It also prunes, at most 10 at a
 time, the output rows of terminal jobs whose logs an earlier cleanup removed before this
 pruning existed. Freed pages are reused but the file does not shrink; reclaiming space
 needs a `VACUUM` while no job runs. Candidate selection reaches noncompleted terminal

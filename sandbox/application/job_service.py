@@ -1583,7 +1583,8 @@ class JobService:
     def retention_sweep(self, *, retention_days: int = 7, limit: int = 200,
                         storage_pressure: bool = False,
                         cursor: str | None = None,
-                        cursor_job_id: str | None = None) -> dict:
+                        cursor_job_id: str | None = None,
+                        max_scanned: int | None = None) -> dict:
         if isinstance(retention_days, bool) or not isinstance(retention_days, int) or retention_days < 0:
             raise ValueError("retention_days must be a non-negative whole number")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -1594,7 +1595,10 @@ class JobService:
         if storage_pressure and not self.storage.is_under_pressure():
             storage_pressure = False
         before_finished_at = None if storage_pressure else cutoff.isoformat().replace("+00:00", "Z")
-        max_scanned = max(limit * 2, 200)
+        if max_scanned is None:
+            max_scanned = max(limit * 2, 200)
+        elif isinstance(max_scanned, bool) or not isinstance(max_scanned, int) or max_scanned < 1:
+            raise ValueError("max_scanned must be a positive whole number")
         total_scanned = 0
         explicit_cursor = cursor is not None or cursor_job_id is not None
         current_cursor = cursor if cursor is not None else cursor_job_id
@@ -1609,7 +1613,7 @@ class JobService:
             )
 
         while len(cleaned) < limit and total_scanned < max_scanned:
-            batch_limit = min(limit - len(cleaned), 50)
+            batch_limit = min(limit - len(cleaned), 50, max_scanned - total_scanned)
             try:
                 rows = self.repository.list_retention_candidates(
                     limit=batch_limit,

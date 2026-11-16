@@ -1418,6 +1418,34 @@ class JobServiceTests(unittest.TestCase):
 
             repository.close()
 
+    def test_retention_sweep_scan_budget_bounds_cleanups_of_retained_rows(self):
+        """The after-release sweep looks at no more rows than its scan budget."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat().replace("+00:00", "Z")
+            for i in range(25):
+                row, _ = repository.accept(JobSubmission(
+                    "ci", temp, "p", "local", f"ci-{i}", ("echo", "ok"), 60,
+                    SourceIdentity("source"), request_id=f"req-retained-{i}"))
+                repository.transition(row["job_id"], "running")
+                repository.transition(row["job_id"], "succeeded", exit_code=0)
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='retained' WHERE job_id=?",
+                    (old, row["job_id"]))
+            calls = []
+            service.cleanup = lambda job_id: calls.append(job_id) or {
+                "job_id": job_id, "ok": True, "removed": [], "cleanup_state": "retained"}
+            sweep = service.retention_sweep(retention_days=7, limit=10, max_scanned=10)
+            self.assertEqual(len(calls), 10)
+            self.assertTrue(sweep["truncated"])
+            service.retention_sweep(retention_days=7, limit=10, max_scanned=10)
+            self.assertEqual(len(set(calls)), 20)
+            with self.assertRaises(ValueError):
+                service.retention_sweep(max_scanned=0)
+            repository.close()
+
     def test_retention_bookmark_restarts_when_stale_and_ignores_explicit_cursors(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

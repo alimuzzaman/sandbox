@@ -568,39 +568,29 @@ def _cmd_materialization(args, as_json: bool) -> None:
     if operation not in {"inspect", "reconcile"} or not name:
         die("usage: ./sb remote materialization <inspect|reconcile> <name> "
             "[--project-dir DIR] [--operation-id OPERATION_ID] [--json]")
+    operation_id = getattr(args, "operation_id", None)
+    if operation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        die("--operation-id must be the 32-hex operation id the sync reported")
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
     entry = {**entry, "_remote_name": name}
-    base = sr.deploy_target_path(entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve())
-    # Only the paths this project derives: its deploy path and the workspace
-    # copy of one label. A path prefix would also match another project
-    # named like `<project>-workspace-...`.
-    explicit_label = getattr(args, "materialization_workspace", None)
     try:
-        workspace = sr.remote_workspace_path(
-            entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve(),
-            explicit_label or "default")
-    except ValueError:
-        die("--workspace must be a workspace label")
-    candidates = {base, workspace}
-    # Without a local record, an explicit --workspace names that copy's lock;
-    # otherwise the deploy path's.
-    fallback = workspace if explicit_label else base
-    recorded = {path: op for path, op in sr.recorded_materialization_operations(entry).items()
-                if path in candidates}
-    operation_id = getattr(args, "operation_id", None)
-    if operation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", operation_id):
-        die("--operation-id must be the 32-hex operation id the sync reported")
+        base = sr.deploy_target_path(entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve())
+    except (RuntimeError, OSError, ValueError) as exc:
+        die(f"remote '{name}' deploy path could not be resolved: {sr.redact_text(str(exc))[:200]}")
+    recorded = sr.recorded_materialization_operations(entry)
     if operation_id is None:
-        if len(recorded) != 1:
-            die("no single recorded operation for this project; pass --operation-id "
-                "(the sync's error names it)" + (f"; recorded: {sorted(recorded.values())}" if recorded else ""))
-        target, operation_id = next(iter(recorded.items()))
+        # Only this project's own deploy path; a path prefix would also match
+        # another project named like `<project>-workspace-...`.
+        if base not in recorded:
+            die("no recorded operation for this project; pass --operation-id "
+                "(the sync's error names it)")
+        target, operation_id = base, recorded[base]
     else:
-        everywhere = sr.recorded_materialization_operations(entry)
-        target = next((path for path, op in recorded.items() if op == operation_id),
-                      next((path for path, op in everywhere.items() if op == operation_id), fallback))
+        # An explicit id names its operation: the path it was recorded under
+        # (a preview or host target), else this project's deploy path.
+        target = next((path for path, op in recorded.items() if op == operation_id), base)
     payload = {"ok": True, "name": name, "operation_id": operation_id, "target_path": target,
                "error": None}
     try:

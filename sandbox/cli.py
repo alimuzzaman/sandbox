@@ -1017,9 +1017,6 @@ Per-project (each plugin carries its own sandbox.config.json):
              "over SSH; that command also requires `--confirm`")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
-    remote_p.add_argument("--workspace", dest="materialization_workspace", default=None,
-        help="for `remote materialization`: the job workspace label whose copy to "
-             "inspect (default: default)")
     remote_p.add_argument("--operation-id", dest="operation_id", default=None,
         help="for `remote materialization`: the original sync's operation id "
              "(default: the one this controller recorded for the project)")

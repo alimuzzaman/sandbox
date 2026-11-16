@@ -99,6 +99,16 @@ class ReviewFindingTests(_Base):
         self.assertNotEqual(second, first)
         self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {TARGET: second})
 
+    def test_a_record_released_elsewhere_is_dropped_once_the_lock_is_ours(self):
+        _remote._record_materialization(REMOTE, TARGET, "a" * 32)  # released by hand elsewhere
+        with _remote._remote_materialization_lock(REMOTE, TARGET):
+            pass
+        self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {})
+
+    def test_an_unreadable_record_store_is_no_record(self):
+        with patch.object(_remote, "_materialization_pending", side_effect=OSError("ro")):
+            self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {})
+
     def test_forgetting_a_released_operation_keeps_a_newer_record(self):
         _remote._record_materialization(REMOTE, TARGET, "a" * 32)
         _remote._record_materialization(REMOTE, TARGET, "b" * 32)  # a later lost sync
@@ -137,22 +147,24 @@ class MaterializationCommandTests(_Base):
         self.assertIsNone(self.transport.record)
         self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {})
 
-    def test_another_projects_workspace_named_like_ours_is_not_selected(self):
+    def test_another_projects_path_named_like_ours_is_not_selected(self):
         foreign = TARGET + "-workspace-0123456789abcd"  # project `project-workspace-...`
         _remote._record_materialization(REMOTE, foreign, "d" * 32)
         args = argparse.Namespace(action="materialization", name="reconcile", ssh_url="box",
                                   project_dir="/tmp", operation_id=None, json=True)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit):
-            remote_cmd._cmd_materialization(args, True)  # no single operation of ours
+            remote_cmd._cmd_materialization(args, True)  # nothing recorded for our own path
         self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {foreign: "d" * 32})
-        ours = _remote.remote_workspace_path(REMOTE, "/tmp", "default")
-        self.assertNotEqual(ours, foreign)
-        _remote._record_materialization(REMOTE, ours, "e" * 32)
-        self.transport.record = dict(schema_version=1, operation_id="e" * 32, state="complete",
-                                     step=1, exit_code=0)
-        code, payload = self.command("inspect")
-        self.assertEqual((code, payload["operation_id"], payload["target_path"]), (0, "e" * 32, ours))
+
+    def test_a_bad_operation_id_refuses_before_any_remote_call(self):
+        args = argparse.Namespace(action="materialization", name="inspect", ssh_url="box",
+                                  project_dir="/tmp", operation_id="not-hex", json=True)
+        with patch.object(_remote, "deploy_target_path", side_effect=AssertionError("ssh")), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            remote_cmd._cmd_materialization(args, True)
+        self.assertEqual(self.transport.calls, [])
 
     def test_reconcile_refuses_an_active_receipt(self):
         self.lose_a_sync()
@@ -171,18 +183,6 @@ class MaterializationCommandTests(_Base):
             remote_cmd._cmd_materialization(args, True)
         self.assertEqual(json.loads(out.getvalue())["state"], "released")
         self.assertIsNone(self.transport.record)
-
-    def test_an_explicit_workspace_and_operation_target_that_copy_without_a_record(self):
-        self.transport.record = dict(schema_version=1, operation_id="b" * 32, state="complete",
-                                     step=2, exit_code=0)
-        args = argparse.Namespace(action="materialization", name="inspect", ssh_url="box",
-                                  project_dir="/tmp", operation_id="b" * 32, json=True,
-                                  materialization_workspace="ci")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            remote_cmd._cmd_materialization(args, True)
-        self.assertEqual(json.loads(out.getvalue())["target_path"],
-                         _remote.remote_workspace_path(REMOTE, "/tmp", "ci"))
 
     def test_a_wrong_operation_id_releases_nothing(self):
         self.transport.record = dict(schema_version=1, operation_id="b" * 32, state="complete",

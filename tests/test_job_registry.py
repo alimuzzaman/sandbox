@@ -47,6 +47,29 @@ class JobRegistryTests(unittest.TestCase):
                          "output_streams", "job_events", "metrics_index", "artifacts",
                          "compatibility_differences"}.issubset(names))
 
+    def test_retention_prunes_a_cleaned_jobs_output_rows_but_keeps_other_events(self):
+        repo = self.repository()
+        row, _ = repo.accept(submission("request-prune"))
+        job_id = row["job_id"]
+        repo.append_event(job_id, "lease", {"kept": True})
+        for index in range(5):
+            repo.append_event(job_id, "output", {"sequence": index})
+        other, _ = repo.accept(submission("request-other"))
+        repo.append_event(other["job_id"], "output", {"sequence": 0})
+        repo.append_event(other["job_id"], "output", {"sequence": 1})
+        repo.mark_retained_metadata_unavailable(job_id, logs=True)
+        kinds = [tuple(item) for item in repo.connection.execute(
+            "SELECT kind, sequence FROM job_events WHERE job_id=? ORDER BY sequence", (job_id,))]
+        newest = max(sequence for _, sequence in kinds)
+        self.assertIn("lease", [kind for kind, _ in kinds])
+        self.assertEqual([item for item in kinds if item[0] == "output"], [("output", newest)])
+        self.assertEqual(repo.append_event(job_id, "after", {}), newest + 1)
+        self.assertEqual(repo.connection.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id=? AND kind='output'", (other["job_id"],)).fetchone()[0], 2)
+        repo.mark_retained_metadata_unavailable(job_id, artifacts=True)  # no logs: nothing pruned
+        self.assertEqual(len(list(repo.connection.execute(
+            "SELECT 1 FROM job_events WHERE job_id=?", (job_id,)))), len(kinds) + 1)
+
     def test_accept_is_durable_and_idempotent(self):
         repo = self.repository()
         first, replay = repo.accept(submission())

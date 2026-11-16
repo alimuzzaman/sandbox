@@ -1395,6 +1395,12 @@ class JobRepository:
             if logs:
                 connection.execute("UPDATE output_streams SET available=0, updated_at=? WHERE job_id=?",
                                    (_now(), job_id))
+                # One row per output chunk indexes the removed log files and is
+                # never read again; it is what grows the registry. The newest
+                # event stays so a later event never reuses a sequence number.
+                connection.execute(
+                    "DELETE FROM job_events WHERE job_id=? AND kind='output' AND sequence < "
+                    "(SELECT MAX(sequence) FROM job_events WHERE job_id=?)", (job_id, job_id))
             if artifacts:
                 connection.execute("UPDATE artifacts SET status='expired', reason='cleanup_removed' "
                                    "WHERE job_id=? AND status='available'", (job_id,))

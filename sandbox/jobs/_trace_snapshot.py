@@ -16,8 +16,11 @@ import sys
 import time
 
 
-SOURCE_BYTES = 32 * 1024 * 1024
-IMAGE_BYTES = 32 * 1024 * 1024
+# A busy server's registry passed 32 MiB (database plus WAL) on 2026-11-16 and
+# every nested apply's admission read refused as recovery_context_invalid. The
+# cap bounds memory, not correctness; retention keeps the file from creeping.
+SOURCE_BYTES = 256 * 1024 * 1024
+IMAGE_BYTES = 256 * 1024 * 1024
 FRAME_LIMIT = 65_536
 READ_BYTES = 65_536
 _WAL_VERSION = 3_007_000

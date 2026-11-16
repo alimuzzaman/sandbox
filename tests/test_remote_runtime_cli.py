@@ -166,6 +166,8 @@ class MigratePinTests(unittest.TestCase):
                         patch.object(sr, "migrate_remote_mcp_service",
                                      return_value={"status": "applied" if confirm else "planned",
                                                    "service": service}) as migrate, \
+                        patch("sandbox.hosting.login_reapply_plan.plan",
+                              return_value={"state": "complete", "needs_reapply": ["sandbox-host-b"]}), \
                         patch("builtins.print") as printed:
                     remote_cmd._cmd_service(args, as_json=True)
                 record = sr.get_remote("vps")
@@ -180,6 +182,7 @@ class MigratePinTests(unittest.TestCase):
         self.assertEqual([pin["holder"] for pin in data["would_break_pins"]], [holder])
         self.assertIn("stops_serving_below_protocol", data)
         self.assertIn("control protocol", data["protocol_note"])
+        self.assertEqual(data["login_reapply"]["needs_reapply"], ["sandbox-host-b"])
         upload.assert_not_called()
 
     def test_confirm_without_acknowledgment_refuses_with_zero_writes(self):

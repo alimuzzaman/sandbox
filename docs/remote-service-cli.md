@@ -23,6 +23,13 @@ this checkout's, `migrate --plan` (and the confirmed result) adds
 installed revision fails its runtime check until it migrates again. Check with
 whoever owns that pin before confirming.
 
+`migrate --plan` also reports `login_reapply`: it reads the running `sandbox-login`
+containers on the remote (`docker ps`/`docker inspect` only) and compares each one's
+login runtime with this checkout's. `needs_reapply` names the Compose projects whose
+owner-panel sign-in and sharing will refuse `owner_share_upgrade_required` after this
+migrate until each stack is reapplied; `current` are already on it. When Docker cannot
+be read it is `state: unavailable` and the plan still succeeds.
+
 `status` bounds each user-systemd probe and returns `probe_state` (`complete`,
 `partial`, or `unavailable`) with a stable `probe_error` when evidence is
 incomplete. SSH transport failures return a degraded JSON result and a nonzero

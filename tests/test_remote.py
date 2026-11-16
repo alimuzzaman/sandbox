@@ -4027,6 +4027,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args = types.SimpleNamespace(name="migrate", ssh_url="myvps", confirm=False, plan=False)
                 with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "absent"}), \
                      patch.object(remote_cmd.sr, "migrate_remote_mcp_service", return_value={"status": "planned", "service": {}}) as migrate, \
+                     patch("sandbox.hosting.login_reapply_plan.plan", return_value={}), \
                      patch("builtins.print"):
                     remote_cmd._cmd_service(args, as_json=True)
                 self.assertIsNone(migrate.call_args.args[4])
@@ -4045,6 +4046,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=observed), \
                      patch.object(remote_cmd.sr, "migrate_remote_mcp_service",
                                   return_value={"status": "planned", "service": {}}), \
+                     patch("sandbox.hosting.login_reapply_plan.plan", return_value={}), \
                      redirect_stdout(out):
                     remote_cmd._cmd_service(args, as_json=True)
                 data = json.loads(out.getvalue())["data"]
@@ -4065,7 +4067,10 @@ class TestRemoteServiceCommand(unittest.TestCase):
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
                     remote_cmd._cmd_service(args, as_json=True)
-                ssh_run.assert_not_called()
+                # The only remote call is the read-only login runtime listing.
+                from sandbox.hosting import login_reapply_plan
+                self.assertEqual([shlex.split(call.args[1]) for call in ssh_run.call_args_list],
+                                 [["python3", "-c", login_reapply_plan._PROGRAM]])
                 upload.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")

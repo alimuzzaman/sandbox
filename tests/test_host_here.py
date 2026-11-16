@@ -525,6 +525,85 @@ class WaitTests(unittest.TestCase):
         self.assertEqual(json.loads(printed.call_args.args[0])["outer_job_id"], "f" * 32)
 
 
+class RelayReadsRealJobOutputTests(unittest.TestCase):
+    """Feedback 25074608: the relay must read through the real job-output API and its page cap."""
+
+    def setUp(self):
+        from sandbox.application.job_service import JobService
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        from sandbox.jobs.registry import JobRepository
+        from sandbox.jobs.storage import JobStorage
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repository = JobRepository(Path(self.temp.name) / "jobs.sqlite")
+        self.addCleanup(self.repository.close)
+        self.job, _ = self.repository.accept(JobSubmission(
+            "server-cli", "/project", "project", "local", "default", ("host",), 60, SourceIdentity("s")))
+        self.storage = JobStorage(self.temp.name, free_disk_reserve=0)
+        self.storage.job_dir(self.job["job_id"], create=True)
+        self.service = JobService(self.repository, self.storage, None, launcher=lambda _: None)
+
+    def write(self, *chunks: bytes):
+        from sandbox.jobs.output import JobOutputStore
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        for chunk in chunks:
+            output.append("stdout", chunk)
+        output.finish("stdout")
+        self.repository.transition(self.job["job_id"], "running")
+        self.repository.transition(self.job["job_id"], "succeeded", exit_code=0)
+
+    def relay(self) -> dict:
+        deps = {"job_service": self.service}
+        with mock.patch("sandbox.application.context.durable_job_dependencies", return_value=deps):
+            return here._submit_and_wait(
+                SimpleNamespace(action="stack", image_action="list"), ["sb", "--timeout", "900"], "req",
+                submit=lambda argv: self.job["job_id"], view=lambda job_id: {"lifecycle": "succeeded"},
+                output=None, sleep=lambda _s: None, clock=lambda: 0)
+
+    def test_a_small_result_is_relayed(self):
+        self.write(b"progress\n", json.dumps({"ok": True, "action": "stack-list", "stacks": []}).encode() + b"\n")
+        result = self.relay()
+        self.assertEqual((result["ok"], result["action"], result["job_id"]), (True, "stack-list", self.job["job_id"]))
+
+    def test_a_result_larger_than_one_page_after_more_than_the_budget_of_noise(self):
+        from sandbox.jobs.models import MAX_OUTPUT_PAGE_BYTES
+        stacks = [{"name": f"s{i}", "note": "x" * 200} for i in range(1500)]
+        line = json.dumps({"ok": True, "action": "stack-list", "stacks": stacks}).encode() + b"\n"
+        self.assertGreater(len(line), MAX_OUTPUT_PAGE_BYTES)
+        noise = [b"n" * 4095 + b"\n"] * 300  # 1.2 MiB before the result
+        self.write(*noise, line)
+        result = self.relay()
+        self.assertEqual(len(result["stacks"]), 1500)
+
+
+class RelayRefusalTests(unittest.TestCase):
+    def test_output_that_never_ends_or_repeats_its_cursor_or_is_gone_refuses(self):
+        import base64
+
+        class Endless:
+            def __init__(self, repeat=False):
+                self.n, self.repeat = 0, repeat
+            def read_output(self, job_id, query):
+                self.n += 1
+                return {"data": base64.b64encode(b"x").decode(), "has_more": True,
+                        "cursor": "c" if self.repeat else f"c{self.n}"}
+
+        class Gone:
+            def read_output(self, job_id, query):
+                raise RuntimeError("output_unavailable")
+        for service, code in ((Endless(), "host_here_result_unreadable"),
+                              (Endless(repeat=True), "host_here_result_unreadable"),
+                              (Gone(), "host_here_output_unavailable")):
+            with self.subTest(code=code, service=type(service).__name__), \
+                    self.assertRaises(here.HereRefusal) as caught:
+                here._stdout_tail("e" * 32, service=service)
+            self.assertEqual((caught.exception.code, caught.exception.job_id), (code, "e" * 32))
+        endless = Endless()
+        with self.assertRaises(here.HereRefusal):
+            here._stdout_tail("e" * 32, service=endless)
+        self.assertEqual(endless.n, here.RELAY_MAX_PAGES)
+
+
 class DispatchRoutingTests(unittest.TestCase):
     def test_here_owner_commands_never_reach_the_controller_path(self):
         args = _args(["host", "follow", "status", "--here", "--json"])

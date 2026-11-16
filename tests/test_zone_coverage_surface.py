@@ -435,13 +435,16 @@ exit(0)
         with open(nginx_conf, "w") as f:
             f.write(f"""
 pid {self.td}/nginx.pid;
+error_log {self.td}/error.log;
 events {{ worker_connections 64; }}
 http {{
+    access_log off;
     include {vhost_path};
 }}
 """)
 
-        r = subprocess.run([nginx_bin, "-t", "-c", nginx_conf], capture_output=True, text=True, env=synthetic_environment({"HOME": self.td}))
+        # Own log paths: an unprivileged user cannot open the packaged ones.
+        r = subprocess.run([nginx_bin, "-e", os.path.join(self.td, "error.log"), "-t", "-c", nginx_conf], capture_output=True, text=True, env=synthetic_environment({"HOME": self.td}))
         self.assertEqual(r.returncode, 0, f"nginx -t failed:\nstdout: {r.stdout}\nstderr: {r.stderr}")
         self.assertIn("syntax is ok", r.stderr)
         self.assertIn("test is successful", r.stderr)

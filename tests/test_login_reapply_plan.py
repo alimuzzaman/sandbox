@@ -39,7 +39,7 @@ class LoginReapplyPlanTest(unittest.TestCase):
     def ssh_run(self, remote, command, *, timeout):
         argv = shlex.split(command)
         self.assertEqual(argv[:2], ["python3", "-c"])
-        return run_test_process([sys.executable, "-c", argv[2]], text=True,
+        return run_test_process([sys.executable, "-c", argv[2]], text=True, capture_output=True,
                                 env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin"})
 
     def test_a_stack_running_another_login_runtime_needs_a_reapply(self):

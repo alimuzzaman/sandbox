@@ -4025,7 +4025,10 @@ class TestRemoteServiceCommand(unittest.TestCase):
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
                     remote_cmd._cmd_service(args, as_json=True)
-                ssh_run.assert_not_called()
+                # The only remote call is the read-only login runtime listing.
+                from sandbox.hosting import login_reapply_plan
+                self.assertEqual([shlex.split(call.args[1]) for call in ssh_run.call_args_list],
+                                 [["python3", "-c", login_reapply_plan._PROGRAM]])
                 upload.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")

@@ -1253,6 +1253,37 @@ class StackAccessDeclarationTests(unittest.TestCase):
             _validate(env)
 
 
+class VouchDeclarationTests(unittest.TestCase):
+    def environment(self, vouch="SHARE_VOUCH_KEY"):
+        env = _environment(_login_block())
+        env["host"]["aliases"].append({"hostname": "share.example.test", "mode": "serve"})
+        env["secrets"]["generated"] = {"SHARE_VOUCH_KEY": "SOURCE_SHARE_VOUCH_KEY"}
+        env["share"] = {"hostname": "share.example.test", "vouch_secret": vouch}
+        return env
+
+    def test_the_key_reaches_the_gate_by_reference_and_the_config_never_names_it(self):
+        validated = _validate(self.environment())
+        override = hosting.compose_override(validated, 18080)
+        self.assertIn('      SANDBOX_LOGIN_VOUCH_KEY: "${SHARE_VOUCH_KEY}"\n', override)
+        config = login.runtime_config(validated["login_service"])
+        self.assertIs(config["vouch"], True)
+        self.assertNotIn("SHARE_VOUCH_KEY", json.dumps(config))
+        self.assertNotIn("vouch_secret", validated["login_service"]["share"])
+
+    def test_without_it_nothing_changes(self):
+        env = self.environment()
+        del env["share"]["vouch_secret"]
+        validated = _validate(env)
+        self.assertNotIn("SANDBOX_LOGIN_VOUCH_KEY", hosting.compose_override(validated, 18080))
+        self.assertIs(login.runtime_config(validated["login_service"])["vouch"], False)
+
+    def test_it_must_name_a_generated_secret(self):
+        for value in ("CAPTURE_PASSWORD", "SOURCE_SHARE_VOUCH_KEY", "MISSING", 7, None):
+            with self.subTest(value=value), self.assertRaises(hosting.HostingError) as caught:
+                _validate(self.environment(value))
+            self.assertIn("share.vouch_secret", str(caught.exception))
+
+
 class LinkedAccessDeclarationTests(unittest.TestCase):
     environment = StackAccessDeclarationTests.environment
 

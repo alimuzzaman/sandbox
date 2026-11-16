@@ -862,5 +862,79 @@ class ShortLinkTests(_Gate):
             self.assertNotIn(value, blob)
 
 
+
+VOUCH_KEY = "v" * 48
+
+
+class VouchHeaderTests(_Gate):
+    """share.vouch_secret: the gate signs its word that a live session sent the request."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = dict(self.config, vouch=True)
+        self.public, self.health = runtime.create_servers(
+            self.config, "", self.state_dir, clock=lambda: self.now, log=self.logs.append,
+            public_address=("127.0.0.1", 0), health_address=("127.0.0.1", 0), vouch_key=VOUCH_KEY)
+        _serve(self.public)
+        self.addCleanup(self.public.server_close)
+        self.addCleanup(self.public.shutdown)
+        self.addCleanup(self.health.server_close)
+
+    def vouches(self):
+        return [value for name, value in self.upstream_store["requests"][-1]["headers"]
+                if name.lower() == runtime.VOUCH_HEADER.lower()]
+
+    def test_a_session_forward_carries_one_verifiable_header_and_drops_the_visitors(self):
+        token, link_id = self.mint(scope="/")
+        cookie = self.cookie(token)
+        response, _ = self.request("GET", "/admin", headers={
+            "Cookie": cookie, runtime.VOUCH_HEADER: "v1 forged", "x-sandbox-share-session": "v1 forged"})
+        self.assertEqual(response.status, 200)
+        [value] = self.vouches()
+        fields = value.split(" ")
+        self.assertEqual(len(fields), 9)
+        version, host, entry, session_id, link, scope, issued, expires, mac = fields
+        self.assertEqual((version, host, entry, link, scope), ("v1", GATE, "share", link_id, "/"))
+        self.assertRegex(session_id, r"^s-[0-9a-f]{32}$")
+        self.assertEqual(int(issued), int(self.now))
+        self.assertGreater(int(expires), int(self.now))
+        expected = hmac.new(VOUCH_KEY.encode(), value.rsplit(" ", 1)[0].encode(), hashlib.sha256).hexdigest()
+        self.assertTrue(hmac.compare_digest(mac, expected))
+        listed = self.manage("list", "share")["sessions"]
+        self.assertEqual([item["id"] for item in listed], [session_id])
+
+    def test_no_session_means_no_forward_and_no_header(self):
+        self.mint(scope="/")
+        before = len(self.upstream_store["requests"])
+        response, _ = self.request("GET", "/admin", headers={runtime.VOUCH_HEADER: "v1 forged"})
+        self.assertEqual(response.status, 404)
+        self.assertEqual(len(self.upstream_store["requests"]), before)
+
+    def test_a_revoked_session_gets_no_further_header(self):
+        token, link_id = self.mint(scope="/")
+        cookie = self.cookie(token)
+        self.manage("revoke", "share", link_id)
+        before = len(self.upstream_store["requests"])
+        response, _ = self.request("GET", "/admin", headers={"Cookie": cookie})
+        self.assertEqual(response.status, 404)
+        self.assertEqual(len(self.upstream_store["requests"]), before)
+
+    def test_a_declared_key_that_is_missing_or_short_refuses_to_start(self):
+        for key in (None, "", "short"):
+            with self.assertRaises(ValueError):
+                runtime.create_servers(self.config, "", self.state_dir, vouch_key=key,
+                                       public_address=("127.0.0.1", 0), health_address=("127.0.0.1", 0))
+
+
+class VouchStrippedWithoutKeyTests(_Gate):
+    def test_without_a_key_the_visitors_copy_is_still_dropped(self):
+        token, _ = self.mint(scope="/")
+        cookie = self.cookie(token)
+        response, _ = self.request("GET", "/", headers={"Cookie": cookie, runtime.VOUCH_HEADER: "v1 forged"})
+        self.assertEqual(response.status, 200)
+        names = [name.lower() for name, _ in self.upstream_store["requests"][-1]["headers"]]
+        self.assertNotIn(runtime.VOUCH_HEADER.lower(), names)
+
+
 if __name__ == "__main__":
     unittest.main()

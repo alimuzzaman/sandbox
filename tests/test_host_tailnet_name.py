@@ -166,6 +166,13 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"ssl_certificate_key /etc/nginx/sandbox-tailnet/{FQDN}/privkey.pem;", text)
         self.assertEqual(text.count(f'if ($host != "{FQDN}") {{ return 444; }}'), 2)
 
+    def test_both_server_blocks_admit_only_tailnet_peers(self):
+        text = self.block()
+        rules = "allow 100.64.0.0/10;\n    allow fd7a:115c:a1e0::/48;\n    deny all;"
+        self.assertEqual(text.count(rules), 2)
+        for server in text.split("server {")[1:]:
+            self.assertIn(rules, server)
+
     def test_the_block_serves_a_marker_derived_from_its_own_text(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location(

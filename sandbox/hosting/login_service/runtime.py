@@ -12,6 +12,8 @@ Security properties worth keeping in mind when changing this file:
 * With no live token and no session, every public route answers 404.
 * A site_gate hostname forwards only to its declared upstream, and only with a session
   held as a hash on the tmpfs, so the operator can list and revoke it.
+* VOUCH_HEADER is the gate's alone: any copy a client sends is dropped, and the gate
+  adds its own, HMAC-signed, only on a request it forwards for a live session.
 """
 import base64
 import calendar
@@ -66,6 +68,12 @@ GATE_HEADER = "X-Sandbox-Gate"
 # verification can tell the gate from an application (sandbox.commands.hosting._GATE_CHECK_PATH).
 GATE_CHECK_PATH = "/__sandbox/gate-check"
 SHARE_COOKIE_SESSIONS = 8
+# The gate's word to the upstream that a live share session sent this request
+# (docs/login-service.md#vouching-for-share-visitors). Stripped from every visitor
+# request; set, signed, only when the manifest declares share.vouch_secret.
+VOUCH_HEADER = "X-Sandbox-Share-Session"
+VOUCH_VERSION = "v1"
+MIN_VOUCH_KEY_LENGTH = 32
 SHARE_PREFIX = "/s/"
 STACK_PAGE_PATH = "/__sandbox/stack"
 ROBOTS_TAG = "noindex, nofollow, noarchive"
@@ -708,13 +716,29 @@ def scope_covers(scope, raw_path):
     return path.startswith(wanted) if wanted.endswith("/") else path == wanted
 
 
+_VOUCH_LOWER = VOUCH_HEADER.lower()
+
+
+def vouch_value(key, host, entry, session, issued_at):
+    """``v1 <host> <entry> <session id> <link id> <scope> <issued at> <expires at> <hmac>``.
+
+    The HMAC-SHA256 (lowercase hex) covers every field before it, joined by single
+    spaces exactly as sent, so a verifier recomputes it over ``value.rsplit(" ", 1)[0]``.
+    No field holds a space: hostnames, ids and scopes are validated before this.
+    """
+    signed = " ".join((VOUCH_VERSION, host, entry, session["id"], session["link"], session["scope"],
+                       str(int(issued_at)), str(int(session["expires_at"]))))
+    return f"{signed} {hmac.new(key, signed.encode(), hashlib.sha256).hexdigest()}"
+
+
 
 class Gate:
     """Token, session, and sign-in state shared by the request handlers."""
 
-    def __init__(self, config, credential, state_dir, *, clock, log):
+    def __init__(self, config, credential, state_dir, *, clock, log, vouch_key=None):
         self.config = config
         self.credential = credential
+        self.vouch_key = vouch_key.encode() if vouch_key else None
         self.state_dir = Path(state_dir)
         self.clock = clock
         self.log = log
@@ -1422,7 +1446,11 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if session is None:
             return self._not_found()
         upstream = urllib.parse.urlsplit(entry["upstream"])
-        return self._forward((upstream.hostname, upstream.port), self._site_headers(entry),
+        headers = self._site_headers(entry)
+        if self.gate.vouch_key is not None:
+            headers.append((VOUCH_HEADER, vouch_value(self.gate.vouch_key, entry["hostname"], name,
+                                                      session, int(self.gate.clock()))))
+        return self._forward((upstream.hostname, upstream.port), headers,
                              session["expires_at"], lambda: store.session_alive(session["digest"]))
 
     def _share_open_short(self, name, entry, store):
@@ -1658,11 +1686,13 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
                 ("X-Content-Type-Options", "nosniff")]
 
     def _site_headers(self, entry):
-        """The visitor's headers for the upstream, with Host fixed and the gate's cookies removed."""
+        """The visitor's headers for the upstream, with Host fixed and the gate's cookies
+        and any visitor copy of VOUCH_HEADER removed."""
         headers = [("Host", entry["hostname"])]
         for name, value in self.headers.items():
             lowered = name.lower()
-            if lowered in _HOP_BY_HOP or lowered == "host" or "\r" in value or "\n" in value:
+            if (lowered in _HOP_BY_HOP or lowered in ("host", _VOUCH_LOWER)
+                    or "\r" in value or "\n" in value):
                 continue
             if lowered == "cookie":
                 kept = [part.strip() for part in value.split(";")
@@ -2000,9 +2030,12 @@ class _Server(http.server.ThreadingHTTPServer):
 
 
 def create_servers(config, credential, state_dir, *, clock=time.time, log=None,
-                   public_address=PUBLIC_ADDRESS, health_address=HEALTH_ADDRESS):
+                   public_address=PUBLIC_ADDRESS, health_address=HEALTH_ADDRESS, vouch_key=None):
     """Bind the public and internal listeners; serving is the caller's choice."""
-    gate = Gate(config, credential, state_dir, clock=clock, log=log or _log)
+    if config.get("vouch") and (not isinstance(vouch_key, str) or len(vouch_key) < MIN_VOUCH_KEY_LENGTH):
+        raise ValueError("vouch_key_missing")
+    gate = Gate(config, credential, state_dir, clock=clock, log=log or _log,
+                vouch_key=vouch_key if config.get("vouch") else None)
     public = _Server(public_address, _PublicHandler)
     public.gate = gate
     health = _Server(health_address, _HealthHandler)
@@ -2080,7 +2113,12 @@ def main():
         except CaptureUnavailable:
             _log("refused code=capture_unreachable")
             raise SystemExit(1) from None
-    public, health = create_servers(config, credential, STATE_DIRECTORY)
+    vouch_key = os.environ.get("SANDBOX_LOGIN_VOUCH_KEY", "")
+    if config.get("vouch") and len(vouch_key) < MIN_VOUCH_KEY_LENGTH:
+        # Declared but absent or short: refuse rather than forward unvouched.
+        _log("refused code=vouch_key_missing")
+        raise SystemExit(1)
+    public, health = create_servers(config, credential, STATE_DIRECTORY, vouch_key=vouch_key or None)
     threading.Thread(target=health.serve_forever, daemon=True).start()
     _log("started")
     public.serve_forever()

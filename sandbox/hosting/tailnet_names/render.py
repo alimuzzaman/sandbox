@@ -17,6 +17,15 @@ _ZERO_MARKER = "0" * 32
 # below declares its own add_header, so every answer inherits it.
 _NOINDEX = 'add_header X-Robots-Tag "noindex, nofollow, noarchive" always;'
 _TOKEN = re.compile(r"[a-z0-9.:-]+")
+# Only tailnet peers. Linux accepts a packet for a local address on any interface,
+# so without this a container on the server could dial the tailnet address. Tailscale's
+# ts-input rule drops 100.64.0.0/10 sources that do not arrive on tailscale0, so the
+# source address is sound. A process on the server itself still passes: it dials from
+# the tailnet address, and it can reach the loopback upstream directly anyway.
+# nginx checks it after the rewrite phase, so the $host guard, the port-80 redirect and
+# the marker still answer anyone; none of them carries the upstream's content.
+TAILNET_PEERS = ("100.64.0.0/10", "fd7a:115c:a1e0::/48")
+_PEERS_ONLY = "\n    ".join([*(f"allow {net};" for net in TAILNET_PEERS), "deny all;"])
 
 
 def _token(value: str) -> str:
@@ -54,6 +63,7 @@ server {{
     server_name {fqdn};
     {_NOINDEX}
     {guard}
+    {_PEERS_ONLY}
     return 308 https://{fqdn}$request_uri;
 }}
 server {{
@@ -61,6 +71,7 @@ server {{
     server_name {fqdn};
     {_NOINDEX}
     {guard}
+    {_PEERS_ONLY}
     ssl_certificate     {cert_dir}/fullchain.pem;
     ssl_certificate_key {cert_dir}/privkey.pem;
     client_max_body_size 50m;

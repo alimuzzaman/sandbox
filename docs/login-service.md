@@ -220,6 +220,7 @@ environments:
       enabled_until: 2026-12-01             # required; within 30 days of apply
       allowed_host_suffixes: [dev.example.test]
       session_ttl_seconds: 43200            # optional; 300 to 172800, default 12 hours
+      vouch_secret: SHARE_VOUCH_KEY         # optional; signs X-Sandbox-Share-Session
 ```
 
 That is the whole declaration: no edge config. Sandbox renders the gate as the
@@ -276,7 +277,8 @@ the route marker that apply checks.
   the names are unrouted while the runtime still runs: only a server-wide catch-all that
   proxies to the target's own loopback port could reach it.
 - With an `autologin.login_service` block, `share` carries only `hostname`, `private`,
-  `agent_mint` and `stack_sign_in`, and uses that block's fields. `share` is then a
+  `agent_mint`, `stack_sign_in`, `route_sign_in`, `inbox_sign_in`, `linked_access` and
+  `vouch_secret`, and uses that block's fields. `share` is then a
   reserved entry name.
 - `basic_auth` is refused with `share.private` (nothing is left to protect) and with any
   `site_gate`.
@@ -684,7 +686,9 @@ run `host apply`).
   get 429.
 - **Forwarding.** Only origin-form targets with exactly one `Host` header equal to the
   gate hostname are forwarded. The gate sends `Host: <hostname>`, drops hop-by-hop
-  headers and its own cookies, and passes everything else.
+  headers, its own cookies and any `X-Sandbox-Share-Session` the visitor sent, and
+  passes everything else. With `share.vouch_secret` it adds its own
+  `X-Sandbox-Share-Session` (below).
 - **Lifetime.** A session ends at `session_ttl_seconds`, at its link's expiry, at revoke,
   or at `enabled_until`, whichever comes first. Every request checks that the session's
   link still exists, so a revoke ends access at the next request. A browser whose
@@ -693,6 +697,67 @@ run `host apply`).
 - **No indexing.** Every gate response carries `X-Robots-Tag: noindex, nofollow,
   noarchive`, replacing any value from the upstream, and every page the gate serves has
   a robots `noindex, nofollow` meta tag. `/robots.txt` answers `Disallow: /`.
+
+### Vouching for share visitors
+
+By default nothing on a forwarded request shows the application that it came through a
+live share session: the front door also reaches the application, and a client can send
+any header. When the application should treat share visitors differently (for example,
+staff access on a test stack), declare a key:
+
+```yaml
+    secrets:
+      generated:
+        SHARE_VOUCH_KEY: SHARE_VOUCH_KEY    # sb host secrets --generate-secrets
+    share:
+      hostname: s.dev.example.test
+      vouch_secret: SHARE_VOUCH_KEY         # must be a secrets.generated key
+```
+
+The gate gets the value as `SANDBOX_LOGIN_VOUCH_KEY`; the runtime config carries only
+`vouch: true`, never the name or the value. Give the application the same key by
+mapping the generated secret into its environment as usual. A gate whose key is missing
+or shorter than 32 characters refuses to start (`refused code=vouch_key_missing`), so
+the apply fails instead of forwarding unvouched requests.
+
+Every site_gate entry of the target then sends, on each request it forwards for a live
+session (never on its own pages, a link opener or a 404):
+
+```
+X-Sandbox-Share-Session: v1 <host> <entry> <session id> <link id> <scope> <issued at> <expires at> <hmac>
+```
+
+- `host` is the gate hostname the gate also sends as `Host`; `entry` is `share` for the
+  `share` block, or the site_gate entry's name.
+- `session id` is `s-` and 32 hex, `link id` is `l-` and 12 (or, for old links, 32) hex,
+  both as `sb host share list` shows them. `scope` is the link's path scope (`/` for the
+  whole site).
+- `issued at` is the gate's clock when it forwarded the request, `expires at` the
+  session's end, both Unix seconds.
+- `hmac` is HMAC-SHA256 with the key, as 64 lowercase hex, over every field before it,
+  exactly as sent and joined by single spaces. No field contains a space.
+
+The gate removes any `X-Sandbox-Share-Session` from the visitor's request first, on
+every site_gate forward, with or without a key. A websocket carries the header once, on
+its upgrade request. To verify, the application:
+
+1. splits the value on single spaces and requires exactly 9 fields, the first `v1`;
+2. recomputes the HMAC over `value.rsplit(" ", 1)[0]` and compares it in constant time;
+3. requires `host` to be the gate hostname it expects and `entry` to be the entry it
+   trusts (and `scope` to be `/` if it grants whole-site rights);
+4. requires `issued at` within 60 seconds of its own clock and `expires at` in the
+   future.
+
+Revoke and expiry end forwarding at the next request, so no header is issued for an
+ended session; the 60-second window bounds a replay of a header seen in transit between
+the gate and the application. Anything with the key can mint the header, so the key
+belongs only to the gate and the services that verify it. Every site_gate entry of a
+target shares one key; the `host` and `entry` fields tell them apart.
+
+The nginx front door forwards `Host` (and `X-Forwarded-Host`) as nginx's `$host`, which
+its guard holds to the route's declared names, not the raw `Host` header, so an
+absolute-form request line cannot pair one name's server block with another name in
+`Host`. Caddy already uses the request's host.
 
 ## What it cannot do
 

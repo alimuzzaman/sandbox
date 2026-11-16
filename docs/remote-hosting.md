@@ -2222,7 +2222,16 @@ published name changes nothing.
    with HTTP/2. It proxies to the upstream with websocket headers,
    `proxy_buffering off` and `proxy_read_timeout 600s`, and drops any other
    Host with 444, and answers the marker path above itself. It is never a
-   `default_server`.
+   `default_server`. Both server blocks allow only tailnet peers
+   (`allow 100.64.0.0/10; allow fd7a:115c:a1e0::/48; deny all;`), so a container
+   on the server that dials the tailnet address gets 403: Linux accepts a packet for
+   a local address on any interface, and Tailscale drops CGNAT sources that do not
+   arrive on `tailscale0`, so the source address is sound. The `$host` guard, the
+   port-80 redirect and the marker answer before that check; none carries the
+   upstream's content. A process on the server itself still passes (it dials from
+   the tailnet address) and can reach a loopback upstream directly anyway, so an
+   upstream that must exclude local processes needs its own check. A name added
+   before this rule gets it when `add` runs again with the same upstream.
 6. **Verify**: HTTPS to the tailnet address must present the installed
    certificate and answer HTTP (`tailnet_name_tailnet_probe_failed`
    otherwise, after a few tries; the name stays and a rerun repeats the

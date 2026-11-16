@@ -321,10 +321,13 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
         block += [
             f"        proxy_pass http://127.0.0.1:{int(upstream)};",
             "        proxy_http_version 1.1;",
-            "        proxy_set_header Host $http_host;",
+            # $host, not $http_host: an absolute-form request line picks the server
+            # block and $host, so the Host header alone could name another declared
+            # host. The guard above holds $host to this route's names.
+            "        proxy_set_header Host $host;",
             f"        proxy_set_header X-Forwarded-For {peer};",
             "        proxy_set_header X-Forwarded-Proto https;",
-            "        proxy_set_header X-Forwarded-Host $http_host;",
+            "        proxy_set_header X-Forwarded-Host $host;",
             "        proxy_set_header Upgrade $http_upgrade;",
             f"        proxy_set_header Connection ${p}_connection;",
             f"        proxy_set_header CF-Connecting-IP ${p}_cf_connecting_ip;",

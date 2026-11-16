@@ -135,7 +135,9 @@ only after `./sb delivery inspect` shows the attempt has no
 For a hosted stack, name it instead (spec 084): `sb delivery inspect --remote NAME --name
 <stack> --json` and `sb host retire-delivery --remote NAME --name <stack>
 --original-request-id APPLY_REQUEST --confirm --json` (or `--target <project>/<env>`).
-Both read the delivery scope the target's hosting record names. Inspect then answers for
+Both read the delivery scope the target's hosting record names. That record is the applying
+controller's own: another controller (or the server's own account) gets
+`host_target_unknown` and must run both commands from the checkout that applied the stack. Inspect then answers for
 one attempt only (`--request-id`, `--operation-id`, or by default the request the record
 names), without history or latest summaries: one checkout can serve several hosted
 projects, so that scope's history may belong to another target, and an attempt of

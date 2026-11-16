@@ -2403,19 +2403,156 @@ def push_commits(
     return source_commit
 
 
+def _materialization_pending_file() -> Path:
+    return RUNTIME_DIR / "remote-materialization" / "pending.json"
+
+
+def _materialization_key(remote) -> str | None:
+    name = remote.get("_remote_name") if isinstance(remote, dict) else None
+    return name if isinstance(name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name) else None
+
+
+@contextmanager
+def _materialization_pending():
+    """Read-modify-write of the controller's record of unknown-completion operations."""
+    import fcntl
+    path = _materialization_pending_file()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(path.with_name("pending.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, ValueError):
+            value = {}
+        if not isinstance(value, dict):
+            value = {}
+        before = json.dumps(value, sort_keys=True)
+        yield value
+        if json.dumps(value, sort_keys=True) != before:
+            temporary = path.with_name(f".pending.{os.getpid()}")
+            temporary.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+
+
+def recorded_materialization_operations(remote) -> dict:
+    """{target_path: operation_id} this controller left with unknown completion."""
+    key = _materialization_key(remote)
+    if key is None:
+        return {}
+    with _materialization_pending() as pending:
+        rows = pending.get(key) if isinstance(pending.get(key), dict) else {}
+        return {path: op for path, op in rows.items()
+                if isinstance(path, str) and isinstance(op, str) and re.fullmatch(r"[0-9a-f]{32}", op)}
+
+
+def _record_materialization(remote, target_path: str, operation_id: str | None) -> None:
+    """Remember (or, with None, forget) an operation whose completion is unknown."""
+    key = _materialization_key(remote)
+    if key is None:
+        return
+    try:
+        with _materialization_pending() as pending:
+            rows = pending.setdefault(key, {})
+            if not isinstance(rows, dict):
+                rows = pending[key] = {}
+            if operation_id is None:
+                rows.pop(target_path, None)
+            else:
+                rows[target_path] = operation_id
+            if not rows:
+                pending.pop(key, None)
+    except OSError:
+        pass  # evidence only; the remote lock itself is unchanged
+
+
+def _forget_materialization(remote, target_path: str, operation_id: str) -> None:
+    """Drop the record only while it still names ``operation_id`` (one lock).
+
+    Another process may have recorded a newer lost operation for the same path
+    after this one was released; that record must survive.
+    """
+    key = _materialization_key(remote)
+    if key is None:
+        return
+    try:
+        with _materialization_pending() as pending:
+            rows = pending.get(key)
+            if isinstance(rows, dict) and rows.get(target_path) == operation_id:
+                rows.pop(target_path)
+                if not rows:
+                    pending.pop(key, None)
+    except OSError:
+        pass
+
+
+def _reconcile_recorded_materialization(remote, target_path: str) -> str | None:
+    """Release this controller's own recorded operation when its receipt is idle/complete.
+
+    Returns the operation id it released, else None (busy stays busy). The
+    coordinator's receipt is the only cessation proof; an original coordinator
+    still running holds its flock, so inspect cannot read it and nothing is released.
+    """
+    from sandbox.core.remote_materialization import (
+        RemoteMaterializationLease, RemoteMaterializationUnknown)
+    operation_id = recorded_materialization_operations(remote).get(target_path)
+    if operation_id is None:
+        return None
+    try:
+        evidence = RemoteMaterializationLease(remote, target_path, ssh_run,
+                                              operation_id=operation_id).inspect()
+        if evidence.get("state") not in ("idle", "complete"):
+            return None
+        RemoteMaterializationLease(remote, target_path, ssh_run,
+                                   operation_id=operation_id).reconcile()
+    except RemoteMaterializationUnknown:
+        return None
+    _forget_materialization(remote, target_path, operation_id)
+    return operation_id
+
+
 @contextmanager
 def _remote_materialization_lock(remote: dict, target_path: str):
     """Retain physical exclusion whenever remote cessation is unproven."""
-    from sandbox.core.remote_materialization import RemoteMaterializationLease
+    from sandbox.core.remote_materialization import (
+        RemoteMaterializationBusy, RemoteMaterializationLease, RemoteMaterializationUnknown)
 
-    lease = RemoteMaterializationLease(remote, target_path, ssh_run).acquire()
+    lease = RemoteMaterializationLease(remote, target_path, ssh_run)
+    try:
+        try:
+            lease.acquire()
+        except RemoteMaterializationBusy:
+            # A sync this controller lost (timeout) left a completed receipt:
+            # release that exact operation once, then take the lock.
+            if _reconcile_recorded_materialization(remote, target_path) is None:
+                pending = recorded_materialization_operations(remote).get(target_path)
+                name = _materialization_key(remote) or "REMOTE"
+                raise RemoteMaterializationBusy(
+                    "remote source materialization lock is busy"
+                    + (f" (operation {pending} of an earlier sync is still unsettled)" if pending else "")
+                    + f"; inspect with `sb remote materialization inspect {name}"
+                    + (f" --operation-id {pending}" if pending else " --operation-id OPERATION_ID")
+                    + " --project-dir DIR`") from None
+            # Bind the new lease before acquiring, so a lost response records
+            # this operation, not the one just released.
+            lease = RemoteMaterializationLease(remote, target_path, ssh_run)
+            lease.acquire()
+    except RemoteMaterializationUnknown:
+        _record_materialization(remote, target_path, lease.operation_id)
+        raise
     try:
         yield lease
     finally:
         # Local exceptions before dispatch and positively completed remote
         # failures can release. Transport loss never sends an unlock command.
         if not lease.unknown:
-            lease.release()
+            try:
+                lease.release()
+            except RemoteMaterializationUnknown:
+                _record_materialization(remote, target_path, lease.operation_id)
+                raise
+        else:
+            _record_materialization(remote, target_path, lease.operation_id)
 
 
 def inspect_remote_materialization(remote, target_path: str, operation_id: str):
@@ -2429,9 +2566,11 @@ def inspect_remote_materialization(remote, target_path: str, operation_id: str):
 def reconcile_remote_materialization(remote, target_path: str, operation_id: str):
     """Explicitly release a positively completed original operation only."""
     from sandbox.core.remote_materialization import RemoteMaterializationLease
-    return RemoteMaterializationLease(
+    result = RemoteMaterializationLease(
         remote, target_path, ssh_run, operation_id=operation_id,
     ).reconcile()
+    _forget_materialization(remote, target_path, operation_id)
+    return result
 
 
 def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str, *, lease) -> None:

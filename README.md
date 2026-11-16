@@ -540,6 +540,10 @@ deletion manifest before each removal so "what happened to X" stays answerable:
 # keep 30 GiB free for hosted sites: remote test/job submissions that would
 # cross it are refused before any upload (remote_storage_floor, spec 066)
 ./sb remote set-storage-floor scaleway-sandbox --gb 30
+# a timed-out source sync left the remote source lock busy: inspect, then release
+# it only when its receipt is complete (job-start does this itself for its own)
+./sb remote materialization inspect   scaleway-sandbox --project-dir .
+./sb remote materialization reconcile scaleway-sandbox --project-dir .
 # hosted services that exhausted their on-failure restarts (e.g. after a full
 # disk): list, then start them once free space is above the floor
 ./sb host heal --remote scaleway-sandbox

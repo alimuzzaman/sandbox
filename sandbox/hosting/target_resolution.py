@@ -88,6 +88,12 @@ def _stack_directory(record: dict) -> str:
     return str(expected)
 
 
+# Stacks and targets are this controller's own records; another controller's
+# (or the server's own) are not looked up, so say where the command works.
+_ELSEWHERE = ("; a target another controller applied resolves only there: run the "
+              "command from that controller's checkout")
+
+
 def resolve(remote_name: str | None, *, target: str | None = None, name: str | None = None,
             project_dir: str | None = None, environment: str | None = None,
             state: dict | None = None, registry: dict | None = None) -> ResolvedTarget:
@@ -103,7 +109,7 @@ def resolve(remote_name: str | None, *, target: str | None = None, name: str | N
             raise TargetRefusal(
                 TARGET_UNKNOWN,
                 f"no stack named {name!r} is recorded for remote {remote_name}; "
-                f"see `sb host stack list --remote {remote_name}`")
+                f"see `sb host stack list --remote {remote_name}`" + _ELSEWHERE)
         project, env = parse_target(f"{record.get('project')}/{record.get('environment')}")
     else:
         project, env = parse_target(target)
@@ -118,7 +124,7 @@ def resolve(remote_name: str | None, *, target: str | None = None, name: str | N
         raise TargetRefusal(
             TARGET_UNKNOWN,
             f"{project}/{env} is not recorded in this controller's hosting state for "
-            f"remote {remote_name}{hint}")
+            f"remote {remote_name}{hint}" + _ELSEWHERE)
     if record is not None:
         return ResolvedTarget(
             remote=remote_name, project=project, environment=env, kind="stack",

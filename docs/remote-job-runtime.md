@@ -540,6 +540,28 @@ becomes `interrupted` with `termination_reason=queue_expired`, so abandoned rows
 counting as active inventory. Active rows are scanned on their own, so an old row is
 reached even when the registry holds more jobs than one reconcile page.
 
+### A stuck remote source lock
+
+Publishing a project's source to a remote takes a lock directory beside its
+`deploy-src` checkout. When the SSH session of that sync is lost (a timeout), its
+completion is unknown and the lock stays, so every later `job-start` for that project
+gets `remote source materialization lock is busy`. The controller records that
+operation id under `$SANDBOX_HOME/runtime/remote-materialization/pending.json`.
+
+The next `job-start` for the same project inspects the recorded operation's remote
+receipt first. When the receipt says `idle` or `complete` (written only after every
+process the sync started has ended), it releases that lock and continues. Anything
+else, including an original sync still running, stays busy. To do the same by hand:
+
+```sh
+./sb remote materialization inspect   xspeed-dev --project-dir . [--operation-id OP]
+./sb remote materialization reconcile xspeed-dev --project-dir . [--operation-id OP]
+```
+
+`--operation-id` defaults to the one this controller recorded for the project; the
+sync's own error names it too. `reconcile` inspects first and releases only an `idle`
+or `complete` receipt. It never reruns the sync or removes the lock otherwise.
+
 ## Cancellation, retry, and cleanup
 
 `job-cancel` sends a verified graceful signal first; `--force` uses the verified

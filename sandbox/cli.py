@@ -913,7 +913,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Readiness (spec 063):\n"
             "  ./sb remote readiness [NAME] [--project-dir DIR] [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "rebind-host", "tailscale-ssh", "tailnet-access", "join", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness", "coverage"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "rebind-host", "tailscale-ssh", "tailnet-access", "join", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness", "coverage", "materialization"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -929,7 +929,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "locally (never touches the VPS itself); ssh: explicit operator-only "
              "direct SSH escape hatch; edge: report the nginx front door (routes "
              "loaded, conflicts, certificates) or remove one Sandbox route; "
-             "coverage: wildcard subdomain hosting status, plan, and enable")
+             "coverage: wildcard subdomain hosting status, plan, and enable; "
+             "materialization: inspect or reconcile a remote source lock a timed-out sync left")
     remote_p.add_argument("name", nargs="?", default=None,
         help="remote name (required for every action except 'list')")
     remote_p.add_argument("ssh_url", nargs="?", default=None,
@@ -1016,6 +1017,9 @@ Per-project (each plugin carries its own sandbox.config.json):
              "over SSH; that command also requires `--confirm`")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
+    remote_p.add_argument("--operation-id", dest="operation_id", default=None,
+        help="for `remote materialization`: the original sync's operation id "
+             "(default: the one this controller recorded for the project)")
     remote_p.add_argument("--holder", default=None,
         help="for `remote pin release`: the pin holder to release (default: this checkout)")
     remote_p.add_argument("--break-pin", dest="break_pins", action="append", default=[],

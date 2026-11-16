@@ -172,6 +172,18 @@ class MaterializationCommandTests(_Base):
         self.assertEqual(json.loads(out.getvalue())["state"], "released")
         self.assertIsNone(self.transport.record)
 
+    def test_an_explicit_workspace_and_operation_target_that_copy_without_a_record(self):
+        self.transport.record = dict(schema_version=1, operation_id="b" * 32, state="complete",
+                                     step=2, exit_code=0)
+        args = argparse.Namespace(action="materialization", name="inspect", ssh_url="box",
+                                  project_dir="/tmp", operation_id="b" * 32, json=True,
+                                  materialization_workspace="ci")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            remote_cmd._cmd_materialization(args, True)
+        self.assertEqual(json.loads(out.getvalue())["target_path"],
+                         _remote.remote_workspace_path(REMOTE, "/tmp", "ci"))
+
     def test_a_wrong_operation_id_releases_nothing(self):
         self.transport.record = dict(schema_version=1, operation_id="b" * 32, state="complete",
                                      step=2, exit_code=0)

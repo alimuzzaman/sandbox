@@ -576,11 +576,17 @@ def _cmd_materialization(args, as_json: bool) -> None:
     # Only the paths this project derives: its deploy path and the workspace
     # copy of one label. A path prefix would also match another project
     # named like `<project>-workspace-...`.
-    label = getattr(args, "materialization_workspace", None) or "default"
+    explicit_label = getattr(args, "materialization_workspace", None)
     try:
-        candidates = {base, sr.remote_workspace_path(entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve(), label)}
+        workspace = sr.remote_workspace_path(
+            entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve(),
+            explicit_label or "default")
     except ValueError:
         die("--workspace must be a workspace label")
+    candidates = {base, workspace}
+    # Without a local record, an explicit --workspace names that copy's lock;
+    # otherwise the deploy path's.
+    fallback = workspace if explicit_label else base
     recorded = {path: op for path, op in sr.recorded_materialization_operations(entry).items()
                 if path in candidates}
     operation_id = getattr(args, "operation_id", None)
@@ -594,7 +600,7 @@ def _cmd_materialization(args, as_json: bool) -> None:
     else:
         everywhere = sr.recorded_materialization_operations(entry)
         target = next((path for path, op in recorded.items() if op == operation_id),
-                      next((path for path, op in everywhere.items() if op == operation_id), base))
+                      next((path for path, op in everywhere.items() if op == operation_id), fallback))
     payload = {"ok": True, "name": name, "operation_id": operation_id, "target_path": target,
                "error": None}
     try:

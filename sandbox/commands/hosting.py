@@ -5775,11 +5775,12 @@ def _acquire_host_apply_lease(entry: dict, validated: dict) -> dict | None:
         return None
     path = target_lease.lease_path(remote.resolve_sandbox_home(entry),
                                    validated["project"], validated["environment"])
-    owner = (_controller_lease_owner() if not is_owner_target(entry) else
-             hashlib.sha256(("server-cli:" + entry.require_current().job_id).encode()).hexdigest()[:32])
+    run = lambda command: remote.ssh_run(entry, command, timeout=60)  # noqa: E731
     try:
-        return target_lease.acquire(lambda command: remote.ssh_run(entry, command, timeout=60),
-                                    path, owner)
+        if is_owner_target(entry):
+            from sandbox.application.server_cli_apply_lease import acquire_owner_lease
+            return acquire_owner_lease(entry, path, validated["project"], validated["environment"], run)
+        return target_lease.acquire(run, path, _controller_lease_owner())
     except target_lease.LeaseHeld as exc:
         raise hosting.HostingError(f"host_apply_lease_held: {exc}; see docs/remote-hosting.md") from None
     except target_lease.LeaseUnavailable as exc:
@@ -5788,7 +5789,12 @@ def _acquire_host_apply_lease(entry: dict, validated: dict) -> dict | None:
 
 def _release_host_apply_lease(entry: dict, lease: dict | None) -> None:
     from sandbox.hosting import target_lease
-    target_lease.release(lambda command: remote.ssh_run(entry, command, timeout=60), lease)
+    run = lambda command: remote.ssh_run(entry, command, timeout=60)  # noqa: E731
+    if lease is not None and lease.get("job_id"):
+        from sandbox.application.server_cli_apply_lease import release_owner_lease
+        release_owner_lease(lease, run)
+        return
+    target_lease.release(run, lease)
 
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *args, **kwargs) -> dict:

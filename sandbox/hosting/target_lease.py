@@ -6,7 +6,9 @@ and runtime. The lease never expires on its own: an expired owner that kept writ
 would be the interleaving it exists to stop. The controller that holds it releases it,
 or takes it over on its next operation (its own state lock already serializes its own
 operations). A lease left by another controller is removed by hand, once nothing of
-that controller still runs (docs/remote-hosting.md, `host_apply_lease_held`).
+that controller still runs (docs/remote-hosting.md, `host_apply_lease_held`). A
+server-owner job's lease is recorded in its job events and taken over once that job
+is proven ended (sandbox/application/server_cli_apply_lease.py).
 
 Stdlib only.
 """

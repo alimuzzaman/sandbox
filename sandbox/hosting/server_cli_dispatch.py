@@ -164,6 +164,12 @@ def dispatch_host_if_selected(args) -> bool:
         from sandbox.hosting.server_login_url import run_here
         run_here(args)
         return True
+    from sandbox.hosting import server_cli_here
+    if server_cli_here.claims(args):
+        # The installed owner on the host itself (Fix 5): the same server CLI
+        # job a controller submits, admitted locally. Never falls through.
+        server_cli_here.dispatch(args)
+        return True
     from sandbox.application.server_cli_source_repair import dispatch_if_selected
     if dispatch_if_selected(args):
         return True

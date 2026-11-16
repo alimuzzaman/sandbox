@@ -5017,6 +5017,34 @@ def _source_receipt_command(source_revision: str) -> str:
     )
 
 
+def _owner_origin_command(remote: dict, record: dict) -> str:
+    """Shell that replaces this host's owner origin record (Fix 5).
+
+    Best effort, like the source receipt: the old record is always removed,
+    and a new one is written only when the controller's name for the remote
+    and its front door are known. ``sb host ... --here`` refuses without it.
+    """
+    from sandbox.hosting import owner_origin
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode
+    target = "$HOME/sandbox/runtime/" + owner_origin.FILENAME
+    remove = f"rm -f -- \"{target}\" || true; "
+    try:
+        body = owner_origin.payload(
+            remote.get("_remote_name"), front_door_mode(remote), int(record["port"]),
+            record["ownership_marker"], record["runtime_revision"])
+    except (FrontDoorError, ValueError, TypeError, KeyError):
+        return remove
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return (
+        remove + "{ origin_dir=$HOME/sandbox/runtime; mkdir -p \"$origin_dir\" && "
+        "origin_tmp=$(mktemp \"$origin_dir/.owner-origin.XXXXXX\") && "
+        f"printf '%s\\n' {shlex.quote(text)} > \"$origin_tmp\" && "
+        "chmod 600 \"$origin_tmp\" && "
+        f"mv \"$origin_tmp\" \"{target}\"; "
+        "} || rm -f -- \"${origin_tmp:-}\" || true; "
+    )
+
+
 def _record_controller_hint(remote: dict, revision, source: str) -> None:
     """Record a remote's installed source revision for controller auto-update.
 
@@ -5602,7 +5630,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         # Spec 072: leave the installed git source revision where the status
         # probe can read it. The service is already live, so this is best
         # effort and can never fail the install.
-        + _source_receipt_command(source_revision) +
+        + _source_receipt_command(source_revision)
+        + _owner_origin_command(remote, record) +
         "rm -rf -- \"$stage_root\" \"$backup\"; "
         "test ! -e \"$backup\""
     )

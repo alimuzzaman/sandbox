@@ -356,9 +356,13 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
                health: HealthLookup | None = None,
                mail_inventory: mail_panel.Inventory | None = None,
                lifetimes: LifetimeSources | None = None,
+               server_remote: str | None = None,
                clock: Callable[[], float] = time.time) -> HostingView:
     """``lifetimes`` maps ``"this-server"`` (this server's records) and each
-    controller remote name to its spec 077 listing; ``None`` means not loaded."""
+    controller remote name to its spec 077 listing; ``None`` means not loaded.
+    ``server_remote`` is the controller's name for this server (its owner
+    origin record): controller rows under that name read this server's
+    lifetimes, never a listing fetched for a remote this server is."""
     known = known or []
     lifetimes = lifetimes or {}
     partial: list[str] = []
@@ -380,8 +384,12 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
         for reason in (listing or {}).get("partial_reasons") or []:
             pr.add_reason(partial, reason)
 
+    def lifetime_key(source: Source, remote: str) -> str:
+        return "this-server" if source == "this-server" or (
+            server_remote is not None and remote == server_remote) else remote
+
     def lifetime_source(source: Source, remote: str) -> pl.LifetimeListing | None:
-        return lifetimes.get("this-server" if source == "this-server" else remote)
+        return lifetimes.get(lifetime_key(source, remote))
 
     lifetime_rows: list[pl.LifetimeRow] = []
     carded: set[tuple[str, str]] = set()
@@ -389,7 +397,7 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
     def lifetime_for(source: Source, remote: str, project: str, environment: str, name: str,
                      compose_project: str) -> pl.LifetimeView:
         view = pl.lookup(lifetime_source(source, remote), compose_project)
-        key = ("this-server" if source == "this-server" else remote, compose_project)
+        key = (lifetime_key(source, remote), compose_project)
         if key not in carded:
             carded.add(key)
             lifetime_rows.append({**view, "remote": remote, "source": source, "project": project,  # type: ignore[typeddict-item]

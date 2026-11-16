@@ -170,6 +170,19 @@ class LifetimeViewTest(unittest.TestCase):
         self.assertIn("lifetime_unavailable:xspeed-dev", down["partial_reasons"])
         self.assertEqual(down["stacks"][0]["lifetime"]["reason"], "unavailable")
 
+    def test_controller_rows_naming_this_server_use_its_own_lifetimes(self):
+        """d8654d4b: on the server, records under its controller name read this server's records."""
+        stack_data = {"stacks": {"xspeed-dev/demo": {
+            "remote": "xspeed-dev", "slug": "demo", "project": "hub-demo", "environment": "sandbox",
+            "ref": "stack/demo", "ref_branch": "stack/demo", "commit": COMMIT, "hostnames": ["hub-demo.example.test"]}}}
+        records = pv.controller_records(stack_data, {"hosts": {}}, lambda record: {})
+        record = stack_record(expires=hs.to_rfc3339(NOW + 60))
+        view = pv.build_view([records], lifetimes={"this-server": self.listing(record)},
+                             server_remote="xspeed-dev", clock=lambda: NOW)
+        self.assertEqual(view["stacks"][0]["lifetime"]["owner"], "alice")
+        self.assertEqual(view["partial_reasons"], [])
+        self.assertEqual(len(view["lifetimes"]), 1)  # carded once, not again as an uncarded record
+
     def test_no_lifetimes_wired_keeps_cards_unknown_never_reapable(self):
         view = pv.build_view([server([summary()])])
         self.assertEqual(view["stacks"][0]["lifetime"]["classification"], "unknown")

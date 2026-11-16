@@ -34,6 +34,10 @@ def configure_recovery(parser) -> None:
                         help="materialized artifact as NAME=PATH; repeat for each artifact")
     parser.add_argument("--keep-count", type=int, default=1)
     parser.add_argument("--minimum-age-days", type=int, default=0)
+    parser.add_argument("--prune", action="store_true",
+                        help="retention: plan (or with --plan-id --confirm apply) deleting one "
+                             "profile's verified sets beyond --keep-count")
+    parser.add_argument("--plan-id", help="retention --prune: the reviewed plan to apply")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--scheduled", action="store_true", help="reserved for an enabled reviewed timer")
     parser.add_argument("--json", action="store_true")
@@ -150,6 +154,12 @@ def _emit(payload: dict, as_json: bool) -> None:
             print(f"  legacy server archives: {len(data.get('legacy_server_archives') or ())}")
             for item in data.get("legacy_server_archives") or ():
                 print(f"    {item.get('name', '(unknown)')}: {item.get('size')} bytes")
+        for field in ("profile", "keep_count", "plan_id", "plan_expires_at"):
+            if field in data:
+                print(f"  {field}: {data[field]}")
+        if "deleted" in data:
+            print(f"  deleted: {', '.join(data['deleted']) or '(none)'}")
+            print(f"  kept: {', '.join(data.get('kept') or ()) or '(none)'}")
         protected = tuple(data.get("protected_sets") or ())
         candidates = tuple(data.get("candidates") or ())
         print(f"  protected: {', '.join(protected) or '(none)'}")
@@ -325,7 +335,17 @@ def cmd_recovery(_cfg, args) -> None:
             payload = result(True, "schedule", remote=args.remote, status="planned", data={"units": render_systemd_units(policy)})
     elif args.action == "retention":
         from sandbox.recovery.errors import RecoveryError, result
-        if args.remote:
+        if getattr(args, "prune", False):
+            state_root = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox")) / "recovery"
+            if len(args.profile) != 1 or args.remote:
+                payload = result(False, "retention", remote=args.remote, error=RecoveryError(
+                    "prune takes exactly one --profile and the --destination, not --remote",
+                    "invalid_retention_policy"))
+            else:
+                payload = service.retention_prune(
+                    args.profile[0], keep_count=args.keep_count, state_root=state_root,
+                    plan_id=args.plan_id, confirm=args.confirm)
+        elif args.remote:
             payload = service.server_capture_retention(
                 args.remote, args.backup_id, confirm=args.confirm)
         elif args.confirm:

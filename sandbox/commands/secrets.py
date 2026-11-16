@@ -1,6 +1,7 @@
 """CLI adapters for least-disclosure secret operations."""
 from __future__ import annotations
 
+import argparse
 from contextlib import contextmanager
 import getpass
 import io
@@ -28,7 +29,8 @@ from sandbox.secrets.models import (
 
 
 ACTIONS = ("source-info", "inspect", "validate", "use-profile", "credential-set",
-           "run", "set", "unset", "copy", "organize", "reveal", "migrate-zshrc", "ownership")
+           "run", "set", "unset", "copy", "egress", "organize", "reveal", "migrate-zshrc",
+           "ownership")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
@@ -162,14 +164,23 @@ def configure_parser(parser) -> None:
     unsetting.add_argument("--project-dir", default=".")
 
     copying = actions.add_parser(
-        "copy", help="copy one value to a registered remote's secret source over SSH stdin",
+        "copy", help="copy one value to a registered remote's secret source over SSH stdin, "
+                     "or with --from-remote fetch one owner-granted value into a local source",
     )
-    copying.add_argument("--source", required=True)
+    copying.add_argument("--source", required=True,
+                         help="local source (outbound) or the remote's source (--from-remote)")
     copying.add_argument("--key", required=True)
-    copying.add_argument("--remote", required=True)
-    copying.add_argument("--target-source", required=True)
+    copying.add_argument("--remote")
+    copying.add_argument("--target-source")
+    copying.add_argument("--from-remote", metavar="REMOTE",
+                         help="fetch from this registered remote instead of sending to it")
+    copying.add_argument("--to", dest="to_source", metavar="LOCAL_SOURCE",
+                         help="local destination source for --from-remote")
+    copying.add_argument("--source-project-dir", metavar="REMOTE_DIR",
+                         help="absolute remote project directory whose registered sources "
+                              "resolve --source for --from-remote (default: the remote Sandbox home)")
     copying.add_argument("--as", dest="target_key", metavar="NEWKEY",
-                         help="key name on the remote (default: the same name)")
+                         help="key name at the destination (default: the same name)")
     copy_intent = copying.add_mutually_exclusive_group()
     copy_intent.add_argument("--create-only", action="store_true")
     copy_intent.add_argument("--replace-only", action="store_true")
@@ -182,6 +193,13 @@ def configure_parser(parser) -> None:
                          help="refuse if the remote source changed since metadata inspection")
     copying.add_argument("--json", action="store_true")
     copying.add_argument("--project-dir", default=".")
+
+    # Transport half of `copy --from-remote`; the controller runs it over SSH.
+    egress = actions.add_parser("egress", help=argparse.SUPPRESS)
+    egress.add_argument("--source", required=True)
+    egress.add_argument("--key", required=True)
+    egress.add_argument("--json", action="store_true")
+    egress.add_argument("--project-dir", default=".")
 
     organize = actions.add_parser(
         "organize", help="group one dotenv source into documented sections without reading values",
@@ -273,7 +291,14 @@ def _emit(payload: dict, as_json: bool) -> None:
             print(f"    {', '.join(group['keys'])}")
     if payload.get("validation"):
         print(json.dumps(payload["validation"], sort_keys=True))
-    if payload.get("action") and operation == "copy":
+    if payload.get("action") and operation == "copy" and payload.get("remote_source"):
+        verification = payload.get("verification") or {}
+        print(f"  {payload['action']}: remote:{payload.get('remote', '')}/"
+              f"{payload.get('remote_source', '')}/{payload.get('remote_key', '')} -> "
+              f"{payload.get('source', '')}/{payload.get('key', '')}")
+        print(f"  fingerprint_match={verification.get('fingerprint_match')} "
+              f"length_bucket={(verification.get('local') or {}).get('length_bucket')}")
+    elif payload.get("action") and operation == "copy":
         print(f"  {payload['action']}: {payload.get('key', '')} -> "
               f"remote:{payload.get('remote', '')}/{payload.get('target_source', '')}/"
               f"{payload.get('target_key', '')}")
@@ -817,8 +842,76 @@ def _copy_sink(remote: str):
     return SshRemoteSecretSink.for_remote(remote)
 
 
+def _copy_from_remote(service, args) -> dict:
+    from sandbox.secrets.remote_copy import RemoteGetRequest
+    misplaced = [flag for flag, value in (
+        ("--remote", args.remote), ("--target-source", args.target_source),
+        ("--target-project-dir", args.target_project_dir),
+        ("--if-source-revision", getattr(args, "if_source_revision", None)),
+        ("--if-target-revision", getattr(args, "if_target_revision", None)),
+    ) if value is not None]
+    if misplaced:
+        raise SecretBrokerError("input_invalid",
+                                f"--from-remote does not take {', '.join(misplaced)}")
+    if not args.to_source:
+        raise SecretBrokerError("input_invalid", "--from-remote requires --to LOCAL_SOURCE")
+    request = RemoteGetRequest(remote=args.from_remote, source=args.source, key=args.key,
+                               source_project_dir=args.source_project_dir)
+    origin = _copy_sink(args.from_remote)
+    # Default create-only: escrow must not silently overwrite a local value.
+    intent = "replace" if args.replace_only else "create"
+    return service.copy_from_remote(args.to_source, args.target_key or args.key, request, origin,
+                                    intent=intent)
+
+
+def _egress(service, args) -> None:
+    """Remote half of `copy --from-remote`: one JSON line to a non-terminal stdout."""
+    from sandbox.secrets.remote_copy import EGRESS_NONCE_BYTES
+    try:
+        interactive = sys.stdout.isatty() or sys.stdin.isatty()
+    except (OSError, ValueError):
+        interactive = True
+    if interactive or not args.json:
+        raise SecretBrokerError(
+            "egress_requires_transport",
+            "secret egress runs only as the transport of `secrets copy --from-remote`",
+        )
+    raw = sys.stdin.buffer.read(EGRESS_NONCE_BYTES * 2 + 2).rstrip(b"\r\n")
+    try:
+        nonce = bytes.fromhex(raw.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        nonce = b""
+    if len(nonce) != EGRESS_NONCE_BYTES:
+        raise SecretBrokerError("input_invalid", "egress nonce is invalid")
+    delivered = []
+
+    def writer(value: str, fingerprint: str) -> None:
+        # Written straight to the SSH channel: no redaction pass, log or echo.
+        line = json.dumps({"ok": True, "operation": "egress", "source": args.source,
+                           "key": args.key, "value": value, "fingerprint": fingerprint},
+                          sort_keys=True)
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        delivered.append(True)
+
+    service.egress(args.source, args.key, nonce, writer)
+    if not delivered:
+        raise SecretBrokerError("operation_failed", "secret egress produced no answer")
+
+
 def _copy(service, args) -> dict:
     from sandbox.secrets.remote_copy import RemoteSetRequest
+    if getattr(args, "from_remote", None):
+        return _copy_from_remote(service, args)
+    misplaced = [flag for flag, value in (
+        ("--to", getattr(args, "to_source", None)),
+        ("--source-project-dir", getattr(args, "source_project_dir", None)),
+    ) if value is not None]
+    if misplaced:
+        raise SecretBrokerError("input_invalid",
+                                f"{', '.join(misplaced)} requires --from-remote")
+    if not args.remote or not args.target_source:
+        raise SecretBrokerError("input_invalid", "copy requires --remote and --target-source")
     intent = "create" if args.create_only else "replace" if args.replace_only else "either"
     request = RemoteSetRequest(
         remote=args.remote, target_source=args.target_source,
@@ -912,6 +1005,8 @@ def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None)
                   args.json)
         elif args.action == "copy":
             _emit(_copy(service, args), args.json)
+        elif args.action == "egress":
+            _egress(service, args)
         elif args.action == "organize":
             _emit(service.organize(args.source, apply=args.apply,
                                    expected_revision=args.if_revision), args.json)

@@ -140,6 +140,56 @@ and retirement refuses if those reviewed bytes change. The request and retired s
 complete unpromoted archive is never retirable, even past
 its bound, and its only supported exit is promotion. No server archive is deleted automatically.
 
+### Pruning one profile's Drive sets
+
+`--prune` keeps the newest N verified sets of one profile in a Drive destination and deletes the
+older verified ones. It runs on the controller, which holds the rclone remote and the passphrase:
+
+```sh
+sb secrets run --source personal --key RECOVERY_PASSPHRASE --destination RECOVERY_PASSPHRASE -- \
+  sb recovery retention --prune --profile infisical --keep-count 8 \
+  --destination gdrive:hermes-full-recovery --json
+# review data.candidates and data.protected_sets, then:
+sb secrets run ... -- sb recovery retention --prune --profile infisical --keep-count 8 \
+  --destination gdrive:hermes-full-recovery --plan-id rp_... --confirm --json
+```
+
+The plan step deletes nothing. It reads each manifest under `sets/`, ignores every set of another
+profile without downloading its archive, and fully verifies the rest: manifest shape, the
+downloaded ciphertext digest and size, and decryption with the current passphrase. Only verified
+sets count. The newest `--keep-count` of them (at least 1) are protected and the older verified
+ones are candidates. Incomplete, unverifiable or old-passphrase sets are reported under
+`unclassified` and never deleted. The plan is stored owner-only under
+`$SANDBOX_HOME/recovery/retention/plans/<plan_id>.json` for 24 hours. Its id is a digest of the
+destination, profile, keep count, protected ids and each candidate's ciphertext digest, so planning
+again against the same state returns the same id.
+
+Apply needs both `--plan-id` and `--confirm`, and the same profile, keep count and destination. It
+verifies the destination again and refuses with `stale_retention_plan` when a planned protected set
+is no longer verified, a candidate's ciphertext changed, a new verified set appeared, or the newest
+verified set would be deleted. One apply runs at a time per controller (`retention_locked` otherwise). Right before each
+candidate's deletes, apply verifies that set again (manifest, profile, ciphertext digest and object,
+and exactly its manifest plus ciphertext with no other object) and re-lists the destination to
+confirm every protected manifest is still there and every protected ciphertext is still listed at
+its verified size. It then appends an `intent` line naming the exact
+object keys and ciphertext digest to `$SANDBOX_HOME/recovery/retention/deletions/<plan_id>.jsonl`,
+fsynced together with its directory entries, before deleting anything. It deletes the manifest
+first and then the ciphertext (`rclone deletefile`, never `purge`), removes the emptied folder, and
+appends an `outcome` line. If a run stops partway, the set is left without a manifest, so nothing
+treats it as restorable. Rerun with the same plan id to finish it. A started set may then lack its
+manifest, but a listing taken right before its deletes may show only the objects its intent named, and a remaining ciphertext must still
+match the planned digest. Anything else refuses with `stale_retention_plan`. Sets without a manifest
+show up under `unclassified` as `incomplete_no_manifest` and are never deleted. Other refusals:
+`confirmation_required`, `retention_plan_unknown`, `retention_plan_expired`,
+`retention_plan_mismatch`, `retention_plan_unsupported` (a plan from an older format: plan again),
+`retention_locked`, `missing_passphrase` and `drive_delete_failed`. There is no MCP form.
+
+Limit: Drive offers no conditional delete, so a writer that replaces a candidate's object in the
+moment between its recheck and its delete is not detected, and the protected check compares listed
+sizes, not bytes, so a same-size corruption of a protected ciphertext during the run is caught only
+by the next plan's full verification. Captures never do this: they write new
+set ids and upload with `--immutable`.
+
 The matching MCP tools are `recovery_capture`, `recovery_capture_status`, `recovery_promote`, and
 `recovery_retention`. The existing `recovery_retention_plan` remains the Drive-set plan. Both
 retention paths stay opt-in through the recovery MCP group.

@@ -102,6 +102,8 @@ class SourcePolicy:
     path: Path
     format: str = "dotenv"
     mcp_modes: frozenset[str] = frozenset()
+    # Exact key names the owner allows to leave this host (copy --from-remote).
+    egress_keys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

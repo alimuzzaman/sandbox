@@ -13,6 +13,9 @@ from .errors import RecoveryError
 from .integrity import sha256_file
 
 _DESTINATION = re.compile(r"^[A-Za-z0-9_.-]+:[^\n\r]*$")
+# Deletion is confined to objects and folders of one recovery set (prune only).
+_SET_OBJECT = re.compile(r"^sets/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
+_SET_DIR = re.compile(r"^sets/[A-Za-z0-9_-]+$")
 
 
 def _has_control(value: str) -> bool:
@@ -114,6 +117,19 @@ class RcloneDrive:
             if sha256_file(source) != sha256_file(downloaded):
                 raise RecoveryError("Drive object hash does not match", "drive_verification_failed")
 
+    def delete(self, key: str) -> None:
+        """Delete one object inside ``sets/<id>/``; used only by a confirmed prune."""
+        if not isinstance(key, str) or not _SET_OBJECT.fullmatch(key) or ".." in key.split("/"):
+            raise RecoveryError("recovery delete key is invalid", "invalid_object_key")
+        self._ok(self.runner.run(("rclone", "deletefile", self._remote(key)), timeout=600),
+                 "drive_delete_failed")
+
+    def remove_empty_dir(self, key: str) -> None:
+        """Remove an emptied set folder; a non-empty or absent folder is left alone."""
+        if not isinstance(key, str) or not _SET_DIR.fullmatch(key):
+            raise RecoveryError("recovery delete key is invalid", "invalid_object_key")
+        self.runner.run(("rclone", "rmdir", self._remote(key)), timeout=120)
+
     def list(self, prefix: str = "sets") -> tuple[dict, ...]:
         remote = self._remote(prefix)
         result = self.runner.run(("rclone", "lsjson", "--recursive", remote), timeout=120)
@@ -166,5 +182,10 @@ class MemoryDrive:
     def verify_file(self, key: str, source: str | Path) -> None:
         if self.get(key) != Path(source).read_bytes():
             raise RecoveryError("Drive object hash does not match", "drive_verification_failed")
+    def delete(self, key: str) -> None:
+        if not _SET_OBJECT.fullmatch(key): raise RecoveryError("recovery delete key is invalid", "invalid_object_key")
+        if self.objects.pop(key, None) is None: raise RecoveryError("recovery object is absent", "drive_delete_failed")
+    def remove_empty_dir(self, key: str) -> None:
+        if not _SET_DIR.fullmatch(key): raise RecoveryError("recovery delete key is invalid", "invalid_object_key")
     def list(self, prefix: str = "sets") -> tuple[dict, ...]:
         return tuple({"Path": key, "Size": len(value)} for key, value in sorted(self.objects.items()) if key.startswith(prefix))

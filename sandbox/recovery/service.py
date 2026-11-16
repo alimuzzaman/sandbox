@@ -365,6 +365,158 @@ class RecoveryService:
             "requires_confirmation": plan.requires_confirmation,
         })
 
+    def _profile_inventory(self, profile: str, keep_count: int) -> dict:
+        """Verified sets of one profile, split into kept and prunable (newest kept)."""
+        from .restore import verify_manifest
+        from .retention import build_retention_plan
+        objects = self.drive.list("")
+        by_set: dict[str, list[str]] = {}
+        for item in objects:
+            path = _listing_path(item)
+            set_id = _set_id(path)
+            if set_id is not None and not item.get("IsDir"):
+                by_set.setdefault(set_id, []).append(path)
+        observed, digests, skipped = [], {}, []
+        for set_id in sorted(set_id for set_id, paths in by_set.items()
+                             if f"sets/{set_id}/manifest.json" not in paths):
+            # Interrupted upload or prune; profile unknown, never deletable here.
+            skipped.append({"id": set_id, "reason": "incomplete_no_manifest"})
+        for set_id in sorted(set_id for set_id, paths in by_set.items()
+                             if f"sets/{set_id}/manifest.json" in paths):
+            try:
+                # Cheap profile filter first, so other profiles' sets are not
+                # downloaded; the full verification below re-reads the manifest.
+                import json
+                declared = json.loads(self.drive.get(f"sets/{set_id}/manifest.json"))
+            except (RecoveryError, ValueError, TypeError):
+                skipped.append({"id": set_id, "reason": "invalid_manifest"})
+                continue
+            if not isinstance(declared, dict) or declared.get("profiles") != [profile]:
+                continue
+            try:
+                manifest = verify_manifest(self.drive, set_id)
+            except RecoveryError as exc:
+                skipped.append({"id": set_id, "reason": exc.code})
+                continue
+            if manifest.get("profiles") != [profile]:
+                continue
+            current = self._current_passphrase_verifies(manifest["ciphertext_object"])
+            if not current or not _retention_timestamp_valid(manifest.get("created_at")):
+                skipped.append({"id": set_id, "reason": "passphrase_not_current" if not current
+                                else "invalid_created_at"})
+                continue
+            digests[set_id] = (manifest["ciphertext_sha256"], manifest["ciphertext_object"],
+                               manifest["ciphertext_size"])
+            observed.append({"id": set_id, "prefix": "sets/", "status": "complete", "verified": True,
+                             "passphrase_current": True, "created_at": manifest.get("created_at")})
+        plan = build_retention_plan("sets/", tuple(observed), keep_count=keep_count)
+        newest = plan.protected_sets[-1] if plan.protected_sets else None
+        return {
+            "protected_sets": plan.protected_sets,
+            "candidates": [{"id": set_id, "ciphertext_sha256": digests[set_id][0],
+                            "ciphertext_object": digests[set_id][1]}
+                           for set_id in plan.candidates],
+            "newest_verified": newest, "skipped": skipped,
+            "protected_objects": {set_id: (digests[set_id][1], digests[set_id][2])
+                                  for set_id in plan.protected_sets},
+            "objects": {set_id: tuple(paths) for set_id, paths in by_set.items()},
+        }
+
+    def _prune_recheck(self, set_id: str, profile: str, plan: dict) -> tuple[str, ...]:
+        """Re-verify one candidate right before deleting it; return its object keys."""
+        from .restore import verify_manifest
+        expected = next(item for item in plan["candidates"] if item["id"] == set_id)
+        manifest = verify_manifest(self.drive, set_id)
+        if (manifest.get("profiles") != [profile]
+                or manifest["ciphertext_sha256"] != expected["ciphertext_sha256"]
+                or manifest["ciphertext_object"] != expected["ciphertext_object"]):
+            raise RecoveryError("a candidate set changed since planning", "stale_retention_plan")
+        keys = tuple(path for item in self.drive.list("")
+                     if (path := _listing_path(item)).startswith(f"sets/{set_id}/")
+                     and not item.get("IsDir"))
+        if set(keys) != {f"sets/{set_id}/manifest.json", expected["ciphertext_object"]}:
+            raise RecoveryError("a candidate set holds unexpected objects", "stale_retention_plan")
+        return keys
+
+    def _protected_present(self, protected: dict) -> bool:
+        """Every protected manifest and ciphertext is still listed at its verified size."""
+        sizes = {_listing_path(item): item.get("Size") for item in self.drive.list("")}
+        return all(f"sets/{set_id}/manifest.json" in sizes and sizes.get(key) == size
+                   for set_id, (key, size) in protected.items())
+
+    def _current_keys(self, set_id: str) -> tuple[str, ...]:
+        return tuple(path for item in self.drive.list("")
+                     if (path := _listing_path(item)).startswith(f"sets/{set_id}/")
+                     and not item.get("IsDir"))
+
+    def _remnant_matches(self, key: str, digest: str) -> bool:
+        from .integrity import sha256_file
+        with tempfile.TemporaryDirectory(prefix="sandbox-recovery-prune-") as directory:
+            target = Path(directory) / "object"
+            self.drive.get_file(key, target)
+            return sha256_file(target) == digest
+
+    def retention_prune(self, profile: str, *, keep_count: int, state_root: Path,
+                        plan_id: str | None = None, confirm: bool = False,
+                        remote: str | None = None) -> dict:
+        """Plan, or with a plan id and confirmation apply, a profile-scoped prune."""
+        from .prune import PruneStore, apply_prune, plan_body, valid_profile
+        if self.drive is None:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "recovery Drive is not configured", "recovery_not_configured"))
+        if self.capture is None:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "retention verification needs RECOVERY_PASSPHRASE", "missing_passphrase"))
+        if not valid_profile(profile):
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "one recovery profile is required", "invalid_retention_policy"))
+        if (not isinstance(keep_count, int) or isinstance(keep_count, bool)
+                or not 1 <= keep_count <= 1000):
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "retention keep count must be 1-1000", "invalid_retention_policy"))
+        if confirm and not plan_id:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "a confirmed prune requires --plan-id from a reviewed plan", "confirmation_required"))
+        if plan_id and not confirm:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "applying a plan requires --confirm", "confirmation_required"))
+        store = PruneStore(Path(state_root) / "retention")
+        destination = getattr(self.drive, "destination", "")
+        try:
+            if plan_id:
+                plan = store.load(plan_id)
+                if (plan.get("destination") != destination or plan.get("profile") != profile
+                        or plan.get("keep_count") != keep_count):
+                    raise RecoveryError("retention plan selectors differ", "retention_plan_mismatch")
+                fresh = self._profile_inventory(profile, keep_count)
+                outcome = apply_prune(
+                    store, plan, fresh, self.drive,
+                    recheck=lambda set_id: self._prune_recheck(set_id, profile, plan),
+                    protected_present=lambda: self._protected_present(fresh["protected_objects"]),
+                    remnant_matches=self._remnant_matches,
+                    current_keys=self._current_keys,
+                )
+                return result(True, "retention", remote=remote, status="pruned", data={
+                    "profile": profile, "keep_count": keep_count, **outcome,
+                    "requires_confirmation": False,
+                })
+            inventory = self._profile_inventory(profile, keep_count)
+            record = store.save(plan_body(destination, profile, keep_count, inventory))
+        except RecoveryError as exc:
+            return result(False, "retention", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError, KeyError):
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "recovery retention prune failed", "retention_failed"))
+        return result(True, "retention", remote=remote, status="planned", data={
+            "profile": profile, "keep_count": keep_count, "plan_id": record["plan_id"],
+            "plan_expires_at": record["expires_at"],
+            "destination_prefix": "sets/",
+            "protected_sets": tuple(record["protected_sets"]),
+            "candidates": tuple(item["id"] for item in record["candidates"]),
+            "unclassified": tuple(inventory["skipped"]),
+            "requires_confirmation": bool(record["candidates"]),
+        })
+
     def restore_plan(self, set_id: str, profiles: tuple[str, ...] = (), *, remote: str | None = None) -> dict:
         if self.drive is None:
             return result(False, "restore", remote=remote, error=RecoveryError(

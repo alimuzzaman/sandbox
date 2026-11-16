@@ -1,9 +1,19 @@
-"""Copy one secret value to a registered remote's own broker (spec 073).
+"""Copy one secret value between the controller and a registered remote's broker.
 
-The value crosses hosts only on the stdin of one SSH session that ``exec``s the
-remote's staged ``sb secrets set --stdin --skip-unchanged``. Command words are
-validated names, quoted for the remote shell; the value never appears in them.
-Only a small allowlist of fields is read back from the remote's JSON answer.
+Outbound (spec 073): the value crosses hosts only on the stdin of one SSH
+session that ``exec``s the remote's staged ``sb secrets set --stdin
+--skip-unchanged``.
+
+Inbound (``copy --from-remote``): one SSH session ``exec``s the remote's
+staged ``sb secrets egress``, which refuses unless the remote source's owner
+granted that exact key in ``egressKeys`` and its stdout is not a terminal. The
+controller sends a fresh random nonce on stdin; the remote answers with one
+JSON line holding the value and an HMAC-SHA256 of it keyed by that nonce. The
+answer stays in this process: it is parsed, checked against the fingerprint,
+and handed to the local broker's write. It is never logged or re-emitted.
+
+Command words are validated names, quoted for the remote shell; the value never
+appears in them. Only a small allowlist of fields is read back.
 """
 from __future__ import annotations
 
@@ -143,6 +153,110 @@ def parse_remote_answer(returncode: int, stdout: bytes) -> RemoteSetResult:
     return RemoteSetResult(action=action, revision=revision)
 
 
+@dataclass(frozen=True)
+class RemoteGetRequest:
+    """Non-secret description of one remote ``secrets egress``."""
+
+    remote: str
+    source: str
+    key: str
+    source_project_dir: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.remote) is not str or not _REMOTE_NAME_RE.fullmatch(self.remote):
+            raise SecretBrokerError("input_invalid", "remote name is invalid")
+        if type(self.source) is not str or not _SOURCE_ALIAS_RE.fullmatch(self.source):
+            raise SecretBrokerError("input_invalid", "remote source alias is invalid")
+        validate_key(self.key)
+        _validate_project_dir(self.source_project_dir)
+
+    @property
+    def origin(self) -> str:
+        return f"remote:{self.remote}/{self.source}/{self.key}"
+
+
+class RemoteEgressAnswer:
+    """One fetched value and its nonce-keyed fingerprint; never rendered."""
+
+    __slots__ = ("_value", "fingerprint")
+
+    def __init__(self, value: str, fingerprint: str) -> None:
+        self._value = value
+        self.fingerprint = fingerprint
+
+    def take(self) -> str:
+        value, self._value = self._value, ""
+        return value
+
+    def __repr__(self) -> str:  # never show the value in a traceback or log
+        return "RemoteEgressAnswer(<withheld>)"
+
+
+class RemoteSecretSource(Protocol):
+    def get(self, request: RemoteGetRequest, nonce: bytes) -> RemoteEgressAnswer:
+        """Fetch one granted value from the remote broker; raise a bounded SecretBrokerError."""
+
+
+EGRESS_NONCE_BYTES = 32
+MAX_EGRESS_STDOUT_BYTES = 6 * 65_536 + 4096
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def egress_fingerprint(nonce: bytes, value: str) -> str:
+    """HMAC-SHA256 of the value under a single-use nonce; never stored or shown."""
+    import hashlib
+    import hmac
+    return hmac.new(nonce, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def remote_egress_command(request: RemoteGetRequest) -> str:
+    """The value-free remote shell command for one ``secrets egress``."""
+    project = (shlex.quote(request.source_project_dir)
+               if request.source_project_dir is not None else '"$home"')
+    tail = ["--source", request.source, "--key", request.key, "--json"]
+    return ('home="${SANDBOX_HOME:-$HOME/sandbox}"; exec "$home/sb-src/sb" secrets egress '
+            "--project-dir " + project + " " + " ".join(shlex.quote(word) for word in tail))
+
+
+def parse_egress_answer(returncode: int, stdout: bytes) -> RemoteEgressAnswer:
+    """Map one remote egress exit and stdout to an answer or a bounded refusal."""
+    if returncode == 255:
+        raise SecretBrokerError("remote_unreachable", "the remote could not be reached over SSH",
+                                retryable=True)
+    # A 64 KiB value can grow sixfold as JSON \\u escapes; allow that plus framing.
+    if not isinstance(stdout, bytes) or len(stdout) > MAX_EGRESS_STDOUT_BYTES:
+        stdout = b""
+    answer = None
+    lines = [line for line in stdout.split(b"\n") if line.strip()]
+    if lines:
+        try:
+            answer = json.loads(lines[-1].decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            answer = None
+    lines = []
+    stdout = b""
+    if not isinstance(answer, dict) or not isinstance(answer.get("ok"), bool):
+        if returncode == 2:
+            raise SecretBrokerError(
+                "remote_unsupported", "the remote Sandbox does not support copy --from-remote",
+                remedy="Update the remote runtime with `sb remote service migrate REMOTE --confirm`, then retry.",
+            )
+        raise SecretBrokerError("remote_failed", "the remote secret egress failed")
+    if answer["ok"] is not True:
+        error = answer.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        if not isinstance(code, str) or not _ERROR_CODE_RE.fullmatch(code):
+            code = "remote_failed"
+        raise SecretBrokerError(code, "the remote refused the secret egress")
+    value = answer.get("value")
+    fingerprint = answer.get("fingerprint")
+    answer.clear()
+    if (returncode != 0 or not isinstance(value, str) or not value
+            or not isinstance(fingerprint, str) or not _FINGERPRINT_RE.fullmatch(fingerprint)):
+        raise SecretBrokerError("remote_failed", "the remote secret egress answer is invalid")
+    return RemoteEgressAnswer(value, fingerprint)
+
+
 class SshRemoteSecretSink:
     """Production sink: one SSH session per value, no retry after a timeout."""
 
@@ -196,9 +310,39 @@ class SshRemoteSecretSink:
             raise SecretBrokerError("remote_unreachable", "ssh could not be started", retryable=True)
         return parse_remote_answer(getattr(result, "returncode", 1), getattr(result, "stdout", b""))
 
+    def get(self, request: RemoteGetRequest, nonce: bytes) -> RemoteEgressAnswer:
+        """Fetch one granted value over the same authenticated SSH channel."""
+        if not isinstance(request, RemoteGetRequest):
+            raise SecretBrokerError("input_invalid", "remote secret request is invalid")
+        if not isinstance(nonce, bytes) or len(nonce) != EGRESS_NONCE_BYTES:
+            raise SecretBrokerError("input_invalid", "egress nonce is invalid")
+        timed_out = failed = False
+        result = None
+        try:
+            result = self._run(self._entry, remote_egress_command(request),
+                               timeout=self._timeout, input_data=nonce.hex().encode("ascii") + b"\n")
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        except OSError:
+            failed = True
+        # Raise outside the handlers so no subprocess exception (whose output
+        # may hold a partial answer) is chained or retained.
+        if timed_out:
+            raise SecretBrokerError(
+                "remote_timeout", "the remote secret egress did not finish in time",
+                remedy="Nothing was written locally; rerun the same copy.",
+            )
+        if failed or result is None:
+            raise SecretBrokerError("remote_unreachable", "ssh could not be started", retryable=True)
+        returncode = getattr(result, "returncode", 1)
+        stdout = getattr(result, "stdout", b"")
+        result = None
+        return parse_egress_answer(returncode, stdout)
+
 
 __all__ = [
-    "COPY_ACTIONS", "COPY_INTENTS", "CopyAction", "CopyIntent", "RemoteSecretSink",
-    "RemoteSetRequest", "RemoteSetResult", "SshRemoteSecretSink", "parse_remote_answer",
-    "remote_set_command",
+    "COPY_ACTIONS", "COPY_INTENTS", "CopyAction", "CopyIntent", "EGRESS_NONCE_BYTES",
+    "RemoteEgressAnswer", "RemoteGetRequest", "RemoteSecretSink", "RemoteSecretSource",
+    "RemoteSetRequest", "RemoteSetResult", "SshRemoteSecretSink", "egress_fingerprint",
+    "parse_egress_answer", "parse_remote_answer", "remote_egress_command", "remote_set_command",
 ]

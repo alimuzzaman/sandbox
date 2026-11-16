@@ -16,7 +16,8 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MCP_MODE_ORDER = ("source_info", "keys", "metadata", "validate", "masked", "use")
 _MCP_MODES = frozenset(_MCP_MODE_ORDER)
 _SECRET_KEYS = frozenset(("sources", "useProfiles", "ownership"))
-_FILE_SOURCE_KEYS = frozenset(("type", "path", "format", "mcpModes"))
+_FILE_SOURCE_KEYS = frozenset(("type", "path", "format", "mcpModes", "egressKeys"))
+_MAX_EGRESS_KEYS = 32
 _INFISICAL_SOURCE_KEYS = frozenset((
     "type", "endpoint", "projectId", "environment", "path", "key",
     "clientId", "mcpModes", "timeoutSeconds",
@@ -225,7 +226,23 @@ def _normalize_source(alias: object, value: object, root: object) -> tuple[str, 
     }
     if "format" in descriptor:
         normalized["format"] = format_name
+    if "egressKeys" in descriptor:
+        normalized["egressKeys"] = _egress_keys(descriptor["egressKeys"], format_name, name)
     return name, normalized
+
+
+def _egress_keys(value: object, format_name: str, name: str) -> list[str]:
+    """Exact key names the owner allows to leave this host (``copy --from-remote``)."""
+    if format_name != "dotenv":
+        raise ValueError(f"secret source {name!r} egressKeys requires a dotenv source")
+    if (not isinstance(value, list) or not 1 <= len(value) <= _MAX_EGRESS_KEYS
+            or any(not isinstance(key, str) or not _ENV_NAME.fullmatch(key) for key in value)
+            or len(value) != len(set(value))):
+        raise ValueError(
+            f"secret source {name!r} egressKeys must be a unique list of 1-{_MAX_EGRESS_KEYS} "
+            "exact key names"
+        )
+    return sorted(value)
 
 
 def _bounded_int(value: object, minimum: int, maximum: int, label: str) -> int:

@@ -109,6 +109,12 @@ legacy bearer remains stored locally. The shared installer enforces that rule
 for low-level callers too. `remote provision --force` cannot replace a joined
 Tailnet registration; use the supported lifecycle commands instead.
 
+Control protocol 27 records the `_helper_failure` detail keys of the PostgreSQL
+recovery transport (`helper_code`, `step`, `command`, `exit`, `check`), which ee78ede and
+0a79b72 added under 26 without a bump. The controller builds them from the helper's
+final stderr line; an older helper emits no such line and an older controller ignores
+it, so 27 still serves every runtime 26 did (`CONTROL_PROTOCOL_OLDEST_SERVED` unchanged).
+
 Control protocol 26 adds `sb host login-url --here` (contract
 `host.login-url-here.v1`, `sandbox/hosting/server_login_url.py`). The installed
 runtime lists the contract under `host_login_url_capabilities` in `job-capabilities`

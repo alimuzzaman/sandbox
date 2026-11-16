@@ -7,7 +7,7 @@ server-owner operation on the same target may replace that lease only when,
 under the lease's own lock, the file's holder and token match one recorded
 acquisition of a server-cli job in this server's registry that is terminal (not
 ``interrupted``), recorded its owned work stopped, has no live process, process
-group or unfinished child, ran against the same target and took the lease while
+group or unfinished descendant job, ran against the same target and took the lease while
 it ran. A withheld (effect-unknown) apply never releases its lease; this is how
 it stops holding the target forever. Persisted host-state fences
 (``active_operation``, ``recovery_uncertainty``) are separate and still refuse.
@@ -29,6 +29,7 @@ ACQUIRED = "host_apply_lease_acquired"
 RELEASED = "host_apply_lease_released"
 TAKEN_OVER = "host_apply_lease_taken_over"
 _JOB_PAGES = 50
+_DESCENDANTS = 500
 
 
 class _Unproven(Exception):
@@ -87,7 +88,26 @@ def _events(repository, job_id, kind):
     rows = repository.connection.execute(
         "SELECT payload_json FROM job_events WHERE job_id=? AND kind=? ORDER BY sequence",
         (job_id, kind)).fetchall()
-    return [json.loads(row[0]) for row in rows]
+    events = [json.loads(row[0]) for row in rows]
+    for event in events:
+        if isinstance(event, dict) and isinstance(event.get("path"), str):
+            event["path"] = os.path.normpath(event["path"])
+    return events
+
+
+def _descendants_ended(repository, job_id):
+    """Every descendant job ended with its work proven stopped (bounded walk)."""
+    pending, seen = [job_id], {job_id}
+    while pending:
+        for child in repository.children(pending.pop()):
+            child_id = child["job_id"]
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            if len(seen) > _DESCENDANTS:
+                raise _Unproven()
+            _ended_stopped(repository, child_id)
+            pending.append(child_id)
 
 
 def _epoch(value):
@@ -121,7 +141,8 @@ def _holder_job(repository, holder, token, path, target, since):
             job_id = listed["job_id"]
             if apply_lease_owner(job_id) != holder:
                 continue
-            expected = {"holder": holder, "token": token, "path": str(path), "target": target}
+            expected = {"holder": holder, "token": token, "path": os.path.normpath(str(path)),
+                        "target": target}
             if expected not in _events(repository, job_id, ACQUIRED):
                 raise _Unproven()
             if any(event.get("token") == token for event in _events(repository, job_id, RELEASED)):
@@ -129,8 +150,7 @@ def _holder_job(repository, holder, token, path, target, since):
             row = _ended_stopped(repository, job_id)
             if not _epoch(row["started_at"]) <= since <= _epoch(row["finished_at"]) + 1:
                 raise _Unproven()
-            for child in repository.children(job_id):
-                _ended_stopped(repository, child["job_id"])
+            _descendants_ended(repository, job_id)
             return job_id
         if len(rows) < 200:
             break
@@ -142,10 +162,14 @@ def take_over_ended_apply_lease(path, *, owner, target, job_id, repository=None)
     """Replace a lease held by an ended, stopped apply/destroy job; ``None`` otherwise.
 
     Returns ``(lease, previous_job_id)``; release it like any acquired lease.
-    ``previous_job_id`` is ``None`` when the lease was already gone.
+    ``previous_job_id`` is ``None`` when the lease was already gone. The new
+    lease's acquisition is recorded in ``job_id``'s events before the file is
+    written (``lease["recorded"]``), so a death between the two still leaves a
+    record; a write that fails raises ``LeaseUnavailable``.
     """
     from sandbox.application.server_cli_exec_recovery import (
         TAKEOVER_LOCK_SECONDS, _lease_lock, _write_lease)
+    from sandbox.hosting import target_lease
     path = Path(path)
     with ExitStack() as held:
         try:
@@ -168,7 +192,11 @@ def take_over_ended_apply_lease(path, *, owner, target, job_id, repository=None)
         except Exception:  # noqa: BLE001 - anything unproven keeps the lease
             return None
         lease = {"path": str(path), "token": secrets.token_hex(16), "owner": owner}
-        _write_lease(path, lease["token"], owner)
+        lease["recorded"] = record(job_id, ACQUIRED, lease, target, repository=repository)
+        try:
+            _write_lease(path, lease["token"], owner)
+        except OSError as exc:
+            raise target_lease.LeaseUnavailable(f"target lease could not be written: {exc}") from None
         if previous is not None:
             # Evidence on the ended job; the new holder records its own acquisition.
             try:
@@ -194,8 +222,11 @@ def acquire_owner_lease(entry, path, project, environment, run):
         lease, previous = taken
         if previous is not None:
             print(f"sb host: took over the target lease of ended job {previous}", file=sys.stderr)
+    recorded = lease.pop("recorded", None)
     lease = {**lease, "job_id": job_id, "target": target}
-    if not record(job_id, ACQUIRED, lease, target):
+    if recorded is None:
+        recorded = record(job_id, ACQUIRED, lease, target)
+    if not recorded:
         print("sb host: warning: the target lease was not recorded in this job; "
               "if the job dies holding it, recovery is manual", file=sys.stderr)
     return lease

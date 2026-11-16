@@ -38,7 +38,7 @@ import re
 import shlex
 from typing import Callable, Iterable
 
-from sandbox.hosting.front_door import FrontDoorError
+from sandbox.hosting.front_door import FrontDoorError, exact_read
 
 CONF_DIR = "/etc/nginx/conf.d"
 FILE_PREFIX = "sandbox-"
@@ -963,12 +963,18 @@ def ensure_origin_certificate(entry: dict, name: str, hostnames: list[str], clie
                f"$SUDO sh -c {shlex.quote(keygen)}; fi; "
                f"$SUDO chmod 0600 {shlex.quote(key_path)}; "
                f"$SUDO openssl req -new -key {shlex.quote(key_path)} -subj {shlex.quote('/CN=' + primary)} "
-               f"-out {shlex.quote(csr_path)} && $SUDO cat {shlex.quote(csr_path)}")
+               f"-out {shlex.quote(csr_path)} && $SUDO sh -c {shlex.quote(exact_read.SCRIPT)} "
+               f"sandbox-read {shlex.quote(csr_path)}")
     result = _ssh(entry, command, timeout=60)
-    if result.returncode != 0 or "BEGIN CERTIFICATE REQUEST" not in (result.stdout or ""):
+    try:
+        # Byte for byte: the redacting owner channel can rewrite base64 PEM text.
+        csr = exact_read.decode(result.stdout) if result.returncode == 0 else ""
+    except exact_read.ExactReadError:
+        csr = ""
+    if "BEGIN CERTIFICATE REQUEST" not in csr:
         raise FrontDoorError("front_door_certificate_failed",
                              "could not create the origin key/CSR: " + _diagnostic(entry, result))
-    issued = client.create_origin_certificate(result.stdout, sorted(hostnames))
+    issued = client.create_origin_certificate(csr, sorted(hostnames))
     text = issued.get("certificate") if isinstance(issued, dict) else None
     if not isinstance(text, str) or "BEGIN CERTIFICATE" not in text:
         raise FrontDoorError("front_door_certificate_failed",

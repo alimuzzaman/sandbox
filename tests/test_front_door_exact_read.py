@@ -68,6 +68,35 @@ class ExactReadTests(unittest.TestCase):
             with self.assertRaises(nginx.FrontDoorError):
                 nginx.read_route({}, "x")
 
+    def test_the_origin_csr_reaches_cloudflare_byte_for_byte(self):
+        # Base64 PEM can match a provider-secret pattern (AKIA + 16) and be
+        # rewritten by the redacting owner channel.
+        csr = ("-----BEGIN CERTIFICATE REQUEST-----\nMIIBAKIAABCDEFGHIJKLMNOPQRSTUV\n"
+               "-----END CERTIFICATE REQUEST-----\n")
+        self.assertNotEqual(redact_text(csr), csr)
+        path = self.directory / "origin.csr"
+        path.write_text(csr)
+        encoded = redact_text(_run(path).stdout)
+        calls = []
+
+        def ssh(entry, command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess([], 1, "", "")  # no certificate yet
+            if len(calls) == 2:
+                return subprocess.CompletedProcess([], 0, encoded, "")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        class Client:
+            def create_origin_certificate(self, request, hostnames):
+                self.request = request
+                return {"id": "c1", "certificate": "-----BEGIN CERTIFICATE-----\nx\n"}
+
+        client = Client()
+        with patch.object(nginx, "_ssh", side_effect=ssh):
+            nginx.ensure_origin_certificate({}, "x", ["a.example.com"], client)
+        self.assertEqual(client.request, csr)
+
 
 if __name__ == "__main__":
     unittest.main()

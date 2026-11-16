@@ -449,7 +449,7 @@ http {{
         emerg = [line for line in r.stderr.splitlines() if "[emerg]" in line]
         if r.returncode != 0 and emerg and all(
                 "bind() to" in line and "Permission denied" in line for line in emerg):
-            return  # unprivileged: syntax checked, the listen sockets need root
+            self.skipTest("unprivileged: syntax is ok, but binding the listen sockets needs root")
         self.assertEqual(r.returncode, 0, f"nginx -t failed:\nstdout: {r.stdout}\nstderr: {r.stderr}")
         self.assertIn("test is successful", r.stderr)
 

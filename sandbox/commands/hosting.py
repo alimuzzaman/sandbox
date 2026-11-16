@@ -1294,14 +1294,19 @@ def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry
     if present.returncode == 0:
         return cert_path, key_path, certificate or {"id": None, "hostnames": runtime["certificate_hostnames"]}
     primary = next(route["hostname"] for route in validated["routes"] if route.get("primary"))
+    from sandbox.hosting.front_door import exact_read as _exact
     command = (
         "set -e; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
         f"$SUDO install -d -o root -g caddy -m 0750 {shlex.quote(base)}; "
         f"if [ ! -s {shlex.quote(key_path)} ]; then $SUDO openssl ecparam -name prime256v1 -genkey -noout -out {shlex.quote(key_path)}; $SUDO chown root:caddy {shlex.quote(key_path)}; $SUDO chmod 0640 {shlex.quote(key_path)}; fi; "
         f"$SUDO openssl req -new -key {shlex.quote(key_path)} -subj {shlex.quote('/CN=' + primary)} -out {shlex.quote(csr_path)}; "
-        f"$SUDO cat {shlex.quote(csr_path)}"
+        f"$SUDO sh -c {shlex.quote(_exact.SCRIPT)} sandbox-read {shlex.quote(csr_path)}"
     )
-    csr = _remote_checked(entry, command, timeout=60)
+    try:
+        # Byte for byte: the redacting owner channel can rewrite base64 PEM text.
+        csr = _exact.decode(_remote_checked(entry, command, timeout=60))
+    except _exact.ExactReadError as exc:
+        raise hosting.HostingError(f"origin CSR could not be read: {exc}") from None
     issued = client.create_origin_certificate(csr, runtime["certificate_hostnames"])
     certificate_text = issued.get("certificate")
     if not isinstance(certificate_text, str) or not certificate_text.strip():

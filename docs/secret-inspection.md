@@ -615,6 +615,65 @@ The controller audit records operation `copy` with the local source and key,
 remote's answer as `reason_code`. The remote records its own `set` audit. Copy has
 no MCP form.
 
+### 6d. Copy one value from a remote host to this controller
+
+```bash
+./sb secrets copy --from-remote REMOTE_NAME --source REMOTE_SOURCE_ALIAS \
+  --key SECRET_KEY --to LOCAL_SOURCE_ALIAS [--as LOCAL_KEY] [--replace-only] \
+  [--source-project-dir /absolute/remote/project] --project-dir PROJECT_DIR
+```
+
+This is the reverse of 6c. Use it to keep a copy of a host's own key on the controller,
+such as an application's encryption key that its backups need.
+
+**Grant.** A value leaves a host only when that host's registration of the source names the
+exact key in `egressKeys`:
+
+```jsonc
+"secrets": { "sources": { "app-env": {
+  "path": ".env.app",
+  "egressKeys": ["ENCRYPTION_KEY", "AUTH_SECRET"]
+} } }
+```
+
+The grant is the owner's approval. It lists exact key names only, with no wildcard. It needs a
+dotenv source, and the built-in `personal` source can never grant egress. Agents do not add or
+widen a grant on their own. The owner adds it, or names the exact keys in the task. A key without
+a grant refuses with `egress_not_granted` before the value is read. An unregistered source refuses
+with `source_unknown`, and an unknown remote with `remote_unknown`.
+
+**Transport.** The controller opens one SSH session to the registered, provisioned remote and runs
+`"$SANDBOX_HOME/sb-src/sb" secrets egress --project-dir DIR --source ALIAS --key KEY --json`
+there. Only names are in that command. The controller sends a fresh random 32-byte nonce on the
+session's stdin. The remote broker checks the grant, then writes one JSON line to the SSH channel
+holding the value and an HMAC-SHA256 of it keyed by that nonce. `egress` refuses
+(`egress_requires_transport`) when its stdout or stdin is a terminal or `--json` is missing, and it
+has no MCP form. The controller keeps the answer in memory. It never logs, prints or writes it to
+a temporary file. The value never appears in argv, an environment variable, console output or
+either audit journal.
+
+**Write and verify.** The controller checks the received value against the fingerprint
+(`transfer_mismatch` otherwise, nothing written). It then writes the value into the local dotenv
+source the way `set --stdin --skip-unchanged` does, reads it back through the broker and compares
+the fingerprint again (`verification_failed` otherwise). The default intent is create-only, so an
+escrow never overwrites a different local value silently: that refuses with `intent_conflict`.
+Pass `--replace-only` to rotate a value deliberately. A rerun reports `already_current`. The result
+holds names, the action, the local revision and a `verification` block with each side's `state`
+and `length_bucket` plus `fingerprint_match: true`. The nonce and fingerprint are used once and are
+never stored or shown.
+
+The remote records operation `egress` (destination `controller`). The controller records operation
+`copy` with `input_channel` `remote_ssh` and `destination` `remote:REMOTE/SOURCE/KEY`, the origin.
+Other refusals are the same as 6c: `remote_unreachable`, `remote_timeout` (nothing was written
+locally; rerun) and `remote_unsupported` (the remote runtime predates `egress`: run
+`sb remote service migrate REMOTE_NAME --confirm`). `--remote`, `--target-source`,
+`--target-project-dir` and the revision pins belong to 6c and are refused with `--from-remote`.
+
+Trust limit: anyone who can run `sb` as the remote owner can pipe `secrets egress` for a granted
+key and read the value. That is why a grant should name only keys that are meant to leave the
+host. Same-UID file access on either host stays outside the broker's boundary, as everywhere else
+in this document.
+
 ### 6b. Group one dotenv source into documented sections
 
 ```bash

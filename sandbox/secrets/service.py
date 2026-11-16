@@ -932,6 +932,133 @@ class SecretService:
         return self._operate("copy", source, (key,), surface, perform,
                              input_channel="remote_stdin", destination=request.destination)
 
+    @staticmethod
+    def _single_line(value: str) -> None:
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            size = MAX_VALUE_BYTES + 1
+        if not value or size > MAX_VALUE_BYTES or any(
+                character in value for character in "\r\n\x00"):
+            raise SecretBrokerError(
+                "input_invalid", "secret value cannot travel as one line",
+            )
+
+    def egress(self, source: str, key: str, nonce: bytes, writer: Callable[[str, str], None], *,
+               surface: str = "cli") -> dict:
+        """Hand one owner-granted value to the controller's ``copy --from-remote``.
+
+        Refuses unless the registered dotenv source lists ``key`` in its
+        ``egressKeys`` grant. ``writer(value, fingerprint)`` is the only place
+        the value goes; the returned payload and audit carry names only.
+        """
+        from .remote_copy import EGRESS_NONCE_BYTES, egress_fingerprint
+        if self._is_provider_source(source):
+            raise SecretBrokerError("egress_denied", "provider sources do not support egress")
+        if source == "personal":
+            raise SecretBrokerError("egress_denied", "the personal source never grants egress")
+        self._validate_source_key(source, key)
+        if surface != "cli":
+            raise SecretBrokerError("egress_denied", "secret egress requires the local CLI")
+        if not isinstance(nonce, bytes) or len(nonce) != EGRESS_NONCE_BYTES:
+            raise SecretBrokerError("input_invalid", "egress nonce is invalid")
+        if not callable(writer):
+            raise SecretBrokerError("input_invalid", "egress writer is invalid")
+
+        def perform(correlation):
+            policy = self.registry.policy(source)
+            if policy.format != "dotenv":
+                raise SecretBrokerError("egress_denied", "secret egress requires a dotenv source")
+            if key not in getattr(policy, "egress_keys", frozenset()):
+                raise SecretBrokerError(
+                    "egress_not_granted", "the source owner has not granted this key egress",
+                    remedy="The host owner adds the exact key to the source's egressKeys, then retry.",
+                )
+            _, document = self._document(source)
+            record = document.entries.get(key)
+            if record is None:
+                raise SecretBrokerError("key_missing", "secret key does not exist")
+            value = self._entry_value(record)
+            self._single_line(value)
+            writer(value, egress_fingerprint(nonce, value))
+            return success("egress", source=source, key=key, correlation_id=correlation)
+
+        return self._operate("egress", source, (key,), surface, perform,
+                             input_channel="ssh_stdout", destination="controller")
+
+    def copy_from_remote(self, target_source: str, target_key: str, request, origin, *,
+                         intent: str = "create", surface: str = "cli") -> dict:
+        """Fetch one granted remote value straight into a local dotenv source.
+
+        The value travels only inside ``origin.get``'s authenticated channel and
+        this call. It is checked against the remote's nonce-keyed fingerprint
+        before the write and read back afterwards; the result reports metadata
+        and match booleans only.
+        """
+        from .remote_copy import EGRESS_NONCE_BYTES, RemoteGetRequest, egress_fingerprint
+        if self._is_provider_source(target_source):
+            raise SecretBrokerError(
+                "update_denied", "provider sources do not accept secret-value updates",
+            )
+        self._validate_source_key(target_source, target_key)
+        if surface != "cli":
+            raise SecretBrokerError("update_denied", "secret copying requires the local CLI")
+        if not isinstance(request, RemoteGetRequest):
+            raise SecretBrokerError("input_invalid", "remote secret request is invalid")
+        if not callable(getattr(origin, "get", None)):
+            raise SecretBrokerError("input_invalid", "remote secret origin is invalid")
+        if intent not in {"create", "replace", "either"}:
+            raise SecretBrokerError("intent_conflict", "secret update intent is invalid")
+
+        def perform(correlation):
+            if self.registry.policy(target_source).format != "dotenv":
+                raise SecretBrokerError(
+                    "update_unsupported", "secret updates are not supported for this format",
+                )
+            # Fail on an unreadable or unparsable target before fetching anything.
+            self._document(target_source)
+            nonce = secure_random.token_bytes(EGRESS_NONCE_BYTES)
+            answer = origin.get(request, nonce)
+            value = answer.take()
+            self._single_line(value)
+            if not hmac.compare_digest(egress_fingerprint(nonce, value), answer.fingerprint):
+                raise SecretBrokerError(
+                    "transfer_mismatch", "the received value does not match the remote fingerprint",
+                )
+            remote_bucket = length_bucket(len(value))
+            safe = self.registry.read(target_source)
+            action, revision = update_source(
+                safe, key=target_key, value=value,
+                revision_key=load_revision_key(self.revision_key_path),
+                intent=intent, skip_unchanged=True,
+            )
+            value = ""
+            _, document = self._document(target_source)
+            record = document.entries.get(target_key)
+            stored = self._entry_value(record) if record is not None else ""
+            matched = bool(stored) and hmac.compare_digest(
+                egress_fingerprint(nonce, stored), answer.fingerprint)
+            local_bucket = length_bucket(len(stored))
+            stored = ""
+            if not matched:
+                raise SecretBrokerError(
+                    "verification_failed", "the stored value does not match the remote fingerprint",
+                )
+            return success(
+                "copy", source=target_source, key=target_key, remote=request.remote,
+                remote_source=request.source, remote_key=request.key, action=action,
+                revision=revision, reason_code=action, correlation_id=correlation,
+                verification={
+                    "remote": {"state": "present", "length_bucket": remote_bucket},
+                    "local": {"state": "present", "length_bucket": local_bucket},
+                    "length_match": remote_bucket == local_bucket,
+                    "fingerprint_match": True,
+                },
+            )
+
+        return self._operate("copy", target_source, (target_key,), surface, perform,
+                             input_channel="remote_ssh", destination=request.origin)
+
     def generate(self, source: str, key: str, profile: str, **kwargs) -> dict:
         if self._is_provider_source(source):
             raise SecretBrokerError(

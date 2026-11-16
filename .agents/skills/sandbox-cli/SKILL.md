@@ -51,7 +51,10 @@ File sources: `sb secrets unset --source ALIAS KEY` removes one key (a missing k
 refuses with `key_missing`). `sb secrets copy --source ALIAS --key KEY --remote NAME
 --target-source ALIAS [--as NEWKEY]` sends one value to a provisioned remote's own
 `secrets set --stdin --skip-unchanged` over SSH stdin; a rerun reports
-`already_current`. Both are local CLI only and never print values.
+`already_current`. `sb secrets copy --from-remote NAME --source ALIAS --key KEY --to
+LOCAL [--as NEWKEY]` fetches one key the host granted in that source's `egressKeys` into a
+local source (create-only by default) and reports `fingerprint_match`. All are local CLI only and
+never print values.
 
 ## Ownership profiles
 

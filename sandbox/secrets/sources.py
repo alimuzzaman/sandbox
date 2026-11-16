@@ -103,6 +103,8 @@ class SourceRegistry:
             path=path,
             format=self._field(item, "format", "dotenv"),
             mcp_modes=frozenset(modes or ()),
+            egress_keys=frozenset(
+                self._field(item, "egress_keys", self._field(item, "egressKeys", ())) or ()),
         )
 
     def probe(self, alias: str, *, exact_size: bool = False) -> dict[str, Any]:

@@ -284,6 +284,21 @@ same copy rather than inspecting either file. Both commands are local CLI only a
 print names, actions and opaque revisions, never values. Agents run them only when
 the operator asked for that exact source, key and remote.
 
+Reverse direction, from a remote host into a local source:
+
+```bash
+./sb secrets copy --from-remote REMOTE_NAME --source REMOTE_SOURCE_ALIAS --key SECRET_KEY \
+  --to LOCAL_SOURCE_ALIAS [--as LOCAL_KEY] [--source-project-dir /remote/project] \
+  --project-dir PROJECT_DIR
+```
+
+It works only for keys the host's source registration lists in `egressKeys`
+(`egress_not_granted` otherwise). The owner grants that, never an agent on its own. The value
+travels on the SSH channel inside one JSON answer and is checked against a nonce-keyed fingerprint
+before and after the local create-only write. The result shows `fingerprint_match` and length
+buckets only. `secrets egress` is that command's remote half: never run it yourself. See
+`docs/secret-inspection.md` section 6d.
+
 ## 6b. Group a dotenv source without reading it
 
 ```bash

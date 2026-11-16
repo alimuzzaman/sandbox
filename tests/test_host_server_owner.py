@@ -873,6 +873,12 @@ class ServerSelectionTests(OwnerTargetTests):
         # Not busy: the apply ran, its delivery could not be verified (no declared revision).
         self.assertEqual(refused.exception.code, "host_target_unverified")
         self.assertIn("derived_environment APP_SOURCE_REVISION", str(refused.exception))
+        self.summary["last_apply"]["reason"] = "edge_not_observed"
+        with self.assertRaises(TargetRefusal) as refused:
+            self.selected()
+        self.assertEqual(refused.exception.code, "host_target_unverified")
+        self.assertNotIn("APP_SOURCE_REVISION", str(refused.exception))
+        del self.summary["last_apply"]["reason"]
         self.process.assert_not_called()
         for status in ("failed", "applying"):
             self.summary["last_apply"]["status"] = status

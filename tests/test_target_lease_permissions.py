@@ -62,15 +62,47 @@ class TargetLeasePermissionsTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(after.st_mode), 0o664)
 
     @unittest.skipUnless(TIGHTENS, "requires real flock and /proc")
-    def test_anchor_with_a_lease_body_is_left_as_it_is(self):
+    def test_anchor_is_tightened_even_while_another_owner_holds_the_lease(self):
+        # Otherwise a stale holder's legacy anchor would block the takeover forever:
+        # takeover needs a private anchor, and only a lease operation repairs it.
         with tempfile.TemporaryDirectory() as directory:
             lease, lock = self.legacy_anchor(directory)
             lease.write_text(f"{'c' * 32} {'d' * 32} 1\n")
             lease.chmod(0o600)
+            body = lease.read_text()
             result = self.run_lease(lease)
-            self.assertEqual(result.returncode, 45, result.stderr)  # held by another owner
-            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o664)
-            self.assertEqual(lease.read_text().split()[1], "d" * 32)
+            self.assertEqual(result.returncode, 45, result.stderr)  # still held, not taken
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+            self.assertEqual(lease.read_text(), body)
+
+    def test_new_lease_directory_is_private_with_group_writable_caller_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease = Path(directory) / "sub" / "example.lease"
+            result = self.run_lease(lease)
+            self.assertIn(result.returncode, (0, 46), result.stderr)
+            self.assertEqual(stat.S_IMODE(lease.parent.stat().st_mode) & 0o022, 0)
+
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "Linux remotes")
+    def test_legacy_group_writable_lease_directory_loses_group_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory).resolve()
+            parent = real / "sub"
+            parent.mkdir()
+            parent.chmod(0o775)
+            result = self.run_lease(parent / "example.lease")
+            self.assertIn(result.returncode, (0, 46), result.stderr)
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "Linux remotes")
+    def test_symlinked_lease_directory_is_left_as_it_is(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory).resolve()
+            target = real / "elsewhere"
+            target.mkdir()
+            target.chmod(0o775)
+            (real / "sub").symlink_to(target)
+            self.run_lease(real / "sub" / "example.lease")
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o775)
 
     @unittest.skipUnless(TIGHTENS, "requires real flock and /proc")
     def test_hard_linked_anchor_is_left_as_it_is(self):

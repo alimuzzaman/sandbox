@@ -24,18 +24,27 @@ HELD_EXIT = 45
 
 SCRIPT = r"""set -eu
 f=$1; token=$2; owner=$3; action=$4
-mkdir -p "$(dirname "$f")"
-# The physical anchor must satisfy exact exec recovery's owner-only policy.
-# Set this before opening it; changing umask later only protects the lease body.
+# The physical anchor and its directory must satisfy exact exec recovery's
+# owner-only policy. Set this before creating either; changing umask later only
+# protects the lease body.
 umask 077
+d=$(dirname "$f")
+mkdir -p "$d"
+# A legacy directory made under a group-writable umask is refused by exact exec
+# recovery. Drop group/other write on it only when it is a real directory we own
+# whose resolved path is itself.
+if [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && [ "$(cd "$d" && pwd -P)" = "$d" ]; then
+  chmod go-w "$d" 2>/dev/null || true
+fi
 exec 9>"$f.lock"
 flock -w 30 9 || exit 46
 # A legacy anchor created before that umask is group-writable, which exact exec
 # recovery and the owner panel refuse. Tighten it in place under its flock: only the
 # open inode itself, when it is the path's own (not a symlink target), a regular file
-# we own with one link, and no lease body is present. Never replace the inode.
+# we own with one link. Permissions are checked only at open, so a holder's open
+# descriptor is unaffected. Never replace the inode.
 a=/proc/$$/fd/9
-if [ -f "$a" ] && [ -O "$a" ] && [ ! -s "$f" ] \
+if [ -f "$a" ] && [ -O "$a" ] \
     && [ "$(stat -c %d:%i "$f.lock" 2>/dev/null)" = "$(stat -L -c %d:%i "$a" 2>/dev/null)" ] \
     && [ "$(stat -L -c %h "$a" 2>/dev/null)" = 1 ] && [ "$(stat -L -c %a "$a" 2>/dev/null)" != 600 ]; then
   chmod 600 "$a" 2>/dev/null || true

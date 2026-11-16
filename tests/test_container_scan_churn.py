@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import unittest
 
 from sandbox.hosting import ports
@@ -73,16 +74,30 @@ class PortProbeScanTests(unittest.TestCase):
     def test_a_departed_owner_cannot_vouch_for_its_old_port(self):
         # The expected owner stops after its inspect; a foreign container may
         # take its port and address. Its stale row must refuse, not accept.
+        owner = {"project": "p", "service": "web", "container_port": 80}
         probe, _ = self.scan([[A], []], self.ok)
         publications = probe["settled_scan"]()
         port = publications[0]["port"]
-        snapshot = {"version": 1, "complete": True, "identity": {"target": "t", "uid": 1, "home": "/h"},
-                    "engine_id": "e", "observed_at": 0, "publications": publications,
-                    "listeners": [{"address": "127.0.0.1", "port": port, "container": None}],
-                    "reservations": [], "end": "sandbox.ports.v1.complete"}
-        snapshot = ports.validate_snapshot(snapshot, now=0)
-        with self.assertRaises(ports.PortObservationError):
-            ports.check_pair(snapshot, port, {"project": "p", "service": "web", "container_port": 80})
+        for listeners in ([{"address": "127.0.0.1", "port": port, "container": None}], []):
+            with self.subTest(listener=bool(listeners)):
+                snapshot = ports.validate_snapshot(self.snapshot(publications, listeners))
+                # An ownership refusal, never "stale port observation".
+                with self.assertRaisesRegex(ports.PortObservationError, "unknown listener|conflicting Docker owner"):
+                    ports.check_pair(snapshot, port, owner)
+        # Control: the same container still listed is the port's proven owner.
+        probe, _ = self.scan([[A], [A]], self.ok)
+        ports.check_pair(ports.validate_snapshot(self.snapshot(probe["settled_scan"](), [])), port, owner)
+
+    def test_a_departed_reservation_and_a_replacement_on_one_port_refuse_the_snapshot(self):
+        probe, _ = self.scan([[A], [C]], lambda cid: (0, _item(cid, 9000), ""))
+        with self.assertRaisesRegex(ports.PortObservationError, "duplicate Docker bind owner|multiple containers own one TCP port"):
+            ports.validate_snapshot(self.snapshot(probe["settled_scan"](), []))
+
+    @staticmethod
+    def snapshot(publications, listeners):
+        return {"version": 1, "complete": True, "identity": {"target": "t", "uid": 1, "home": "/h"},
+                "engine_id": "e", "observed_at": time.time(), "publications": publications,
+                "listeners": listeners, "reservations": [], "end": "sandbox.ports.v1.complete"}
 
     def test_a_container_entering_the_list_is_inspected_too(self):
         probe, calls = self.scan([[A], [A, C]], self.ok)

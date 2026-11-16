@@ -198,6 +198,7 @@ class RemoteSecretSource(Protocol):
 
 
 EGRESS_NONCE_BYTES = 32
+MAX_EGRESS_STDOUT_BYTES = 6 * 65_536 + 4096
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -222,7 +223,8 @@ def parse_egress_answer(returncode: int, stdout: bytes) -> RemoteEgressAnswer:
     if returncode == 255:
         raise SecretBrokerError("remote_unreachable", "the remote could not be reached over SSH",
                                 retryable=True)
-    if not isinstance(stdout, bytes) or len(stdout) > MAX_REMOTE_STDOUT_BYTES * 2:
+    # A 64 KiB value can grow sixfold as JSON \\u escapes; allow that plus framing.
+    if not isinstance(stdout, bytes) or len(stdout) > MAX_EGRESS_STDOUT_BYTES:
         stdout = b""
     answer = None
     lines = [line for line in stdout.split(b"\n") if line.strip()]

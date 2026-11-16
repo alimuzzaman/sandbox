@@ -246,6 +246,13 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, code)
             self.assertNotIn(CANARY, str(caught.exception))
 
+    def test_largest_escaped_value_still_parses(self):
+        value = "\u00e9" * 32_768  # 64 KiB of UTF-8, sixfold as JSON escapes
+        stdout = (json.dumps({"ok": True, "value": value,
+                              "fingerprint": egress_fingerprint(NONCE, value)}) + "\n").encode()
+        self.assertGreater(len(stdout), 2 * 65_536)
+        self.assertEqual(parse_egress_answer(0, stdout).take(), value)
+
     def test_nonce_only_on_stdin_and_timeout_is_bounded(self):
         calls = []
 

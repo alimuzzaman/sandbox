@@ -858,6 +858,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         metavar="KEY=VALUE",
         help="cap each act job container (repeatable): memory=2g, cpus=2, pids=512 or "
              "cgroup-parent=NAME.slice")
+    ci_p.add_argument("--as-runner", dest="as_runner", action="store_true",
+        help="run each act job container as GitHub's runner user (runner, uid 1001, "
+             "passwordless sudo) from catthehacker/ubuntu:runner-*; a runs-on with no "
+             "runner image refuses (default: the act-* images, as root)")
 
     pcheck = sub.add_parser("plugin-check",
         help="Run WordPress.org's Plugin Check, gated by a committed baseline "

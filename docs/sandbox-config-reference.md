@@ -1512,6 +1512,18 @@ unknown key, a malformed value or a repeated key stops the run before anything
 starts. `act` runs one job at a time per host, so a second run waits for the
 first.
 
+`--as-runner` runs each job container as GitHub's runner user (`runner`, uid
+1001, passwordless `sudo`) instead of root, so file permissions behave as on
+GitHub: a directory at `0555` blocks writes. It maps `ubuntu-latest` and
+`ubuntu-22.04` to `catthehacker/ubuntu:runner-22.04`, and `ubuntu-20.04` and
+`ubuntu-24.04` to their `runner-` images. A `runs-on` with no runner image
+(Windows, macOS, a self-hosted label, an expression other than
+`${{ matrix.KEY }}`) stops the run before anything starts; it never falls back
+to root. Without the option the `act-` images, as root, are used as before. It
+combines with `--container-limit`, is forwarded to every remote durable child
+and to `--async`. Pull the image on the host first (`docker pull
+catthehacker/ubuntu:runner-22.04`); `act` runs with `--pull=false`.
+
 A caller that mints a credential for one run, such as a short-lived GitHub
 token, passes it with `--secrets-stdin` (local runs only, not with `--async`):
 `NAME=value` lines on stdin, one printable word per value. They override

@@ -789,6 +789,18 @@ instance and does not inject `WP_BASE_URL` or `SANDBOX_INSTANCE`. The workflow's
 unchanged. The same flag can be passed to a remote `ci run`; it is propagated to
 each durable child.
 
+Act's default images run each job as root, so a test that expects `chmod 0444`
+or `0555` to block a write passes on GitHub and fails here. Add `--as-runner` to
+run the job container as GitHub's runner user instead (`runner`, uid 1001,
+passwordless `sudo`), from `catthehacker/ubuntu:runner-*` for `ubuntu-latest`,
+`ubuntu-20.04`, `ubuntu-22.04` and `ubuntu-24.04`. Any other `runs-on` refuses
+before anything runs; it never falls back to root. It combines with
+`--container-limit` and reaches each remote durable child:
+
+```sh
+sb ci run .github/workflows/tests.yml --remote xspeed-dev --as-runner --container-limit memory=2g --json
+```
+
 Retry only a terminal job, use a request ID for replay-safe control, and clean
 up only after retrieving any evidence you need:
 

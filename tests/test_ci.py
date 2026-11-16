@@ -393,6 +393,71 @@ class TestContainerLimits(unittest.TestCase):
                          "--add-host=host.docker.internal:host-gateway")
 
 
+class TestAsRunner(unittest.TestCase):
+    """`--as-runner`: GitHub's runner user (1001, passwordless sudo) instead of root."""
+
+    def test_each_ubuntu_label_maps_to_its_runner_image(self):
+        self.assertEqual(ci._ACT_RUNNER_PLATFORM_MAP, {
+            "ubuntu-latest": "catthehacker/ubuntu:runner-22.04",
+            "ubuntu-20.04": "catthehacker/ubuntu:runner-20.04",
+            "ubuntu-22.04": "catthehacker/ubuntu:runner-22.04",
+            "ubuntu-24.04": "catthehacker/ubuntu:runner-24.04",
+        })
+        # ubuntu-latest keeps the default map's release: only the user changes.
+        self.assertEqual(ci._ACT_RUNNER_PLATFORM_MAP["ubuntu-latest"].rsplit("-", 1)[1],
+                         ci._ACT_PLATFORM_MAP["ubuntu-latest"].rsplit("-", 1)[1])
+        for label in ci._ACT_RUNNER_PLATFORM_MAP:
+            self.assertEqual(ci._runner_platforms(label, {}), [label])
+        self.assertEqual(ci._runner_platforms(["ubuntu-22.04"], {}), ["ubuntu-22.04"])
+        self.assertEqual(ci._runner_platforms({"labels": "ubuntu-24.04"}, {}), ["ubuntu-24.04"])
+        self.assertEqual(ci._runner_platforms("${{ matrix.os }}", {"os": "ubuntu-20.04"}),
+                         ["ubuntu-20.04"])
+
+    def test_a_platform_without_a_runner_image_refuses(self):
+        for runs_on, cell in (("windows-latest", {}), ("macos-14", {}), ("ubuntu-18.04", {}),
+                              (["self-hosted", "linux"], {}), (["ubuntu-22.04", "gpu"], {}),
+                              ("${{ matrix.os }}", {}), ("${{ matrix.os }}", {"os": "windows-2022"}),
+                              ("${{ inputs.runner }}", {}), (None, {}), ([], {}),
+                              ({"group": "large"}, {})):
+            with self.subTest(runs_on=runs_on, cell=cell), \
+                    self.assertRaisesRegex(ValueError, "--as-runner"):
+                ci._runner_platforms(runs_on, cell)
+
+    def act_command(self, **kwargs):
+        with patch("sandbox.commands.ci._core") as core, \
+                patch("sandbox.commands.ci.subprocess.run") as run, \
+                patch("sandbox.commands.ci._act_binary", return_value="act"):
+            core.return_value.project_lock.return_value = nullcontext()
+            run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with __import__("tempfile").TemporaryDirectory() as temp:
+                root = Path(temp)
+                ci._run_cell_with_act({}, {"cell": {}, "job_id": "build"}, root,
+                                      root / "workflow.yml", root / "secrets.env", False, 30,
+                                      runtime="none", **kwargs)
+        return run.call_args.args[0]
+
+    @staticmethod
+    def platforms(command):
+        return [command[i + 1] for i, part in enumerate(command) if part == "-P"]
+
+    def test_the_default_still_maps_the_act_images(self):
+        for command in (self.act_command(), self.act_command(as_runner=False)):
+            self.assertEqual(self.platforms(command),
+                             ["ubuntu-latest=catthehacker/ubuntu:act-22.04",
+                              "ubuntu-22.04=catthehacker/ubuntu:act-22.04"])
+
+    def test_as_runner_maps_only_runner_images_and_keeps_container_limits(self):
+        command = self.act_command(as_runner=True,
+                                   container_limits=("memory=2g", "cgroup-parent=miu-ci.slice"))
+        self.assertEqual(self.platforms(command),
+                         [f"{label}={image}" for label, image in ci._ACT_RUNNER_PLATFORM_MAP.items()])
+        self.assertNotIn("act-22.04", " ".join(command))
+        self.assertEqual(command[command.index("--container-options") + 1],
+                         "--add-host=host.docker.internal:host-gateway --memory=2g "
+                         "--memory-swap=2g --cgroup-parent=miu-ci.slice")
+        self.assertNotIn("--user", command[command.index("--container-options") + 1])
+
+
 class TestRuntimeSecrets(unittest.TestCase):
     def test_skipped_deploy_secrets_do_not_block_safe_run(self):
         jobs = [{"steps": [

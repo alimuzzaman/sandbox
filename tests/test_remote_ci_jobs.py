@@ -340,6 +340,36 @@ class RemoteCIJobTests(unittest.TestCase):
                                                 _plan_workflow(workflow), args)[0]
             self.assertEqual(submission.artifact_paths, ("coverage.xml", "reports"))
 
+    def as_runner_submissions(self, runs_on, **extra):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workflow = root / "ci.yml"
+            workflow.write_text("jobs:\n  unit:\n    runs-on: " + runs_on + "\n"
+                                "    strategy:\n      matrix:\n        os: [ubuntu-22.04]\n"
+                                "    steps:\n      - run: id -u\n")
+            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p",
+                                    {"identity": "project:ci"})
+            args = SimpleNamespace(timeout=60, label_prefix=None, matrix_filter={}, jobs=None,
+                                   allow_deploy=False, keep_on_fail=False, strict_provision=False,
+                                   accepted_differences=None, output_profile="smart", **extra)
+            return _remote_ci_submissions(target, str(root), workflow,
+                                          _plan_workflow(workflow), args)
+
+    def test_as_runner_reaches_each_child_with_its_container_limits(self):
+        # Miu's worker: a remote durable run, capped, as GitHub's runner user.
+        argv = self.as_runner_submissions("${{ matrix.os }}", as_runner=True,
+                                          container_limits=["memory=2g", "cgroup-parent=miu-ci.slice"])[0].argv
+        self.assertIn("--as-runner", argv)
+        self.assertEqual([argv[i + 1] for i, part in enumerate(argv) if part == "--container-limit"],
+                         ["memory=2g", "cgroup-parent=miu-ci.slice"])
+        self.assertNotIn("--as-runner", self.as_runner_submissions("ubuntu-22.04")[0].argv)
+
+    def test_as_runner_refuses_a_platform_without_a_runner_image_before_submitting(self):
+        stderr = StringIO()
+        with patch("sys.stderr", stderr), self.assertRaises(SystemExit):
+            self.as_runner_submissions("windows-latest", as_runner=True)
+        self.assertIn("no runner image", stderr.getvalue())
+
     def test_mcp_ci_accepts_local_cells_and_remote_durable_parent_reports(self):
         module = _load_mcp_ci_tool()
         reports = [

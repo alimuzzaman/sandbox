@@ -1001,6 +1001,106 @@ class NormalExitCessationTests(unittest.TestCase):
             zombie(proc, 90700, 1010, os.getpid(), [])
             self.assertIsNone(self.holders(proc))
 
+    SESSION = f"/user.slice/user-{os.geteuid()}.slice/session-c1.scope"
+    CONTAINER = "/system.slice/docker-" + "9f" * 32 + ".scope"
+
+    @staticmethod
+    def cgroup(proc, pid, path):
+        (proc / str(pid) / "cgroup").write_text(f"0::{path}\n")
+
+    def container_proc(self, chrome_cgroup):
+        """xspeed-dev during b3ad3e8d: the supervisor in its SSH session scope, and a
+        renderer container's non-dumpable chrome (the owner's UID) that started during
+        the job, under a containerd shim that started then too, adopted by init."""
+        proc = self.lineage_proc()
+        self.cgroup(proc, os.getpid(), self.SESSION)
+        self.fake_process(proc, 90600, 1005, 1)  # containerd-shim, root's: unreadable
+        self.cgroup(proc, 90600, "/system.slice/containerd.service")
+        self.fake_process(proc, 90700, 1010, 90600)  # chrome: non-dumpable
+        if chrome_cgroup is not None:
+            self.cgroup(proc, 90700, chrome_cgroup)
+        return proc
+
+    def test_an_unreadable_process_outside_the_jobs_cgroups_does_not_count(self):
+        uid = os.geteuid()
+        manager = f"/user.slice/user-{uid}.slice/user@{uid}.service"
+        cases = (
+            ("a container's process", self.CONTAINER, []),
+            ("a system service's process", "/system.slice/miu.service", []),
+            ("another login session's process", f"/user.slice/user-{uid}.slice/session-c2.scope", []),
+            ("a cgroup that only shares a name prefix", self.SESSION + "x", []),
+            ("in the supervisor's own cgroup", self.SESSION, None),
+            ("below the supervisor's cgroup", self.SESSION + "/child", None),
+            ("under the user's manager (systemd-run --user)", manager + "/app.slice/run-1.scope", None),
+            ("the user's manager itself", manager, None),
+            ("a name that only extends the manager's", manager + "-x", []),
+            ("outside the supervisor's cgroup namespace", "/../../x", []),
+            ("a cgroup that cannot be read", None, None),
+        )
+        for name, path, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(self.holders(self.container_proc(path)), expected)
+        with self.subTest("cgroup v1 or hybrid: no conclusion"):
+            proc = self.container_proc(None)
+            (proc / "90700" / "cgroup").write_text(f"12:pids:/x\n0::{self.CONTAINER}\n")
+            self.assertIsNone(self.holders(proc))
+        with self.subTest("the supervisor's cgroup unknown: the rule is off"):
+            proc = self.container_proc(self.CONTAINER)
+            (proc / str(os.getpid()) / "cgroup").unlink()
+            self.assertIsNone(self.holders(proc))
+        with self.subTest("a supervisor in the root cgroup reaches everything"):
+            proc = self.container_proc(self.CONTAINER)
+            self.cgroup(proc, os.getpid(), "/")
+            self.assertIsNone(self.holders(proc))
+
+    def test_a_failed_apply_beside_a_new_container_hands_its_lease_over(self):
+        """b3ad3e8d: an apply that ends failed with its rollback withheld keeps its
+        target lease, so the next apply's takeover rests on the exit proof alone.
+
+        The real command is not in the fake /proc, so in the second arm the scan
+        refuses for want of its start time; the parent walk to init is pinned by
+        ``test_an_unreadable_process_outside_the_jobs_cgroups_does_not_count``."""
+        from sandbox.application import server_cli_apply_lease as leases
+        from sandbox.application import server_cli_exec_recovery as recovery
+        from sandbox.hosting import target_lease
+        from tests.test_host_apply_lease_takeover import DEAD, NOW, TAKER, Registry, job
+
+        for name, chrome_cgroup, stopped in (("in a container", self.CONTAINER, True),
+                                             ("in the job's own session", self.SESSION, False)):
+            with self.subTest(name):
+                with patch.object(supervisor, "_PROC", self.container_proc(chrome_cgroup)):
+                    snap, result = self.run_job("exit 1")
+                self.assertEqual((snap["lifecycle"], snap["exit_code"]), ("failed", 1))
+                self.assertIs(result["owned_work_stopped"], stopped, result)
+                if not stopped:
+                    self.assertEqual(result["unproven"], "process_environment_unavailable")
+
+                home = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+                (home / ".sandbox").mkdir(mode=0o700)
+                path = Path(target_lease.lease_path(str(home), "hp", "sandbox"))
+                os.close(os.open(str(path) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600))
+                token = "a" * 32
+                since = int(NOW.timestamp()) - 300  # within the synthetic job's run
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+                os.write(descriptor, f"{token} {leases.apply_lease_owner(DEAD)} {since}\n".encode())
+                os.close(descriptor)
+                body = path.read_text()
+                row = {**job(), "result_json": snap["result_json"]}
+                registry = Registry(row)
+                registry.events.append((DEAD, leases.ACQUIRED, {
+                    "holder": leases.apply_lease_owner(DEAD), "token": token,
+                    "path": str(path), "target": "hp/sandbox"}))  # no release: withheld
+                with patch.object(recovery, "_ceased", return_value={}):
+                    taken = leases.take_over_ended_apply_lease(
+                        path, owner=leases.apply_lease_owner(TAKER), target="hp/sandbox",
+                        job_id=TAKER, repository=registry)
+                if stopped:
+                    self.assertEqual(taken[1], DEAD)
+                    self.assertNotEqual(path.read_text(), body)
+                else:
+                    self.assertIsNone(taken)
+                    self.assertEqual(path.read_text(), body)
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "reads the real /proc")
     def test_the_real_unreaped_command_is_proven_stopped(self):
         # The scan runs before the supervisor reaps the command, so its zombie

@@ -561,6 +561,22 @@ def _web_share(payload, *, owner_request=None) -> tuple[int, dict]:
         return 500, _share_failure({})
 
 
+def _owner_sign_in_refusal(exc: BaseException) -> BaseException:
+    """Name the one owner-path refusal the operator can act on; others stay generic.
+
+    A running sandbox-login started by an older login runtime refuses as
+    owner_share_upgrade_required (owner_panel_gate) until the stack is reapplied.
+    """
+    from sandbox.hosting import panel_access
+    from sandbox.hosting.share import ShareRefusal
+    if isinstance(exc, ShareRefusal) and exc.code == "owner_share_upgrade_required":
+        return panel_access.SignInUnavailable(
+            "sign_in_upgrade_required",
+            "This stack's sign-in service predates the server's login runtime. "
+            "Update the server and reapply this stack.")
+    return exc
+
+
 def _web_sign_in(payload, *, owner_request=None) -> tuple[int, dict]:
     from sandbox.hosting import panel_access
     from sandbox.hosting.share import append_audit, audit_record
@@ -585,7 +601,10 @@ def _web_sign_in(payload, *, owner_request=None) -> tuple[int, dict]:
                     or (owner_request.action, owner_request.remote, owner_request.stack, owner_request.link_id)
                     != ("create", remote_name, stack, None)):
                 raise ValueError("owner request admission mismatch")
-            result = owner_panel_share.wordpress_admin(owner_request)
+            try:
+                result = owner_panel_share.wordpress_admin(owner_request)
+            except Exception as exc:
+                raise _owner_sign_in_refusal(exc) from None
         else:
             result = panel_access.sign_in(remote_name, stack)
         audit('succeeded')

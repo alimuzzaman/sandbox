@@ -156,7 +156,10 @@ expiry format and do not acquire a stack parent.
 The WordPress sign-in client accepts at most 8 KiB of response data and cancels
 the reader on overflow before accumulating the oversized chunk. HTTP 409 and
 successful HTTP replies containing `ok:false` expose only fixed local guidance
-for known manifest, target, declaration, private-route and remote refusal codes.
+for known manifest, target, declaration, private-route, remote and upgrade refusal
+codes. `sign_in_upgrade_required` is the owner path's `owner_share_upgrade_required`: the
+running sandbox-login was started by an older login runtime than the installed
+server's (after an update that changes it), and the stack needs a reapply.
 Unknown or malformed replies use generic guidance; server text and error URLs
 are never reflected. Success requires an unexpired integer timestamp, the one-time
 flag, a bounded user, and an HTTPS URL without credentials, whitespace or

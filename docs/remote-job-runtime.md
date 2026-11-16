@@ -654,7 +654,10 @@ metrics, declared artifacts, and retained CI rematerialization archives, then re
 the newest event of the job stays, and every other event kind is kept. Without this
 the registry only grows: job evidence reads copy the whole database and its WAL into
 memory and refuse above 256 MiB (it was 32 MiB until a busy server's registry crossed
-it and every nested apply refused with `recovery_context_invalid`). Candidate selection reaches noncompleted terminal
+it and every nested apply refused with `recovery_context_invalid`). The host also runs
+this sweep by default: each job that releases its slot on the host's own registry then
+cleans at most 10 terminal jobs finished more than 7 days ago (the same rules, the
+same bookmark), so a host nobody runs `job-retention` on still catches up. Candidate selection reaches noncompleted terminal
 jobs with a present `finished_at` timestamp (jobs without `finished_at` are excluded), ensuring unindexed output directories on disk can be reclaimed. Candidates are
 ordered oldest finished first. No-op candidates, including completed CI rows with
 authority records, still consume the bounded scan budget. When `truncated` is true,

@@ -462,8 +462,19 @@ class DrainAfterReleaseTests(unittest.TestCase):
             self.assertTrue(context.drain_after_release(RUNTIME_DIR / "jobs" / "registry.sqlite3"))
         build.assert_called_once()
         dependencies["job_service"].repository.close.assert_called_once()
+        dependencies["job_service"].retention_sweep.assert_called_once_with(
+            retention_days=7, limit=10)
         with mock.patch.object(context, "durable_job_dependencies", side_effect=RuntimeError("x")):
             self.assertFalse(context.drain_after_release(RUNTIME_DIR / "jobs" / "registry.sqlite3"))
+
+    def test_a_failed_retention_sweep_still_closes_and_reports_the_drain(self):
+        from sandbox.application import context
+        from sandbox.core._paths import RUNTIME_DIR
+        dependencies = {"job_service": mock.Mock()}
+        dependencies["job_service"].retention_sweep.side_effect = RuntimeError("locked")
+        with mock.patch.object(context, "durable_job_dependencies", return_value=dependencies):
+            self.assertTrue(context.drain_after_release(RUNTIME_DIR / "jobs" / "registry.sqlite3"))
+        dependencies["job_service"].repository.close.assert_called_once()
 
     def test_an_admission_tick_reconciles_through_fresh_services_and_closes_them(self):
         from sandbox.application import context

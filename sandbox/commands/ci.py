@@ -8,6 +8,7 @@ import re
 import secrets as _secretsmod
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -39,6 +40,43 @@ from sandbox.registry import register
 # if given real secrets, so this module must supply that gate itself.
 
 _EXPR_RE = re.compile(r"\$\{\{\s*([a-zA-Z0-9_.\-]+)\s*\}\}")
+# Every `secrets.NAME` (or `secrets['NAME']`) inside any `${{ ... }}`, so a
+# compound expression such as `secrets.X || github.token` still names X.
+_EXPR_BLOCK_RE = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+_SECRET_REF_RE = re.compile(r"\bsecrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\s*\])")
+_SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+_STDIN_SECRET_VALUE_RE = re.compile(r"[\x21-\x7e]{1,4096}")
+
+
+def _secret_refs(text: str) -> list[str]:
+    names = set()
+    for block in _EXPR_BLOCK_RE.findall(text):
+        for dotted, bracketed in _SECRET_REF_RE.findall(block):
+            names.add(dotted or bracketed)
+    return sorted(names)
+
+
+def _read_stdin_secrets(stream=None) -> dict:
+    """`NAME=value` lines from stdin, for one run only (`--secrets-stdin`).
+
+    A caller that mints a short-lived credential per run hands it over here
+    instead of on the command line, in the environment or in a config file.
+    Values are single printable words; anything else is refused whole.
+    """
+    data = (stream if stream is not None else sys.stdin).read(65537)
+    if len(data) > 65536:
+        raise ValueError("--secrets-stdin takes at most 64 KiB")
+    out = {}
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        name, sep, value = line.partition("=")
+        if not sep or not _SECRET_NAME_RE.fullmatch(name) or not _STDIN_SECRET_VALUE_RE.fullmatch(value):
+            raise ValueError("--secrets-stdin lines must be NAME=value, one printable word per value")
+        if name in out:
+            raise ValueError(f"--secrets-stdin names {name} twice")
+        out[name] = value
+    return out
 _DANGEROUS_RUN_RE = re.compile(
     r"^\s*(git\s+push|gh\s+pr\s+merge|gh\s+release\s+create|svn\s+commit)\b",
     re.MULTILINE)
@@ -183,8 +221,7 @@ def _classify_step(step: dict) -> dict:
     side-effect-free, safe to run in `ci plan`)."""
     name = step.get("name") or step.get("uses") or step.get("run", "")[:40] or "(unnamed step)"
     text = json.dumps(step)
-    secrets_needed = sorted(set(_EXPR_RE.findall(text)))
-    secrets_needed = [s[len("secrets."):] for s in secrets_needed if s.startswith("secrets.")]
+    secrets_needed = _secret_refs(text)
 
     if step.get("uses"):
         ref = step["uses"]
@@ -201,11 +238,11 @@ def _classify_step(step: dict) -> dict:
             "wordpress-plugin-asset-update": "push readme/assets to WordPress.org SVN",
         }.get(action, f"unknown action '{ref}' — not executed locally")
         return {"name": name, "kind": kind, "uses": ref, "with": step.get("with"),
-                "env": step.get("env"),
+                "env": step.get("env"), "if": step.get("if"),
                 "would_run": would_run, "secrets_needed": secrets_needed}
     if step.get("run"):
         return {"name": name, "kind": "run", "run": step["run"],
-                "env": step.get("env"),
+                "env": step.get("env"), "if": step.get("if"),
                 "would_run": "executed on host in the plugin dir",
                 "secrets_needed": secrets_needed}
     return {"name": name, "kind": "unknown", "env": step.get("env"),
@@ -401,17 +438,24 @@ def _neutralize_workflow_for_safety(data: dict, allow_deploy: bool) -> tuple[dic
     return patched, notes
 
 
+_ACT_SKIP_RE = re.compile(r"\s*(?:\$\{\{\s*)?!\s*env\.ACT\s*(?:\}\})?\s*")
+
+
 def _runtime_secrets_needed(jobs: list[dict], allow_deploy: bool) -> list[str]:
     """Return secrets needed by steps that will actually reach `act`.
 
     Deploy-class actions are replaced with no-op stubs when deployment is not
     allowed, so their deploy-only secrets must not block the safe CI path.
+    A step whose condition is exactly `!env.ACT` is one act leaves out (act
+    sets ACT), so its secrets do not block a run either.
     """
     needed = set()
     for job in jobs:
         for step in job.get("steps") or []:
             uses = step.get("uses")
             if uses and not allow_deploy and _is_deploy_class(uses):
+                continue
+            if isinstance(step.get("if"), str) and _ACT_SKIP_RE.fullmatch(step["if"]):
                 continue
             needed.update(step.get("secrets_needed") or [])
     return sorted(needed)
@@ -904,6 +948,8 @@ def cmd_ci(cfg, args) -> None:
                 "if-no-files-found: error, or accept each named difference")
         return
     if target is not None and target.kind == "remote":
+        if getattr(args, "secrets_stdin", False):
+            die("--secrets-stdin works only with a local run (--local)")
         _run_remote_ci(target, root, wf_path, plan, args, as_json=as_json)
         return
 
@@ -911,6 +957,8 @@ def cmd_ci(cfg, args) -> None:
         die("`act` not found — the CI executor requires it "
             "(brew install act; https://github.com/nektos/act).")
 
+    if getattr(args, "secrets_stdin", False) and getattr(args, "run_async", False):
+        die("--secrets-stdin cannot be used with --async")
     if getattr(args, "run_async", False):
         # Detached run (sandbox/core/_asyncjobs.py) — a ci run mints multiple
         # instances itself, so it doesn't fit commands/jobs.py's per-instance
@@ -968,9 +1016,20 @@ def cmd_ci(cfg, args) -> None:
               else "secrets needed: " + (", ".join(all_secrets_needed) or "(none)"))
         return
 
+    # Per-run secrets from stdin win over sandbox.local.yml and all reach act,
+    # GITHUB_TOKEN included (act's `github.token`), whether or not a step names them.
+    given_secrets = {}
+    if getattr(args, "secrets_stdin", False):
+        try:
+            # cmd_ci imports sys locally further down, so the module's sys is not reachable here.
+            given_secrets = _read_stdin_secrets()
+        except (ValueError, UnicodeDecodeError) as exc:
+            die(str(exc))
     local_cfg = _local_yaml()
-    resolved_secrets = {}
+    resolved_secrets = dict(given_secrets)
     for name in all_secrets_needed:
+        if name in given_secrets:
+            continue
         val = _resolve_secret(name, local_cfg)
         if val is None:
             die(f"secret '{name}' referenced by workflow '{wf_path.name}' is not "

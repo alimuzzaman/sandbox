@@ -1500,6 +1500,17 @@ unknown key, a malformed value or a repeated key stops the run before anything
 starts. `act` runs one job at a time per host, so a second run waits for the
 first.
 
+A caller that mints a credential for one run, such as a short-lived GitHub
+token, passes it with `--secrets-stdin` (local runs only, not with `--async`):
+`NAME=value` lines on stdin, one printable word per value. They override
+`sandbox.local.yml`, need no allowlist entry, and all reach `act`, so
+`GITHUB_TOKEN` there is what `${{ github.token }}` reads. A run reads every
+`secrets.NAME` inside any `${{ }}`, also in a compound expression such as
+`${{ secrets.X || github.token }}`, and refuses one with no value before
+anything starts.
+A step whose condition is exactly `${{ !env.ACT }}` is one act leaves out, so
+its secrets are not asked for.
+
 ## Hermes remote defaults
 
 `sb hermes` stores no provider credentials in project configuration. It uses an

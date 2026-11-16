@@ -827,6 +827,9 @@ Per-project (each plugin carries its own sandbox.config.json):
              "(still requires every referenced secret to resolve; see §3.6)")
     ci_p.add_argument("--list-secrets", dest="list_secrets", action="store_true",
         help="print the secrets this workflow references and exit — no execution")
+    ci_p.add_argument("--secrets-stdin", dest="secrets_stdin", action="store_true",
+        help="(local run only) read NAME=value secrets for this run from stdin; they "
+             "override sandbox.local.yml and all reach act, GITHUB_TOKEN included")
     ci_p.add_argument("--keep-on-fail", dest="keep_on_fail", action="store_true",
         help="preserve a failed cell's instance for inspection instead of tearing it down")
     ci_p.add_argument("--strict-provision", dest="strict_provision", action="store_true",

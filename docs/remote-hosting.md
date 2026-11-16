@@ -2982,10 +2982,14 @@ install, not backed up or losslessly recoverable.
 ### `host_apply_lease_held`
 
 New physical `.lease.lock` anchors are created with owner-only permissions,
-independent of the caller's umask. Existing anchors are not chmodded or replaced
-by normal lease operations. A legacy group-writable anchor can therefore still
-refuse exact exec recovery. Preserve it and obtain an exact operator repair plan;
-do not weaken recovery's permission checks or recreate the lock inode.
+independent of the caller's umask. A legacy group-writable anchor (made before that
+rule) is tightened to 0600 in place by the next lease operation on that target, while
+it holds the anchor's flock: only the open inode itself, when it is the path's own
+(never a symlink target), a regular file owned by the remote user with one link, and
+only when no lease body is present. The inode is never replaced. Until then such an
+anchor refuses exact exec recovery and owner-panel WordPress sign-in (`owner share
+file is not private`); an apply, destroy or exec of the target repairs it. Do not
+weaken recovery's permission checks or recreate the lock inode.
 
 Every `sb host apply`, edge-only recovery, `sb host destroy` and `sb host stack down`
 holds one lease per target on the remote,

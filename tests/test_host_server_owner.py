@@ -868,8 +868,17 @@ class ServerSelectionTests(OwnerTargetTests):
 
     def test_unknown_apply_or_active_native_owner_refuses_without_execution(self):
         self.summary["last_apply"]["status"] = "unverified"
-        with self.assertRaises(TargetRefusal):
+        with self.assertRaises(TargetRefusal) as refused:
             self.selected()
+        # Not busy: the apply ran, its delivery could not be verified (no declared revision).
+        self.assertEqual(refused.exception.code, "host_target_unverified")
+        self.assertIn("derived_environment APP_SOURCE_REVISION", str(refused.exception))
+        self.process.assert_not_called()
+        for status in ("failed", "applying"):
+            self.summary["last_apply"]["status"] = status
+            with self.assertRaises(TargetRefusal) as refused:
+                self.selected()
+            self.assertEqual(refused.exception.code, "host_target_busy")
         self.process.assert_not_called()
         self.summary["last_apply"]["status"] = "succeeded"
         self.state["hosts"]["old-alias/project/dev"]["recovery_uncertainty"] = {"unknown": True}

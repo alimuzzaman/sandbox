@@ -48,7 +48,11 @@ Without a record, exec refuses with `host_server_target_evidence_unavailable`
 and a hint: classify an unclassified target, or re-apply a classified one whose commit is stale.
 A stack selected with `--name` never needs classify; its hint asks for a
 succeeded `sb host stack up` of its current commit. A busy target or one whose last apply did not
-succeed refuses with `host_target_busy`. Non-joined targets keep their existing
+succeed refuses with `host_target_busy`. A target whose last apply ran but whose delivery
+was not verified (panel status `unverified`) refuses with `host_target_unverified`
+instead: usually no runtime revision is declared, so declare
+`deploy.derived_environment: {APP_SOURCE_REVISION: pushed_commit_sha}`, forward it on
+every service, and re-apply. Non-joined targets keep their existing
 controller execution paths.
 
 The default batch contract transfers original non-TTY stdin once through the

@@ -84,7 +84,8 @@ class TargetObservationTests(unittest.TestCase):
 
     def test_server_typed_selector_refusal_keeps_its_code(self):
         # The installed handler prints this envelope and exits 1 on a TargetRefusal.
-        for code in ('host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid'):
+        for code in ('host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid',
+                     'host_target_unverified'):
             with self.subTest(code=code), self.assertRaises(targets.ServerTargetRefused) as caught:
                 self.observe({'schema_version': 1, 'ok': False, 'code': code,
                               'error': 'owner target metadata is unavailable; no job was accepted'}, returncode=1)

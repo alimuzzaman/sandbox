@@ -10,7 +10,8 @@ CONTRACT = 'host.target-inspect.v1'
 # Typed selector refusals the installed inspector reports. Any other failure
 # stays the generic unavailable error.
 TARGET_REFUSAL_CODES = frozenset({
-    'host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid'})
+    'host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid',
+    'host_target_unverified'})
 
 
 class ServerTargetRefused(ServerCLIUnavailable):

@@ -30,6 +30,16 @@ mkdir -p "$(dirname "$f")"
 umask 077
 exec 9>"$f.lock"
 flock -w 30 9 || exit 46
+# A legacy anchor created before that umask is group-writable, which exact exec
+# recovery and the owner panel refuse. Tighten it in place under its flock: only the
+# open inode itself, when it is the path's own (not a symlink target), a regular file
+# we own with one link, and no lease body is present. Never replace the inode.
+a=/proc/$$/fd/9
+if [ -f "$a" ] && [ -O "$a" ] && [ ! -s "$f" ] \
+    && [ "$(stat -c %d:%i "$f.lock" 2>/dev/null)" = "$(stat -L -c %d:%i "$a" 2>/dev/null)" ] \
+    && [ "$(stat -L -c %h "$a" 2>/dev/null)" = 1 ] && [ "$(stat -L -c %a "$a" 2>/dev/null)" != 600 ]; then
+  chmod 600 "$a" 2>/dev/null || true
+fi
 t=; o=; since=
 if [ -f "$f" ]; then read -r t o since < "$f" || true; fi
 case "$action" in

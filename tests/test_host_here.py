@@ -207,6 +207,9 @@ class HereSubmissionTests(unittest.TestCase):
             "host_here_argv_invalid    ": _args(["host", "apply", "--confirm", "--here",
                                                  "--server-cli-source-branch={}"],
                                                 server_cli_source_branch="{}"),
+            "host_here_argv_invalid     ": _args(["host", "stack", "list", "--here"], request_id="r" * 65),
+            "host_here_argv_invalid      ": _args(["host", "stack", "down", "--here", "--project-dir", "."],
+                                                  project_dir="."),
         }
         for code, args in cases.items():
             with self.subTest(code=code.strip()), self.assertRaises(here.HereRefusal) as caught:
@@ -265,62 +268,261 @@ def _git(root: Path, *argv: str) -> str:
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test"}).stdout.strip()
 
 
-class SourceBindingTests(unittest.TestCase):
-    """stack up and apply run on the checkout in place, with the controller's bindings."""
+class SourceSnapshotTests(unittest.TestCase):
+    """stack up and apply run on an owner-private snapshot of the bound commit, never in place."""
 
     def setUp(self):
-        self.home = Path(tempfile.mkdtemp())
+        self.home = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.home)], check=False))
         self.owner = _owner(self.home)
         (self.home / "repo").mkdir()
         self.repo = (self.home / "repo").resolve()
         _git(self.repo, "init", "-q", "-b", "dev")
+        (self.repo / ".gitignore").write_text("ignored.txt\n")
         (self.repo / "a.txt").write_text("one\n")
-        _git(self.repo, "add", "a.txt")
+        _git(self.repo, "add", "a.txt", ".gitignore")
         _git(self.repo, "commit", "-qm", "one")
         self.first = _git(self.repo, "rev-parse", "HEAD")
         (self.repo / "a.txt").write_text("two\n")
         _git(self.repo, "commit", "-qam", "two")
         self.head = _git(self.repo, "rev-parse", "HEAD")
+        patcher = mock.patch("sandbox.application.server_cli.server_cli_context_if_selected", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.submitted: list[list[str]] = []
 
-    def argv(self, original, **values):
-        args = _args(original, project_dir=str(self.repo), **values)
-        return here.job_argv(args, original, owner=self.owner, record=_record(), capability=dict(CAPABILITY),
-                             request_id="host-here-test", root=self.repo)
+    def run_here(self, original, **values):
+        def submit(argv):
+            self.submitted.append(argv)
+            staged = Path(argv[argv.index("--project-dir") + 1])
+            self.seen = {path.name for path in staged.iterdir()}
+            self.staged_head = _git(staged, "rev-parse", "HEAD")
+            return "f" * 32
+        args = _args(original, **values)
+        return here.run(args, submit=submit, view=lambda job_id: {"lifecycle": "succeeded"},
+                        output=lambda job_id: '{"ok": false, "code": "test_stop"}\n', owner=self.owner,
+                        record=_record(), capability=dict(CAPABILITY), sleep=lambda _s: None)
 
-    def test_apply_binds_the_checkouts_branch_and_the_job_validator_accepts_it(self):
+    def test_apply_runs_on_a_private_snapshot_and_the_job_validator_accepts_it(self):
         original = ["host", "apply", "--confirm", "--project-dir", str(self.repo), "--here"]
-        job = self.argv(original)
-        self.assertEqual(job[job.index("--source-commit") + 1], self.head)
+        self.run_here(original, project_dir=str(self.repo))
+        (job,) = self.submitted
+        staged = Path(job[job.index("--project-dir") + 1])
+        snapshots = self.home / "sandbox/runtime/hosting/here/src"
+        self.assertIn(snapshots, staged.parents)
+        self.assertNotEqual(staged, self.repo)
+        self.assertEqual(staged.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.staged_head, job[job.index("--source-commit") + 1]), (self.head, self.head))
         inner = tuple(job[job.index("--") + 1:])
-        context = SimpleNamespace(argv=inner, source_commit=self.head, project_root=str(self.repo), owner=self.owner)
+        self.assertEqual(inner[inner.index("--project-dir") + 1], str(staged))
+        context = SimpleNamespace(argv=inner, source_commit=self.head, project_root=str(staged), owner=self.owner)
         with mock.patch("sandbox.application.server_cli.server_cli_context_if_selected", return_value=context), \
                 mock.patch("sandbox.application.server_cli.validate_owner_current", return_value=context):
-            self.assertEqual(server_cli_dispatch.bound_source_branch(self.repo), "dev")
+            self.assertEqual(server_cli_dispatch.bound_source_branch(staged), "dev")
 
-    def test_stack_up_binds_the_ref_only_when_it_is_checked_out_and_clean(self):
-        original = ["host", "stack", "up", "--project-dir", str(self.repo), "--here"]
-        job = self.argv(original)
+    def test_apply_refuses_a_dirty_or_untracked_checkout(self):
+        original = ["host", "apply", "--confirm", "--project-dir", str(self.repo), "--here"]
+        for change in ("a.txt", "new.txt"):
+            with self.subTest(change=change):
+                (self.repo / change).write_text("changed\n")
+                with self.assertRaises(here.HereRefusal) as caught:
+                    self.run_here(original, project_dir=str(self.repo))
+                self.assertEqual(caught.exception.code, "host_here_source_dirty")
+                _git(self.repo, "checkout", "-q", "--", "a.txt")
+                (self.repo / "new.txt").unlink(missing_ok=True)
+        self.assertEqual(self.submitted, [])
+
+    def test_stack_up_stages_the_ref_without_untracked_or_ignored_files(self):
+        (self.repo / "untracked.txt").write_text("x\n")
+        (self.repo / "ignored.txt").write_text("x\n")
+        (self.repo / "a.txt").write_text("edited\n")
+        original = ["host", "stack", "up", "--project-dir", str(self.repo), "--ref", self.first, "--here"]
+        self.run_here(original, project_dir=str(self.repo), ref=self.first)
+        (job,) = self.submitted
+        self.assertEqual(self.staged_head, self.first)
+        self.assertEqual(self.seen, {".git", ".gitignore", "a.txt"})
         inner = job[job.index("--") + 1:]
         packed = next(value for value in inner if value.startswith("--server-cli-stack-ref="))
-        self.assertEqual(json.loads(packed.split("=", 1)[1]),
-                         {"ref": "HEAD", "commit": self.head, "ref_branch": "dev"})
-        self.assertEqual(job[job.index("--source-commit") + 1], self.head)
-        with self.assertRaises(here.HereRefusal) as caught:
-            self.argv(original + ["--ref", self.first], ref=self.first)
-        self.assertEqual(caught.exception.code, "host_here_ref_not_checked_out")
-        (self.repo / "a.txt").write_text("dirty\n")
-        with self.assertRaises(here.HereRefusal) as caught:
-            self.argv(original)
-        self.assertEqual(caught.exception.code, "host_here_source_dirty")
+        self.assertEqual(json.loads(packed.split("=", 1)[1])["commit"], self.first)
 
-    def test_relative_paths_become_the_callers_absolute_paths(self):
-        cwd = os.getcwd()
-        os.chdir(self.home)
-        self.addCleanup(os.chdir, cwd)
-        argv = here._absolute_paths(["host", "apply", "--project-dir", "repo", "--template=repo/a.txt"])
-        self.assertEqual(argv[3], str(self.repo))
-        self.assertEqual(argv[4], "--template=" + str(self.repo / "a.txt"))
+    def test_the_staged_tree_is_stable_reset_each_run_and_one_run_at_a_time(self):
+        from sandbox.hosting import here_source
+        with here_source.snapshot(self.owner.sandbox_home, self.repo, self.first) as staged:
+            first_path = staged
+            (staged / "left-by-a-job.txt").write_text("x\n")
+            with self.assertRaises(here_source.SnapshotError) as caught:
+                with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head):
+                    pass
+            self.assertEqual(caught.exception.code, "host_here_source_busy")
+        with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head) as staged:
+            self.assertEqual(staged, first_path)
+            self.assertEqual(_git(staged, "rev-parse", "HEAD"), self.head)
+            self.assertFalse((staged / "left-by-a-job.txt").exists())
+        with mock.patch.object(here_source, "_active_jobs_inside", return_value=True), \
+                self.assertRaises(here_source.SnapshotError) as caught:
+            with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head):
+                pass
+        self.assertEqual(caught.exception.code, "host_here_source_busy")
+
+    def test_staged_tree_keeps_the_repo_identity_without_the_token(self):
+        from sandbox.hosting import here_source
+        from sandbox.hosting.lifetime import naming
+        _git(self.repo, "remote", "add", "origin", "https://user:secret-token@github.com/WPDevelopers/demo.git")
+        with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head) as staged:
+            self.assertEqual(naming.repo_identity(staged), naming.repo_identity(self.repo))
+            self.assertEqual(naming.repo_identity(staged), "github.com/wpdevelopers/demo")
+            self.assertNotIn("secret-token", _git(staged, "config", "--list"))
+
+    def test_a_shallow_source_is_staged(self):
+        from sandbox.hosting import here_source
+        shallow = self.home / "shallow"
+        _git(self.home, "clone", "-q", "--depth", "1", "file://" + str(self.repo), str(shallow))
+        head = _git(shallow, "rev-parse", "HEAD")
+        with here_source.snapshot(self.owner.sandbox_home, shallow.resolve(), head) as staged:
+            self.assertEqual(_git(staged, "rev-parse", "HEAD"), head)
+
+    def test_a_source_another_account_controls_is_refused_before_any_git_read(self):
+        from sandbox.hosting import here_source
+        with mock.patch.object(here_source, "_owned", return_value=False), \
+                mock.patch.object(here_source.subprocess, "run", side_effect=AssertionError("git ran")), \
+                mock.patch.object(here, "_source_bindings", side_effect=AssertionError("source read")), \
+                self.assertRaises(here.HereRefusal) as caught:
+            self.run_here(["host", "apply", "--confirm", "--project-dir", str(self.repo), "--here"],
+                          project_dir=str(self.repo))
+        self.assertEqual(caught.exception.code, "host_here_source_not_owned")
+        self.assertEqual(self.submitted, [])
+
+    def test_template_only_stack_up_carries_the_checkouts_owner_label(self):
+        _git(self.repo, "config", "user.name", "Repo Owner")
+        (self.repo / "t.yml").write_text("x\n")
+        _git(self.repo, "add", "t.yml")
+        _git(self.repo, "commit", "-qm", "template")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        original = ["host", "stack", "up", "--template", str(self.repo / "t.yml"), "--here"]
+        self.run_here(original, template=str(self.repo / "t.yml"), owner=None)
+        (job,) = self.submitted
+        inner = job[job.index("--") + 1:]
+        staged = Path(job[job.index("--project-dir") + 1])
+        self.assertEqual(inner[inner.index("--template") + 1], str(staged / "t.yml"))
+        self.assertIn("--owner=Repo Owner", inner)
+        self.submitted.clear()
+        self.run_here(original + ["--owner", "miu"], template=str(self.repo / "t.yml"), owner="miu")
+        inner = self.submitted[0][self.submitted[0].index("--") + 1:]
+        self.assertEqual([t for t in inner if t.startswith("--owner")], ["--owner"])
+        self.assertEqual(inner[inner.index("--owner") + 1], "miu")
+        self.assertEqual(self.staged_head, head)
+
+    def test_a_tree_that_cannot_be_reset_is_moved_aside_and_the_next_run_works(self):
+        from sandbox.hosting import here_source
+        with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head) as staged:
+            (staged / "ro").mkdir()
+            (staged / "ro" / "f").write_text("x\n")
+            (staged / "ro").chmod(0o500)
+        self.addCleanup(lambda: [p.chmod(0o700) for p in self.home.rglob("ro") if p.is_dir()])
+        if os.geteuid() != 0:
+            with self.assertRaises(here_source.SnapshotError):
+                with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head):
+                    pass
+        with here_source.snapshot(self.owner.sandbox_home, self.repo, self.head) as staged:
+            self.assertFalse((staged / "ro").exists())
+        group = staged.parent
+        self.assertEqual([p.name for p in group.iterdir() if p.name.startswith(".tree.broken-")], [])
+
+    def test_busy_check_uses_the_registrys_in_use_rule(self):
+        import sqlite3
+        from sandbox.hosting import here_source
+        tree = (self.home / "src" / "tree").resolve()
+        registry = Path(self.owner.sandbox_home) / "runtime" / "jobs" / "registry.sqlite3"
+        registry.parent.mkdir(parents=True)
+        db = sqlite3.connect(registry)
+        db.executescript("CREATE TABLE jobs (job_id TEXT, project_root TEXT, lifecycle TEXT);"
+                         "CREATE TABLE workspace_leases (job_id TEXT);")
+        def state(*rows, leases=()):
+            db.execute("DELETE FROM jobs"); db.execute("DELETE FROM workspace_leases")
+            db.executemany("INSERT INTO jobs VALUES (?,?,?)", rows)
+            db.executemany("INSERT INTO workspace_leases VALUES (?)", [(j,) for j in leases])
+            db.commit()
+            return here_source._active_jobs_inside(tree, self.owner.sandbox_home)
+        self.assertIs(state(("a", str(tree / "sub"), "running")), True)
+        self.assertIs(state(("a", str(tree), "succeeded")), False)
+        self.assertIs(state(("a", str(tree), "interrupted"), leases=["a"]), True)
+        self.assertIs(state(("a", str(tree) + "2", "running"), ("b", str(tree) + "_x", "running")), False)
+        self.assertIs(state(*[(f"j{i}", f"/elsewhere/{i}", "running") for i in range(300)]), False)
+        db.close()
+        registry.write_text("not a database")
+        self.assertIsNone(here_source._active_jobs_inside(tree, self.owner.sandbox_home))
+
+    def test_paths_must_stay_inside_the_source_root(self):
+        staged = Path("/staged")
+        (self.repo / "t.yml").write_text("x\n")
+        moved = here.relocate_paths(["host", "stack", "up", "--project-dir", str(self.repo),
+                                     "--template=" + str(self.repo / "t.yml")], self.repo, staged)
+        self.assertEqual(moved[4:], [str(staged), "--template=" + str(staged / "t.yml")])
+        outside = self.home / "elsewhere.yml"
+        outside.write_text("x\n")
+        for argv in (["--template", str(outside)], ["--project-dir", str(self.home)]):
+            with self.subTest(argv=argv), self.assertRaises(here.HereRefusal) as caught:
+                here.relocate_paths(["host", "stack", "up", *argv], self.repo, staged)
+            self.assertEqual(caught.exception.code, "host_here_path_outside_source")
+
+
+class WaitTests(unittest.TestCase):
+    def test_an_unreadable_registry_keeps_waiting_and_a_missing_outer_job_is_reported(self):
+        states = iter([None, None, {"lifecycle": "succeeded"}])
+        self.assertEqual(here._wait("e" * 32, 10, view=lambda job_id: next(states), sleep=lambda _s: None,
+                                    clock=lambda: 0), {"lifecycle": "succeeded"})
+        with self.assertRaises(here.HereRefusal) as caught:
+            here._submit_and_wait(SimpleNamespace(action="stack", image_action="list"),
+                                  ["sb", "--timeout", "900"], "req", submit=lambda argv: "e" * 32,
+                                  view=lambda job_id: here._Missing(), output=lambda job_id: "",
+                                  sleep=lambda _s: None, clock=lambda: 0)
+        self.assertEqual((caught.exception.code, caught.exception.job_id), ("host_here_job_not_found", "e" * 32))
+        self.assertIn("do not resubmit", caught.exception.message)
+
+    def test_job_state_tells_a_missing_row_from_an_unreadable_registry(self):
+        from sandbox.jobs.registry import JobNotFound
+        runtime = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(runtime)], check=False))
+        (runtime / "jobs").mkdir()
+        (runtime / "jobs" / "registry.sqlite3").write_text("")
+
+        class Repo:
+            def __init__(self, error):
+                self.error = error
+            def get(self, job_id):
+                raise self.error
+            def close(self):
+                pass
+        from sandbox.core import _paths
+        with mock.patch.object(_paths, "RUNTIME_DIR", runtime):
+            with mock.patch("sandbox.hosting.here_source.open_registry", return_value=Repo(JobNotFound("x"))):
+                self.assertIsInstance(here.job_state("e" * 32), here._Missing)
+            with mock.patch("sandbox.hosting.here_source.open_registry", return_value=Repo(OSError("busy"))):
+                self.assertIsNone(here.job_state("e" * 32))
+
+    def test_a_refused_inner_command_is_not_followed_into_another_job(self):
+        result = {"ok": False, "code": "stack_apply_in_progress", "job_id": "1" * 32}
+        self.assertIs(here._follow_child(result, "f" * 32, view=lambda job_id: self.fail("followed"),
+                                         sleep=lambda _s: None, clock=lambda: 0), result)
+
+    def test_an_unknown_child_stops_and_a_timeout_keeps_the_outer_job_id(self):
+        accepted = {"ok": True, "status": "accepted", "job_id": "1" * 32}
+        with self.assertRaises(here.HereRefusal) as caught:
+            here._follow_child(dict(accepted), "f" * 32, view=lambda job_id: here._Missing(),
+                               sleep=lambda _s: None, clock=lambda: 0)
+        self.assertEqual((caught.exception.code, caught.exception.extra["outer_job_id"]),
+                         ("host_here_job_not_found", "f" * 32))
+        clock = iter(range(0, 100_000, 1000))
+        with self.assertRaises(here.HereRefusal) as caught:
+            here._follow_child(dict(accepted), "f" * 32, view=lambda job_id: {"lifecycle": "running"},
+                               sleep=lambda _s: None, clock=lambda: next(clock))
+        self.assertEqual((caught.exception.code, caught.exception.job_id, caught.exception.extra["outer_job_id"]),
+                         ("host_here_job_unfinished", "1" * 32, "f" * 32))
+        refusal = caught.exception
+        with mock.patch.object(here, "run", side_effect=refusal), mock.patch("builtins.print") as printed, \
+                self.assertRaises(SystemExit):
+            here.dispatch(_args(["host", "stack", "up", "--here"]))
+        self.assertEqual(json.loads(printed.call_args.args[0])["outer_job_id"], "f" * 32)
 
 
 class DispatchRoutingTests(unittest.TestCase):

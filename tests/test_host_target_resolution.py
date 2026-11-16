@@ -111,6 +111,7 @@ class ResolveTests(unittest.TestCase):
                     "myvps", target="example-site/production", project_dir="/nonexistent",
                     state=_state(), registry={"version": 1, "stacks": {}})
         self.assertEqual(caught.exception.code, "host_target_unknown")
+        self.assertIn("run the command from that controller's checkout", str(caught.exception))
         validate.assert_not_called()
 
     def test_stack_without_successful_apply_is_unknown_with_hint(self):

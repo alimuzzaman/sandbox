@@ -1152,10 +1152,13 @@ class AddTests(ServiceTestCase):
         self.assertTrue(result.ok, result.envelope())
         self.assertEqual(self.store.load()[FQDN].state, "published")
 
-    def test_no_public_address_is_not_ok(self):
+    def test_no_public_address_refuses_before_anything_is_published(self):
         self.ctx = service.Context(config(), target(public_ip=None))
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.PUBLIC_PROBE_UNAVAILABLE))
+        self.assertEqual(self.remote.calls, [])  # no inspect, reserve or commit
+        self.assertEqual(self.remote.blocks, {})
+        self.assertNotIn(FQDN, self.store.load())
 
     def test_interruption_then_rerun_finishes(self):
         self.dns.fail = True

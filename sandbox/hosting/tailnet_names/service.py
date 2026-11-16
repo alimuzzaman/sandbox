@@ -509,6 +509,11 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
     target = ctx.target
     entry = target.entry
     try:
+        if target.public_ip is None:
+            # The public exposure check needs an address. Without one the block
+            # would be published and only then reported unverified.
+            run.stop("preflight", PUBLIC_PROBE_UNAVAILABLE,
+                     "no public IPv4 is known for this remote; pass --public-address", "refused")
         lego = run.call("preflight", deps.find_lego, ctx.config)
         store = deps.store(target.name)
         with store.lock():

@@ -1446,12 +1446,16 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if session is None:
             return self._not_found()
         upstream = urllib.parse.urlsplit(entry["upstream"])
-        headers = self._site_headers(entry)
+        vouch = None
         if self.gate.vouch_key is not None:
-            headers.append((VOUCH_HEADER, vouch_value(self.gate.vouch_key, entry["hostname"], name,
-                                                      session, int(self.gate.clock()))))
-        return self._forward((upstream.hostname, upstream.port), headers,
-                             session["expires_at"], lambda: store.session_alive(session["digest"]))
+            # Signed only once the body is in and the session re-checked, so a slow
+            # upload never reaches the upstream with a stale issued-at.
+            def vouch():
+                return [(VOUCH_HEADER, vouch_value(self.gate.vouch_key, entry["hostname"], name,
+                                                   session, int(self.gate.clock())))]
+        return self._forward((upstream.hostname, upstream.port), self._site_headers(entry),
+                             session["expires_at"], lambda: store.session_alive(session["digest"]),
+                             late_headers=vouch)
 
     def _share_open_short(self, name, entry, store):
         """``/s/``: a page that posts the fragment's token, then the token-for-cookie swap.
@@ -1691,7 +1695,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         headers = [("Host", entry["hostname"])]
         for name, value in self.headers.items():
             lowered = name.lower()
-            if (lowered in _HOP_BY_HOP or lowered in ("host", _VOUCH_LOWER)
+            # CGI-style backends read "_" as "-", so an underscore spelling is the same header.
+            if (lowered in _HOP_BY_HOP or lowered == "host" or lowered.replace("_", "-") == _VOUCH_LOWER
                     or "\r" in value or "\n" in value):
                 continue
             if lowered == "cookie":
@@ -1812,7 +1817,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         headers = []
         for name, value in self.headers.items():
             lowered = name.lower()
-            if lowered in _HOP_BY_HOP or "\r" in value or "\n" in value:
+            if (lowered in _HOP_BY_HOP or lowered.replace("_", "-") == _VOUCH_LOWER
+                    or "\r" in value or "\n" in value):
                 continue
             if lowered == "cookie":
                 kept = [part.strip() for part in value.split(";")
@@ -1832,8 +1838,12 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return self._forward((target.hostname, target.port), self._upstream_headers(authenticated),
                              session_expires, still_allowed)
 
-    def _forward(self, address, headers, session_expires, still_allowed=None):
-        """Send this request to a fixed address; nothing in it chooses where."""
+    def _forward(self, address, headers, session_expires, still_allowed=None, late_headers=None):
+        """Send this request to a fixed address; nothing in it chooses where.
+
+        ``late_headers`` is called after the last check before sending, for headers
+        that must be fresh when the upstream receives them.
+        """
         # Framing first, for both modes: a request the gate cannot frame never goes on.
         length = self._content_length()
         if length is None or "Transfer-Encoding" in self.headers:
@@ -1846,12 +1856,14 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             if self.command != "GET" or length:
                 self.close_connection = True
                 return self._fail(400, "bad_upgrade")
-            return self._tunnel(address, headers, session_expires, still_allowed)
+            return self._tunnel(address, headers, session_expires, still_allowed, late_headers)
         connection = http.client.HTTPConnection(*address, timeout=30)
         try:
             body = self.rfile.read(length) if length else None
             if still_allowed is not None and not still_allowed():
                 return self._answer_not_found()
+            if late_headers is not None:
+                headers = [*headers, *late_headers()]
             connection.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
             for name, value in headers:
                 connection.putheader(name, value)
@@ -1911,7 +1923,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             self.connection.setblocking(True)
         return self.rfile.read(len(pending)) if pending else b""
 
-    def _tunnel(self, address, headers, session_expires, still_allowed=None):
+    def _tunnel(self, address, headers, session_expires, still_allowed=None, late_headers=None):
         """A websocket. Raw bytes flow only after the upstream accepts the upgrade.
 
         Until the upstream answers 101 with ``Upgrade: websocket``, nothing the client sent
@@ -1930,6 +1942,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             # Connecting can block long enough for the original grant to end.
             if still_allowed is not None and not still_allowed():
                 return self._answer_not_found()
+            if late_headers is not None:
+                headers = [*headers, *late_headers()]
             lines = [f"{self.command} {self.path} HTTP/1.1"]
             lines += [f"{name}: {value}" for name, value in headers]
             lines += ["Upgrade: websocket", "Connection: Upgrade", "", ""]

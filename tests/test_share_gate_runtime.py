@@ -888,7 +888,10 @@ class VouchHeaderTests(_Gate):
         token, link_id = self.mint(scope="/")
         cookie = self.cookie(token)
         response, _ = self.request("GET", "/admin", headers={
-            "Cookie": cookie, runtime.VOUCH_HEADER: "v1 forged", "x-sandbox-share-session": "v1 forged"})
+            "Cookie": cookie, runtime.VOUCH_HEADER: "v1 forged", "x-sandbox-share-session": "v1 forged",
+            "X_Sandbox_Share_Session": "v1 forged"})
+        names = [name.lower().replace("_", "-") for name, _ in self.upstream_store["requests"][-1]["headers"]]
+        self.assertEqual(names.count(runtime.VOUCH_HEADER.lower()), 1)
         self.assertEqual(response.status, 200)
         [value] = self.vouches()
         fields = value.split(" ")
@@ -902,6 +905,22 @@ class VouchHeaderTests(_Gate):
         self.assertTrue(hmac.compare_digest(mac, expected))
         listed = self.manage("list", "share")["sessions"]
         self.assertEqual([item["id"] for item in listed], [session_id])
+
+    def test_the_header_is_signed_after_a_slow_body_arrives(self):
+        import socket
+        token, _ = self.mint(scope="/")
+        cookie = self.cookie(token)
+        sent_at = int(self.now)
+        with socket.create_connection(("127.0.0.1", self.public.server_address[1]), timeout=10) as sock:
+            sock.sendall((f"POST /upload HTTP/1.1\r\nHost: {GATE}\r\nCookie: {cookie}\r\n"
+                          "Content-Length: 4\r\nConnection: close\r\n\r\nab").encode())
+            time.sleep(0.3)
+            self.now += 120
+            sock.sendall(b"cd")
+            reply = sock.recv(65536)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply[:80])
+        [value] = self.vouches()
+        self.assertEqual(int(value.split(" ")[6]), sent_at + 120)
 
     def test_no_session_means_no_forward_and_no_header(self):
         self.mint(scope="/")

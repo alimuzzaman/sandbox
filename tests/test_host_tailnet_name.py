@@ -168,7 +168,8 @@ class RenderTests(unittest.TestCase):
 
     def test_both_server_blocks_admit_only_tailnet_peers(self):
         text = self.block()
-        rules = "allow 100.64.0.0/10;\n    allow fd7a:115c:a1e0::/48;\n    deny all;"
+        rules = (f"deny {TAILNET_IP};\n    allow 100.64.0.0/10;\n    allow fd7a:115c:a1e0::/48;\n"
+                 "    deny all;")
         self.assertEqual(text.count(rules), 2)
         for server in text.split("server {")[1:]:
             self.assertIn(rules, server)

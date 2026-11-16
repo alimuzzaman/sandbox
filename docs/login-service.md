@@ -686,7 +686,8 @@ run `host apply`).
   get 429.
 - **Forwarding.** Only origin-form targets with exactly one `Host` header equal to the
   gate hostname are forwarded. The gate sends `Host: <hostname>`, drops hop-by-hop
-  headers, its own cookies and any `X-Sandbox-Share-Session` the visitor sent, and
+  headers, its own cookies and any `X-Sandbox-Share-Session` the visitor sent (an
+  underscore spelling too), and
   passes everything else. With `share.vouch_secret` it adds its own
   `X-Sandbox-Share-Session` (below).
 - **Lifetime.** A session ends at `session_ttl_seconds`, at its link's expiry, at revoke,
@@ -732,13 +733,13 @@ X-Sandbox-Share-Session: v1 <host> <entry> <session id> <link id> <scope> <issue
 - `session id` is `s-` and 32 hex, `link id` is `l-` and 12 (or, for old links, 32) hex,
   both as `sb host share list` shows them. `scope` is the link's path scope (`/` for the
   whole site).
-- `issued at` is the gate's clock when it forwarded the request, `expires at` the
-  session's end, both Unix seconds.
+- `issued at` is the gate's clock when it sent the request on, after reading its body,
+  `expires at` the session's end, both Unix seconds.
 - `hmac` is HMAC-SHA256 with the key, as 64 lowercase hex, over every field before it,
   exactly as sent and joined by single spaces. No field contains a space.
 
 The gate removes any `X-Sandbox-Share-Session` from the visitor's request first, on
-every site_gate forward, with or without a key. A websocket carries the header once, on
+every site_gate and inbox_gate forward, with or without a key. A websocket carries the header once, on
 its upgrade request. To verify, the application:
 
 1. splits the value on single spaces and requires exactly 9 fields, the first `v1`;
@@ -750,7 +751,8 @@ its upgrade request. To verify, the application:
 
 Revoke and expiry end forwarding at the next request, so no header is issued for an
 ended session; the 60-second window bounds a replay of a header seen in transit between
-the gate and the application. Anything with the key can mint the header, so the key
+the gate and the application. It is a bearer assertion, not bound to a method or path:
+within that window a copied header works on any request. Anything with the key can mint the header, so the key
 belongs only to the gate and the services that verify it. Every site_gate entry of a
 target shares one key; the `host` and `entry` fields tell them apart.
 

@@ -5939,6 +5939,10 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         attempt.checkpoint('source', 'edge_apply')
     private_closure = _close_route_for_private_apply(
         edge, caddy_name, validated=validated, runtime=runtime)
+    # The route a failed apply puts back, read (and verified byte for byte) before
+    # any source, space or state effect, so a refused read changes nothing.
+    previous_caddy = (private_closure["baseline"] if private_closure is not None
+                      else edge.read_previous(caddy_name))
     attempt.checkpoint('source', 'source_publish')
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -6036,8 +6040,6 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                 if secret:
                     safe = safe.replace(secret, "[REDACTED]")
             progress(safe)
-    previous_caddy = (private_closure["baseline"] if private_closure is not None
-                      else edge.read_previous(caddy_name))
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
     edge_cache_receipt = None

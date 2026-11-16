@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from sandbox.hosting.front_door import exact_read, nginx
 from sandbox.services.redaction import redact_text
+from tests.subprocess_support import synthetic_environment
 
 ROUTE = ("server {\n    listen 443 ssl;\n    location / {\n"
          "        proxy_pass http://127.0.0.1:18199;\n        proxy_http_version 1.1;\n"
@@ -20,7 +21,7 @@ ROUTE = ("server {\n    listen 443 ssl;\n    location / {\n"
 
 def _run(path):
     return subprocess.run(["sh", "-c", exact_read.command(str(path))], capture_output=True,
-                          text=True, check=False)
+                          text=True, check=False, env=synthetic_environment())
 
 
 class ExactReadTests(unittest.TestCase):

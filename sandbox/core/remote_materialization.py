@@ -127,6 +127,12 @@ print(json.dumps(value, sort_keys=True, separators=(",", ":")), flush=True)
 COORDINATOR = inspect.getsource(content_digest) + '\n' + COORDINATOR
 
 
+# acquire/release/inspect are one short coordinator call each; the bound covers
+# the SSH round trip. At 10 s a slow tailnet hop lost the release of a completed
+# operation, and the lock stayed held (sb feedback c81d39ad).
+CONTROL_TIMEOUT_SECONDS = 30
+
+
 class RemoteMaterializationUnknown(RuntimeError):
     """Original exclusion is retained; do not replay or manually remove it."""
 
@@ -156,7 +162,7 @@ class RemoteMaterializationLease:
         self.unknown = False
         self.step = 0
 
-    def _call(self, action, *, command=None, input_data=None, timeout=10):
+    def _call(self, action, *, command=None, input_data=None, timeout=CONTROL_TIMEOUT_SECONDS):
         args = ["python3", "-c", COORDINATOR, action, self.parent,
                 self.name, self.operation_id]
         intent = None

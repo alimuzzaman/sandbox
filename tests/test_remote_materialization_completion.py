@@ -93,6 +93,19 @@ class RemoteMaterializationCompletionTest(unittest.TestCase):
                 self.assertIsNone(transport.record)
                 self.assertEqual(transport.calls, ["acquire", "run", "release"])
 
+    def test_control_calls_allow_a_slow_ssh_round_trip(self):
+        # c81d39ad: a 10 s bound lost the release of a completed operation.
+        timeouts = {}
+        transport = ReceiptTransport()
+
+        def timed(remote, command, **kwargs):
+            timeouts.setdefault(shlex.split(command)[3], kwargs["timeout"])
+            return transport(remote, command, **kwargs)
+        with patch.object(_remote, "ssh_run", side_effect=timed):
+            _remote.reset_target_to({}, "/srv/source", "a" * 40)
+        self.assertGreaterEqual(timeouts["acquire"], 30)
+        self.assertGreaterEqual(timeouts["release"], 30)
+
     def test_blank_ssh_success_is_not_cessation_proof(self):
         transport = ReceiptTransport()
         lease = RemoteMaterializationLease({}, "/srv/source", transport).acquire()

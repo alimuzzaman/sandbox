@@ -992,6 +992,48 @@ class TestDeployTargetPath(unittest.TestCase):
             )
         self.assertEqual(path, "/home/ubuntu/sandbox/deploy-src/alimuzzaman.me")
 
+    def test_same_named_checkouts_with_deploy_slugs_get_separate_trees_and_locks(self):
+        # 0e470e0e/c81d39ad: two checkouts named `hub` shared deploy-src/hub and its lock.
+        import shlex
+        from sandbox.core.remote_materialization import (
+            RemoteMaterializationBusy, RemoteMaterializationLease)
+        configs = {"/a/hub": {"kind": "wordpress", "deploySlug": "guided"},
+                   "/b/hub": {"kind": "wordpress", "deploySlug": "guided-setup"},
+                   "/c/hub": {"kind": "wordpress"}}
+        core = sr._core()
+        with patch.object(core, "load_project_config", side_effect=lambda root: configs[root]):
+            paths = {root: sr.deploy_target_path({}, root, sandbox_home="/home/u/sandbox")
+                     for root in configs}
+        self.assertEqual(paths, {"/a/hub": "/home/u/sandbox/deploy-src/guided",
+                                 "/b/hub": "/home/u/sandbox/deploy-src/guided-setup",
+                                 "/c/hub": "/home/u/sandbox/deploy-src/hub"})
+        held = set()
+
+        def transport(remote, command, **kwargs):
+            action, parent, name, token = shlex.split(command)[3:7]
+            if (parent, name) in held:
+                return _completed(returncode=73)
+            held.add((parent, name))
+            return _completed(stdout=json.dumps(
+                {"schema_version": 1, "operation_id": token, "state": "idle", "step": 0}))
+        first = RemoteMaterializationLease({}, paths["/a/hub"], transport).acquire()
+        second = RemoteMaterializationLease({}, paths["/b/hub"], transport).acquire()
+        self.assertNotEqual(first.name, second.name)
+        with self.assertRaises(RemoteMaterializationBusy):
+            RemoteMaterializationLease({}, paths["/a/hub"], transport).acquire()
+
+    def test_wordpress_slug_does_not_move_the_deploy_path(self):
+        core = sr._core()
+        with patch.object(core, "load_project_config",
+                          return_value={"kind": "wordpress", "slug": "my-addon"}):
+            path = sr.deploy_target_path({}, "/w/my-addon-fix-1", sandbox_home="/home/u/sandbox")
+        self.assertEqual(path, "/home/u/sandbox/deploy-src/my-addon-fix-1")
+        for bad in ("Hub", "../x", "a" * 64, 7):
+            with self.subTest(bad=bad), patch.object(
+                    core, "load_project_config", return_value={"deploySlug": bad}):
+                with self.assertRaises(ValueError):
+                    sr.deploy_target_slug("/w/hub")
+
     @patch("subprocess.run")
     def test_raises_when_sandbox_home_unresolvable(self, mock_run):
         mock_run.return_value = _completed(returncode=1, stderr="connection refused")

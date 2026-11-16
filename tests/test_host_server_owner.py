@@ -141,6 +141,31 @@ class DispatchTests(unittest.TestCase):
                 self.assertNotIn(marker, output.getvalue())
                 submit.assert_called_once()
 
+    def test_a_busy_source_lock_is_reported_as_busy_not_as_unknown_acceptance(self):
+        from sandbox.core.remote_materialization import RemoteMaterializationBusy
+        busy = RemoteMaterializationBusy("remote source materialization lock is busy; inspect with "
+                                         "`sb remote materialization inspect box --operation-id "
+                                         "OPERATION_ID --project-dir DIR`")
+        try:
+            raise RuntimeError("wrapped") from busy
+        except RuntimeError as wrapped:
+            error = wrapped
+        for request_id, code, acceptance in ((None, "server_cli_source_busy", "not_accepted"),
+                                             ("original", "server_cli_acceptance_unknown", "unknown")):
+            with self.subTest(request_id=request_id):
+                args = Namespace(**{**vars(self.args), "request_id": request_id})
+                def started(*_args, **_kwargs):
+                    self.assertTrue(args._server_cli_submission_started)
+                    raise error
+                with patch.object(sdk, "dispatch_server_cli", side_effect=started):
+                    output = io.StringIO()
+                    with redirect_stdout(output), self.assertRaises(SystemExit):
+                        dispatch.dispatch_host_if_selected(args)
+                payload = json.loads(output.getvalue())
+                self.assertEqual((payload["code"], payload["acceptance"]), (code, acceptance))
+                self.assertTrue(payload["source_busy"])
+                self.assertIn("sb remote materialization inspect box", payload["error"])
+
     def test_unknown_receipt_retains_only_original_handle_and_refuses_replay(self):
         self.submit.return_value = {"status": "acceptance_unknown", "job_id": "d" * 32,
             "request_id": "original", "error": "untrusted raw response"}

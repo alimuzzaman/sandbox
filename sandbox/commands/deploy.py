@@ -231,8 +231,8 @@ def _cmd_deploy(cfg, args) -> None:
         sr.deploy_target_slug(root)
     except (sc.ConfigError, ValueError) as e:
         _fail(remote_name, f"{e}; the remote deploy path is derived from the checkout "
-              f"directory name {root.name!r}, so deploy from a checkout whose directory "
-              "name is a valid slug", as_json, source_ref=source_ref)
+              f"directory name {root.name!r} (or deploySlug), so deploy from a checkout whose "
+              "directory name is a valid slug, or set a valid deploySlug", as_json, source_ref=source_ref)
     project_kind = pconf.get("kind", "wordpress")
     capability = _REMOTE_DEPLOY_CAPABILITIES.get(project_kind)
     if capability is None:

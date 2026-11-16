@@ -2253,7 +2253,9 @@ published name changes nothing.
    else still serves the name (or that the follow-up check was inconclusive).
    Coverage follows the certificate's DNS SANs; the subject CN counts only
    when the certificate has none. The public address is the SSH host when it is
-   public, or `--public-address`.
+   public, or `--public-address`. With neither, `add` refuses
+   `tailnet_name_public_probe_unavailable` before it reserves, writes or loads
+   anything.
 
 The upstream must be `localhost`, a loopback, private or tailnet IPv4 and a
 port. Hostnames are refused, because nginx resolves them once at start-up.

@@ -2440,10 +2440,13 @@ def recorded_materialization_operations(remote) -> dict:
     key = _materialization_key(remote)
     if key is None:
         return {}
-    with _materialization_pending() as pending:
-        rows = pending.get(key) if isinstance(pending.get(key), dict) else {}
-        return {path: op for path, op in rows.items()
-                if isinstance(path, str) and isinstance(op, str) and re.fullmatch(r"[0-9a-f]{32}", op)}
+    try:
+        with _materialization_pending() as pending:
+            rows = pending.get(key) if isinstance(pending.get(key), dict) else {}
+            return {path: op for path, op in rows.items()
+                    if isinstance(path, str) and isinstance(op, str) and re.fullmatch(r"[0-9a-f]{32}", op)}
+    except OSError:
+        return {}  # evidence only, like _record/_forget
 
 
 def _record_materialization(remote, target_path: str, operation_id: str | None) -> None:
@@ -2540,6 +2543,11 @@ def _remote_materialization_lock(remote: dict, target_path: str):
     except RemoteMaterializationUnknown:
         _record_materialization(remote, target_path, lease.operation_id)
         raise
+    # Holding the lock proves any operation recorded for this path is released
+    # (elsewhere, by hand): drop that stale record, never a newer one.
+    stale = recorded_materialization_operations(remote).get(target_path)
+    if stale is not None and stale != lease.operation_id:
+        _forget_materialization(remote, target_path, stale)
     try:
         yield lease
     finally:

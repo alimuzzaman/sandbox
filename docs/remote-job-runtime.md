@@ -559,10 +559,14 @@ else, including an original sync still running, stays busy. To do the same by ha
 ```
 
 `--operation-id` defaults to the one this controller recorded for the project's own
-paths: its deploy path and the workspace copy of `--workspace LABEL` (default
-`default`), never another project whose path merely starts the same. The sync's own
-error names it too. `reconcile` inspects first and releases only an `idle`
-or `complete` receipt. It never reruns the sync or removes the lock otherwise.
+deploy path, never another project whose path merely starts the same. An explicit id
+names its operation: the path it was recorded under (a preview or host target), else
+the project's deploy path. The sync's own error names it too. `reconcile` inspects
+first and releases only an `idle` or `complete` receipt. It never reruns the sync or
+removes the lock otherwise. A `complete` receipt means no process of that step still
+runs, not that the whole sync finished, so the tree may be half written: run the next
+sync (any job-start or apply re-materializes first). Once a sync takes the lock, a
+stale record for that path is dropped.
 
 ## Cancellation, retry, and cleanup
 

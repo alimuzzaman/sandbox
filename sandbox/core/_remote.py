@@ -2466,6 +2466,26 @@ def _record_materialization(remote, target_path: str, operation_id: str | None) 
         pass  # evidence only; the remote lock itself is unchanged
 
 
+def _forget_materialization(remote, target_path: str, operation_id: str) -> None:
+    """Drop the record only while it still names ``operation_id`` (one lock).
+
+    Another process may have recorded a newer lost operation for the same path
+    after this one was released; that record must survive.
+    """
+    key = _materialization_key(remote)
+    if key is None:
+        return
+    try:
+        with _materialization_pending() as pending:
+            rows = pending.get(key)
+            if isinstance(rows, dict) and rows.get(target_path) == operation_id:
+                rows.pop(target_path)
+                if not rows:
+                    pending.pop(key, None)
+    except OSError:
+        pass
+
+
 def _reconcile_recorded_materialization(remote, target_path: str) -> str | None:
     """Release this controller's own recorded operation when its receipt is idle/complete.
 
@@ -2487,7 +2507,7 @@ def _reconcile_recorded_materialization(remote, target_path: str) -> str | None:
                                    operation_id=operation_id).reconcile()
     except RemoteMaterializationUnknown:
         return None
-    _record_materialization(remote, target_path, None)
+    _forget_materialization(remote, target_path, operation_id)
     return operation_id
 
 
@@ -2513,7 +2533,10 @@ def _remote_materialization_lock(remote: dict, target_path: str):
                     + f"; inspect with `sb remote materialization inspect {name}"
                     + (f" --operation-id {pending}" if pending else " --operation-id OPERATION_ID")
                     + " --project-dir DIR`") from None
-            lease = RemoteMaterializationLease(remote, target_path, ssh_run).acquire()
+            # Bind the new lease before acquiring, so a lost response records
+            # this operation, not the one just released.
+            lease = RemoteMaterializationLease(remote, target_path, ssh_run)
+            lease.acquire()
     except RemoteMaterializationUnknown:
         _record_materialization(remote, target_path, lease.operation_id)
         raise
@@ -2546,8 +2569,7 @@ def reconcile_remote_materialization(remote, target_path: str, operation_id: str
     result = RemoteMaterializationLease(
         remote, target_path, ssh_run, operation_id=operation_id,
     ).reconcile()
-    if recorded_materialization_operations(remote).get(target_path) == operation_id:
-        _record_materialization(remote, target_path, None)
+    _forget_materialization(remote, target_path, operation_id)
     return result
 
 

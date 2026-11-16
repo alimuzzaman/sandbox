@@ -558,8 +558,10 @@ else, including an original sync still running, stays busy. To do the same by ha
 ./sb remote materialization reconcile xspeed-dev --project-dir . [--operation-id OP]
 ```
 
-`--operation-id` defaults to the one this controller recorded for the project; the
-sync's own error names it too. `reconcile` inspects first and releases only an `idle`
+`--operation-id` defaults to the one this controller recorded for the project's own
+paths: its deploy path and the workspace copy of `--workspace LABEL` (default
+`default`), never another project whose path merely starts the same. The sync's own
+error names it too. `reconcile` inspects first and releases only an `idle`
 or `complete` receipt. It never reruns the sync or removes the lock otherwise.
 
 ## Cancellation, retry, and cleanup

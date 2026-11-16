@@ -573,8 +573,16 @@ def _cmd_materialization(args, as_json: bool) -> None:
         die(f"no remote named '{name}'")
     entry = {**entry, "_remote_name": name}
     base = sr.deploy_target_path(entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve())
+    # Only the paths this project derives: its deploy path and the workspace
+    # copy of one label. A path prefix would also match another project
+    # named like `<project>-workspace-...`.
+    label = getattr(args, "materialization_workspace", None) or "default"
+    try:
+        candidates = {base, sr.remote_workspace_path(entry, Path(getattr(args, "project_dir", None) or os.getcwd()).resolve(), label)}
+    except ValueError:
+        die("--workspace must be a workspace label")
     recorded = {path: op for path, op in sr.recorded_materialization_operations(entry).items()
-                if path == base or path.startswith(base + "-workspace-")}
+                if path in candidates}
     operation_id = getattr(args, "operation_id", None)
     if operation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", operation_id):
         die("--operation-id must be the 32-hex operation id the sync reported")
@@ -584,7 +592,9 @@ def _cmd_materialization(args, as_json: bool) -> None:
                 "(the sync's error names it)" + (f"; recorded: {sorted(recorded.values())}" if recorded else ""))
         target, operation_id = next(iter(recorded.items()))
     else:
-        target = next((path for path, op in recorded.items() if op == operation_id), base)
+        everywhere = sr.recorded_materialization_operations(entry)
+        target = next((path for path, op in recorded.items() if op == operation_id),
+                      next((path for path, op in everywhere.items() if op == operation_id), base))
     payload = {"ok": True, "name": name, "operation_id": operation_id, "target_path": target,
                "error": None}
     try:

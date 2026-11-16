@@ -76,6 +76,38 @@ class JobStartReconcilesItsOwnSettledOperationTests(_Base):
         self.assertEqual(self.transport.record["operation_id"], "f" * 32)
 
 
+class ReviewFindingTests(_Base):
+    def test_a_lost_reacquire_response_records_the_new_operation(self):
+        first = self.lose_a_sync()
+        self.transport.record.update(state="complete", exit_code=0)
+        transport = self.transport
+        original = transport.__call__
+
+        def lose_the_second_acquire(remote, command, **kwargs):
+            result = original(remote, command, **kwargs)
+            if transport.calls[-1] == "acquire" and transport.record is not None \
+                    and transport.record["operation_id"] != first:
+                import subprocess
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 1))
+            return result
+
+        with patch.object(_remote, "ssh_run", lose_the_second_acquire), \
+                self.assertRaises(RemoteMaterializationUnknown):
+            with _remote._remote_materialization_lock(REMOTE, TARGET):
+                pass
+        second = transport.record["operation_id"]
+        self.assertNotEqual(second, first)
+        self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {TARGET: second})
+
+    def test_forgetting_a_released_operation_keeps_a_newer_record(self):
+        _remote._record_materialization(REMOTE, TARGET, "a" * 32)
+        _remote._record_materialization(REMOTE, TARGET, "b" * 32)  # a later lost sync
+        _remote._forget_materialization(REMOTE, TARGET, "a" * 32)
+        self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {TARGET: "b" * 32})
+        _remote._forget_materialization(REMOTE, TARGET, "b" * 32)
+        self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {})
+
+
 class MaterializationCommandTests(_Base):
     def setUp(self):
         super().setUp()
@@ -104,6 +136,23 @@ class MaterializationCommandTests(_Base):
         self.assertEqual((code, payload["state"]), (0, "released"))
         self.assertIsNone(self.transport.record)
         self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {})
+
+    def test_another_projects_workspace_named_like_ours_is_not_selected(self):
+        foreign = TARGET + "-workspace-0123456789abcd"  # project `project-workspace-...`
+        _remote._record_materialization(REMOTE, foreign, "d" * 32)
+        args = argparse.Namespace(action="materialization", name="reconcile", ssh_url="box",
+                                  project_dir="/tmp", operation_id=None, json=True)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            remote_cmd._cmd_materialization(args, True)  # no single operation of ours
+        self.assertEqual(_remote.recorded_materialization_operations(REMOTE), {foreign: "d" * 32})
+        ours = _remote.remote_workspace_path(REMOTE, "/tmp", "default")
+        self.assertNotEqual(ours, foreign)
+        _remote._record_materialization(REMOTE, ours, "e" * 32)
+        self.transport.record = dict(schema_version=1, operation_id="e" * 32, state="complete",
+                                     step=1, exit_code=0)
+        code, payload = self.command("inspect")
+        self.assertEqual((code, payload["operation_id"], payload["target_path"]), (0, "e" * 32, ours))
 
     def test_reconcile_refuses_an_active_receipt(self):
         self.lose_a_sync()

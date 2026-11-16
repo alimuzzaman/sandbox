@@ -307,7 +307,7 @@ def strict_pairs(items):
         result[key]=value
     return result
 def fail(): raise RuntimeError("port observation refused")
-def run(args, payload=None):
+def attempt(args, payload=None):
     if time.monotonic()>DEADLINE: fail()
     import tempfile
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, tempfile.TemporaryFile() as source:
@@ -318,36 +318,94 @@ def run(args, payload=None):
             if time.monotonic()>deadline or os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT:
                 p.kill(); p.wait(); fail()
             time.sleep(.02)
-        if p.returncode or os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT: fail()
-        out.seek(0)
-        return out.read(LIMIT+1).decode("utf-8", "strict")
+        if os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT: fail()
+        out.seek(0); err.seek(0)
+        return p.returncode, out.read(LIMIT+1).decode("utf-8", "strict"), err.read(LIMIT+1).decode("utf-8", "strict")
+def run(args, payload=None):
+    code,out,_=attempt(args, payload)
+    if code: fail()
+    return out
+def vanished(cid, code, err):
+    # Only Docker's own not-found reply for this exact id counts as removal.
+    # Any other failure (daemon, permission, timeout, extra output) refuses.
+    lines=[line.strip() for line in err.splitlines() if line.strip()]
+    return code!=0 and len(lines)==1 and re.fullmatch('(?i)(error: no such object|error response from daemon: no such container): '+cid,lines[0]) is not None
+class Churn(Exception): pass
+SCANS=8
+FORMAT='{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .NetworkSettings.Ports}},"addresses":"{{range .NetworkSettings.Networks}}{{.IPAddress}},{{.GlobalIPv6Address}},{{end}}"}'
+def listed():
+    ids=run(['docker','ps','--no-trunc','--quiet']).splitlines()
+    if len(ids)>ROWS or len(set(ids))!=len(ids) or any(not re.fullmatch('[0-9a-f]{64}',cid) for cid in ids): fail()
+    return ids
+def inspect_one(cid):
+    """Publication rows of one container, or None when Docker says it is gone."""
+    # Allow-listed projections only. Never collect Config.Env or raw inspect.
+    code,out,err=attempt(['docker','inspect','--format',FORMAT,cid])
+    if code:
+        if vanished(cid,code,err): return None
+        fail()
+    item=json.loads(out,object_pairs_hook=strict_pairs)
+    if item['ports'] is None: item['ports']={}
+    if item['id']!=cid or type(item['ports']) is not dict: fail()
+    rows=[]
+    for target, binds in item['ports'].items():
+        match=re.fullmatch(r'([0-9]+)/(tcp|udp|sctp)',target)
+        if not match: fail()
+        if match[2]!='tcp': continue
+        if binds is None: continue
+        if type(binds) is not list: fail()
+        for bind in binds:
+            if set(bind)!={'HostIp','HostPort'} or not bind['HostPort'].isdigit(): fail()
+            addresses=sorted(set(str(ipaddress.ip_address(value)) for value in item['addresses'].split(',') if value))
+            rows.append(dict(address=bind['HostIp'],port=int(bind['HostPort']),container=cid,project=item['project'] or 'unknown:'+cid,service=item['service'] or 'unknown',container_port=int(match[1]),container_addresses=addresses))
+            if len(rows)>ROWS: fail()
+    return rows
+def scan():
+    # Facts cover every container running in the first list OR the re-list, so
+    # nothing that ran during the scan is silently left out. Any listed
+    # container removed outright (a recreate may hand its port to a new id)
+    # restarts the scan. One that leaves the running list but still exists (a
+    # restart loop drops in and out every few seconds) keeps its host ports
+    # only as an unknown-owner reservation with no container addresses: its
+    # stale facts can refuse a port but never prove socket ownership.
+    first=listed()
+    rows={}
+    for cid in first:
+        found=inspect_one(cid)
+        if found is None: raise Churn()
+        rows[cid]=found
+    second=listed()
+    for cid in second:
+        if cid in rows: continue
+        found=inspect_one(cid)
+        if found is None: raise Churn()
+        rows[cid]=found
+    for cid in first:
+        if cid in second: continue
+        code,_,err=attempt(['docker','inspect','--format','{{json .Id}}',cid])
+        if code:
+            if vanished(cid,code,err): raise Churn()
+            fail()
+        rows[cid]=[dict(row,project='unknown:'+cid,service='unknown',container_addresses=[]) for row in rows[cid]]
+    publications=[row for cid in rows for row in rows[cid]]
+    if len(publications)>ROWS: fail()
+    return publications
+def settled_scan():
+    # A container removed between list and inspect (another session's
+    # `docker run --rm`) restarts the whole scan from a fresh list. Facts come
+    # only from one scan whose every inspect succeeded and whose re-list
+    # matched; churn that never settles within SCANS refuses.
+    for _ in range(SCANS):
+        try:
+            return scan()
+        except Churn:
+            continue
+    fail()
 def collect(identity, runtime):
     if os.getuid()!=identity['uid'] or not pathlib.Path(identity['home']).is_dir(): fail()
     engine=json.loads(run(['docker','info','--format','{{json .ID}}']))
     if type(engine) is not str or not engine or len(engine)>512: fail()
-    ids=run(['docker','ps','--no-trunc','--quiet']).splitlines()
-    if len(ids)>ROWS or len(set(ids))!=len(ids): fail()
-    publications=[]
-    for cid in ids:
-        if not re.fullmatch('[0-9a-f]{64}',cid): fail()
-        # Allow-listed projections only. Never collect Config.Env or raw inspect.
-        fmt='{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .NetworkSettings.Ports}},"addresses":"{{range .NetworkSettings.Networks}}{{.IPAddress}},{{.GlobalIPv6Address}},{{end}}"}'
-        item=json.loads(run(['docker','inspect','--format',fmt,cid]),object_pairs_hook=strict_pairs)
-        if item['ports'] is None: item['ports']={}
-        if item['id']!=cid or type(item['ports']) is not dict: fail()
-        for target, binds in item['ports'].items():
-            match=re.fullmatch(r'([0-9]+)/(tcp|udp|sctp)',target)
-            if not match: fail()
-            if match[2]!='tcp': continue
-            if binds is None: continue
-            if type(binds) is not list: fail()
-            for bind in binds:
-                if set(bind)!={'HostIp','HostPort'} or not bind['HostPort'].isdigit(): fail()
-                addresses=sorted(set(str(ipaddress.ip_address(value)) for value in item['addresses'].split(',') if value))
-                publications.append(dict(address=bind['HostIp'],port=int(bind['HostPort']),container=cid,project=item['project'] or 'unknown:'+cid,service=item['service'] or 'unknown',container_port=int(match[1]),container_addresses=addresses))
-                if len(publications)>ROWS: fail()
-    # Re-list so disappearing/appearing containers cannot silently truncate facts.
-    if set(run(['docker','ps','--no-trunc','--quiet']).splitlines())!=set(ids): fail()
+    publications=settled_scan()
     socket_args=['python3','-I','-S','-c',SOCKET_PROGRAM]
     if os.geteuid()!=0: socket_args=['sudo','-n',*socket_args]
     listeners=json.loads(run(socket_args,json.dumps(publications)),object_pairs_hook=strict_pairs)

@@ -39,6 +39,8 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
         "host_target_busy": "The server target is busy or its last apply did not succeed; "
             "no controller fallback was attempted.",
         "host_target_invalid": "The server refused the target selector; no controller fallback was attempted.",
+        "host_target_unverified": "The target's last apply ran but its delivery was not verified; "
+            "no controller fallback was attempted.",
     }
     hints = {
         "host_server_target_evidence_unavailable":
@@ -48,6 +50,9 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
         "host_target_busy": "the target is being applied or reaped, or its last apply did not succeed; "
             "check sb host status before retrying",
         "host_target_invalid": "check --target, --name and --environment",
+        "host_target_unverified": "check sb host status; if no runtime revision is declared, set "
+            "deploy.derived_environment APP_SOURCE_REVISION: pushed_commit_sha in the hosting manifest "
+            "(a stack's template), forward it on every service, then re-apply",
         "server_cli_exec_observation_unavailable":
             "inspect it with sb job-status JOB_ID --remote NAME; do not replay it",
     }

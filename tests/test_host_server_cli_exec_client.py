@@ -324,7 +324,8 @@ class ExecClientTests(unittest.TestCase):
         self.args.name, self.args.target = None, "project/dev"
         for code, hint in (("host_server_target_evidence_unavailable", "an unclassified target needs sb host classify"),
                            ("host_target_busy", "being applied or reaped"),
-                           ("host_target_invalid", "--target")):
+                           ("host_target_invalid", "--target"),
+                           ("host_target_unverified", "derived_environment APP_SOURCE_REVISION")):
             with self.subTest(code=code):
                 self.observe.side_effect = ServerTargetRefused(code)
                 output = io.StringIO()

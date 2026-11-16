@@ -18,6 +18,14 @@ from sandbox.hosting.target_resolution import ResolvedTarget, TargetRefusal, par
 
 UNAVAILABLE = "host_server_target_evidence_unavailable"
 BUSY = "host_target_busy"
+# The last apply ran but its delivery stayed incomplete (panel status "unverified"),
+# most often because no runtime revision is declared. Not busy: retrying cannot help.
+UNVERIFIED = "host_target_unverified"
+UNVERIFIED_MESSAGE = "the last apply ran but its delivery was not verified; check sb host status, then re-apply"
+# Missing required evidence (or no recorded reason) is usually an undeclared runtime revision.
+UNVERIFIED_REVISION_MESSAGE = ("the last apply ran but its delivery was not verified; a hosted target needs a "
+                               "declared runtime revision: set deploy.derived_environment APP_SOURCE_REVISION: "
+                               "pushed_commit_sha, forward it on every service, then re-apply")
 _ISSUER = object()
 
 
@@ -223,6 +231,11 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
         _refuse()
     summary = summaries[0]
     commit = summary.get("commit")
+    if (summary["last_apply"]["status"] == "unverified" and summary["compose_project"] == compose_project
+            and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) is not None):
+        reason = summary["last_apply"].get("reason")
+        raise TargetRefusal(UNVERIFIED, UNVERIFIED_REVISION_MESSAGE
+                            if reason in (None, "required_evidence_missing") else UNVERIFIED_MESSAGE)
     if (summary["last_apply"]["status"] != "succeeded"
             or summary["compose_project"] != compose_project
             or not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None):

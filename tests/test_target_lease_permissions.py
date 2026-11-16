@@ -1,4 +1,5 @@
 """Physical anchors must meet the exact recovery permission contract."""
+import os
 import shutil
 import stat
 import tempfile
@@ -7,6 +8,9 @@ from pathlib import Path
 
 from sandbox.hosting.target_lease import SCRIPT
 from tests.subprocess_support import run_test_process
+
+# The in-place repair needs the anchor's flock and its /proc fd (Linux remotes).
+TIGHTENS = bool(shutil.which("flock", path="/usr/bin:/bin")) and Path("/proc/self/fd").is_dir()
 
 
 class TargetLeasePermissionsTests(unittest.TestCase):
@@ -27,18 +31,99 @@ class TargetLeasePermissionsTests(unittest.TestCase):
             self.assertIn(result.returncode, (0, 46), result.stderr)
             self.assertEqual(stat.S_IMODE(Path(str(lease) + ".lock").stat().st_mode), 0o600)
 
-    def test_existing_anchor_is_not_replaced_or_permission_repaired(self):
+    def legacy_anchor(self, directory, mode=0o664):
+        lease = Path(directory) / "example.lease"
+        lock = Path(str(lease) + ".lock")
+        lock.touch(mode=0o600)
+        lock.chmod(mode)
+        return lease, lock
+
+    @unittest.skipUnless(TIGHTENS, "requires real flock and /proc")
+    def test_legacy_group_writable_anchor_is_tightened_in_place(self):
         with tempfile.TemporaryDirectory() as directory:
-            lease = Path(directory) / "example.lease"
-            lock = Path(str(lease) + ".lock")
-            lock.touch(mode=0o600)
-            lock.chmod(0o664)
+            lease, lock = self.legacy_anchor(directory)
             before = lock.stat()
             result = self.run_lease(lease)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            after = lock.stat()
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+            self.assertEqual(stat.S_IMODE(after.st_mode), 0o600)
+
+    def test_existing_anchor_is_never_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease, lock = self.legacy_anchor(directory)
+            before = lock.stat()
+            result = self.run_lease(lease)
+            # Without flock the script stops before any repair; the inode stays either way.
             self.assertIn(result.returncode, (0, 46), result.stderr)
             after = lock.stat()
             self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
-            self.assertEqual(stat.S_IMODE(after.st_mode), 0o664)
+            if result.returncode == 46:
+                self.assertEqual(stat.S_IMODE(after.st_mode), 0o664)
+
+    @unittest.skipUnless(TIGHTENS, "requires real flock and /proc")
+    def test_anchor_is_tightened_even_while_another_owner_holds_the_lease(self):
+        # Otherwise a stale holder's legacy anchor would block the takeover forever:
+        # takeover needs a private anchor, and only a lease operation repairs it.
+        with tempfile.TemporaryDirectory() as directory:
+            lease, lock = self.legacy_anchor(directory)
+            lease.write_text(f"{'c' * 32} {'d' * 32} 1\n")
+            lease.chmod(0o600)
+            body = lease.read_text()
+            result = self.run_lease(lease)
+            self.assertEqual(result.returncode, 45, result.stderr)  # still held, not taken
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+            self.assertEqual(lease.read_text(), body)
+
+    def test_new_lease_directory_is_private_with_group_writable_caller_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease = Path(directory) / "sub" / "example.lease"
+            result = self.run_lease(lease)
+            self.assertIn(result.returncode, (0, 46), result.stderr)
+            self.assertEqual(stat.S_IMODE(lease.parent.stat().st_mode) & 0o022, 0)
+
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "Linux remotes")
+    def test_legacy_group_writable_lease_directory_loses_group_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory).resolve()
+            parent = real / "sub"
+            parent.mkdir()
+            parent.chmod(0o775)
+            result = self.run_lease(parent / "example.lease")
+            self.assertIn(result.returncode, (0, 46), result.stderr)
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "Linux remotes")
+    def test_symlinked_lease_directory_is_left_as_it_is(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory).resolve()
+            target = real / "elsewhere"
+            target.mkdir()
+            target.chmod(0o775)
+            (real / "sub").symlink_to(target)
+            self.run_lease(real / "sub" / "example.lease")
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o775)
+
+    @unittest.skipUnless(TIGHTENS, "requires real flock and /proc")
+    def test_hard_linked_anchor_is_left_as_it_is(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease, lock = self.legacy_anchor(directory)
+            os.link(lock, Path(directory) / "other-name")
+            result = self.run_lease(lease)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o664)
+
+    @unittest.skipUnless(TIGHTENS, "requires real flock and /proc")
+    def test_symlinked_anchor_target_is_left_as_it_is(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease = Path(directory) / "example.lease"
+            target = Path(directory) / "elsewhere"
+            target.touch(mode=0o600)
+            target.chmod(0o664)
+            Path(str(lease) + ".lock").symlink_to(target)
+            result = self.run_lease(lease)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o664)
 
     @unittest.skipUnless(shutil.which("flock", path="/usr/bin:/bin"), "requires real flock")
     def test_acquire_and_release_preserve_private_anchor(self):

@@ -62,6 +62,63 @@ returns the original server acceptance receipt. Unknown acceptance is not retrie
 The fixed installed executable is selected on the server, with no project PATH,
 project script, self remote alias, instance ensure or SSH loop.
 
+### Exception: the owner on the host itself (`--here`, Fix 5)
+
+A tagged Tailscale node cannot SSH to itself, so on the remote the owner cannot
+reach its own Sandbox through `--remote`. `sb host ... --here` is the one
+host-local entry point to the same fixed job. It does not register a self remote
+alias and adds no grant: it submits `job-start --local --server-cli` bound to the
+installed owner's target, revision and marker, exactly as the follow timer's tick
+does, and the command runs inside that retained job as it would for a controller.
+
+Bounds, all checked before submission (`sandbox/hosting/server_cli_here.py`):
+
+- Commands: `host stack up|list|down|ttl|sweep|limits`, `host apply --confirm`
+  and `host follow add|status|pause|resume|remove|run-now|key`. Anything else
+  with `--here` refuses `host_here_unsupported`. The older meanings of `--here`
+  (`login-url`, `stack reap`, `follow tick|apply`) are unchanged.
+- Caller: `read_current_server_owner()` must succeed, the real and effective
+  UID must both be that owner's, and `$HOME` and the Sandbox home must be the
+  owner's (`host_here_owner_unavailable`; use `sudo -H -u <owner>`, not `-E`).
+- Routing: the origin remote name, front door and control port come only from
+  the host's owner origin record, `$HOME/sandbox/runtime/owner-origin.json`
+  (`sandbox/hosting/owner_origin.py`). Every confirmed `remote service migrate`
+  (all installers go through `migrate_remote_mcp_service`) removes it and writes
+  it again from the controller's registration: the name the controller uses,
+  `front_door_mode()` and the installed port. It must be the owner's private
+  regular file and name the installed unit's marker and runtime revision; else
+  `host_here_origin_unavailable`. Nothing is probed on the host. `--remote`,
+  when given with `--here`, must equal the recorded name
+  (`host_here_remote_mismatch`). The record holds one name: if two controllers
+  register this host under different names, it holds the one that migrated
+  last, and stacks and follows recorded under the other name are not found by
+  `--here`.
+- No credential selection flags, no stdin or `-- COMMAND`, no `--here` inside a
+  server CLI job, no caller-supplied `--server-cli-stack-ref` or
+  `--server-cli-source-branch`, and `--here`, `--remote`, `--json`,
+  `--project-dir` and `--template` spelled out in full.
+- Source: `stack up` and `apply` run on the given checkout in place, with the
+  bindings a controller adds (the stack ref; the checkout's branch and commit for
+  `apply`). A controller stages exactly the bound commit, so `--here` refuses
+  `stack up` unless the checkout is at the ref (`host_here_ref_not_checked_out`)
+  and has no tracked changes (`host_here_source_dirty`); `apply` refuses a dirty
+  checkout inside the job as before. The other commands run in the owner-private
+  folder `$SANDBOX_HOME/runtime/hosting/here`, never the caller's working
+  directory.
+
+Unlike the controller form, `--here` waits for the job (its deadline plus two
+minutes), writes the job id to stderr first and prints the command's own last
+JSON line (the inner command always gets `--json`), exiting 1 when the command
+or the job failed. `stack up` and `apply` only submit the apply job inside it;
+`--here` waits for that job too (up to an hour) and reports it: `job_id` is the
+apply job, `outer_job_id` the server CLI job, `completion` its end state, and
+`ok` is false unless it succeeded. If a wait ends first it prints
+`host_here_job_unfinished` with that job id; inspect the job, do not resubmit.
+
+The owner panel reads the same record as a label only: controller records on the
+server under the recorded name use this server's lifetime records instead of a
+`stack list --remote <itself>` fetch (feedback d8654d4b).
+
 The optional SDK `source_ref` is a full, locally resolved commit and selects the
 existing immutable measured-source deploy path instead of a working-tree overlay.
 Host stack creation uses it together with its retained original ref/branch binding.

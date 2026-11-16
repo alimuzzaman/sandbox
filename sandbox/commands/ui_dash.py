@@ -635,6 +635,7 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
     try:
         sources, partial, known, lifetimes = [], [], [], {}
         server_records = None
+        server_remote = None
         now = int(time.time())
         mail_inventory = None
         if _hosts_control_service():
@@ -648,6 +649,10 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
             mail_inventory = mail_panel.read_server(upstreams=desired_upstreams, bound_host=bound_host)
             sources.append(panel_view.server_source(server_records))
             lifetimes["this-server"] = panel_lifetime.read_server(_paths.RUNTIME_DIR, now)
+            # The controller's name for this server (d8654d4b): its records
+            # here carry it, and this server is not a remote of itself.
+            from sandbox.hosting import owner_origin
+            server_remote = owner_origin.remote_label()
             try:
                 rows = list(_core().registry_all().values())
             except Exception:
@@ -686,9 +691,11 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
                     remotes = {t["remote"] for t in controller["targets"]
                                if t["remote"] in registered or
                                (t["remote"], t["project"], t["environment"]) not in local_keys}
+            remotes.discard(server_remote)
             lifetimes.update(_hosting_lifetimes().snapshot(sorted(remotes), now))
         view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
-                                     lifetimes=lifetimes, mail_inventory=mail_inventory)
+                                     lifetimes=lifetimes, mail_inventory=mail_inventory,
+                                     server_remote=server_remote)
         from sandbox.hosting import panel_access
         panel_access.enrich(view, stack_data, host_state, server_records=server_records)
         view["partial_reasons"] = partial + view["partial_reasons"]

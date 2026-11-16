@@ -4921,6 +4921,10 @@
    "RegisteredPostgresRecoveryTransport.invoke:read[local_runtime_revision]",
    "RegisteredPostgresRecoveryTransport.invoke:read[provisioned]",
    "RegisteredPostgresRecoveryTransport.invoke:read[runtime_revision_state]",
+   "_helper_failure:detail={helper_code,step}",
+   "_helper_failure:detail[check]=",
+   "_helper_failure:error.detail#2={exit,helper_code}",
+   "_helper_failure:error.detail={helper_code}",
    "_inspection_bytes:payload={code,inspection_diagnostic,ok,schema_version}",
    "_inspection_bytes:payload[inspection_diagnostic]={archive_digest,code,correlation_id,installed_runtime_revision,local_runtime_revision,phase,runtime_revision_state,schema_version,source_digest,status}",
    "_inspection_bytes:read[installed_runtime_revision]",
@@ -4941,10 +4945,13 @@
    "archive_digest",
    "archive_size",
    "authenticated",
+   "check",
    "code",
    "correlation_id",
    "credential_revision",
    "credential_size",
+   "exit",
+   "helper_code",
    "inspection_diagnostic",
    "installed_runtime_revision",
    "local_runtime_revision",
@@ -4965,6 +4972,7 @@
    "source_digest",
    "sources",
    "status",
+   "step",
    "target_volume"
   ],
   "sandbox/transports/remote_recovery.py": [
@@ -5244,5 +5252,5 @@
    "content_digest.head:subprocess.run(env=)={GIT_CONFIG_GLOBAL,GIT_CONFIG_NOSYSTEM,GIT_NO_REPLACE_OBJECTS,GIT_OPTIONAL_LOCKS,HOME,PATH}"
   ]
  },
- "spoken": 26
+ "spoken": 27
 }

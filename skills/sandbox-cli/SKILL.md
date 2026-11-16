@@ -793,9 +793,12 @@ Act's default images run each job as root, so a test that expects `chmod 0444`
 or `0555` to block a write passes on GitHub and fails here. Add `--as-runner` to
 run the job container as GitHub's runner user instead (`runner`, uid 1001,
 passwordless `sudo`), from `catthehacker/ubuntu:runner-*` for `ubuntu-latest`,
-`ubuntu-20.04`, `ubuntu-22.04` and `ubuntu-24.04`. Any other `runs-on` refuses
-before anything runs; it never falls back to root. It combines with
-`--container-limit` and reaches each remote durable child:
+`ubuntu-20.04`, `ubuntu-22.04` and `ubuntu-24.04`. Any other `runs-on`, in the
+selected jobs or their `needs` chain, refuses before anything runs; it never falls
+back to root. A job-level `container:` keeps its image's user, as on GitHub. The
+workspace is bind-mounted, so its host owner must be uid 1001 (as on xspeed-dev)
+for the job to write it; pull the image on that host first. It combines with
+`--container-limit` and reaches each remote durable child (CLI only, not MCP):
 
 ```sh
 sb ci run .github/workflows/tests.yml --remote xspeed-dev --as-runner --container-limit memory=2g --json

@@ -1512,17 +1512,28 @@ unknown key, a malformed value or a repeated key stops the run before anything
 starts. `act` runs one job at a time per host, so a second run waits for the
 first.
 
-`--as-runner` runs each job container as GitHub's runner user (`runner`, uid
+`--as-runner` runs each workflow job as GitHub's runner user (`runner`, uid
 1001, passwordless `sudo`) instead of root, so file permissions behave as on
 GitHub: a directory at `0555` blocks writes. It maps `ubuntu-latest` and
-`ubuntu-22.04` to `catthehacker/ubuntu:runner-22.04`, and `ubuntu-20.04` and
-`ubuntu-24.04` to their `runner-` images. A `runs-on` with no runner image
-(Windows, macOS, a self-hosted label, an expression other than
-`${{ matrix.KEY }}`) stops the run before anything starts; it never falls back
-to root. Without the option the `act-` images, as root, are used as before. It
-combines with `--container-limit`, is forwarded to every remote durable child
-and to `--async`. Pull the image on the host first (`docker pull
-catthehacker/ubuntu:runner-22.04`); `act` runs with `--pull=false`.
+`ubuntu-22.04` to `catthehacker/ubuntu:runner-22.04` (the same release the
+default map uses for `ubuntu-latest`, not GitHub's current 24.04), and
+`ubuntu-20.04` and `ubuntu-24.04` to their `runner-` images. Every job `act` will
+run is checked, including the selected jobs' `needs` chain with all its cells. A
+`runs-on` with no runner image (Windows, macOS, a self-hosted label, an
+expression other than `${{ matrix.KEY }}`) or a reusable-workflow job stops the run
+before any secret, instance, `--async` launch or remote submission; it never falls
+back to root. A job-level `container:`, service containers and Docker actions keep
+their own image's user, as on GitHub. Without the option the `act-` images, as
+root, are used as before. It combines with `--container-limit` and is forwarded to
+every remote durable child and to `--async`; the MCP `ci_run` tool does not take
+it.
+
+The checkout is bind-mounted into the job container, so `runner` (uid 1001) must
+be able to write it: true where the host user that owns the workspace is uid 1001
+(xspeed-dev); elsewhere a workflow that writes to its workspace fails with
+permission errors. Pull the image on the host that runs `act` before the first
+run (`docker pull catthehacker/ubuntu:runner-22.04`, about 2.2 GB): `act` pulls a
+missing image itself, inside the cell's timeout and while other runs wait for it.
 
 A caller that mints a credential for one run, such as a short-lived GitHub
 token, passes it with `--secrets-stdin` (local runs only, not with `--async`):

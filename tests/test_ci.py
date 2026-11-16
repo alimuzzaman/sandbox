@@ -458,6 +458,92 @@ class TestAsRunner(unittest.TestCase):
         self.assertNotIn("--user", command[command.index("--container-options") + 1])
 
 
+class TestAsRunnerReach(unittest.TestCase):
+    """Every job act runs is checked, before any secret, instance or --async launch."""
+
+    WORKFLOW = """on: push
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps: [{run: make}]
+  test:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps: [{run: make test}]
+  win:
+    runs-on: windows-latest
+    steps: [{run: dir}]
+  reuse:
+    uses: ./.github/workflows/other.yml
+"""
+
+    def workflow(self, text=None):
+        temp = Path(self.enterContext(__import__("tempfile").TemporaryDirectory())).resolve()
+        path = temp / "ci.yml"
+        path.write_text(text or self.WORKFLOW)
+        return path
+
+    def check(self, path, selected, matrix_filter=None):
+        ci._check_as_runner(path, ci._plan_workflow(path), selected, matrix_filter or {})
+
+    def test_selected_jobs_and_their_needs_chain_are_checked(self):
+        path = self.workflow()
+        self.check(path, ["test"])  # test needs build: both map, win is never run
+        self.check(path, ["build"], {"os": "ubuntu-22.04"})
+        with self.assertRaisesRegex(ValueError, "windows-latest"):
+            self.check(path, ["win"])
+        with self.assertRaisesRegex(ValueError, "reusable workflow"):
+            self.check(path, ["reuse"])
+        with self.assertRaisesRegex(ValueError, "--as-runner"):
+            self.check(path, None)  # no --job: every job runs
+
+    def test_a_dependency_without_a_runner_image_refuses(self):
+        path = self.workflow(self.WORKFLOW.replace("os: [ubuntu-22.04, ubuntu-24.04]",
+                                                  "os: [ubuntu-22.04, self-hosted]"))
+        with self.assertRaisesRegex(ValueError, "self-hosted"):
+            self.check(path, ["test"])
+        # The filter narrows only the selected job's own cells, not its dependencies'.
+        self.check(path, ["build"], {"os": "ubuntu-22.04"})
+        with self.assertRaisesRegex(ValueError, "self-hosted"):
+            self.check(path, ["test"], {"os": "ubuntu-22.04"})
+
+    def run_args(self, path, **extra):
+        values = dict(action="run", workflow=str(path), json=True, jobs=["win"], matrix_filter=None,
+                      container_limits=None, as_runner=True, run_async=True, if_event=None,
+                      event=None, dry_run=False, runtime="none", local=True, remote=None,
+                      project_dir=str(path.parent), secrets_stdin=False, list_secrets=False)
+        values.update(extra)
+        return SimpleNamespace(**values)
+
+    def test_a_refusal_comes_before_secrets_and_the_async_launch(self):
+        path = self.workflow()
+        for extra in ({}, {"as_runner": False, "jobs": ["test"], "container_limits": ["memory=nope"]}):
+            with self.subTest(**{k: str(v) for k, v in extra.items()}), \
+                    patch("sandbox.commands.ci.launch_background_job") as launch, \
+                    patch("sandbox.commands.ci._read_stdin_secrets") as secrets, \
+                    patch("sandbox.commands.ci._act_binary", return_value="act"), \
+                    patch("sys.stderr", __import__("io").StringIO()), \
+                    self.assertRaises(SystemExit):
+                ci.cmd_ci({}, self.run_args(path, **extra))
+            launch.assert_not_called()
+            secrets.assert_not_called()
+
+    def test_async_forwards_as_runner_and_container_limits(self):
+        path = self.workflow(self.WORKFLOW.split("  win:")[0])
+        with patch("sandbox.commands.ci.launch_background_job", return_value="j1") as launch, \
+                patch("sandbox.commands.ci._act_binary", return_value="act"), \
+                patch("sys.stdout", __import__("io").StringIO()):
+            ci.cmd_ci({}, self.run_args(path, jobs=["test"],
+                                        container_limits=["memory=2g", "pids=512"]))
+        argv = launch.call_args.args[0]
+        self.assertIn("--as-runner", argv)
+        self.assertEqual([argv[i + 1] for i, part in enumerate(argv) if part == "--container-limit"],
+                         ["memory=2g", "pids=512"])
+
+
 class TestRuntimeSecrets(unittest.TestCase):
     def test_skipped_deploy_secrets_do_not_block_safe_run(self):
         jobs = [{"steps": [

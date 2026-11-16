@@ -149,6 +149,35 @@ def _runner_platforms(runs_on, cell: dict) -> list[str]:
     return resolved
 
 
+def _check_as_runner(wf_path: Path, plan: dict, selected, matrix_filter: dict) -> None:
+    """ValueError unless every job act will run has a runner image for each of its cells.
+
+    act runs a selected job's `needs` chain too, so those jobs are checked with
+    all their cells. A reusable-workflow job (`uses:`) has no `runs-on` to check.
+    """
+    data = _load_workflow(wf_path).get("jobs") or {}
+    cells = {job["id"]: [c["matrix"] for c in job["cells"]] for job in plan["jobs"]}
+    pending = list(selected or cells)
+    filtered = set(pending)
+    seen = set()
+    while pending:
+        job_id = pending.pop()
+        if job_id in seen or job_id not in data:
+            continue
+        seen.add(job_id)
+        job = data[job_id] or {}
+        if "uses" in job:
+            raise ValueError(f"--as-runner: job {job_id!r} calls a reusable workflow, whose "
+                             "runs-on cannot be checked; refusing rather than running as root")
+        for cell in cells.get(job_id) or [{}]:
+            if job_id in filtered and matrix_filter and not all(
+                    str(cell.get(k)) == v for k, v in matrix_filter.items()):
+                continue
+            _runner_platforms(job.get("runs-on"), cell)
+        needs = job.get("needs") or []
+        pending += [needs] if isinstance(needs, str) else list(needs)
+
+
 def _load_workflow(path: Path) -> dict:
     sc = _core()
     ensure_pyyaml()  # back-filled from sandbox.core._config
@@ -732,6 +761,11 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     matrix_filter = getattr(args, "matrix_filter", None) or {}
     selected = getattr(args, "jobs", None)
     workflow_data = _load_workflow(wf_path)
+    if getattr(args, "as_runner", False):
+        try:
+            _check_as_runner(wf_path, plan, selected, matrix_filter)
+        except ValueError as exc:
+            die(str(exc))
     from sandbox.ci.workflow import preflight
     safe_gate = preflight(root, wf_path, selected_jobs=selected,
                           accepted_differences=getattr(args, "accepted_differences", None),
@@ -781,10 +815,6 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
             for limit in getattr(args, "container_limits", None) or ():
                 command += ["--container-limit", limit]
             if getattr(args, "as_runner", False):
-                try:
-                    _runner_platforms(workflow_data.get("jobs", {}).get(job["id"], {}).get("runs-on"), cell)
-                except ValueError as exc:
-                    die(str(exc))
                 command.append("--as-runner")
             accepted_compatibility = tuple({"id": value, "accepted": True,
                     "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
@@ -930,7 +960,15 @@ def cmd_ci(cfg, args) -> None:
             info(msg)
         return
 
-    # action == "run"
+    # action == "run". Refuse a bad --container-limit or --as-runner before any
+    # target, secret, temp file, --async launch or remote submission.
+    try:
+        _container_limit_options(getattr(args, "container_limits", None) or ())
+        if getattr(args, "as_runner", False):
+            _check_as_runner(wf_path, plan, getattr(args, "jobs", None),
+                             getattr(args, "matrix_filter", None) or {})
+    except ValueError as exc:
+        die(str(exc))
     runtime = getattr(args, "runtime", "sandbox")
     if runtime not in {"sandbox", "none"}:
         die("CI runtime must be 'sandbox' or 'none'")
@@ -1122,15 +1160,7 @@ def cmd_ci(cfg, args) -> None:
     if not specs:
         _cleanup_ci_temp_files(patched_path, secrets_path)
         die("no matrix cells matched --matrix-filter")
-    as_runner = bool(getattr(args, "as_runner", False))
-    if as_runner:
-        for spec in specs:
-            try:
-                _runner_platforms((raw_data.get("jobs") or {}).get(spec["job_id"], {}).get("runs-on"),
-                                  spec["cell"])
-            except ValueError as exc:
-                _cleanup_ci_temp_files(patched_path, secrets_path)
-                die(str(exc))
+    as_runner = bool(getattr(args, "as_runner", False))  # checked before anything ran
 
     if not as_json:
         info(f"ci: running {len(specs)} cell(s) across job(s) {', '.join(job_ids)} via act…")

@@ -1590,7 +1590,10 @@ def drain_after_release(registry_path) -> bool:
 
     Only for this host's own registry, so a supervisor of a temporary registry
     (tests, tools) never touches host state. Building the services reconciles
-    and drains. Errors are swallowed: the job's result is already durable.
+    and drains. Then it runs one small retention sweep (the `sb job-retention`
+    default, 7 days), so finished jobs' output rows cannot grow the registry
+    past the delivery snapshot cap when nobody runs retention by hand. Errors
+    are swallowed: the job's result is already durable.
     """
     from sandbox.core._paths import RUNTIME_DIR
     try:
@@ -1599,8 +1602,25 @@ def drain_after_release(registry_path) -> bool:
         dependencies = durable_job_dependencies()
     except Exception:
         return False
+    try:
+        dependencies["job_service"].retention_sweep(
+            retention_days=RETENTION_DAYS_AFTER_RELEASE, limit=RETENTION_JOBS_PER_RELEASE)
+    except Exception:
+        pass
+    try:
+        # Jobs cleaned before cleanup pruned their output rows.
+        dependencies["job_service"].repository.prune_unavailable_output_events(
+            limit=RETENTION_JOBS_PER_RELEASE)
+    except Exception:
+        pass
     _close_job_dependencies(dependencies)
     return True
+
+
+# Each finished job cleans at most this many jobs older than the retention
+# window, so a host catches up on a backlog over its next releases.
+RETENTION_DAYS_AFTER_RELEASE = 7
+RETENTION_JOBS_PER_RELEASE = 10
 
 
 def run_admission_tick() -> None:

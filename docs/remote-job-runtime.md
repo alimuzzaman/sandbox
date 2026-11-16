@@ -649,7 +649,18 @@ Cleanup failure (such as workspace release errors or release exceptions) reports
 `ok: false` truthfully, while valid policy retention (such as intentional workspace retention where the release result is `ok: true`) remains `ok: true` with cleanup state `retained`. Direct cleanup retires the CI materialization before removing any file, so a retirement failure raises fail-closed with nothing removed, while `retention_sweep` handles candidate retirement and cleanup failures at the per-row boundary to preserve an `ok: false` structured outcome without aborting the sweep page; a retirement or materialization-check failure removes nothing and reports `cleanup_state: retained` with `removed: []`. Any later failure (a workspace release, a file removal, a registry update, or a materialization check after files were removed) reports `ok: false` and `cleanup_state: retained`; `removed` then lists every kind whose removal started, including one a failure left partly removed. Both `job-cleanup` and `job-retention` print an `ok: false` envelope and still exit 0, so local callers must read `ok`; the remote control transport parses the envelope and raises on `ok: false`. For scheduled/maintenance cleanup, apply the configured age explicitly with
 `./sb job-retention --retention-days 7 --json`; it removes terminal output,
 metrics, declared artifacts, and retained CI rematerialization archives, then records
-`cleanup_state` in the registry. Candidate selection reaches noncompleted terminal
+`cleanup_state` in the registry. Removing a job's output also deletes its per-chunk
+`output` rows from the registry's `job_events` (they index only the removed files);
+the newest event of the job stays, and every other event kind is kept. Without this
+the registry only grows: job evidence reads copy the whole database and its WAL into
+memory and refuse above 256 MiB (it was 32 MiB until a busy server's registry crossed
+it and every nested apply refused with `recovery_context_invalid`). The host also runs
+this sweep by default: each job that releases its slot on the host's own registry then
+cleans at most 10 terminal jobs finished more than 7 days ago (the same rules, the
+same bookmark), so a host nobody runs `job-retention` on still catches up. It also prunes, at most 10 at a
+time, the output rows of terminal jobs whose logs an earlier cleanup removed before this
+pruning existed. Freed pages are reused but the file does not shrink; reclaiming space
+needs a `VACUUM` while no job runs. Candidate selection reaches noncompleted terminal
 jobs with a present `finished_at` timestamp (jobs without `finished_at` are excluded), ensuring unindexed output directories on disk can be reclaimed. Candidates are
 ordered oldest finished first. No-op candidates, including completed CI rows with
 authority records, still consume the bounded scan budget. When `truncated` is true,

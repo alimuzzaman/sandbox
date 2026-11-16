@@ -209,6 +209,30 @@ class JobTraceSnapshotTests(unittest.TestCase):
                 self.assertEqual(result['state'], 'partial')
                 self.assertIsNone(result['job'])
 
+    def test_a_registry_past_the_old_32_mib_cap_still_serves_delivery_evidence(self):
+        # xspeed-dev 2026-11-16: 29.9 MB database + 4.2 MB WAL refused every
+        # nested apply's admission as recovery_context_invalid.
+        payload = '{"chunk":"' + 'x' * 4000 + '"}'
+        with self.repository.transaction(immediate=True) as connection:
+            connection.executemany(
+                "INSERT INTO job_events(job_id, sequence, kind, occurred_at, payload_json) VALUES(?,?,?,?,?)",
+                ((self.job_id, 1000 + index, 'output', '2026-11-16T00:00:00Z', payload)
+                 for index in range(9000)))
+        # Like the server: the bulk sits in the database file and the WAL
+        # holds only recent writes (one transaction this size would put all of
+        # it in the WAL, which auto-checkpointing never lets a live one reach).
+        self.repository.connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        with self.repository.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO job_events(job_id, sequence, kind, occurred_at, payload_json) VALUES(?,?,?,?,?)",
+                (self.job_id, 99999, 'output', '2026-11-16T00:00:00Z', payload))
+        self.assertGreater(Path(str(self.path) + '-wal').stat().st_size, 0)
+        size = sum(path.stat().st_size for path in self.root.glob('registry.sqlite3*'))
+        self.assertGreater(size, 34 * 1000 * 1000)
+        result = read_delivery_job_evidence(self.path, self.job_id)
+        self.assertEqual((result['state'], result['reason']), ('known', None))
+        self.assertEqual(result['job']['lifecycle'], 'running')
+
     def test_oversized_source_is_partial_without_reading_its_body(self):
         directory = self.root / 'oversized'
         directory.mkdir()

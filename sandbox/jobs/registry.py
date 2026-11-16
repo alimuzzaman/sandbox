@@ -1395,11 +1395,41 @@ class JobRepository:
             if logs:
                 connection.execute("UPDATE output_streams SET available=0, updated_at=? WHERE job_id=?",
                                    (_now(), job_id))
+                # One row per output chunk indexes the removed log files and is
+                # never read again; it is what grows the registry. The newest
+                # event stays so a later event never reuses a sequence number.
+                connection.execute(
+                    "DELETE FROM job_events WHERE job_id=? AND kind='output' AND sequence < "
+                    "(SELECT MAX(sequence) FROM job_events WHERE job_id=?)", (job_id, job_id))
             if artifacts:
                 connection.execute("UPDATE artifacts SET status='expired', reason='cleanup_removed' "
                                    "WHERE job_id=? AND status='available'", (job_id,))
             if metrics:
                 connection.execute("UPDATE metrics_index SET available=0 WHERE job_id=?", (job_id,))
+
+    def prune_unavailable_output_events(self, *, limit: int = 10) -> int:
+        """Backfill for jobs whose logs were removed before cleanup pruned rows.
+
+        Only a terminal job whose every output stream is already unavailable
+        qualifies; the newest event of each stays, as in cleanup. Returns the
+        number of jobs pruned (at most ``limit``).
+        """
+        terminal = tuple(item.value for item in (
+            Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+            Lifecycle.CANCELLED, Lifecycle.INTERRUPTED))
+        marks = ",".join("?" * len(terminal))
+        with self.transaction(immediate=True) as connection:
+            jobs = [row[0] for row in connection.execute(
+                f"SELECT o.job_id FROM output_streams o JOIN jobs j ON j.job_id=o.job_id "
+                f"WHERE j.lifecycle IN ({marks}) GROUP BY o.job_id HAVING MAX(o.available)=0 "
+                "AND EXISTS (SELECT 1 FROM job_events e WHERE e.job_id=o.job_id AND e.kind='output' "
+                "AND e.sequence < (SELECT MAX(sequence) FROM job_events WHERE job_id=o.job_id)) "
+                "LIMIT ?", (*terminal, int(limit)))]
+            for job_id in jobs:
+                connection.execute(
+                    "DELETE FROM job_events WHERE job_id=? AND kind='output' AND sequence < "
+                    "(SELECT MAX(sequence) FROM job_events WHERE job_id=?)", (job_id, job_id))
+        return len(jobs)
 
     def set_cleanup_state(self, job_id: str, state: str) -> None:
         if not isinstance(state, str) or not state or any(ord(char) < 32 for char in state):

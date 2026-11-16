@@ -86,6 +86,31 @@ class TestClassifyStep(unittest.TestCase):
         self.assertEqual(s["secrets_needed"], ["MUKUL_PAT"])
 
 
+class TestSecretReferences(unittest.TestCase):
+    def test_a_secret_with_a_fallback_is_still_named(self):
+        s = ci._classify_step({"uses": "actions/checkout@v4", "with": {
+            "repository": "o/free", "token": "${{ secrets.FREE_REPO_TOKEN || github.token }}"}})
+        self.assertEqual(s["secrets_needed"], ["FREE_REPO_TOKEN"])
+
+    def test_index_syntax_and_several_per_expression(self):
+        self.assertEqual(ci._secret_refs("${{ secrets['A'] && secrets.B }} ${{ github.token }} secrets.C"),
+                         ["A", "B"])
+
+
+class TestStdinSecrets(unittest.TestCase):
+    def test_name_value_lines(self):
+        import io
+        self.assertEqual(ci._read_stdin_secrets(io.StringIO("GITHUB_TOKEN=ghs_x\n\nX_1=a.b-c\n")),
+                         {"GITHUB_TOKEN": "ghs_x", "X_1": "a.b-c"})
+
+    def test_refuses_without_echoing_the_value(self):
+        import io
+        for text in ("A=b c\n", "1A=b\n", "A\n", "A=b\nA=c\n", "A=\n", "x" * 70000):
+            with self.assertRaises(ValueError) as caught:
+                ci._read_stdin_secrets(io.StringIO(text))
+            self.assertNotIn("b c", str(caught.exception))
+
+
 class TestMergeEnvPrecedence(unittest.TestCase):
     def test_step_overrides_job_overrides_workflow(self):
         # docs.github.com/actions/learn-github-actions/variables

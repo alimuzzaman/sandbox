@@ -142,7 +142,7 @@ own code still touches (for planning/mapping/safety) is:
 | Most `uses:` actions (checkout, setup-*, cache, third-party) | **`act`**, for real | Full fidelity — this is the whole point of adopting it |
 | `actions/upload-artifact` | Sandbox job runtime | Preflight requires literal project-relative paths plus `if-no-files-found: error`; globs, expressions, and unsupported options block with named differences; a `${{ runner.temp }}` path blocks with `sandbox.artifact-runner-temp-unsupported`, whose message says to write into the workspace (for example `.ci-artifacts/<name>`). Expression paths are never collected and are reported as `uncollectable_artifacts`. Accepted steps become a local marker; `act --bind` keeps output in the isolated workspace and the durable supervisor retains files directly and directories as deterministic bounded tar archives because self-hosted `act` has no GitHub runtime token |
 | Deploy/publish-class `uses:` or `run:` | Our safety deny-list | Neutralized BEFORE act sees them, unless `--allow-deploy` (§3.6) |
-| `${{ secrets.* }}` | Resolved from `sandbox.local.yml` `ci_secrets:` / `$SANDBOX_CI_SECRET_*`, fed to act via `--secret-file` | Never GitHub's; unresolved → fail loud before anything runs |
+| `${{ secrets.* }}` | Resolved from `--secrets-stdin` (one run), then `sandbox.local.yml` `ci_secrets:` / `$SANDBOX_CI_SECRET_*`, fed to act via `--secret-file`; a name anywhere in a `${{ }}` counts | Never GitHub's; unresolved → fail loud before anything runs |
 
 When `act --bind` runs from a Git worktree, the mounted `.git` marker can point to
 host-only worktree administration paths, and repo-local virtual environments can

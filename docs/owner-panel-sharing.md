@@ -160,6 +160,8 @@ for known manifest, target, declaration, private-route, remote and upgrade refus
 codes. `sign_in_upgrade_required` is the owner path's `owner_share_upgrade_required`: the
 running sandbox-login was started by an older login runtime than the installed
 server's (after an update that changes it), and the stack needs a reapply.
+`remote service migrate NAME --plan` lists those stacks before the update
+(`login_reapply.needs_reapply`, docs/remote-service-cli.md).
 Unknown or malformed replies use generic guidance; server text and error URLs
 are never reflected. Success requires an unexpired integer timestamp, the one-time
 flag, a bounded user, and an HTTPS URL without credentials, whitespace or

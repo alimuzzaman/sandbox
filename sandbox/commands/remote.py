@@ -984,6 +984,8 @@ def _cmd_service(args, as_json: bool) -> None:
                     f"after this migrate the remote serves compatible-mode controllers "
                     f"speaking control protocol {oldest} through {local_protocol().spoken}; "
                     f"controllers below {oldest} are refused")
+                from sandbox.hosting import login_reapply_plan
+                plan["login_reapply"] = login_reapply_plan.plan(entry, sr.ssh_run)
             if observed.get("runtime_revision_state") == "mismatch":
                 # One remote serves one runtime revision. Replacing it breaks
                 # any other checkout or deploy that requires the installed one.

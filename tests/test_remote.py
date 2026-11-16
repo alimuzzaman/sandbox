@@ -3985,6 +3985,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args = types.SimpleNamespace(name="migrate", ssh_url="myvps", confirm=False, plan=False)
                 with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "absent"}), \
                      patch.object(remote_cmd.sr, "migrate_remote_mcp_service", return_value={"status": "planned", "service": {}}) as migrate, \
+                     patch("sandbox.hosting.login_reapply_plan.plan", return_value={}), \
                      patch("builtins.print"):
                     remote_cmd._cmd_service(args, as_json=True)
                 self.assertIsNone(migrate.call_args.args[4])
@@ -4003,6 +4004,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=observed), \
                      patch.object(remote_cmd.sr, "migrate_remote_mcp_service",
                                   return_value={"status": "planned", "service": {}}), \
+                     patch("sandbox.hosting.login_reapply_plan.plan", return_value={}), \
                      redirect_stdout(out):
                     remote_cmd._cmd_service(args, as_json=True)
                 data = json.loads(out.getvalue())["data"]

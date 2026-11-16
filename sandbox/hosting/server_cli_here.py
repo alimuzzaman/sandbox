@@ -349,13 +349,43 @@ def _wait(job_id: str, deadline: float, *, view, sleep=time.sleep, clock=time.mo
         delay = min(delay * 2, 2.0)
 
 
-def _stdout_tail(job_id: str) -> str:
-    from sandbox.application.context import durable_job_dependencies
-    from sandbox.jobs.models import OutputQuery
-    page = durable_job_dependencies()["job_service"].read_output(
-        job_id, OutputQuery(stream="stdout", tail_bytes=MAX_RELAY_BYTES, max_bytes=MAX_RELAY_BYTES))
-    data = page.get("data") if isinstance(page, dict) else None
-    return data if isinstance(data, str) else ""
+RELAY_MAX_PAGES = 256
+
+
+def _stdout_tail(job_id: str, *, service=None) -> str:
+    """The last ``MAX_RELAY_BYTES`` of the job's stdout, read to its end in pages the
+    job output API admits (at most ``MAX_OUTPUT_PAGE_BYTES``, and the output profile's
+    own cap), following its cursor. The tail selection starts on an event boundary,
+    so the range can exceed the budget; only the newest bytes are kept."""
+    import base64
+    from sandbox.jobs.models import MAX_OUTPUT_PAGE_BYTES, OutputQuery
+    if service is None:
+        from sandbox.application.context import durable_job_dependencies
+        service = durable_job_dependencies()["job_service"]
+    query = OutputQuery(stream="stdout", tail_bytes=MAX_RELAY_BYTES, max_bytes=MAX_OUTPUT_PAGE_BYTES,
+                        encoding="base64")
+    window, seen = b"", set()
+    for _ in range(RELAY_MAX_PAGES):
+        try:
+            page = service.read_output(job_id, query)
+        except RuntimeError as exc:
+            if str(exc) != "output_unavailable":
+                raise
+            raise HereRefusal("host_here_output_unavailable", f"job {job_id}'s output is no longer retained; "
+                              f"check `sb job-status {job_id}`", job_id=job_id) from None
+        if not isinstance(page, dict):
+            break
+        window = (window + base64.b64decode(page.get("data") or "", validate=True))[-MAX_RELAY_BYTES:]
+        cursor = page.get("cursor")
+        if page.get("has_more") is not True:
+            return window.decode("utf-8", errors="replace")
+        if not isinstance(cursor, str) or cursor in seen:
+            break
+        seen.add(cursor)
+        query = OutputQuery(stream="stdout", cursor=cursor, max_bytes=MAX_OUTPUT_PAGE_BYTES, encoding="base64")
+    # The end was not reached: a partial tail could hold an older JSON line.
+    raise HereRefusal("host_here_result_unreadable", f"job {job_id}'s result could not be read to its end; "
+                      f"read it with `sb job-output {job_id}`", job_id=job_id)
 
 
 def _last_json(text: str) -> dict | None:

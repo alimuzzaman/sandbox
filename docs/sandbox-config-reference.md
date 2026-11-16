@@ -1508,6 +1508,8 @@ token, passes it with `--secrets-stdin` (local runs only, not with `--async`):
 `secrets.NAME` inside any `${{ }}`, also in a compound expression such as
 `${{ secrets.X || github.token }}`, and refuses one with no value before
 anything starts.
+A step whose condition is exactly `${{ !env.ACT }}` is one act leaves out, so
+its secrets are not asked for.
 
 ## Hermes remote defaults
 

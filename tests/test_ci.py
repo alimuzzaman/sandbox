@@ -97,6 +97,22 @@ class TestSecretReferences(unittest.TestCase):
                          ["A", "B"])
 
 
+class TestActSkippedSecrets(unittest.TestCase):
+    def test_a_step_act_leaves_out_needs_no_secret(self):
+        steps = [ci._classify_step({"if": "${{ !env.ACT }}", "uses": "actions/checkout@v4",
+                                    "with": {"token": "${{ secrets.FREE_REPO_TOKEN || github.token }}"}}),
+                 ci._classify_step({"if": "!env.ACT", "run": "echo ${{ secrets.B }}"}),
+                 ci._classify_step({"if": "${{ !env.ACT || true }}", "run": "echo ${{ secrets.C }}"})]
+        self.assertEqual(ci._runtime_secrets_needed([{"steps": steps}], allow_deploy=False), ["C"])
+
+
+class TestStdinDefault(unittest.TestCase):
+    def test_reads_sys_stdin_by_default(self):
+        import io
+        with patch.object(ci.sys, "stdin", io.StringIO("A=b\n")):
+            self.assertEqual(ci._read_stdin_secrets(), {"A": "b"})
+
+
 class TestStdinSecrets(unittest.TestCase):
     def test_name_value_lines(self):
         import io

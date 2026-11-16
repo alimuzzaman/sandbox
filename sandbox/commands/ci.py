@@ -56,14 +56,14 @@ def _secret_refs(text: str) -> list[str]:
     return sorted(names)
 
 
-def _read_stdin_secrets(stream) -> dict:
+def _read_stdin_secrets(stream=None) -> dict:
     """`NAME=value` lines from stdin, for one run only (`--secrets-stdin`).
 
     A caller that mints a short-lived credential per run hands it over here
     instead of on the command line, in the environment or in a config file.
     Values are single printable words; anything else is refused whole.
     """
-    data = stream.read(65537)
+    data = (stream if stream is not None else sys.stdin).read(65537)
     if len(data) > 65536:
         raise ValueError("--secrets-stdin takes at most 64 KiB")
     out = {}
@@ -238,11 +238,11 @@ def _classify_step(step: dict) -> dict:
             "wordpress-plugin-asset-update": "push readme/assets to WordPress.org SVN",
         }.get(action, f"unknown action '{ref}' — not executed locally")
         return {"name": name, "kind": kind, "uses": ref, "with": step.get("with"),
-                "env": step.get("env"),
+                "env": step.get("env"), "if": step.get("if"),
                 "would_run": would_run, "secrets_needed": secrets_needed}
     if step.get("run"):
         return {"name": name, "kind": "run", "run": step["run"],
-                "env": step.get("env"),
+                "env": step.get("env"), "if": step.get("if"),
                 "would_run": "executed on host in the plugin dir",
                 "secrets_needed": secrets_needed}
     return {"name": name, "kind": "unknown", "env": step.get("env"),
@@ -438,17 +438,24 @@ def _neutralize_workflow_for_safety(data: dict, allow_deploy: bool) -> tuple[dic
     return patched, notes
 
 
+_ACT_SKIP_RE = re.compile(r"\s*(?:\$\{\{\s*)?!\s*env\.ACT\s*(?:\}\})?\s*")
+
+
 def _runtime_secrets_needed(jobs: list[dict], allow_deploy: bool) -> list[str]:
     """Return secrets needed by steps that will actually reach `act`.
 
     Deploy-class actions are replaced with no-op stubs when deployment is not
     allowed, so their deploy-only secrets must not block the safe CI path.
+    A step whose condition is exactly `!env.ACT` is one act leaves out (act
+    sets ACT), so its secrets do not block a run either.
     """
     needed = set()
     for job in jobs:
         for step in job.get("steps") or []:
             uses = step.get("uses")
             if uses and not allow_deploy and _is_deploy_class(uses):
+                continue
+            if isinstance(step.get("if"), str) and _ACT_SKIP_RE.fullmatch(step["if"]):
                 continue
             needed.update(step.get("secrets_needed") or [])
     return sorted(needed)
@@ -1014,7 +1021,8 @@ def cmd_ci(cfg, args) -> None:
     given_secrets = {}
     if getattr(args, "secrets_stdin", False):
         try:
-            given_secrets = _read_stdin_secrets(sys.stdin)
+            # cmd_ci imports sys locally further down, so the module's sys is not reachable here.
+            given_secrets = _read_stdin_secrets()
         except (ValueError, UnicodeDecodeError) as exc:
             die(str(exc))
     local_cfg = _local_yaml()

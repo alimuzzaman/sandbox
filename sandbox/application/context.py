@@ -1604,7 +1604,8 @@ def drain_after_release(registry_path) -> bool:
         return False
     try:
         dependencies["job_service"].retention_sweep(
-            retention_days=RETENTION_DAYS_AFTER_RELEASE, limit=RETENTION_JOBS_PER_RELEASE)
+            retention_days=RETENTION_DAYS_AFTER_RELEASE, limit=RETENTION_JOBS_PER_RELEASE,
+            max_scanned=RETENTION_JOBS_PER_RELEASE)
     except Exception:
         pass
     try:
@@ -1617,8 +1618,9 @@ def drain_after_release(registry_path) -> bool:
     return True
 
 
-# Each finished job cleans at most this many jobs older than the retention
-# window, so a host catches up on a backlog over its next releases.
+# Each finished job looks at most at this many retention candidates (so a
+# backlog of policy-retained CI rows cannot turn one release into a long run of
+# cleanups), and a host catches up over its next releases.
 RETENTION_DAYS_AFTER_RELEASE = 7
 RETENTION_JOBS_PER_RELEASE = 10
 

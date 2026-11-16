@@ -53,6 +53,7 @@ const signInGuidance: Record<string, string> = {
   sign_in_not_declared: "Declare WordPress autologin user, service, container_path and request_path, then reapply the stack.",
   sign_in_private_route: "WordPress is behind a private gate. Use the existing stack access link.",
   sign_in_remote_unavailable: "The recorded remote is unavailable. Restore its controller registration before signing in.",
+  sign_in_upgrade_required: "This stack's sign-in service predates the server's login runtime. Update the server and reapply this stack.",
 };
 
 function signInRefusal(value: unknown): ShareRefused {

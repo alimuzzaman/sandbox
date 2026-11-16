@@ -61,3 +61,19 @@ class SignInRouteTest(unittest.TestCase):
         self.assertEqual((status, cache), (409, 'no-store'))
         self.assertEqual(body['code'], error.code)
         self.assertEqual(body['message'], error.message)
+
+
+class OwnerSignInRefusalTest(unittest.TestCase):
+    def test_an_outdated_login_runtime_names_update_and_reapply(self):
+        from sandbox.commands import ui_dash
+        from sandbox.hosting.share import ShareRefusal
+        mapped = ui_dash._owner_sign_in_refusal(ShareRefusal("owner_share_upgrade_required", "x"))
+        self.assertIsInstance(mapped, panel_access.SignInUnavailable)
+        self.assertEqual(mapped.code, "sign_in_upgrade_required")
+        self.assertIn("reapply", mapped.message)
+
+    def test_other_owner_refusals_stay_generic(self):
+        from sandbox.commands import ui_dash
+        from sandbox.hosting.share import ShareRefusal
+        for exc in (ShareRefusal("owner_share_unavailable", "x"), RuntimeError("planted-secret")):
+            self.assertIs(ui_dash._owner_sign_in_refusal(exc), exc)

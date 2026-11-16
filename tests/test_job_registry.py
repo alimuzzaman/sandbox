@@ -70,6 +70,34 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(len(list(repo.connection.execute(
             "SELECT 1 FROM job_events WHERE job_id=?", (job_id,)))), len(kinds) + 1)
 
+    def test_backfill_prunes_only_terminal_jobs_whose_logs_are_already_gone(self):
+        from sandbox.jobs.models import Lifecycle
+        repo = self.repository()
+
+        def job(name, *, finished, available):
+            row, _ = repo.accept(submission(name))
+            for index in range(4):
+                repo.append_event(row["job_id"], "output", {"sequence": index})
+            repo.connection.execute(
+                "INSERT INTO output_streams(job_id, stream, available, updated_at) VALUES(?,?,?,?)",
+                (row["job_id"], "stdout", int(available), "2026-11-16T00:00:00Z"))
+            if finished:
+                repo.connection.execute("UPDATE jobs SET lifecycle=? WHERE job_id=?",
+                                        (Lifecycle.SUCCEEDED.value, row["job_id"]))
+            return row["job_id"]
+
+        gone = job("backfill-gone", finished=True, available=False)
+        kept_logs = job("backfill-logs", finished=True, available=True)
+        running = job("backfill-running", finished=False, available=False)
+
+        def outputs(job_id):
+            return repo.connection.execute(
+                "SELECT COUNT(*) FROM job_events WHERE job_id=? AND kind='output'", (job_id,)).fetchone()[0]
+
+        self.assertEqual(repo.prune_unavailable_output_events(limit=10), 1)
+        self.assertEqual((outputs(gone), outputs(kept_logs), outputs(running)), (1, 4, 4))
+        self.assertEqual(repo.prune_unavailable_output_events(limit=10), 0)
+
     def test_accept_is_durable_and_idempotent(self):
         repo = self.repository()
         first, replay = repo.accept(submission())

@@ -1607,6 +1607,12 @@ def drain_after_release(registry_path) -> bool:
             retention_days=RETENTION_DAYS_AFTER_RELEASE, limit=RETENTION_JOBS_PER_RELEASE)
     except Exception:
         pass
+    try:
+        # Jobs cleaned before cleanup pruned their output rows.
+        dependencies["job_service"].repository.prune_unavailable_output_events(
+            limit=RETENTION_JOBS_PER_RELEASE)
+    except Exception:
+        pass
     _close_job_dependencies(dependencies)
     return True
 

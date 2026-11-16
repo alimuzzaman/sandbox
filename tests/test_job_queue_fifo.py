@@ -464,6 +464,8 @@ class DrainAfterReleaseTests(unittest.TestCase):
         dependencies["job_service"].repository.close.assert_called_once()
         dependencies["job_service"].retention_sweep.assert_called_once_with(
             retention_days=7, limit=10)
+        dependencies["job_service"].repository.prune_unavailable_output_events.assert_called_once_with(
+            limit=10)
         with mock.patch.object(context, "durable_job_dependencies", side_effect=RuntimeError("x")):
             self.assertFalse(context.drain_after_release(RUNTIME_DIR / "jobs" / "registry.sqlite3"))
 

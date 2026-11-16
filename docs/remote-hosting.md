@@ -1083,6 +1083,13 @@ the file, runs `nginx -t`, reloads, and curls the route marker
 `/.well-known/sandbox-edge-route` through 127.0.0.1. Any failure restores the previous
 file (or removes the new one) and reloads again.
 
+A route read back (the previous route a rollback puts back, the strict reads of private
+closure) travels as hex with its SHA-256 (`sandbox/hosting/front_door/exact_read.py`),
+on both front doors. The server-local owner channel redacts process output, and a
+route read as text came back with `proxy_pass [REDACTION_FAILED]`, so a rollback
+reinstalled a route `nginx -t` rejected. A read whose bytes do not match refuses
+(`front_door_read_failed` / `route state unknown`) instead of returning altered text.
+
 **Preflight.** Before anything changes, `sb host plan/apply` and provision probe the
 remote and refuse with `front_door_nginx_missing`, `front_door_nginx_inactive`,
 `front_door_include_missing` (nginx.conf does not include `conf.d/*.conf`),

@@ -60,7 +60,8 @@ _CAPTURE_FIELDS = {"service", "adapter", "api_url", "username", "credential_secr
 _ENTRY_FIELDS = {"mode", "requires_email", "hostname", "path", "ttl_seconds", "magic_link", "landing_path",
                  "upstream"}
 _WORDPRESS_FIELDS = {"user", "service", "request_path", "container_path", "ttl_seconds"}
-_SHARE_FIELDS = {"hostname", "private", "agent_mint", "stack_sign_in", "route_sign_in", "inbox_sign_in", "linked_access"}
+_SHARE_FIELDS = {"hostname", "private", "agent_mint", "stack_sign_in", "route_sign_in", "inbox_sign_in", "linked_access",
+                 "vouch_secret"}
 _SHARE_SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_host_suffixes"}
 _MAGIC_FIELDS = {"request_url", "request_origin", "link_origin", "link_path", "link_pattern",
                  "required_params", "poll_timeout_seconds", "denied_emails"}
@@ -408,6 +409,7 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
         entries = {}
     if share_own is not None and isinstance(entries, dict) and SHARE_ENTRY in entries:
         raise _invalid(f"entries.{SHARE_ENTRY} is reserved for the share block")
+    vouch_secret = _vouch_secret(share, secrets) if share_own is not None else None
     if not isinstance(service, dict):
         raise _invalid("login_service must be a mapping")
     _reject_unknown(service, _SERVICE_FIELDS, "login_service")
@@ -471,9 +473,24 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
             # service's own login; with no login there it would be open access.
             if capture["username"] is None:
                 raise _invalid("inbox_gate entries need a capture login (username and credential_secret)")
-    return {"image": image, "enabled_until": enabled_until.isoformat(),
-            "session_ttl_seconds": session, "allowed_host_suffixes": suffixes,
-            "capture": capture, "entries": parsed, "share": share_own}
+    result = {"image": image, "enabled_until": enabled_until.isoformat(),
+              "session_ttl_seconds": session, "allowed_host_suffixes": suffixes,
+              "capture": capture, "entries": parsed, "share": share_own}
+    if vouch_secret is not None:
+        # Outside ``share`` on purpose: runtime_config copies ``share`` to the server,
+        # and the config never carries a secret's name.
+        result["vouch_secret"] = vouch_secret
+    return result
+
+
+def _vouch_secret(share: dict, secrets: dict) -> str | None:
+    """``share.vouch_secret``: the generated secret that keys the gate's vouch header."""
+    if "vouch_secret" not in share:
+        return None
+    name = share["vouch_secret"]
+    if not isinstance(name, str) or name not in secrets.get("generated", {}):
+        raise _invalid("share.vouch_secret must name a secrets.generated key")
+    return name
 
 
 def validate_route_sign_in(share: dict, entries: dict, routes: list[dict], *,
@@ -591,6 +608,8 @@ def runtime_config(declaration: dict, *, target_digest: str | None = None) -> di
         "allowed_host_suffixes": list(declaration["allowed_host_suffixes"]),
         # Public applied policy, bound by the owner-panel gate capability digest.
         "panel_share": dict(declaration.get("share") or {}),
+        # Whether every site_gate forward carries the signed vouch header.
+        "vouch": bool(declaration.get("vouch_secret")),
         "panel_target_digest": target_digest,
         "panel_access_digest": digest({key: declaration[key] for key in
             ("enabled_until", "allowed_host_suffixes", "session_ttl_seconds", "entries", "share") if key in declaration}),
@@ -652,6 +671,8 @@ def render_service(declaration: dict, gate_port: int | None = None, *, target_di
         f'      SANDBOX_LOGIN_CONFIG: "{config}"',
         *([f'      SANDBOX_LOGIN_CAPTURE_CREDENTIAL: "${{{capture["credential_secret"]}}}"']
           if capture and capture["credential_secret"] else []),
+        *([f'      SANDBOX_LOGIN_VOUCH_KEY: "${{{declaration["vouch_secret"]}}}"']
+          if declaration.get("vouch_secret") else []),
         *(f'      {key}: "${{{key}}}"' for key in keys),
         f"    command: {json.dumps(['python3', '-c', _LOADER, source])}",
         "    healthcheck:",

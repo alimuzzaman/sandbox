@@ -17,6 +17,19 @@ _ZERO_MARKER = "0" * 32
 # below declares its own add_header, so every answer inherits it.
 _NOINDEX = 'add_header X-Robots-Tag "noindex, nofollow, noarchive" always;'
 _TOKEN = re.compile(r"[a-z0-9.:-]+")
+# Only tailnet peers. Linux accepts a packet for a local address on any interface,
+# so without this a container on the server could dial the tailnet address. Tailscale's
+# ts-input rule drops 100.64.0.0/10 sources that do not arrive on tailscale0, so the
+# source address is sound. The server's own tailnet address is denied first: a process
+# or host-network container there dials from it. (It can still reach a loopback
+# upstream directly; that is the upstream's to check.)
+# nginx checks it after the rewrite phase, so the $host guard, the port-80 redirect and
+# the marker still answer anyone; none of them carries the upstream's content.
+TAILNET_PEERS = ("100.64.0.0/10", "fd7a:115c:a1e0::/48")
+
+
+def _peers_only(own_ip: str) -> str:
+    return "\n    ".join([f"deny {own_ip};", *(f"allow {net};" for net in TAILNET_PEERS), "deny all;"])
 
 
 def _token(value: str) -> str:
@@ -46,6 +59,7 @@ def _render(name: TailnetName, upstream: Upstream, tailnet_ip: str, *,
     # The $host guard: this block may be nginx's implicit default for the
     # tailnet address, so any other Host on that socket is dropped (444).
     guard = f'if ($host != "{fqdn}") {{ return 444; }}'
+    peers_only = _peers_only(ip)
     return f"""{HEADER_PREFIX}{header}
 # Managed by `sb host tailnet-name`. Reachable only on the tailnet address;
 # never the default server for any address.
@@ -54,6 +68,7 @@ server {{
     server_name {fqdn};
     {_NOINDEX}
     {guard}
+    {peers_only}
     return 308 https://{fqdn}$request_uri;
 }}
 server {{
@@ -61,6 +76,7 @@ server {{
     server_name {fqdn};
     {_NOINDEX}
     {guard}
+    {peers_only}
     ssl_certificate     {cert_dir}/fullchain.pem;
     ssl_certificate_key {cert_dir}/privkey.pem;
     client_max_body_size 50m;

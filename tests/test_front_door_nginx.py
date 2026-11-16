@@ -153,6 +153,12 @@ class NginxRenderTests(unittest.TestCase):
                           "proxy_pass http://127.0.0.1:18001;"):
             self.assertIn(directive, conf)
 
+    def test_host_is_pinned_to_the_guarded_name_not_the_raw_header(self):
+        conf = _render()
+        self.assertIn("proxy_set_header Host $host;", conf)
+        self.assertIn("proxy_set_header X-Forwarded-Host $host;", conf)
+        self.assertNotIn("$http_host", conf)
+
     def test_robots_redirects_and_http_to_https(self):
         conf = _render()
         self.assertIn('return 200 "User-agent: *\\nDisallow: /\\n";', conf)

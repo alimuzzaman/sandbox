@@ -97,14 +97,36 @@ Bounds, all checked before submission (`sandbox/hosting/server_cli_here.py`):
   server CLI job, no caller-supplied `--server-cli-stack-ref` or
   `--server-cli-source-branch`, and `--here`, `--remote`, `--json`,
   `--project-dir` and `--template` spelled out in full.
-- Source: `stack up` and `apply` run on the given checkout in place, with the
-  bindings a controller adds (the stack ref; the checkout's branch and commit for
-  `apply`). A controller stages exactly the bound commit, so `--here` refuses
-  `stack up` unless the checkout is at the ref (`host_here_ref_not_checked_out`)
-  and has no tracked changes (`host_here_source_dirty`); `apply` refuses a dirty
-  checkout inside the job as before. The other commands run in the owner-private
-  folder `$SANDBOX_HOME/runtime/hosting/here`, never the caller's working
-  directory.
+- Source: `stack up` and `apply` never run on the caller's checkout. As a
+  controller stages exactly the bound commit into one workspace per project on
+  the server, `--here` fetches it (a fetch runs none of the source repository's
+  hooks, and staging runs no hook at all) into an owner-only bare store per
+  source checkout, resets one stable worktree per source to it and runs the job
+  there: `$SANDBOX_HOME/runtime/hosting/here/src/<key>/tree` (mode 0700,
+  `sandbox/hosting/here_source.py`). Untracked and ignored files, edits after the
+  checks, and later changes to the source do not reach the job. The path is
+  stable and the store carries the source's origin URL (without user info), so
+  the repository, stack-owner and delivery identities match the checkout's from
+  run to run; `stack up` gets the checkout's `user.name` as `--owner` unless one
+  is given. `stack up` stages its ref's commit (committed only, as the
+  controller does); `apply` stages HEAD with the checkout's branch bound, and
+  refuses uncommitted or untracked changes up front (`host_here_source_dirty`),
+  which the controller's apply job refuses too. The given folder must belong to
+  this account and not be world writable before Git is run in it, and then its
+  top level and Git directory too (`host_here_source_not_owned`, also for Git's
+  own "dubious ownership" refusal).
+  `--project-dir` must be the source root and `--template` inside it
+  (`host_here_path_outside_source`). One run per source at a time: a second run,
+  or any run while an unfinished job still uses the staged tree, refuses
+  `host_here_source_busy`; a job counts until it is finished and holds no
+  workspace lease, as the job registry counts checkout use. LFS objects and
+  submodules are not staged (no LFS filter runs; pointer files and empty
+  submodule folders stay as they are). A staged tree that cannot be reset is
+  moved aside; if even that fails the run refuses `host_here_snapshot_stuck`
+  with the path. The other
+  commands take no `--project-dir` or `--template` and run in the owner-private
+  folder `$SANDBOX_HOME/runtime/hosting/here`.
+- `--request-id`, when given, is at most 64 characters.
 
 Unlike the controller form, `--here` waits for the job (its deadline plus two
 minutes), writes the job id to stderr first and prints the command's own last
@@ -114,6 +136,20 @@ or the job failed. `stack up` and `apply` only submit the apply job inside it;
 apply job, `outer_job_id` the server CLI job, `completion` its end state, and
 `ok` is false unless it succeeded. If a wait ends first it prints
 `host_here_job_unfinished` with that job id; inspect the job, do not resubmit.
+
+A delegated sudo rule (another account running `--here` as the owner) is the
+real boundary, because anything sudo lets through runs with the owner's
+authority. Such a rule must:
+
+- keep `env_reset` and grant no `SETENV`; keep no `HOME`, `GIT_*`, `SANDBOX_*`,
+  `PYTHON*` or `PATH` through `env_keep` (`--here` refuses a `$HOME` that is not
+  the owner's, and drops `GIT_*` for its own Git calls, but the rest is sudo's job);
+- name the installed `sb` by absolute path and pin exact verbs, never
+  `sb host *`. A worker that only manages follows needs
+  `host follow add|status|pause|resume|remove` and `host stack down`; it should
+  not get `host stack up` or `host apply`, which build and run project code.
+  The Miu PR-stack worker goes through one fixed wrapper that validates every
+  argument itself; the rule should admit only that wrapper.
 
 The owner panel reads the same record as a label only: controller records on the
 server under the recorded name use this server's lifetime records instead of a

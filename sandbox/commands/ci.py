@@ -113,6 +113,70 @@ _ACT_PLATFORM_MAP = {
     "ubuntu-22.04": "catthehacker/ubuntu:act-22.04",
 }
 
+# `--as-runner`: the same Ubuntu releases, as GitHub runs them: user `runner`
+# (uid 1001) with passwordless sudo, so a chmod 0444/0555 blocks writes the way
+# it does on GitHub. The act images above run as root. ubuntu-latest follows
+# the default map's release, so the option changes only the user.
+_ACT_RUNNER_PLATFORM_MAP = {
+    "ubuntu-latest": "catthehacker/ubuntu:runner-22.04",
+    "ubuntu-20.04": "catthehacker/ubuntu:runner-20.04",
+    "ubuntu-22.04": "catthehacker/ubuntu:runner-22.04",
+    "ubuntu-24.04": "catthehacker/ubuntu:runner-24.04",
+}
+
+
+def _runner_platforms(runs_on, cell: dict) -> list[str]:
+    """The `runs-on:` labels of one job cell, each with a runner image, or ValueError.
+
+    act picks an image for any label it is not given, which can be a root
+    image, so every label must be one `--as-runner` maps. `${{ matrix.KEY }}`
+    is filled from the cell; any other expression cannot be checked and refuses.
+    """
+    import re
+    labels = runs_on.get("labels") if isinstance(runs_on, dict) else runs_on
+    labels = [labels] if isinstance(labels, str) else labels
+    if not isinstance(labels, list) or not labels:
+        raise ValueError(f"--as-runner: runs-on {runs_on!r} names no platform")
+    resolved = []
+    for label in labels:
+        text = re.sub(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}",
+                      lambda m: str(cell.get(m.group(1), m.group(0))), str(label))
+        if text not in _ACT_RUNNER_PLATFORM_MAP:
+            raise ValueError(
+                f"--as-runner: runs-on {text!r} has no runner image (it supports "
+                f"{', '.join(_ACT_RUNNER_PLATFORM_MAP)}); refusing rather than running as root")
+        resolved.append(text)
+    return resolved
+
+
+def _check_as_runner(wf_path: Path, plan: dict, selected, matrix_filter: dict) -> None:
+    """ValueError unless every job act will run has a runner image for each of its cells.
+
+    act runs a selected job's `needs` chain too, so those jobs are checked with
+    all their cells. A reusable-workflow job (`uses:`) has no `runs-on` to check.
+    """
+    data = _load_workflow(wf_path).get("jobs") or {}
+    cells = {job["id"]: [c["matrix"] for c in job["cells"]] for job in plan["jobs"]}
+    pending = list(selected or cells)
+    filtered = set(pending)
+    seen = set()
+    while pending:
+        job_id = pending.pop()
+        if job_id in seen or job_id not in data:
+            continue
+        seen.add(job_id)
+        job = data[job_id] or {}
+        if "uses" in job:
+            raise ValueError(f"--as-runner: job {job_id!r} calls a reusable workflow, whose "
+                             "runs-on cannot be checked; refusing rather than running as root")
+        for cell in cells.get(job_id) or [{}]:
+            if job_id in filtered and matrix_filter and not all(
+                    str(cell.get(k)) == v for k, v in matrix_filter.items()):
+                continue
+            _runner_platforms(job.get("runs-on"), cell)
+        needs = job.get("needs") or []
+        pending += [needs] if isinstance(needs, str) else list(needs)
+
 
 def _load_workflow(path: Path) -> dict:
     sc = _core()
@@ -524,7 +588,8 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
                        allow_deploy: bool, timeout: int,
                        extra_act_args: list[str] | None = None,
                        *, runtime: str = "sandbox", event: str | None = None,
-                       container_limits: tuple[str, ...] | list[str] | None = None) -> dict:
+                       container_limits: tuple[str, ...] | list[str] | None = None,
+                       as_runner: bool = False) -> dict:
     """Execute one matrix cell's job via `act` against its own ephemeral
     sandbox instance. `act` handles the FULL step semantics (matrix, if:,
     needs, services:, composite/reusable actions) — this function's only job
@@ -587,7 +652,8 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
            "--pull=false"]
     for k, v in cell.items():
         cmd += ["--matrix", f"{k}:{v}"]
-    for platform, image in _ACT_PLATFORM_MAP.items():
+    platforms = _ACT_RUNNER_PLATFORM_MAP if as_runner else _ACT_PLATFORM_MAP
+    for platform, image in platforms.items():
         cmd += ["-P", f"{platform}={image}"]
     if runtime != "none":
         cmd += ["--env", f"WP_BASE_URL={url}",
@@ -695,6 +761,11 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     matrix_filter = getattr(args, "matrix_filter", None) or {}
     selected = getattr(args, "jobs", None)
     workflow_data = _load_workflow(wf_path)
+    if getattr(args, "as_runner", False):
+        try:
+            _check_as_runner(wf_path, plan, selected, matrix_filter)
+        except ValueError as exc:
+            die(str(exc))
     from sandbox.ci.workflow import preflight
     safe_gate = preflight(root, wf_path, selected_jobs=selected,
                           accepted_differences=getattr(args, "accepted_differences", None),
@@ -743,6 +814,8 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 command += ["--accept-difference", difference]
             for limit in getattr(args, "container_limits", None) or ():
                 command += ["--container-limit", limit]
+            if getattr(args, "as_runner", False):
+                command.append("--as-runner")
             accepted_compatibility = tuple({"id": value, "accepted": True,
                     "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
                     "detail": "caller accepted compatibility difference"} for value in
@@ -887,7 +960,15 @@ def cmd_ci(cfg, args) -> None:
             info(msg)
         return
 
-    # action == "run"
+    # action == "run". Refuse a bad --container-limit or --as-runner before any
+    # target, secret, temp file, --async launch or remote submission.
+    try:
+        _container_limit_options(getattr(args, "container_limits", None) or ())
+        if getattr(args, "as_runner", False):
+            _check_as_runner(wf_path, plan, getattr(args, "jobs", None),
+                             getattr(args, "matrix_filter", None) or {})
+    except ValueError as exc:
+        die(str(exc))
     runtime = getattr(args, "runtime", "sandbox")
     if runtime not in {"sandbox", "none"}:
         die("CI runtime must be 'sandbox' or 'none'")
@@ -985,6 +1066,10 @@ def cmd_ci(cfg, args) -> None:
             argv.append("--strict-provision")
         if runtime == "none":
             argv += ["--runtime", "none"]
+        for limit in getattr(args, "container_limits", None) or ():
+            argv += ["--container-limit", limit]
+        if getattr(args, "as_runner", False):
+            argv.append("--as-runner")
         argv += ["--timeout", str(getattr(args, "timeout", None) or 900)]
         jid = launch_background_job(argv, cwd=ROOT)
         print(json.dumps({"ok": True, "job_id": jid, **_selection(root, args, target)}))
@@ -1075,6 +1160,7 @@ def cmd_ci(cfg, args) -> None:
     if not specs:
         _cleanup_ci_temp_files(patched_path, secrets_path)
         die("no matrix cells matched --matrix-filter")
+    as_runner = bool(getattr(args, "as_runner", False))  # checked before anything ran
 
     if not as_json:
         info(f"ci: running {len(specs)} cell(s) across job(s) {', '.join(job_ids)} via act…")
@@ -1121,7 +1207,7 @@ def cmd_ci(cfg, args) -> None:
             worker_fn=lambda entry, spec: _run_cell_with_act(
                 entry, spec, Path(root), patched_path, secrets_path,
                 allow_deploy, timeout, runtime=runtime, event=event,
-                container_limits=container_limits),
+                container_limits=container_limits, as_runner=as_runner),
             concurrency=concurrency, keep_on_fail=keep_on_fail,
             strict_provision=strict_provision, on_progress=_progress,
             provision_instance=provision_instance, teardown_instance=teardown_instance)

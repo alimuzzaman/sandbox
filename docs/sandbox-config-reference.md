@@ -564,6 +564,18 @@ WordPress test suite, polyfills, isolated test database, and `WP_TESTS_*` enviro
 integration mode retains the existing externally provisioned harness. `--provision-only`
 is integration-only.
 
+### Remote deploy path (`deploySlug`)
+
+A remote deploy publishes a checkout to `<remote SANDBOX_HOME>/deploy-src/<name>`, where
+`<name>` is the checkout's directory name (a Compose project's `slug` when set). Two
+checkouts with the same directory name, such as two clones both called `hub`, therefore
+share one remote tree and one source lock. `"deploySlug": "guided-setup"` gives a
+checkout its own name for that path, for every project kind. It is opt-in: without it
+nothing changes, and a WordPress `slug` (below) never moves the deploy path. It also
+names the remote workspace and instance derived from that path. Lowercase letters,
+numbers, `-` and `_`, at most 63. Setting it on a checkout that has deployed before
+starts a new remote tree; the old one stays until removed.
+
 ### Project slug
 
 `slug` names the plugin represented by this project checkout. It is used only

@@ -1457,6 +1457,18 @@ def deploy_target_slug(project_root) -> str:
     except Exception:
         project = None
     runtime_type = project.get("kind") if isinstance(project, dict) else None
+    # Opt-in for every kind: two checkouts whose directories share a name
+    # (both `hub`) would otherwise share one deploy tree and its source lock.
+    # Not `slug`: for WordPress that is the plugin install slug, shared by
+    # every worktree of the plugin, and existing deploy paths must not move.
+    chosen = project.get("deploySlug") if isinstance(project, dict) else None
+    if chosen is not None:
+        if not isinstance(chosen, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", chosen):
+            raise ValueError(
+                f"invalid deploySlug {chosen!r}; use lowercase letters, numbers, "
+                "hyphens or underscores (at most 63)"
+            )
+        return chosen
     if runtime_type == "compose":
         candidate = str(project.get("slug") or root.name).strip().lower()
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,62}", candidate):

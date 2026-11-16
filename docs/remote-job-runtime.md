@@ -558,8 +558,9 @@ sync). A server-CLI command refused by a busy lock reports `server_cli_source_bu
 (`acceptance: not_accepted`, `source_busy: true`) when Sandbox generated its request id;
 with your own `--request-id` it stays `server_cli_acceptance_unknown` (an earlier
 attempt with that id may have been accepted) and adds `source_busy: true`. Two
-checkouts with the same directory name share one `deploy-src/<name>` path and so one
-lock. To do the same by hand:
+checkouts with the same directory name share one `deploy-src/<name>` tree and so one
+lock; give one of them `"deploySlug"` in its `sandbox.config.json`
+(docs/sandbox-config-reference.md) to publish it to its own tree. To do the same by hand:
 
 ```sh
 ./sb remote materialization inspect   xspeed-dev --project-dir . [--operation-id OP]

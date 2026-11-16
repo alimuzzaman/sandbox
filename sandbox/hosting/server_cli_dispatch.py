@@ -167,6 +167,7 @@ def dispatch_host_if_selected(args) -> bool:
     from sandbox.application.server_cli_source_repair import dispatch_if_selected
     if dispatch_if_selected(args):
         return True
+    generated_request_id = not getattr(args, "request_id", None)
     try:
         return _dispatch_host_if_selected(args)
     except Exception as error:
@@ -174,11 +175,28 @@ def dispatch_host_if_selected(args) -> bool:
         unknown = bool(getattr(error, "completion_unknown", False)) or (
             bool(getattr(args, "_server_cli_submission_started", False))
             and code != "server_cli_capability_unavailable")
+        busy = _source_busy(error)
+        if busy is not None and generated_request_id:
+            # The source lock refused before this request's job submission,
+            # and no earlier attempt can have used this fresh request id.
+            _failure(args, "server_cli_source_busy", unknown=False, busy=busy)
         _failure(args, "server_cli_acceptance_unknown" if unknown else
-                 "server_cli_execution_unavailable", unknown=unknown)
+                 "server_cli_execution_unavailable", unknown=unknown, busy=busy)
 
 
-def _failure(args, code, *, unknown, receipt=None):
+def _source_busy(error):
+    """The remote source lock's refusal text when it caused ``error``, else None."""
+    from sandbox.core.remote_materialization import RemoteMaterializationBusy
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, RemoteMaterializationBusy):
+            return str(error)
+        error = error.__cause__ or error.__context__
+    return None
+
+
+def _failure(args, code, *, unknown, receipt=None, busy=None):
     request_id = getattr(args, "_server_cli_request_id", None) or getattr(args, "request_id", None)
     if not isinstance(request_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", request_id) is None:
         request_id = None
@@ -186,6 +204,12 @@ def _failure(args, code, *, unknown, receipt=None):
         "acceptance": "unknown" if unknown else "not_accepted",
         "error": ("Inspect the original request/job; execution is not safe to replay."
                   if unknown else "Server execution is unavailable; no controller fallback was attempted.")}
+    if busy is not None:
+        # Fixed text from sandbox/core/_remote.py: names an operation id and the
+        # inspect command, nothing from the remote.
+        payload["source_busy"] = True
+        payload["error"] = (("Not submitted: " if not unknown else "") + busy[:400] +
+                            ("" if not unknown else "; the original request may still be accepted"))
     job_id = receipt.get("job_id") if isinstance(receipt, dict) else None
     if isinstance(job_id, str) and re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{32})", job_id):
         payload["job_id"] = job_id

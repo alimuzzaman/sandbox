@@ -66,6 +66,50 @@ def _output(run, argv):
     return (result.stdout or "").strip()
 
 
+_GONE = re.compile(r"(?i)(?:error: no such object|error response from daemon: no such container): ([0-9a-f]{12,64})")
+_SCANS = 8
+
+
+def _vanished(result, ids):
+    """Only Docker's own not-found reply for ids it was asked about counts.
+
+    Any other failure, output or id refuses: that is not a removed container.
+    """
+    lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+    matches = [_GONE.fullmatch(line) for line in lines]
+    return bool(result.returncode) and bool(lines) and all(
+        match is not None and match[1] in ids for match in matches)
+
+
+def _compose_containers(run, compose_project, projection):
+    """List, inspect and re-list the project's running containers.
+
+    A container removed between list and inspect (a plain `docker run --rm` of a
+    Compose-built image carries the project label) restarts the scan from a
+    fresh list, as does any change between list and re-list. Facts come only
+    from one scan whose inspect succeeded and whose re-list matched; churn that
+    never settles within _SCANS refuses.
+    """
+    listing = ["docker", "ps", "--filter", "label=com.docker.compose.project=" + compose_project,
+               "--format", "{{.ID}}"]
+    for _ in range(_SCANS):
+        ids = _output(run, listing).splitlines()
+        if not ids or len(ids) > 64 or any(re.fullmatch(r"[0-9a-f]{12,64}", item) is None for item in ids):
+            _refuse()
+        result = run(["docker", "inspect", "--format", projection, *ids])
+        if result.returncode or result.stderr:
+            if _vanished(result, ids):
+                continue
+            _refuse()
+        if len(result.stdout or "") > 65536:
+            _refuse()
+        lines = (result.stdout or "").strip().splitlines()
+        if sorted(_output(run, listing).splitlines()) != sorted(ids):
+            continue
+        return ids, lines
+    _refuse()
+
+
 def _git_metadata(source, *args):
     return ['git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null',
             '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never', '-C', str(source), *args]
@@ -210,10 +254,6 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
         _refuse()
     if _output(run, _git_metadata(source, 'rev-parse', '--verify', 'HEAD')) != commit:
         _refuse()
-    ids = _output(run, ["docker", "ps", "--filter", "label=com.docker.compose.project=" +
-                         compose_project, "--format", "{{.ID}}"]).splitlines()
-    if not ids or len(ids) > 64 or any(re.fullmatch(r"[0-9a-f]{12,64}", item) is None for item in ids):
-        _refuse()
     # Only five known nonsecret labels are requested. No container environment,
     # full inspect/config output or runtime environment file is read or returned.
     projection = ('[{{json (index .Config.Labels "com.docker.compose.project")}},'
@@ -221,7 +261,7 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
                   '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},'
                   '{{json (index .Config.Labels "com.docker.compose.service")}},'
                   '{{json (index .Config.Labels "com.docker.compose.container-number")}}]')
-    lines = _output(run, ["docker", "inspect", "--format", projection, *ids]).splitlines()
+    ids, lines = _compose_containers(run, compose_project, projection)
     if len(lines) != len(ids):
         _refuse()
     try:

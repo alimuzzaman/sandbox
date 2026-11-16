@@ -69,8 +69,11 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("that command also requires `--confirm`", help_text)
 
     def test_remote_instance_control_flags_reach_registered_handlers(self):
+        import contextlib
         import sandbox.cli as cli
+        import sandbox.commands.instances_cmd as instances_cmd
         import sandbox.commands.migrate as migrate
+        import sandbox.project_registry.lifecycle as lifecycle
 
         invocations = (
             (["sb", "instances", "--remote", "remote-a", "--json"],
@@ -85,6 +88,9 @@ class TestResolutionGate(unittest.TestCase):
                     mock.patch.object(cli, "COMMANDS", {
                         command: lambda _cfg, args: observed.append(args),
                     }), \
+                    mock.patch.object(instances_cmd, "cmd_instance",
+                                      lambda _cfg, args: observed.append(args)), \
+                    mock.patch.object(lifecycle, "lifecycle_writer", contextlib.nullcontext), \
                     mock.patch.object(cli, "load_config", return_value={}), \
                     mock.patch.object(cli, "resolve_instances", return_value={}), \
                     mock.patch.object(cli, "_cwd_instance", return_value=None), \
@@ -842,7 +848,7 @@ class TestResolutionGate(unittest.TestCase):
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 94)
+        self.assertEqual(len(COMMANDS), 95)
         self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
         self.assertEqual(validate_builtin_command_coverage(), ())
 

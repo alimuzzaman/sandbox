@@ -72,9 +72,13 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         return checkout
 
     def _submission(self, checkout, *, request_id, mode="isolated", cleanup="ephemeral"):
+        # A materialized submission carries the measured checkout bytes
+        # (943aa86); admission refuses one without them.
+        from sandbox.workspaces.content import content_digest
         return JobSubmission(
             "ci", str(checkout), "project:ci", "local", checkout.name,
-            ("/bin/sh", "-c", "true"), 20, SourceIdentity("source"),
+            ("/bin/sh", "-c", "true"), 20,
+            SourceIdentity("source", content_digest=content_digest(checkout)),
             request_id=request_id, workspace_mode=mode, cleanup_policy=cleanup,
             materialization_source_root=str(self.sources[str(checkout)]),
         )

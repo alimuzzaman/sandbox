@@ -2985,7 +2985,12 @@ operation, so two controllers cannot interleave changes to one target's route an
 runtime. The lease file holds a random token, a random controller id
 (`$SANDBOX_HOME/runtime/hosting/controller-id` on the controller) and the time it was
 taken; nothing secret. For server-owner execution, the holder is instead the
-first 32 hexadecimal characters of SHA-256 over `server-cli-exec:<job_id>`.
+first 32 hexadecimal characters of SHA-256 over `server-cli-exec:<job_id>` for
+`sb host exec`, and over `server-cli:<job_id>` for a server-owner apply, edge
+recovery, destroy or stack down (a nested apply uses its own job id). Such a job
+appends the exact lease it wrote to its own job events
+(`host_apply_lease_acquired`: holder, token, lease path, `project/environment`) and,
+once a release is confirmed, `host_apply_lease_released`.
 
 The lease never expires: an owner that outlived an expiry and kept writing would be
 the interleaving the lease is there to stop. The controller that holds it releases it,
@@ -2995,7 +3000,24 @@ gone, first check on the remote that nothing of it still runs (no `sb` process f
 target), then remove the lease file there by hand.
 
 Each server-owner job has a different holder, so a job never takes over a lease
-merely because it runs as the same Linux user. One case is taken over: a later
+merely because it runs as the same Linux user.
+
+A later server-owner apply, edge recovery, destroy or stack down takes over a lease
+whose holder is a server-owner apply job of this server when, under the lease's own
+lock, the lease file's holder and token match one `host_apply_lease_acquired` event of
+that job for the same lease path and target, with no `host_apply_lease_released` for
+that token; the job is terminal and not `interrupted`, recorded
+`owned_work_stopped: true` with no stop error, took the lease between its start and
+finish, and none of its recorded processes, its process group or any child job still
+runs. The ended job gets a `host_apply_lease_taken_over` event naming the new job, and
+the operation prints `took over the target lease of ended job <id>`. This also ends
+the lease an apply keeps when its completion is withheld (effect unknown): it never
+releases its lease itself. Taking the lease does not clear persisted host-state fences:
+an `active_operation` or `recovery_uncertainty` record still refuses until
+`sb host recover` settles it. A lease from a job that predates this record, from
+another controller, or from a job whose end is not proven is never taken over.
+
+One exec case is taken over as well: a later
 server-owner `sb host exec` replaces a lease whose holder is the exec lease of a
 top-level server-cli job with no child jobs in the server's own job registry when
 that job is terminal, recorded `owned_work_stopped: true` with no stop error, ran
@@ -3011,7 +3033,7 @@ whose command reached its own `--timeout`. It proves the job's own processes
 stopped, not that a command Docker started inside the container has; Docker does not
 signal it when its client is killed. Any other holder (an apply, a destroy, another
 controller, or an exec job whose end is not proven) is never taken over and keeps
-the behaviour below. `host retire-delivery` closes the delivery
+the behaviour below (an apply lease is covered by the rule above). `host retire-delivery` closes the delivery
 record and its host-state claim; it does not release this separate lease.
 Do not repeat retirement or replay an uncertain apply to clear it. Exact manual
 recovery requires explicit operator approval after binding the lease holder to

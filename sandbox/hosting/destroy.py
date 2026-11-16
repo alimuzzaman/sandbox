@@ -14,7 +14,6 @@ Without ``confirm`` it only reports what it would remove.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import re
 import shlex
@@ -444,10 +443,13 @@ def _target_lease(entry: dict, project: str, environment: str):
         return
     run = lambda command: remote.ssh_run(entry, command, timeout=60)  # noqa: E731
     path = target_lease.lease_path(remote.resolve_sandbox_home(entry), project, environment)
-    owner = (target_lease.controller_owner(RUNTIME_DIR) if not is_owner_target(entry) else
-             hashlib.sha256(("server-cli:" + entry.require_current().job_id).encode()).hexdigest()[:32])
+    owner_target = is_owner_target(entry)
     try:
-        lease = target_lease.acquire(run, path, owner)
+        if owner_target:
+            from sandbox.application.server_cli_apply_lease import acquire_owner_lease
+            lease = acquire_owner_lease(entry, path, project, environment, run)
+        else:
+            lease = target_lease.acquire(run, path, target_lease.controller_owner(RUNTIME_DIR))
     except target_lease.LeaseHeld as exc:
         raise DestroyError(f"{exc}; see docs/remote-hosting.md", "host_apply_lease_held") from None
     except target_lease.LeaseUnavailable as exc:
@@ -457,7 +459,11 @@ def _target_lease(entry: dict, project: str, environment: str):
     finally:
         from sandbox.hosting.server_cli_target import owner_effect_unknown
         if not owner_effect_unknown(entry):
-            target_lease.release(run, lease)
+            if owner_target:
+                from sandbox.application.server_cli_apply_lease import release_owner_lease
+                release_owner_lease(lease, run)
+            else:
+                target_lease.release(run, lease)
 
 
 def execute(entry: dict, remote_name: str, project: str, environment: str, *,

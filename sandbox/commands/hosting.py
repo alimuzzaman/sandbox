@@ -1242,12 +1242,14 @@ def _restore_host_caddy(entry: dict, name: str, previous: str | None, *,
 
 def _read_remote_strict(entry: dict, path: str) -> str | None:
     """A remote file's text, or None only when it is confirmed absent; else raises."""
-    script = 'if [ -f "$1" ]; then cat "$1"; elif [ -e "$1" ] || [ -L "$1" ]; then exit 44; else exit 43; fi'
-    result = remote.ssh_run(entry, f"sh -c {shlex.quote(script)} sandbox-read {shlex.quote(path)}",
-                            timeout=30)
+    from sandbox.hosting.front_door import exact_read
+    result = remote.ssh_run(entry, exact_read.command(path), timeout=30)
     if result.returncode == 0:
-        return result.stdout
-    if result.returncode == 43:
+        try:
+            return exact_read.decode(result.stdout)
+        except exact_read.ExactReadError as exc:
+            raise hosting.HostingError(f"route state unknown: {path} could not be read: {exc}") from None
+    if result.returncode == exact_read.ABSENT_EXIT:
         return None
     raise hosting.HostingError(f"route state unknown: {path} could not be read (exit {result.returncode})")
 
@@ -1272,8 +1274,14 @@ def _reconcile_host_caddy(entry: dict, name: str, keep: str, *,
 
 
 def _read_remote_optional(entry: dict, path: str) -> str | None:
-    result = remote.ssh_run(entry, f"test -f {shlex.quote(path)} && cat {shlex.quote(path)}", timeout=30)
-    return result.stdout if result.returncode == 0 else None
+    from sandbox.hosting.front_door import exact_read
+    result = remote.ssh_run(entry, exact_read.command(path), timeout=30)
+    if result.returncode != 0:
+        return None
+    try:
+        return exact_read.decode(result.stdout)
+    except exact_read.ExactReadError as exc:
+        raise hosting.HostingError(f"route state unknown: {path} could not be read: {exc}") from None
 
 
 def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry: dict,

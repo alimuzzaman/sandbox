@@ -827,13 +827,16 @@ def read_route_strict(entry: dict, name: str) -> str | None:
     Any other outcome (SSH failure, sudo refusal, an unreadable or odd file) raises,
     so an unknown route state is never mistaken for no route.
     """
+    from sandbox.hosting.front_door import exact_read
     path = route_file(name)
-    script = 'if [ -f "$1" ]; then cat "$1"; elif [ -e "$1" ] || [ -L "$1" ]; then exit 44; else exit 43; fi'
-    result = _ssh(entry, _SUDO + f"$SUDO sh -c {shlex.quote(script)} sandbox-read {shlex.quote(path)}",
-                  timeout=30)
+    result = _ssh(entry, exact_read.command(path, sudo_prefix=_SUDO), timeout=30)
     if result.returncode == 0:
-        return result.stdout
-    if result.returncode == 43:
+        try:
+            return exact_read.decode(result.stdout)
+        except exact_read.ExactReadError as exc:
+            raise FrontDoorError("front_door_read_failed",
+                                 f"nginx route {name} could not be read: {exc}") from None
+    if result.returncode == exact_read.ABSENT_EXIT:
         return None
     raise FrontDoorError("front_door_read_failed",
                          f"nginx route {name} could not be read (exit {result.returncode})")
@@ -869,10 +872,16 @@ def reconcile_route(entry: dict, name: str, keep: str, *,
 
 
 def read_route(entry: dict, name: str) -> str | None:
-    path = route_file(name)
-    result = _ssh(entry, _SUDO + f"$SUDO test -f {shlex.quote(path)} && $SUDO cat {shlex.quote(path)}",
-                  timeout=30)
-    return result.stdout if result.returncode == 0 else None
+    """The route's text, or None when it cannot be read; never altered text."""
+    from sandbox.hosting.front_door import exact_read
+    result = _ssh(entry, exact_read.command(route_file(name), sudo_prefix=_SUDO), timeout=30)
+    if result.returncode != 0:
+        return None
+    try:
+        return exact_read.decode(result.stdout)
+    except exact_read.ExactReadError as exc:
+        raise FrontDoorError("front_door_read_failed",
+                             f"nginx route {name} could not be read: {exc}") from None
 
 
 def _probe_host(content: str) -> str | None:

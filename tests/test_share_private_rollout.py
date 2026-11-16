@@ -273,7 +273,11 @@ class FrontDoorClosureCommandTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_strict_reads_tell_absence_from_failure(self):
-        cases = ((0, "route\n", "route\n"), (43, "", None), (255, "", "raise"), (44, "", "raise"), (1, "", "raise"))
+        import hashlib
+        encoded = hashlib.sha256(b"route\n").hexdigest() + "\n" + b"route\n".hex() + "\n"
+        # Raw text is refused: a read must arrive byte for byte (exact_read).
+        cases = ((0, encoded, "route\n"), (0, "route\n", "raise"), (43, "", None),
+                 (255, "", "raise"), (44, "", "raise"), (1, "", "raise"))
         for code, stdout, expected in cases:
             result = subprocess.CompletedProcess([], code, stdout, "")
             with self.subTest(door="caddy", code=code), patch.object(hosting_cmd.remote, "ssh_run", return_value=result):

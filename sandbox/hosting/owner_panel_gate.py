@@ -76,13 +76,15 @@ _BOUND = ('[{{json .Id}},{{json .State.Running}},'
           '{{json (index .Config.Labels "com.docker.compose.project")}},'
           '{{json (index .Config.Labels "com.docker.compose.service")}},'
           '{{json (index .Config.Labels "com.docker.compose.container-number")}},'
-          '{{json .Config.Cmd}}]')
+          '{{json .Config.Cmd}},'
+          '{{json (index .Config.Labels "com.docker.compose.oneoff")}}]')
 
 
 def _observe_bound(owner, snapshot):
     """One `docker inspect` of every container the full snapshot bound.
 
-    Returns a comparable tuple of (service, index, full id, command). A missing,
+    Returns a comparable tuple of (service, index, full id, command, oneoff
+    label). A missing,
     stopped, relabelled or replaced container refuses; the caller compares the
     tuple to the one taken at bind, so any restart into a new id also refuses.
     """
@@ -101,15 +103,33 @@ def _observe_bound(owner, snapshot):
     observed = []
     for (service, index, ident), line in zip(rows, lines):
         try:
-            full_id, running, label_project, label_service, number, command = json.loads(line)
+            full_id, running, label_project, label_service, number, command, oneoff = json.loads(line)
         except (ValueError, TypeError):
             raise _refuse() from None
         if (not isinstance(full_id, str) or not re.fullmatch(r"[0-9a-f]{64}", full_id)
                 or not full_id.startswith(ident) or running is not True
                 or label_project != project or label_service != service or number != str(index)):
             raise _refuse("owner_share_target_changed")
-        observed.append((service, index, full_id, json.dumps(command)))
+        observed.append((service, index, full_id, json.dumps(command), oneoff))
     return tuple(observed)
+
+
+def _running_services(owner, compose_project):
+    """Full ids of the project's running service containers (not one-off runs).
+
+    A replacement or extra service container that leaves the bound ones running
+    changes this set. `docker run` / `compose run` containers carry no
+    `oneoff=False` label, so they neither satisfy nor break it.
+    """
+    result = subprocess.run(["docker", "ps", "--no-trunc", "--quiet",
+        "--filter", "label=com.docker.compose.project=" + compose_project,
+        "--filter", "label=com.docker.compose.oneoff=False"],
+        cwd=owner.home, env=_environment(owner), capture_output=True, text=True, timeout=10)
+    ids = result.stdout.split()
+    if (result.returncode or result.stderr or len(ids) > 64
+            or any(not re.fullmatch(r"[0-9a-f]{64}", ident) for ident in ids)):
+        raise _refuse("owner_share_target_changed")
+    return set(ids)
 
 
 def _first(observed, service):
@@ -149,7 +169,8 @@ class GateGrant:
         repeats the cheap facts that snapshot rested on: the same installed
         owner, the same applied server summary, an active lifetime record for
         the same copy, and one inspect of every bound container returning the
-        same ids, labels and commands. _execute calls it once, right before an
+        same ids, labels and commands, no other running service container in
+        the project, and no persisted recovery fence. _execute calls it once, right before an
         effect; apply, destroy and recovery change the summary or the
         containers, and cannot run meanwhile because the effect holds the
         target lease and mutation lock (owner_panel_share._held).
@@ -174,6 +195,25 @@ class GateGrant:
                 or lifetimes[0].get("state") != "active" or lifetimes[0].get("reap_run") is not None
                 or lifetimes[0].get("copy_id") != self.snapshot["copy_id"]
                 or lifetimes[0].get("commit") != self.snapshot["source_origin_commit"]):
+            raise _refuse("owner_share_target_changed")
+        # A persisted recovery/apply fence left after bind survives the process
+        # lock _held takes, so read it again; the locked key set must not grow.
+        from sandbox.hosting.host_exec import busy_reason
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        try:
+            state = RecoveryRepository(home / "runtime" / "hosts.json").load()
+        except (OSError, ValueError):
+            raise _refuse("owner_share_target_changed") from None
+        if getattr(state, "unreadable", ()):
+            raise _refuse("owner_share_target_changed")
+        keys = sorted(key for key in state["hosts"] if
+                      isinstance(key, str) and key.split("/")[1:] == [project, environment])
+        if sorted(set(keys + [f"{self.request.remote}/{project}/{environment}"])) != sorted(self.snapshot["native_keys"]):
+            raise _refuse("owner_share_target_changed")
+        for key in keys:
+            if not isinstance(state["hosts"][key], dict) or busy_reason(state["hosts"][key], None):
+                raise _refuse("owner_share_target_changed")
+        if _running_services(self.owner, compose_project) != {row[2] for row in self.containers if row[4] == "False"}:
             raise _refuse("owner_share_target_changed")
         if _observe_bound(self.owner, self.snapshot) != self.containers:
             raise _refuse("owner_share_gate_changed")

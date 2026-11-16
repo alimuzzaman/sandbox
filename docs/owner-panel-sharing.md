@@ -46,7 +46,10 @@ target inspection alone cannot construct an admitted request.
 `bind` takes the one full owner-target snapshot and one `docker inspect` of every
 bound container (id, running, Compose labels, command). Each effect re-checks once,
 just before it starts: same owner, same applied server summary, an active lifetime
-record for the same copy and commit, and the same bound containers. Nothing is
+record for the same copy and commit, no persisted recovery or apply fence and the
+same native keys, exactly the bound set of running service containers in the
+project (one-off `docker run`/`compose run` containers are ignored), and the same
+bound containers. Nothing is
 re-checked after the effect, which ran by full container id. The WordPress admin
 click skips the gate's running-config query, because its effect runs only in the
 WordPress container; that grant refuses every gate verb (list, mint, revoke).

@@ -28,10 +28,12 @@ class _Docker:
     def __init__(self, declaration, access):
         self.command = ["python3", "-c", gate.login._LOADER, gate.login._runtime_source()]
         self.containers = {
-            GATE_ID[:12]: [GATE_ID, True, COMPOSE, "sandbox-login", "1", self.command],
-            WP_ID[:12]: [WP_ID, True, COMPOSE, "wordpress", "1", ["apache2-foreground"]],
-            DB_ID[:12]: [DB_ID, True, COMPOSE, "db", "1", ["mysqld"]],
+            GATE_ID[:12]: [GATE_ID, True, COMPOSE, "sandbox-login", "1", self.command, "False"],
+            WP_ID[:12]: [WP_ID, True, COMPOSE, "wordpress", "1", ["apache2-foreground"], "False"],
+            DB_ID[:12]: [DB_ID, True, COMPOSE, "db", "1", ["mysqld"], "False"],
         }
+        # Running containers `docker ps` sees beyond the bound ones: [full id, project, oneoff].
+        self.others = []
         self.reply = {"ok": True, "config_digest": access["gate_config_digest"],
                       "panel_access_digest": digest(declaration),
                       "panel_target_digest": access["target_digest"],
@@ -41,6 +43,13 @@ class _Docker:
         self.effects = []
 
     def run(self, argv, **_):
+        if argv[:2] == ["docker", "ps"]:
+            rows = [(row[0], row[2], row[6]) for row in self.containers.values() if row[1] is True]
+            rows += [tuple(row) for row in self.others]
+            wanted = [item.split("=", 1)[1] for item in argv if item.startswith("label=")]
+            ids = [ident for ident, project, oneoff in rows
+                   if wanted == ["com.docker.compose.project=" + project, "com.docker.compose.oneoff=" + str(oneoff)]]
+            return subprocess.CompletedProcess(argv, 0, "".join(i + "\n" for i in ids), "")
         if argv[:2] == ["docker", "inspect"]:
             self.inspects += 1
             ids = argv[4:]
@@ -86,6 +95,7 @@ class GateRecheckTests(unittest.TestCase):
         self.docker = _Docker(declaration, access)
         self.full = 0
         self.current_owner = self.owner
+        self.recovery = {"version": 1, "hosts": {f"fixture/{PROJECT}/{ENV}": {}}}
 
         def inspect_target(**_):
             self.full += 1
@@ -109,10 +119,17 @@ class GateRecheckTests(unittest.TestCase):
         scope.enter_context(patch("sandbox.hosting.lifetime.hoststore.Store.peek",
                                   side_effect=lambda *_: {"records": [dict(self.lifetime)], "invalid": [],
                                                           "truncated": False}))
-        self.request = object.__new__(gate.PanelRequest)
+        scope.enter_context(patch("sandbox.hosting.recovery.repository.RecoveryRepository.load",
+                                  side_effect=lambda: json.loads(json.dumps(self.recovery))))
+        self.request = self.admitted("create")
+
+    @staticmethod
+    def admitted(action):
+        request = object.__new__(gate.PanelRequest)
         for key, value in zip(("action", "remote", "stack", "link_id", "_seal"),
-                              ("create", "fixture", SLUG, None, gate._SEAL)):
-            object.__setattr__(self.request, key, value)
+                              (action, "fixture", SLUG, None, gate._SEAL)):
+            object.__setattr__(request, key, value)
+        return request
 
     def bind(self):
         return gate.bind(self.request)
@@ -126,6 +143,13 @@ class GateRecheckTests(unittest.TestCase):
         grant.require_current()
         self.assertEqual(self.full, 1)
         self.assertEqual(self.docker.inspects - before, 2)
+
+    def test_one_off_runs_neither_satisfy_nor_break_the_service_set(self):
+        # A `docker run` of a Compose-built image carries the project label but
+        # no oneoff=False; a `compose run` carries oneoff=True.
+        self.docker.others = [("d" * 64, COMPOSE, None), ("e" * 64, COMPOSE, "True")]
+        grant = self.bind()
+        grant.require_current()
 
     def test_wordpress_admin_click_takes_one_full_snapshot(self):
         store = SimpleNamespace(root=self.owner.home, rows=lambda *_: [], save=lambda row: None)
@@ -150,13 +174,22 @@ class GateRecheckTests(unittest.TestCase):
         self.assertEqual(self.docker.queries, 1)
 
     def test_a_wordpress_only_grant_cannot_run_gate_verbs(self):
-        grant = gate.bind(self.request, gate_verbs=False)
         store = SimpleNamespace(save=lambda value: None)
-        for verb in ("mint", "list", "revoke"):
-            with self.subTest(verb=verb), self.assertRaises(ShareRefusal):
-                gate._execute(grant, verb, {}, store, payload={}, grant_id="l-" + "0" * 32)
-        self.assertEqual(self.docker.effects, [])
-        self.assertEqual(self.docker.queries, 0)
+        # Each verb under an action its own validation admits, so only the fence refuses.
+        for verb, action in (("mint", "create"), ("list", "list"), ("revoke", "revoke")):
+            with self.subTest(verb=verb):
+                fenced = gate.bind(self.admitted(action), gate_verbs=False)
+                before = len(self.docker.effects)
+                with self.assertRaises(ShareRefusal):
+                    gate._execute(fenced, verb, {}, store, payload={}, grant_id="l-" + "0" * 32)
+                self.assertEqual(len(self.docker.effects), before)
+                # Control: a full grant passes the same validation and reaches the
+                # gate (the fake reply is empty, so the effect itself is unknown).
+                full = gate.bind(self.admitted(action))
+                with self.assertRaises(ShareRefusal):
+                    gate._execute(full, verb, {}, store, payload={"link": {}}, grant_id="l-" + "0" * 32)
+                self.assertEqual(self.docker.effects[-1][:2], ["docker", "exec"])
+                self.assertEqual(len(self.docker.effects), before + 1)
 
     def test_a_container_swapped_after_bind_refuses_before_the_effect(self):
         grant = self.bind()
@@ -188,7 +221,12 @@ class GateRecheckTests(unittest.TestCase):
         def foreign_project():
             self.docker.containers[WP_ID[:12]][2] = "sandbox-host-other-production"
 
-        for change in (replaced, stopped, relabelled, gone, new_gate_command, foreign_project):
+        def replacement_beside_the_original():
+            # Every bound container keeps running; a new WordPress joins the project.
+            self.docker.others = [("f" * 64, COMPOSE, "False")]
+
+        for change in (replaced, stopped, relabelled, gone, new_gate_command, foreign_project,
+                       replacement_beside_the_original):
             with self.subTest(change=change.__name__):
                 self.setUp()
                 grant = self.bind()
@@ -215,7 +253,18 @@ class GateRecheckTests(unittest.TestCase):
         def owner_changed():
             self.current_owner = SimpleNamespace(**{**vars(self.owner), "uid": 1001})
 
-        for change in (reapplied, sharing_withdrawn, reaping, released, new_copy, owner_changed):
+        def recovery_fence_left_behind():
+            # Persisted after bind; the process lock _held takes is free again.
+            self.recovery["hosts"][f"fixture/{PROJECT}/{ENV}"] = {"active_operation": {"id": "op"}}
+
+        def uncertain_recovery():
+            self.recovery["hosts"][f"fixture/{PROJECT}/{ENV}"] = {"recovery_uncertainty": {"at": 1}}
+
+        def new_alias_key():
+            self.recovery["hosts"][f"alias/{PROJECT}/{ENV}"] = {}
+
+        for change in (reapplied, sharing_withdrawn, reaping, released, new_copy, owner_changed,
+                       recovery_fence_left_behind, uncertain_recovery, new_alias_key):
             with self.subTest(change=change.__name__):
                 self.setUp()
                 grant = self.bind()

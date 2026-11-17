@@ -122,18 +122,41 @@ class ControllerShareTests(unittest.TestCase):
             return subprocess.CompletedProcess([], 0, stdout="", stderr="")
         path = target_lease.lease_path("/srv/fixture", "site", "dev")
         with patch("sandbox.core._remote.get_remote", return_value=self.entry), \
-                patch("sandbox.core._remote.ssh_run", side_effect=run):
+                patch("sandbox.core._remote.ssh_run", side_effect=run), \
+                patch("sandbox.commands.hosting._controller_lease_owner", return_value="c" * 32):
             with controller.hold([self.target, self.target]) as held:
                 with self.assertRaises(target_lease.LeaseHeld):
                     target_lease.acquire(lambda command: run(self.entry, command), path, "e" * 32)
-                with self.assertRaises(ShareRefusal):
-                    with controller.hold([self.target]):
-                        self.fail("second controller acquired physical ownership")
                 self.assertEqual(len(held.leases), 1)
                 held.uncertain.add(self.target)
             self.assertIn(path, physical)
             with self.assertRaises(target_lease.LeaseHeld):
                 target_lease.acquire(lambda command: run(self.entry, command), path, "e" * 32)
+            # Fable review 5: the retained lease is this controller's, so its next
+            # share (or apply) takes it over instead of the target staying blocked.
+            with controller.hold([self.target]):
+                self.assertEqual(physical[path][1], "c" * 32)
+            self.assertNotIn(path, physical)
+
+    def test_a_failed_remote_command_settles_and_releases_the_lease(self):
+        from sandbox.commands.hosting import HostRemoteCommandFailed
+        physical = {}
+        def run(entry, command, **kwargs):
+            path, token, owner, action = shlex.split(command)[-4:]
+            if action == "acquire":
+                physical[path] = (token, owner)
+            elif physical.get(path, ("",))[0] == token:
+                del physical[path]
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        self.execute.side_effect = HostRemoteCommandFailed("exec failed", phase="share", exit_code=1)
+        with patch("sandbox.core._remote.get_remote", return_value=self.entry), \
+                patch("sandbox.core._remote.ssh_run", side_effect=run), \
+                patch("sandbox.commands.hosting._controller_lease_owner", return_value="c" * 32):
+            with controller.hold([self.target]) as held:
+                with self.assertRaises(HostRemoteCommandFailed):
+                    held.effect(self.target, self.entry, "true")
+                self.assertNotIn(self.target, held.uncertain)
+        self.assertEqual(physical, {}, "a completed non-zero command must not strand the lease")
 
 
 if __name__ == "__main__":

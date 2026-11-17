@@ -37,6 +37,24 @@ MAX_CONTROLLER_INPUT = 2000
 HealthLookup = Callable[[list[tuple[str, str]]], dict[str, HealthResult]]
 
 
+def _page_segment(source: str, remote: str) -> str:
+    """The panel's URL segment for a row: rows this server records live under ``this-server``."""
+    return "this-server" if source == "this-server" else remote
+
+
+def stack_page_path(source: str, remote: str, slug: str) -> str:
+    """The panel path of a stack's page, as the panel's own links build it (router.stackPath)."""
+    from urllib.parse import quote
+    return f"/hosting/{quote(_page_segment(source, remote), safe='')}/{quote(slug, safe='')}"
+
+
+def target_page_path(source: str, remote: str, project: str, environment: str) -> str:
+    """The hosting page anchored at a target's card (router.hostingTargetPath)."""
+    from urllib.parse import quote
+    anchor = f"hosting-{_page_segment(source, remote)}/{project}/{environment}"
+    return f"/hosting#{quote(anchor, safe='')}"
+
+
 class Ref(TypedDict):
     branch: str | None
     commit: str | None
@@ -78,7 +96,11 @@ class SignInAvailability(TypedDict):
 
 
 class StackView(TypedDict):
+    # ``key`` is an identity (``<remote>/<slug>``), not a URL path: a stack this
+    # server records itself is served at ``/hosting/this-server/<slug>``. Use
+    # ``page_path`` to link to a row.
     key: str
+    page_path: str
     remote: str
     source: Source
     slug: str
@@ -102,7 +124,8 @@ class StackView(TypedDict):
 
 
 class TargetView(TypedDict):
-    key: str
+    key: str  # an identity, not a path; see ``page_path``
+    page_path: str
     remote: str
     source: Source
     project: str
@@ -473,7 +496,9 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
         ports = dict(stack.get("ports") or {})
         compose_project = target["compose_project"]
         stacks.append({
-            "key": f"{target['remote']}/{stack['slug']}", "remote": target["remote"], "source": source,
+            "key": f"{target['remote']}/{stack['slug']}",
+            "page_path": stack_page_path(source, target["remote"], stack["slug"]),
+            "remote": target["remote"], "source": source,
             "slug": stack["slug"], "project": target["project"], "environment": target["environment"],
             "ref": stack.get("ref") or "", "ref_branch": stack.get("ref_branch") or "",
             "commit": stack.get("commit") or (target["commit"] or ""),
@@ -500,6 +525,8 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
                                 name, target["compose_project"])
         targets.append({
             "key": f"{target['remote']}/{target['project']}/{target['environment']}",
+            "page_path": target_page_path(source, target["remote"], target["project"],
+                                          target["environment"]),
             "remote": target["remote"], "source": source, "project": target["project"],
             "environment": target["environment"], "commit": target["commit"],
             "loopback_port": target["loopback_port"], "last_apply": _apply_view(target["last_apply"]),
@@ -517,7 +544,9 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
         stack_slug = lifetime["slug"] if lifetime["kind"] == "stack" else None
         lifetime = lifetime_for("this-server", "this-server", project, environment,
                                 stack_slug or f"{project} · {environment}", compose_project)
-        targets.append({"key": f"this-server/{project}/{environment}", "remote": "this-server",
+        targets.append({"key": f"this-server/{project}/{environment}",
+                        "page_path": target_page_path("this-server", "this-server", project, environment),
+                        "remote": "this-server",
                         "source": "this-server", "project": project, "environment": environment,
                         "commit": lifetime["commit"], "loopback_port": None, "last_apply": None,
                         "recorded": False, "compose_project": compose_project, "lifetime": lifetime,

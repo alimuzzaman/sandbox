@@ -110,7 +110,8 @@ export interface StackPageAccess {
   sign_in: { available: boolean; code: string; message: string };
 }
 export interface HostingStack {
-  key: string; remote: string; source: "this-server" | "controller";
+  // `key` is an identity, not a path: link to `page_path`.
+  key: string; page_path?: string; remote: string; source: "this-server" | "controller";
   slug: string; project: string; environment: string;
   ref: string; ref_branch: string; commit: string; template: string;
   ports: Record<string, number>; mailpit_port: number | null; loopback_port: number | null;
@@ -122,7 +123,7 @@ export interface HostingStack {
   servers: HostingServer[];
 }
 export interface HostingTarget {
-  key: string; remote: string; source: "this-server" | "controller";
+  key: string; page_path?: string; remote: string; source: "this-server" | "controller";
   project: string; environment: string; commit: string | null; loopback_port: number | null;
   last_apply: HostingApply | null; recorded: boolean;
   compose_project: string; lifetime: LifetimeView; stack_slug: string | null;

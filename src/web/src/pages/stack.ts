@@ -5,15 +5,21 @@ import { theme } from "../theme";
 import { hostingPath, stackPath } from "../router";
 import { stackCard } from "./hosting";
 import type { HostingStack } from "../types";
+import { resolveStack } from "../ui/stack-route";
 export { signInStack } from "../ui/stack-signin";
 
 function findStack(remote: string, slug: string): HostingStack | undefined {
-  return store.hosting?.stacks.find(stack => stack.slug === slug &&
-    (stack.source === "this-server" ? remote === "this-server" : stack.remote === remote));
+  return store.hosting ? resolveStack(store.hosting.stacks, remote, slug)?.stack : undefined;
 }
 
 export function stackView(remote: string, slug: string): string {
-  const stack = findStack(remote, slug);
+  const match = store.hosting ? resolveStack(store.hosting.stacks, remote, slug) : undefined;
+  if (match && match.remote !== remote) {
+    // A link built from /api/hosting names this server's remote; show the canonical URL.
+    history.replaceState(history.state, "", stackPath(match.remote, slug) + location.search + location.hash);
+    remote = match.remote;
+  }
+  const stack = match?.stack;
   const back = `<a data-link href="${hostingPath()}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">All stacks and hosted sites</a>`;
   const head = `<header>${back}<h1 class="mt-3 break-words text-[26px] font-semibold tracking-tight">Stack ${esc(slug)}</h1><div class="mt-2 flex flex-wrap items-center justify-between gap-3"><p class="text-[13px] ${theme.quiet}">${esc(remote === "this-server" ? "This server" : remote)}</p><button type="button" class="${theme.button}" onclick="sb.refreshHosting()">Refresh stack</button></div></header>`;
   const warning = store.hostingError && store.hosting

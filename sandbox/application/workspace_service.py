@@ -238,9 +238,15 @@ def _open_absolute_directory_nofollow(path: Path) -> int:
     descriptor = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         for part in path.parts[1:]:
-            child = os.open(
-                part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                getattr(os, "O_NOFOLLOW", 0), dir_fd=descriptor)
+            flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                child = os.open(part, os.O_RDONLY | flags, dir_fd=descriptor)
+            except PermissionError:
+                # A traverse-only ancestor (e.g. /home at 0711) refuses
+                # O_RDONLY; O_PATH can still fstat it and open children.
+                if not hasattr(os, "O_PATH"):
+                    raise
+                child = os.open(part, os.O_PATH | flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
         return descriptor

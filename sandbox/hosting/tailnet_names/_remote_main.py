@@ -188,7 +188,14 @@ def _open_dir(path, paths, *, create_mode=None, sticky_last=False):
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
             try:
-                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                try:
+                    child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except PermissionError:
+                    # A traverse-only ancestor (e.g. /home at 0711) refuses
+                    # O_RDONLY; O_PATH can still fstat it and open children.
+                    if last or not hasattr(os, "O_PATH"):
+                        raise
+                    child = os.open(part, (_DIR_FLAGS & ~os.O_RDONLY) | os.O_PATH, dir_fd=fd)
             except FileNotFoundError:
                 if not (last and create_mode is not None):
                     raise Refusal("missing", path) from None

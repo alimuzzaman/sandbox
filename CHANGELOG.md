@@ -28,6 +28,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `sb host tailnet-name` waits only on the caddy, edge and docker-pool locks; durable jobs never block it. certbot's deploy hook reloads nginx under the edge lock.
 
 ### Fixed
+- Host-local image provisioning, the image staging ledger, CI workspace cleanup metadata and the tailnet-name remote program no longer refuse a path below a traverse-only ancestor (such as `/home` at 0711, as on xCloud-style hosts): their descriptor walks open such a directory `O_PATH` instead of `O_RDONLY`.
 - Lost-launch recovery no longer fails a `sb host exec` with stdin that is waiting more than 120 s for a job slot; such a job is left alone until its own deadline.
 - A remote provisioned before the acceptance-receipt contract (its recorded capabilities predate it) no longer refuses every job after `sb remote service migrate`: when the recorded list lacks a required contract, Sandbox reads the installed runtime's `job-capabilities`, bound to the recorded marker and revision, and accepts on that.
 - A job supervisor waits up to 60 s on a busy job registry instead of failing its job with `database is locked`.

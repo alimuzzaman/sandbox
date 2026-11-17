@@ -30,7 +30,6 @@ No central catalog is consulted — the project file is authoritative.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -978,8 +977,7 @@ def instance_name_taken(name: str) -> bool:
 
 @contextmanager
 def project_lock(root):
-    from sandbox.project_registry.lifecycle import lifecycle_writer
-    with lifecycle_writer(), _project_lock(root):
+    with _project_lock(root):
         yield
 
 
@@ -988,16 +986,11 @@ def _project_lock(root):
     """Per-project create lock: two concurrent ensure_instance() calls for the
     same project serialize, so the second sees the first's result instead of
     racing to create a duplicate instance. Hold this around the
-    'check registry -> create -> record' critical section."""
-    rt = _ensure_runtime()
-    h = hashlib.sha1(_canonical(root).encode()).hexdigest()[:16]
-    fh = open(rt / "locks" / f"{h}.lock", "w")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    'check registry -> create -> record' critical section. Reentrant within
+    one thread; it does not take the host-wide registry writer lock."""
+    from sandbox.project_registry.lifecycle import project_writer
+    with project_writer(_canonical(root), _ensure_runtime() / "locks"):
         yield
-    finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        fh.close()
 
 
 # --------------------------------------------------------------------------- #

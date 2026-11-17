@@ -625,8 +625,9 @@ class RuntimeService:
     def invoke(self, request: OperationRequest) -> OperationResult | OperationError:
         if request.operation in {'ensure', 'apply', 'destroy', 'start', 'stop',
                                  'resume', 'suspend', 'ownership_repair'}:
-            from sandbox.project_registry.lifecycle import lifecycle_writer
-            with lifecycle_writer():
+            # Per-project only: other projects' lifecycle operations proceed.
+            from sandbox.project_registry.lifecycle import project_writer
+            with project_writer(request.project_root):
                 return self._invoke_coordinated(request)
         return self._invoke_coordinated(request)
 

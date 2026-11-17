@@ -15,6 +15,7 @@ from typing import Any, Callable
 from sandbox.jobs.models import (normalize_output_page_bytes,
                                  normalize_output_wait_seconds, validate_ack_job_id)
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
+from sandbox.transports.job_deploy import job_deploy_options
 from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT, deployed_source, require_retained_acceptance
 
 
@@ -588,9 +589,6 @@ class RemoteJobTransport:
         self._deploy_accepts_push_timeout = self._accepts_keyword(
             deploy, "push_timeout"
         )
-        self._deploy_accepts_diverged_fallback = self._accepts_keyword(
-            deploy, "diverged_fallback"
-        )
         # The VPS runtime is staged under SANDBOX_HOME; its CLI is not
         # necessarily on PATH.  Keep the path policy injected by the remote
         # adapter so this transport remains runtime-neutral and testable.
@@ -682,10 +680,7 @@ class RemoteJobTransport:
             deploy_kwargs["push_timeout"] = remote_push_timeout_for_deadline(
                 deployment_timeout
             )
-        if self._deploy_accepts_diverged_fallback:
-            # A job runs the exact deployed tree; a diverged remote branch is
-            # not a reason to refuse it (see deploy_exact_working_tree).
-            deploy_kwargs["diverged_fallback"] = True
+        deploy_kwargs.update(job_deploy_options(self.deploy))
         try:
             deployed = self.deploy(remote, project_root, **deploy_kwargs)
         except NetworkCapacityAdmissionError as exc:

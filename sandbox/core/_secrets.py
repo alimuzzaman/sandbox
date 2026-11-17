@@ -104,9 +104,12 @@ def _write_secret_unlocked(key: str, value: str, path: Path) -> None:
         # The code is a stable reason; the offending line is never included.
         raise SecretError(f"cannot update {path}: {exc.code}") from None
     temporary = path.with_suffix(path.suffix + ".tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_bytes(updated)
-    temporary.chmod(0o600)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Created 0600, never under the caller's umask: a follow attempt runs at 0022.
+    temporary.unlink(missing_ok=True)
+    descriptor = os.open(str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(updated)
     temporary.replace(path)
     path.chmod(0o600)
 

@@ -1064,7 +1064,8 @@ class AttemptScopeTests(unittest.TestCase):
         self.assertRegex(argv[5], r"^--unit=sandbox-follow-0123456789abcdef-[0-9a-f]{8}$")
         # The manager variables reach systemd-run only, never the attempt.
         self.assertEqual(argv[argv.index("--") + 1:],
-                         ["env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", *self.ARGV])
+                         ["sh", "-c", follow_tick.ATTEMPT_UMASK_SH, "sandbox-follow-attempt",
+                          "env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", *self.ARGV])
         self.assertEqual(seen["environment"]["XDG_RUNTIME_DIR"], "/run/user/1001")
         # Each submission gets its own scope, so a replay never collides with a live one.
         self.assertNotEqual(follow_tick.scoped_argv(self.ARGV)[5], follow_tick.scoped_argv(self.ARGV)[5])
@@ -1137,6 +1138,170 @@ class AttemptScopeTests(unittest.TestCase):
                 results[variant] = alive
         # The unscoped control reproduces the bug; the scoped attempt survives.
         self.assertEqual(results, {"scoped": True, "unscoped": False})
+
+
+class AttemptModeTests(unittest.TestCase):
+    """feedback d96eaf4c: under the poll's UMask=0077 a follow must build from the
+    same file modes as a controller apply (umask 0022)."""
+
+    @staticmethod
+    def _modes(root: Path) -> dict:
+        out = {}
+        for path in sorted(root.rglob("*")):
+            if ".git" in path.relative_to(root).parts:
+                continue
+            out[str(path.relative_to(root))] = "link" if path.is_symlink() else oct(os.lstat(path).st_mode & 0o7777)
+        return out
+
+    def _git(self, *argv, cwd=None, umask=0o022):
+        old = os.umask(umask)
+        try:
+            return subprocess.run(["git", *argv], cwd=cwd, check=True, capture_output=True, text=True,
+                                  env=synthetic_environment({"GIT_CONFIG_NOSYSTEM": "1",
+                                                             "HOME": str(self.root)}))
+        finally:
+            os.umask(old)
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        origin = self.root / "origin"
+        (origin / "stacks" / "build").mkdir(parents=True)
+        (origin / "stacks" / "build" / "init.sh").write_text("#!/bin/sh\necho hi\n")
+        os.chmod(origin / "stacks" / "build" / "init.sh", 0o755)
+        (origin / "stacks" / "sandbox.hosting.yml").write_text("name: x\n")
+        (origin / "README").write_text("r\n")
+        os.symlink("README", origin / "LINK")
+        self._git("init", "-q", "-b", "main", cwd=origin)
+        self._git("add", "-A", cwd=origin)
+        self._git("-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "-q", "-m", "c",
+                  cwd=origin)
+        self.commit = self._git("rev-parse", "HEAD", cwd=origin).stdout.strip()
+        self.origin = origin
+
+    def test_a_checkout_under_0077_gets_the_modes_a_controller_checkout_gets(self):
+        controller = self.root / "controller"
+        self._git("clone", "-q", str(self.origin), str(controller), umask=0o022)
+        follow = self.root / "follow"
+        self._git("clone", "-q", "--no-checkout", str(self.origin), str(follow), umask=0o077)
+        old = os.umask(0o077)
+        try:
+            git.checkout(follow, self.commit, "main")
+        finally:
+            os.umask(old)
+        expected = self._modes(controller)
+        self.assertEqual(expected["stacks/build/init.sh"], "0o755")
+        self.assertEqual(expected["stacks/sandbox.hosting.yml"], "0o644")
+        self.assertEqual(self._modes(follow), expected)
+
+    def test_an_older_clone_checked_out_under_0077_is_repaired(self):
+        follow = self.root / "follow"
+        self._git("clone", "-q", str(self.origin), str(follow), umask=0o077)
+        self.assertEqual(self._modes(follow)["stacks/build/init.sh"], "0o700")
+        # What an earlier 0077 attempt's prepare left behind, untracked.
+        old = os.umask(0o077)
+        try:
+            (follow / "vendor" / "pkg").mkdir(parents=True)
+            (follow / "vendor" / "pkg" / "lib.php").write_text("<?php\n")
+            (follow / "build.zip").write_text("zip")
+            (follow / "tool").write_text("#!/bin/sh\n")
+            os.chmod(follow / "tool", 0o700)
+            (follow / "links").mkdir()
+            os.symlink("../README", follow / "links" / "readme")
+            outside = self.root / "outside.txt"
+            outside.write_text("x")
+            os.chmod(outside, 0o600)
+            os.symlink(str(outside), follow / "escape")
+            git.checkout(follow, self.commit, "main")  # nothing to rewrite: same commit
+        finally:
+            os.umask(old)
+        modes = self._modes(follow)
+        self.assertEqual((modes["stacks/build/init.sh"], modes["README"], modes["stacks"]),
+                         ("0o755", "0o644", "0o755"))
+        self.assertEqual((modes["vendor"], modes["vendor/pkg/lib.php"], modes["build.zip"],
+                          modes["tool"], modes["links"]),
+                         ("0o755", "0o644", "0o644", "0o755", "0o755"))
+        self.assertEqual(oct(os.stat(follow).st_mode & 0o777), "0o755")
+        self.assertEqual(oct(os.stat(follow / ".git").st_mode & 0o777), "0o700")
+        # Symlinks are never followed out of the checkout.
+        self.assertEqual(oct(os.stat(outside).st_mode & 0o777), "0o600")
+
+    def test_the_stack_worktree_an_attempt_adds_gets_controller_modes(self):
+        """The image source is a worktree the attempt adds (host_stack._add_worktree)."""
+        controller = self.root / "controller"
+        self._git("clone", "-q", str(self.origin), str(controller), umask=0o022)
+        follow = self.root / "follow"
+        self._git("clone", "-q", str(self.origin), str(follow), umask=0o077)
+        worktree = self.root / "source"
+        old = os.umask(0o077)
+        try:
+            subprocess.run(["sh", "-c", follow_tick.ATTEMPT_UMASK_SH, "attempt",
+                            "git", "-C", str(follow), "worktree", "add", "-q", "--detach",
+                            str(worktree), self.commit],
+                           check=True, capture_output=True, timeout=60,
+                           env=synthetic_environment({"HOME": str(self.root)}))
+        finally:
+            os.umask(old)
+        self.assertEqual(self._modes(worktree), self._modes(controller))
+
+    def test_personal_secrets_are_never_written_under_the_attempts_umask(self):
+        from sandbox.core import _secrets
+        target = self.root / "secrets.env"
+        created = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *args, **kwargs):
+            if str(path).endswith(".tmp"):
+                created.append(mode)
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        old = os.umask(0o022)
+        try:
+            with patch.object(_secrets.os, "open", spy):
+                _secrets.write_secret("SANDBOX_TEST_KEY", "value-1", path=target)
+        finally:
+            os.umask(old)
+        self.assertEqual(created, [0o600])
+        self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o600")
+
+    def test_the_attempt_command_runs_with_umask_0022_under_a_0077_parent(self):
+        argv = follow_tick.scoped_argv([sys.executable, "-c", "import os; print(oct(os.umask(0)))",
+                                        "--attempt", "0123456789abcdef"])
+        inner = argv[argv.index("--") + 1:]
+        old = os.umask(0o077)
+        try:
+            result = subprocess.run(inner, capture_output=True, text=True, timeout=30)
+        finally:
+            os.umask(old)
+        self.assertEqual(result.stdout.strip(), "0o22", result.stderr)
+
+    def test_files_an_attempt_writes_from_a_umask_0077_poll_unit(self):
+        """A real oneshot user unit with UMask=0077, like sandbox-stack-follow.service."""
+        environment = {**os.environ, **follow_tick.user_manager_environment()}
+        if shutil.which("systemd-run") is None or subprocess.run(
+                ["systemctl", "--user", "show-environment"], capture_output=True,
+                env=environment, timeout=10).returncode != 0:
+            self.skipTest("no systemd user manager")
+        poll = self.root / "poll.py"
+        poll.write_text("import json, subprocess, sys\n"
+                        "raise SystemExit(subprocess.run(json.loads(sys.argv[1])).returncode)\n")
+        results = {}
+        for variant in ("scoped", "unscoped"):
+            target = self.root / f"{variant}.out"
+            inner = [sys.executable, "-c", f"open({str(target)!r}, 'w').write('x')",
+                     "--attempt", "0123456789abcdef"]
+            argv = follow_tick.scoped_argv(inner) if variant == "scoped" else inner
+            completed = subprocess.run(
+                ["systemd-run", "--user", "--wait", "--quiet", "--collect",
+                 f"--unit=sandbox-test-follow-umask-{secrets.token_hex(4)}",
+                 "-p", "Type=oneshot", "-p", "UMask=0077",
+                 "--setenv=XDG_RUNTIME_DIR=" + environment["XDG_RUNTIME_DIR"],
+                 "--", sys.executable, str(poll), json.dumps(argv)],
+                capture_output=True, text=True, env=environment, timeout=60)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            results[variant] = oct(os.stat(target).st_mode & 0o777)
+        self.assertEqual(results, {"scoped": "0o644", "unscoped": "0o600"})
 
 
 if __name__ == "__main__":

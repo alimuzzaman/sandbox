@@ -35,8 +35,10 @@ class _LocalRemote:
         self.calls += 1
         if self.fail:
             raise OSError("ssh: connect to host 192.0.2.1 token=secret")
+        # bin/ first: a test may put a fake systemctl there, so the gate never
+        # reads the host's real control service.
         env = synthetic_environment({"SANDBOX_HOME": str(self.home), "HOME": str(self.home),
-               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
+               "PATH": f"{self.home}/bin:{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         return subprocess.run(["sh", "-c", command], env=env, capture_output=True,
                               text=True, timeout=timeout)
 
@@ -422,6 +424,13 @@ class PinTests(unittest.TestCase):
         """A serving release with scoped supervisors does not hold the lock through the install."""
         path, repository = self._registry()
         os.symlink("current", self.remote_home / "sb-src")
+        fake = self.remote_home / "bin" / "systemctl"
+        fake.parent.mkdir()
+
+        def serving(main_pid):
+            fake.write_text(f"#!/bin/sh\necho {main_pid}\n")
+            fake.chmod(0o755)
+        serving(0)  # no control service running
         probe = (f"python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1], timeout=0.2); "
                  f"c.execute(\"BEGIN IMMEDIATE\"); c.rollback()' {path}")
         # A legacy release in the release layout (no scope.py) keeps it held.
@@ -432,6 +441,16 @@ class PinTests(unittest.TestCase):
         scope.write_text("")
         # Admission and running supervisors' writes go through during the install.
         self.assertEqual(self._gated(probe).returncode, 0)
+        # A running service started from a pre-scope release (its cwd) keeps it held.
+        old_release = self.remote_home / "old-release"
+        old_release.mkdir()
+        sleeper = subprocess.Popen(["sleep", "60"], cwd=old_release, env=synthetic_environment(),
+                                   stdin=subprocess.DEVNULL)
+        self.addCleanup(lambda: (sleeper.kill(), sleeper.wait(10)))
+        serving(sleeper.pid)
+        if sys.platform.startswith("linux"):
+            self.assertEqual(self._gated(f"if {probe} 2>/dev/null; then exit 9; fi").returncode, 0)
+        serving(0)
         os.unlink(self.remote_home / "sb-src")
         self.assertEqual(self._gated(f"if {probe} 2>/dev/null; then exit 9; fi").returncode, 0)
 

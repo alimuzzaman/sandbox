@@ -167,7 +167,9 @@ class StackUpKeepsSitesTest(unittest.TestCase):
                 record = registry.get("r", "demo")
                 record["sites"] = [site]
                 registry.put(record)
-            ths.host_stack._up(self.args("up", confirm=True, request_id="second"))
+            # The first apply finished, so a second up may run.
+            with mock.patch.object(ths.host_stack, "job_view", return_value={"lifecycle": "succeeded"}):
+                ths.host_stack._up(self.args("up", confirm=True, request_id="second"))
         self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["sites"], [site])
 
     def test_first_up_has_no_sites_key(self):

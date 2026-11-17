@@ -37,6 +37,8 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 SOURCE_CONTENT_VERSION = 1
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
+from sandbox.jobs.launch_recovery import launch_lost, lost_launch_result
+
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
 # An accepted job's supervisor records its identity within seconds of launch;
 # one that has not after this long was lost with its launcher.
@@ -972,20 +974,6 @@ class JobService:
         query = dict(query or {})
         return self.repository.list(**query)
 
-    def _launch_lost(self, row: dict, *, now: datetime | None = None) -> bool:
-        """An accepted local job whose supervisor never recorded itself in time."""
-        if row.get("lifecycle") != Lifecycle.ACCEPTED.value or row.get("target_kind") != "local":
-            return False
-        try:
-            since = datetime.fromisoformat(str(row.get("updated_at", "")).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return False
-        if since.tzinfo is None or (now or datetime.now(timezone.utc)) - since <= timedelta(
-                seconds=SUPERVISOR_LAUNCH_GRACE_SECONDS):
-            return False
-        process = (self.repository.snapshot(row["job_id"]) or {}).get("process") or {}
-        return not process.get("supervisor_pid")
-
     @staticmethod
     def _queue_expired(row: dict, *, now: datetime | None = None) -> bool:
         """Whether an accepted/queued job is past any point it could still matter.
@@ -1091,7 +1079,7 @@ class JobService:
                 interrupted.append(row["job_id"])
                 continue
             if row["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
-                if self._launch_lost(row):
+                if launch_lost(row, self.repository.snapshot, SUPERVISOR_LAUNCH_GRACE_SECONDS):
                     # Accepted, a slot held, but no supervisor ever recorded
                     # itself: the launch died with its launcher (a service
                     # stopped while systemd-run was still in its cgroup, a
@@ -1100,10 +1088,7 @@ class JobService:
                     try:
                         self.repository.transition(row["job_id"], Lifecycle.FAILED,
                             termination_reason="supervisor_launch_failed", output_completeness="unknown",
-                            result_json=__import__("json").dumps({
-                                "reconciled": True,
-                                "evidence": "accepted with no supervisor within the launch grace",
-                            }, sort_keys=True))
+                            result_json=lost_launch_result())
                         if self.scheduler is not None:
                             self.scheduler.release(row["job_id"])
                         self._finalize_terminal_workspace(row["job_id"])

@@ -623,13 +623,19 @@ def recheck_command(*, identity, runtime_dir, port, owner, engine_id, gate_owner
     return shlex.join(["python3", "-c", program, json.dumps(config)])
 
 
-def lock_context_command(command, *, uid, locks):
+LOCK_BUSY_EXIT = 75  # flock -E: the lock stayed held for the whole wait
+
+
+def lock_context_command(command, *, uid, locks, wait=30):
     """Keep selected account/groups and a fixed Docker environment across sudo.
 
     Values travel on anonymous stdin, never argv or a named file. The receiver
     drops root before both the daemon-bound recheck and the original Compose up.
+    A lock still held after ``wait`` seconds exits LOCK_BUSY_EXIT, never runs
+    ``command``.
     """
-    if type(uid) is not int or uid < 0 or len(locks) != 2:
+    if (type(uid) is not int or uid < 0 or not 1 <= len(locks) <= 2
+            or type(wait) is not int or not 1 <= wait <= 86400):
         _fail("invalid lock context")
     for path in locks:
         if type(path) is not str or not path.startswith('/run/lock/'):
@@ -657,8 +663,9 @@ if os.geteuid()!=expected or os.getegid()!=c['gid'] or sorted(os.getgroups())!=s
 os.chdir(c['cwd']);os.umask(c['umask'])
 os.execve('/bin/sh',['sh','-c',command],e)
 '''
-    locked = ['flock', '-w', '30', locks[0], 'flock', '-w', '30', locks[1],
-              'python3', '-I', '-S', '-c', receiver, str(uid), command, json.dumps(keys)]
+    locked = [part for path in locks
+              for part in ('flock', '-w', str(wait), '-E', str(LOCK_BUSY_EXIT), path)]
+    locked += ['python3', '-I', '-S', '-c', receiver, str(uid), command, json.dumps(keys)]
     sender = r'''
 import json,os,subprocess,sys
 uid=int(sys.argv[1]); allowed=json.loads(sys.argv[2]); argv=json.loads(sys.argv[3])

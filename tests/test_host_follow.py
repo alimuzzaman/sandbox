@@ -622,7 +622,7 @@ class AttemptTests(FollowCase):
 
     def job_view(self, _job_id):
         return {"lifecycle": self.lifecycles.pop(0) if len(self.lifecycles) > 1 else self.lifecycles[0],
-                "exit_code": 1}
+                "exit_code": getattr(self, "exit_code", 1)}
 
     def busy(self, _record, home):
         return self.busy_answers.pop(0) if self.busy_answers else (None, None)
@@ -672,6 +672,16 @@ class AttemptTests(FollowCase):
         self.assertFalse(result["ok"])
         self.assertTrue(result["reason"].startswith("stack_apply_failed"))
         self.assertEqual(self.store.read("dev")["state"]["failed_heads"], self.heads)
+
+    def test_a_busy_compose_publish_lock_is_retried_not_failed(self):
+        from sandbox.hosting.ports import LOCK_BUSY_EXIT
+        self.lifecycles, self.exit_code = ["failed"], LOCK_BUSY_EXIT
+        result = self.run_attempt()
+        self.assertEqual(result["status"], "busy")
+        self.assertTrue(result["reason"].startswith("hosting_compose_publish_busy"), result["reason"])
+        state = self.store.read("dev")["state"]
+        self.assertIsNone(state["failed_heads"])
+        self.assertIsNone(state["applied"])
 
     def test_a_moved_checkout_is_refused(self):
         self.heads = {"hub": HEAD_A, "setup": HEAD_B}

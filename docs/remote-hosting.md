@@ -955,7 +955,9 @@ the apply fails with `blue_green_side_unhealthy` while the old revision keeps
 serving, untouched. List every database and other stateful server in
 `deploy.blue_green.shared` (they stay single, in the base project, and skip the
 pushed-revision check); services publishing their own host port (Mailpit) and the
-login gate are shared automatically. `deploy.strategy: in-place` restores the
+login gate are shared automatically. A side-loaded service that mounts data
+(a named volume or writable bind) must be listed in `deploy.blue_green.colored`
+to say two copies may run on it. `deploy.strategy: in-place` restores the
 plain recreate; `blue-green` refuses an ineligible apply instead of falling back.
 Init services, a private target, a first apply, or an undeclared stateful service
 mean `auto` recreates in place and prints why. Design, limits and phases:

@@ -10,6 +10,7 @@ moves back.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
 STRATEGIES = ("auto", "blue-green", "in-place")
@@ -23,27 +24,37 @@ class Ineligible(ValueError):
 
 
 def validate(deploy: dict, compose: dict) -> dict:
-    """Return {"strategy", "shared"} from deploy.strategy / deploy.blue_green."""
+    """Return {"strategy", "shared", "colored"} from deploy.strategy / deploy.blue_green.
+
+    shared: stateful services that stay single. colored: side-loaded services
+    allowed to mount data (a named volume or writable bind) beside the running
+    revision, e.g. WordPress on its docroot; any other data mount refuses.
+    """
     strategy = deploy.get("strategy", "auto")
     if strategy not in STRATEGIES:
         raise ValueError("deploy.strategy must be auto, blue-green or in-place")
     block = deploy.get("blue_green", {})
-    if not isinstance(block, dict) or set(block) - {"shared"}:
-        raise ValueError("deploy.blue_green accepts only shared")
-    shared = block.get("shared", [])
-    if (not isinstance(shared, list) or len(set(shared)) != len(shared)
-            or any(not isinstance(name, str) or not _SERVICE.fullmatch(name) for name in shared)):
-        raise ValueError("deploy.blue_green.shared must be a list of service names")
+    if not isinstance(block, dict) or set(block) - {"shared", "colored"}:
+        raise ValueError("deploy.blue_green accepts only shared and colored")
     declared = [compose["service"], *compose.get("background_services", []),
                 *compose.get("init_services", [])]
-    unknown = [name for name in shared if name not in declared]
-    if unknown:
-        raise ValueError("deploy.blue_green.shared names undeclared services: " + ", ".join(unknown))
-    if compose["service"] in shared:
+    lists = {}
+    for key in ("shared", "colored"):
+        names = block.get(key, [])
+        if (not isinstance(names, list) or len(set(names)) != len(names)
+                or any(not isinstance(name, str) or not _SERVICE.fullmatch(name) for name in names)):
+            raise ValueError(f"deploy.blue_green.{key} must be a list of service names")
+        unknown = [name for name in names if name not in declared]
+        if unknown:
+            raise ValueError(f"deploy.blue_green.{key} names undeclared services: " + ", ".join(unknown))
+        lists[key] = list(names)
+    if compose["service"] in lists["shared"]:
         raise ValueError("deploy.blue_green.shared cannot include the primary compose.service")
-    if strategy == "in-place" and shared:
-        raise ValueError("deploy.blue_green.shared needs deploy.strategy auto or blue-green")
-    return {"strategy": strategy, "shared": list(shared)}
+    if set(lists["shared"]) & set(lists["colored"]):
+        raise ValueError("a service cannot be both deploy.blue_green.shared and colored")
+    if strategy == "in-place" and (lists["shared"] or lists["colored"]):
+        raise ValueError("deploy.blue_green needs deploy.strategy auto or blue-green")
+    return {"strategy": strategy, **lists}
 
 
 def revision_exempt(validated: dict) -> set[str]:
@@ -91,13 +102,15 @@ def split(model: dict, validated: dict, *, gate_service: str | None = None) -> d
         colored.append(name)
     if compose["service"] not in colored:
         raise Ineligible("the primary service must be side-loadable")
-    if not plan.get("shared"):
-        # Without a declared stateful set, only a stack with no named volume on a
-        # colored service is safe: two database servers on one volume corrupt it.
-        stateful = [name for name in colored if _named_volumes(services[name])]
-        if stateful:
-            raise Ineligible("deploy.blue_green.shared is not declared and "
-                             + ", ".join(sorted(stateful)) + " mount named volumes")
+    # Two database servers on one data directory corrupt it: a colored service
+    # may mount data only when the manifest says it is safe to run twice.
+    allowed = set(plan.get("colored") or ())
+    stateful = sorted(name for name in colored
+                      if _data_mounts(services[name]) and name not in allowed)
+    if stateful:
+        raise Ineligible(", ".join(stateful) + " mount data; list each in "
+                         "deploy.blue_green.shared (stateful) or colored (safe to run twice)")
+    known = set(colored) | shared
     for name in colored:
         service = services[name]
         if service.get("container_name"):
@@ -107,14 +120,35 @@ def split(model: dict, validated: dict, *, gate_service: str | None = None) -> d
         networks = service.get("networks") or {}
         if set(networks) - {"default"}:
             raise Ineligible(f"{name} joins a declared network")
-        if name != compose["service"] and service.get("ports"):
-            raise Ineligible(f"{name} publishes host ports")
+        for key in ("links", "external_links", "volumes_from", "secrets", "configs"):
+            if service.get(key):
+                raise Ineligible(f"{name} uses {key}")
+        for key in ("ipc", "pid"):
+            if str(service.get(key) or "").startswith(("service:", "container:")):
+                raise Ineligible(f"{name} shares another service's {key} namespace")
+        outside = sorted(set(service.get("depends_on") or {}) - known)
+        if outside:
+            # In place would start them as dependencies; the side never does.
+            raise Ineligible(f"{name} depends on services apply does not start: " + ", ".join(outside))
     return {"colored": colored, "shared": sorted(shared & set(services))}
 
 
 def _named_volumes(service: dict) -> list[str]:
     return [item.get("source") for item in service.get("volumes") or ()
             if isinstance(item, dict) and item.get("type") == "volume" and item.get("source")]
+
+
+def _data_mounts(service: dict) -> list[str]:
+    """Named volumes and writable bind mounts: anything two copies could both write."""
+    found = []
+    for item in service.get("volumes") or ():
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "volume" and item.get("source"):
+            found.append(item["source"])
+        elif item.get("type") == "bind" and not item.get("read_only"):
+            found.append(str(item.get("source")))
+    return found
 
 
 def render_side(model: dict, validated: dict, *, base_project: str, colored: list[str],
@@ -158,6 +192,8 @@ def render_side(model: dict, validated: dict, *, base_project: str, colored: lis
 
 
 _UPSTREAM = r"(?<![0-9.])127\.0\.0\.1:{port}(?![0-9])"
+# nginx.render_host_conf: location = /.well-known/sandbox-edge-route { ... return 200 "<24 hex>\n"; }
+_MARKER = re.compile(r'(?<=return 200 ")([0-9a-f]{24})(?=\\n";)')
 
 
 def swap_upstream(text: str, old: int, new: int) -> str:
@@ -168,6 +204,12 @@ def swap_upstream(text: str, old: int, new: int) -> str:
     swapped, count = pattern.subn(f"127.0.0.1:{int(new)}", text)
     if count == 0:
         raise Ineligible(f"the installed route has no 127.0.0.1:{int(old)} upstream")
+    # The nginx reload probe proves a route loaded by its marker. A marker
+    # rendered for P would also answer from the P route, so the side route
+    # carries its own, derived from the old one and the new port.
+    for marker in set(_MARKER.findall(swapped)):
+        fresh = hashlib.sha256(f"{marker}:{int(new)}".encode()).hexdigest()[:24]
+        swapped = swapped.replace(marker, fresh)
     return swapped
 
 

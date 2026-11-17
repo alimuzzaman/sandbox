@@ -11,9 +11,10 @@ COMPOSE = {"service": "edge", "container_port": 80,
            "init_services": []}
 
 
-def validated(shared=("db", "wp-db", "wp-setup"), strategy="auto"):
-    plan = bg.validate({"strategy": strategy, "blue_green": {"shared": list(shared)}}
-                       if shared else {"strategy": strategy}, COMPOSE)
+def validated(shared=("db", "wp-db", "wp-setup"), strategy="auto", colored=("wordpress",)):
+    block = {key: list(value) for key, value in (("shared", shared), ("colored", colored)) if value}
+    plan = bg.validate({"strategy": strategy, "blue_green": block} if block else {"strategy": strategy},
+                       COMPOSE)
     return {"project": "xspeed-hub-demo", "environment": "sandbox", "compose": COMPOSE,
             "deploy": {"blue_green_plan": plan}}
 
@@ -45,20 +46,22 @@ def model():
 
 class ValidateTests(unittest.TestCase):
     def test_defaults_and_refusals(self):
-        self.assertEqual(bg.validate({}, COMPOSE), {"strategy": "auto", "shared": []})
+        self.assertEqual(bg.validate({}, COMPOSE), {"strategy": "auto", "shared": [], "colored": []})
         for deploy, message in (
                 ({"strategy": "rolling"}, "deploy.strategy"),
                 ({"blue_green": {"shared": ["nope"]}}, "undeclared"),
                 ({"blue_green": {"shared": ["edge"]}}, "primary"),
                 ({"blue_green": {"shared": ["db", "db"]}}, "list of service names"),
-                ({"blue_green": {"colored": ["db"]}}, "accepts only shared"),
+                ({"blue_green": {"other": ["db"]}}, "accepts only shared and colored"),
+                ({"blue_green": {"shared": ["db"], "colored": ["db"]}}, "both"),
+                ({"blue_green": {"colored": ["nope"]}}, "undeclared"),
                 ({"strategy": "in-place", "blue_green": {"shared": ["db"]}}, "auto or blue-green")):
             with self.subTest(deploy=deploy), self.assertRaisesRegex(ValueError, message):
                 bg.validate(deploy, COMPOSE)
 
     def test_only_shared_services_skip_the_revision_check(self):
         self.assertEqual(bg.revision_exempt(validated()), {"db", "wp-db", "wp-setup"})
-        self.assertEqual(bg.revision_exempt(validated(shared=())), set())
+        self.assertEqual(bg.revision_exempt(validated(shared=(), colored=())), set())
         self.assertEqual(bg.revision_exempt({"deploy": {}}), set())
 
 
@@ -69,13 +72,38 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(split["shared"], ["db", "mailpit", "sandbox-login", "wp-db", "wp-setup"])
 
     def test_undeclared_stateful_services_are_never_doubled(self):
-        with self.assertRaisesRegex(bg.Ineligible, "db, wordpress, wp-db, wp-setup mount named volumes"):
-            bg.split(model(), validated(shared=()))
+        with self.assertRaisesRegex(bg.Ineligible, "db, wordpress, wp-db, wp-setup mount data"):
+            bg.split(model(), validated(shared=(), colored=()))
+        # A shared list alone does not license other data mounts (a forgotten redis).
+        with self.assertRaisesRegex(bg.Ineligible, "^wordpress mount data"):
+            bg.split(model(), validated(colored=()))
+
+    def test_a_writable_bind_mount_is_data_and_a_read_only_one_is_not(self):
+        for read_only, eligible in ((False, False), (True, True)):
+            with self.subTest(read_only=read_only):
+                changed = model()
+                changed["services"]["hub"]["volumes"] = [
+                    {"type": "bind", "source": "/srv/data", "target": "/var/lib/x", "read_only": read_only}]
+                if eligible:
+                    bg.split(changed, validated())
+                else:
+                    with self.assertRaisesRegex(bg.Ineligible, "hub mount data"):
+                        bg.split(changed, validated())
+
+    def test_a_dependency_apply_does_not_start_is_ineligible(self):
+        changed = model()
+        changed["services"]["hub"]["depends_on"]["cache"] = {"condition": "service_started"}
+        with self.assertRaisesRegex(bg.Ineligible, "hub depends on services apply does not start: cache"):
+            bg.split(changed, validated())
 
     def test_colored_services_that_cannot_run_twice_are_ineligible(self):
         for change, message in ((("hub", "container_name", "x"), "container_name"),
                                 (("hub", "network_mode", "host"), "network_mode"),
-                                (("hub", "networks", {"front": None}), "declared network")):
+                                (("hub", "networks", {"front": None}), "declared network"),
+                                (("hub", "links", ["db"]), "links"),
+                                (("hub", "volumes_from", ["db"]), "volumes_from"),
+                                (("hub", "secrets", [{"source": "s"}]), "secrets"),
+                                (("hub", "pid", "service:db"), "pid namespace")):
             with self.subTest(change=change):
                 bad = model()
                 bad["services"][change[0]][change[1]] = change[2]
@@ -121,9 +149,22 @@ class SwapTests(unittest.TestCase):
         self.assertIn("127.0.0.1:21044", swapped)
         self.assertIn("127.0.0.1:180445", swapped)
         self.assertIn("10.127.0.0.1:18044", swapped)
-        self.assertEqual(swapped.replace("19044", "18044"), self.NGINX)
+        self.assertEqual(swapped.replace("19044", "18044"), self.NGINX)  # no marker here
         self.assertTrue(bg.serves_port(swapped, 19044))
         self.assertFalse(bg.serves_port(swapped, 18044))
+
+    def test_the_nginx_route_marker_changes_with_the_upstream(self):
+        text = ('server {\n    location = /.well-known/sandbox-edge-route {\n'
+                '        default_type text/plain;\n        return 200 "0123456789abcdef01234567\\n";\n    }\n'
+                '    location / { proxy_pass http://127.0.0.1:18044; }\n}\n'
+                'server {\n    location = /.well-known/sandbox-edge-route { return 200 "0123456789abcdef01234567\\n"; }\n}\n')
+        swapped = bg.swap_upstream(text, 18044, 19044)
+        from sandbox.hosting.front_door import nginx
+        marker = nginx.route_marker(swapped)
+        self.assertIsNotNone(marker)
+        self.assertNotEqual(marker, "0123456789abcdef01234567")
+        self.assertEqual(swapped.count(marker), 2)
+        self.assertNotIn("0123456789abcdef01234567", swapped)
 
     def test_caddy_upstream(self):
         text = "a.example {\n    reverse_proxy 127.0.0.1:18044\n}\n"
@@ -151,7 +192,8 @@ class SideLoadTests(unittest.TestCase):
 
     ROUTE = "server { location / { proxy_pass http://127.0.0.1:18044; } }\n"
 
-    def run_start(self, *, healthy=True, route=ROUTE, side_running=False, strategy="auto"):
+    def run_start(self, *, healthy=True, route=ROUTE, side_running=False, strategy="auto",
+                  stopped=(), side_start_fails=False):
         import json
         import subprocess
         from unittest import mock
@@ -164,15 +206,24 @@ class SideLoadTests(unittest.TestCase):
             checked.append(command)
             if command.startswith("docker ps -aq --filter"):
                 return "abc\n" if side_running else ""
-            if " ps -q --status running " in command:
-                return "base\n"
+            if " ps -q --status running " in command or command.startswith("docker ps -q --filter"):
+                return "" if any(f"service={name}" in command for name in stopped) else "base\n"
             return ""
         target = validated(strategy=strategy)
         runtime = {"loopback_port": 18044, "compose_project": "sandbox-host-xspeed-hub-demo-sandbox",
                    "healthcheck": {"path": "/healthz", "statuses": [200]}}
         side = hosting_cmd._SideLoad({}, {**target, "login_service": None}, runtime, edge=edge,
                                      caddy_name="sandbox-host-xspeed-hub-demo-sandbox",
-                                     previous_route=route, previous_entry={"loopback_port": 18044})
+                                     previous_route=route, previous_entry={"loopback_port": 18044},
+                                     runtime_dir="/rt")
+        self.side = side
+        original = remote_checked
+
+        def remote_checked(entry, command, timeout=180, **kwargs):
+            if side_start_fails and kwargs.get("log_phase") == "blue_green_side_start":
+                checked.append(command)
+                raise RuntimeError("port recheck refused")
+            return original(entry, command, timeout, **kwargs)
         health = mock.Mock(side_effect=None if healthy else RuntimeError("remote healthcheck failed"))
         with mock.patch.object(hosting_cmd, "_remote_checked", side_effect=remote_checked), \
                 mock.patch.object(hosting_cmd.remote, "ssh_run_bounded", return_value=subprocess.CompletedProcess(
@@ -204,9 +255,57 @@ class SideLoadTests(unittest.TestCase):
                          ("sandbox-hostside-xspeed-hub-demo-sandbox", 19044))
         self.assertIn("up -d --no-build --pull never --no-deps edge hub wordpress", command)
         self.assertIn("--alias db", command)
+        self.assertNotIn("--alias sandbox-login", command)  # the gate stays off the side
         base = side.base_up_command("BASE", "")
         self.assertIn("BASE up -d --no-build --no-deps --remove-orphans db mailpit sandbox-login wp-db wp-setup && ", base)
+        # Recreated shared containers rejoin the side network before colored ones go.
+        self.assertLess(base.index("--alias db"), base.index("--force-recreate"))
         self.assertTrue(base.endswith("--force-recreate --renew-anon-volumes edge hub wordpress"))
+
+    def test_a_refused_port_recheck_never_runs_the_side_up(self):
+        import os
+        import subprocess
+        import tempfile
+        *_, locked, _, _ = self.run_start()
+        _, _, up = locked.call_args.args
+        with tempfile.TemporaryDirectory() as root:
+            log = os.path.join(root, "calls")
+            fake = os.path.join(root, "docker")
+            with open(fake, "w") as handle:
+                handle.write(f"#!/bin/sh\necho \"$*\" >> {log}\necho id1\n")
+            os.chmod(fake, 0o755)
+            env = {**os.environ, "PATH": root + os.pathsep + os.environ["PATH"]}
+            for check in ("false", "true"):
+                with self.subTest(check=check):
+                    open(log, "w").close()
+                    result = subprocess.run(["sh", "-c", check + " && " + up], env=env,
+                                            capture_output=True, text=True, timeout=30)
+                    calls = open(log).read()
+                    if check == "false":
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn("compose", calls)
+                        self.assertNotIn("network", calls)
+                    else:
+                        self.assertIn("compose", calls)
+
+    def test_a_side_that_cannot_start_falls_back_under_auto(self):
+        side, edge, checked, *_, result, error = self.run_start(side_start_fails=True)
+        self.assertIsNone(error)
+        self.assertIs(result, False)
+        self.assertIn("could not start", side.skipped)
+        edge.configure.assert_not_called()
+        self.assertTrue(any("docker network rm" in command for command in checked))
+
+    def test_a_stopped_shared_service_falls_back(self):
+        side, edge, checked, write, *_, result, error = self.run_start(stopped=("wp-db",))
+        self.assertIs(result, False)
+        self.assertIn("shared services are not running: wp-db", side.skipped)
+        write.assert_not_called()
+
+    def test_base_up_never_runs_unscoped(self):
+        side, *_ = self.run_start(route="x")  # ineligible: nothing loaded
+        with self.assertRaisesRegex(Exception, "no colored services"):
+            side.base_up_command("BASE", "")
 
     def test_an_unhealthy_side_leaves_route_and_base_untouched(self):
         side, edge, checked, *_, error = self.run_start(healthy=False)
@@ -216,13 +315,35 @@ class SideLoadTests(unittest.TestCase):
         self.assertTrue(any("docker network rm" in command for command in checked))
         self.assertFalse(any("BASE up" in command and "force-recreate" in command for command in checked))
 
-    def test_a_side_left_serving_is_reused(self):
+    def test_a_side_left_serving_is_reused_with_its_split(self):
         route = self.ROUTE.replace("18044", "19044")
         side, edge, checked, write, *_ = self.run_start(route=route, side_running=True)
         self.assertTrue(side.serving)
         self.assertEqual(side.route, route)
         write.assert_not_called()
         edge.configure.assert_not_called()
+        self.assertTrue(any("--alias db" in command for command in checked))  # reconnected
+        base = side.base_up_command("BASE", "")
+        self.assertTrue(base.endswith("--force-recreate --renew-anon-volumes edge hub wordpress"))
+        self.assertNotIn("--force-recreate --renew-anon-volumes db", base)
+
+    def test_an_unhealthy_leftover_side_falls_back(self):
+        route = self.ROUTE.replace("18044", "19044")
+        side, edge, *_, result, error = self.run_start(route=route, side_running=True, healthy=False)
+        self.assertIs(result, False)
+        self.assertFalse(side.serving)
+        self.assertIn("unhealthy", side.skipped)
+
+    def test_finish_clears_the_rollback_target_before_teardown(self):
+        from unittest import mock
+        from sandbox.commands import hosting as hosting_cmd
+        side, *_ = self.run_start()
+        self.assertTrue(side.serving)
+        with mock.patch.object(hosting_cmd, "_remote_checked", side_effect=[
+                "abc\n", RuntimeError("network rm failed")]):
+            side.finish(None)
+        self.assertFalse(side.serving)
+        self.assertIsNone(side.route)
 
     def test_auto_falls_back_and_explicit_blue_green_refuses(self):
         route = "server { proxy_pass http://127.0.0.1:18999; }\n"

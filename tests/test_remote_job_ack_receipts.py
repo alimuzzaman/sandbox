@@ -124,6 +124,18 @@ class RetainedAckTests(unittest.TestCase):
         self.deploy.assert_not_called()
         self.assertEqual(self.calls, [])
 
+    def test_a_server_cli_deployment_failure_is_marked_as_never_submitted(self):
+        from sandbox.application.server_cli import CONTRACT as SERVER_CLI
+        record = {**self.record, 'joined': True, 'control_transport': 'tailscale'}
+        capability = {'capabilities': [SERVER_CLI, CONTRACT, 'job.source-content.v1'],
+                      'target_identity': 't' * 24, 'runtime_revision': 'r' * 24,
+                      'ownership_marker': 'm' * 24, 'target_metadata': {}}
+        self.deploy.side_effect = RuntimeError('not a git checkout')
+        with self.assertRaises(RuntimeError) as raised:
+            self.transport.submit_server_cli(replace(self.client, kind='server-cli'), record, capability)
+        self.assertTrue(raised.exception.server_cli_not_submitted)
+        self.assertEqual(self.calls, [])
+
     def test_clean_deployment_empty_digest_becomes_absent_wire_flag_and_retained_none(self):
         self.deployed.update(dirty=False, dirty_digest='')
         clean = SourceIdentity(self.source.identity, self.source.commit, content_digest=self.source.content_digest)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest.mock import patch
 
 from sandbox.jobs import scope
 from sandbox.remote_runtime import releases
-from tests.subprocess_support import run_test_process
+from tests.subprocess_support import run_test_process, synthetic_environment
 
 OLD, NEW, OTHER = "a" * 24, "b" * 24, "c" * 24
 
@@ -132,6 +133,29 @@ class ReleaseLayoutTest(unittest.TestCase):
         left = sorted(p.name for p in (self.home / "releases").iterdir() if not p.name.startswith("."))
         self.assertEqual(left, sorted(names[-3:]))
         self.assertEqual(os.readlink(self.home / "current"), f"releases/{names[-1]}")
+
+    def test_gc_removes_only_old_unused_upload_stages(self):
+        self._legacy()
+        old = self.home / (".sb-src-stage-" + "a" * 12 + "-" + "b" * 32)
+        tmp = self.home / ".sb-src-stage-tmp.Ab12Cd"
+        fresh = self.home / (".sb-src-stage-" + "c" * 12 + "-" + "d" * 32)
+        used = self.home / ".sb-src-stage-tmp.Zz99Yy"
+        other = self.home / ".sb-src-stage-keepme"
+        for path in (old, tmp, fresh, used, other):
+            (path / "tree").mkdir(parents=True)
+        for path in (old, tmp, used, other):
+            os.utime(path, (1000, 1000))
+        holder = subprocess.Popen(["sleep", "60"], cwd=used, env=synthetic_environment(),
+                                  stdin=subprocess.DEVNULL)
+        self.addCleanup(lambda: (holder.kill(), holder.wait(10)))
+        result = _run(self.home, "gc")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = [old.name, tmp.name] + ([] if sys.platform.startswith("linux") else [used.name])
+        self.assertEqual(json.loads(result.stdout)["stages_removed"], sorted(expected))
+        self.assertFalse(old.exists() or tmp.exists())
+        self.assertTrue(fresh.exists() and other.exists())
+        if sys.platform.startswith("linux"):
+            self.assertTrue(used.exists())
 
     def test_prepare_builds_in_place_and_reuses_a_complete_release(self):
         stage_name = ".sb-src-stage-" + "f" * 12 + "-" + "e" * 32
@@ -267,3 +291,4 @@ class SupervisorScopeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -3061,8 +3061,12 @@ parts inside `pins.INSTALL_GATE`:
 
 After a successful switch the release keeps a copy of its unit, source receipt
 and owner origin record, and releases beyond `current`, `previous` and the last
-3 activated are removed unless a live process runs from them (cwd or command
-line under the release directory).
+3 activated are removed unless a live process runs from them (cwd, command
+line or a mapped file under the release directory). The same cleanup removes
+upload staging directories (`$HOME/sandbox/.sb-src-stage-*`) older than three
+hours (above the longest allowed upload) that no live process uses; prepare
+renames the stage it builds, so these are left only by interrupted or
+pre-release installs.
 
 `sb remote service releases NAME` lists the layout, `current`, `previous` and
 every release. `sb remote service rollback NAME --plan|--confirm` flips

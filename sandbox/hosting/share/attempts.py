@@ -37,6 +37,7 @@ import os
 import re
 import stat
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -152,7 +153,8 @@ _PHASES = {
     "revoked": set(), "expired": set(),
 }
 _MAX_BYTES = 1024 * 1024
-_MAX_ATTEMPTS = 256  # Refuse when full; never discard unresolved identities.
+_MAX_ATTEMPTS = 256  # At capacity, drop the oldest settled attempts; never unresolved ones.
+LEDGER_FULL = "share attempt ledger is full"
 
 
 def _require(condition: bool) -> None:
@@ -442,10 +444,39 @@ class AttemptRepository:
         finally:
             os.close(descriptor)
 
+    @staticmethod
+    def _body(records: tuple[Attempt, ...]) -> bytes:
+        return (json.dumps({"version": 3, "attempts": [asdict(row) for row in records]},
+                           sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    @classmethod
+    def _fits(cls, records: tuple[Attempt, ...]) -> bool:
+        return len(records) <= _MAX_ATTEMPTS and len(cls._body(records)) <= _MAX_BYTES
+
+    @classmethod
+    def _room_for(cls, records: tuple[Attempt, ...], attempt: Attempt, now: int) -> tuple[Attempt, ...]:
+        """``records`` less the oldest settled attempts ``attempt`` needs room for.
+
+        Only revoked or expired attempts whose expiry has passed go: their
+        grants are discharged and their link ids can no longer open anything.
+        """
+        if cls._fits(records + (attempt,)):
+            return records
+        settled = sorted((row for row in records
+                          if row.phase in ("revoked", "expired") and row.expires_at <= now),
+                         key=lambda row: (row.created_at, row.id))
+        dropped = set()
+        for row in settled:
+            dropped.add(row.id)
+            kept = tuple(item for item in records if item.id not in dropped)
+            if cls._fits(kept + (attempt,)):
+                return kept
+        raise AttemptError(f"{LEDGER_FULL}: every recorded share attempt of this stack is still "
+                           "live or unexpired; revoke one (sb host share --revoke) or wait for expiry")
+
     def _write(self, records: tuple[Attempt, ...]) -> None:
         _require(len(records) <= _MAX_ATTEMPTS)
-        body = (json.dumps({"version": 3, "attempts": [asdict(row) for row in records]},
-                           sort_keys=True, separators=(",", ":")) + "\n").encode()
+        body = self._body(records)
         _require(len(body) <= _MAX_BYTES)
         directory = self._local.directory
         staged = "." + self._stem + "." + uuid.uuid4().hex + ".tmp"
@@ -569,7 +600,7 @@ class AttemptRepository:
             # A source id cannot be reused for another attempt on the same gate.
             used = {(grant.target, grant.entry, grant.id) for row in records for grant in row.grants}
             _require(not any((grant.target, grant.entry, grant.id) in used for grant in attempt.grants))
-            self._commit(records + (attempt,))
+            self._commit(self._room_for(records, attempt, int(time.time())) + (attempt,))
             return attempt
 
     def _commit(self, records: tuple[Attempt, ...]) -> None:

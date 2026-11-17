@@ -270,6 +270,40 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.repo.begin_mint(self.plan.id, self.plan.grants[0].id)
         self.assertEqual(other.read(self.plan.id).phase, "prepared")
 
+    # Fable review 8: a full ledger drops its oldest settled attempts.
+
+    def full_ledger(self, phase, expires_at):
+        rows = tuple(replace(self.plan, id=f"a-{index:032x}", created_at=100 + index,
+                             expires_at=expires_at, phase=phase, grants=tuple(
+                                 replace(grant, id=f"l-{index:012x}" if n == 0 else f"l-{index:032x}",
+                                         expires_at=expires_at, disposition=phase)
+                                 for n, grant in enumerate(self.plan.grants)))
+                     for index in range(256))
+        with self.repo.locked():
+            self.repo._commit(rows)
+        return rows
+
+    def test_a_full_ledger_drops_the_oldest_expired_attempt(self):
+        rows = self.full_ledger("expired", 1000)
+        fresh = replace(self.plan, id="a-" + "f" * 32, grants=tuple(
+            replace(grant, id=grant.id[:2] + "e" * (len(grant.id) - 2)) for grant in self.plan.grants))
+        self.assertEqual(self.repo.prepare(fresh), fresh)
+        kept = self.restart().list()
+        self.assertEqual(len(kept), 256)
+        self.assertNotIn(rows[0].id, {row.id for row in kept})
+        self.assertIn(rows[1].id, {row.id for row in kept})
+        self.assertEqual(kept[-1].id, fresh.id)
+
+    def test_a_full_ledger_of_unexpired_attempts_says_it_is_full(self):
+        import time
+        self.full_ledger("revoked", int(time.time()) + 3600)
+        fresh = replace(self.plan, id="a-" + "f" * 32, grants=tuple(
+            replace(grant, id=grant.id[:2] + "e" * (len(grant.id) - 2)) for grant in self.plan.grants))
+        with self.assertRaises(AttemptError) as raised:
+            self.repo.prepare(fresh)
+        self.assertTrue(str(raised.exception).startswith("share attempt ledger is full"), raised.exception)
+        self.assertEqual(len(self.restart().list()), 256)
+
     def test_expiry_keeps_terminal_records_and_grant_ids(self):
         self.repo.prepare(self.plan)
         self.repo.begin_mint(self.plan.id, self.plan.grants[1].id)

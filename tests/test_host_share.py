@@ -463,7 +463,9 @@ class CommandTests(unittest.TestCase):
              patch.object(hosting_cmd, "_with_host_writer_lock",
                           side_effect=lambda _v, _r, callback: callback({}, lambda _s: None)), \
              patch.object(share, "audit_path", return_value=self.audit), \
+             patch.object(host_share.fanout, "root", return_value=self.audit.parent.resolve() / "attempts"), \
              patch.object(host_share, "_audit"):
+            # The ledger root is the test's own directory, never the real SANDBOX_HOME.
             host_share.revoke_share("dev", "l-" + "b" * 12, target="mockups/dev")
         self.assertEqual(revoked.call_args.args[2], "l-" + "b" * 12)
 

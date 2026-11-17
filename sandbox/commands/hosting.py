@@ -683,6 +683,8 @@ _CADDY_LOCK_WAIT_SECONDS = 30
 _CADDY_PHASE_TIMEOUT_SECONDS = 30
 _CADDY_TRANSACTION_TIMEOUT_SECONDS = 150
 _CADDY_LOCK_PATH = "/run/lock/sandbox-hosting-caddy.lock"
+# Serialises port recheck + compose up between targets (_locked_host_compose_up).
+_COMPOSE_PUBLISH_LOCK_PATH = "/run/lock/sandbox-hosting-compose-publish.lock"
 
 
 def _remote_failure_message(text: str, limit: int = 2000) -> str:
@@ -710,9 +712,33 @@ class HostRemoteCommandFailed(RuntimeError):
         self.kill_evidence = kill_evidence
 
 
-# Phases that only build images. A failure here changes nothing the running
-# deployment depends on, so the delivery can be recorded as failed outright.
-_PRE_EFFECT_PHASES = frozenset({"initializer_build", "compose_build"})
+class HostComposePublishBusy(HostRemoteCommandFailed):
+    """Another target's compose up held the publish lock for the whole wait.
+
+    Nothing ran; the apply exits ports.LOCK_BUSY_EXIT so a follow retries it.
+    """
+
+    code = "hosting_compose_publish_busy"
+
+
+def _run_locked_compose_up(entry, command, **kwargs):
+    """_remote_checked for a _locked_host_compose_up command, naming a busy lock."""
+    from sandbox.hosting import ports
+    try:
+        return _remote_checked(entry, command, **kwargs)
+    except HostRemoteCommandFailed as exc:
+        if exc.exit_code != ports.LOCK_BUSY_EXIT:
+            raise
+        raise HostComposePublishBusy(
+            "hosting_compose_publish_busy: another target's compose up held the server's "
+            "compose-publish lock for the whole wait; nothing ran, retry the apply",
+            phase="compose_publish_wait", exit_code=exc.exit_code) from None
+
+
+# Phases that only build images (or never started). A failure here changes
+# nothing the running deployment depends on, so the delivery can be recorded
+# as failed outright.
+_PRE_EFFECT_PHASES = frozenset({"initializer_build", "compose_build", "compose_publish_wait"})
 _SSH_TRANSPORT_EXIT = 255
 
 
@@ -2081,15 +2107,32 @@ def _port_reallocation(args, validated, entry, state, observation):
                                     for section in ("listeners", "publications", "reservations")}}
 
 
-def _locked_host_compose_up(validated, runtime, command):
-    """Same admitted pair, same up, continuous Caddy then nginx locks.
+# A waiting up adds its wait to its own SSH timeout. A blue-green apply can wait
+# twice (side start, then base up); the stack job's deadline carries two waits
+# beyond its 600 s of slack (host_stack._submission_timeout).
+_COMPOSE_PUBLISH_MAX_WAIT_SECONDS = 300
 
-    Privilege is only for the root-owned locks. Run probe and Compose back as
+
+def _compose_publish_lock_wait(validated) -> int:
+    """How long one compose up waits for another before refusing busy."""
+    budget = int(validated["compose"].get("build_timeout_seconds", 900))
+    return min(_COMPOSE_PUBLISH_MAX_WAIT_SECONDS, max(30, budget - 120))
+
+
+def _locked_host_compose_up(validated, runtime, command):
+    """Same admitted pair, same up, under the server's compose-publish lock.
+
+    The lock serialises port recheck + Compose up between targets, so no other
+    target's up binds the admitted pair in between. It is not an edge lock:
+    route installs, certificate reloads and Caddy transactions never wait on a
+    recreate. A lock held past the wait exits ports.LOCK_BUSY_EXIT before
+    anything runs (reported as hosting_compose_publish_busy).
+
+    Privilege is only for the root-owned lock. Run probe and Compose back as
     the observed account, never as root merely because flock requires sudo.
     Route transactions must remain outside this command to avoid nesting.
     """
     from sandbox.hosting import ports, login_service
-    from sandbox.hosting.front_door import nginx
     identity = runtime.get("port_identity")
     if not identity:
         raise hosting.HostingError("hosting_port_observation_required")
@@ -2105,7 +2148,8 @@ def _locked_host_compose_up(validated, runtime, command):
         engine_id=runtime["port_engine_id"])
     joined = check + " && " + command
     return ports.lock_context_command(joined, uid=identity["uid"],
-                                      locks=(_CADDY_LOCK_PATH, nginx.LOCK_PATH))
+                                      locks=(_COMPOSE_PUBLISH_LOCK_PATH,),
+                                      wait=_compose_publish_lock_wait(validated))
 
 
 class _SideLoad:
@@ -2295,9 +2339,14 @@ class _SideLoad:
             progress(f"Blue-green: starting {', '.join(self.colored)} beside the running "
                      f"revision on 127.0.0.1:{self.side_port} (shared: {', '.join(self.shared) or 'none'})")
         try:
-            _remote_checked(self.entry, command, timeout=max(300, int(
-                self.validated["compose"].get("build_timeout_seconds", 900))),
+            _run_locked_compose_up(self.entry, command, timeout=max(300, int(
+                self.validated["compose"].get("build_timeout_seconds", 900)))
+                + _compose_publish_lock_wait(self.validated),
                 progress=progress, log_path=apply_log, log_phase="blue_green_side_start")
+        except HostComposePublishBusy:
+            # Nothing started; an in-place recreate would wait on the same lock.
+            self._cleanup_quietly(progress)
+            raise
         except HostRemoteCommandFailed:
             # A known refusal (busy side port, the port recheck, Docker refusing
             # the side): nothing serving changed, so auto recreates in place. A
@@ -2494,11 +2543,22 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     elif side_load is not None and init_services and side_load.strategy != "in-place":
         side_load._ineligible("init services run as Compose dependencies of the recreate", progress)
     command = _locked_host_compose_up(validated, runtime, command)
-    _remote_checked(
-        entry, command, timeout=build_timeout,
-        progress=progress, log_path=apply_log,
-        log_phase="compose_recreate" if force_recreate else "compose_converge",
-    )
+    try:
+        _run_locked_compose_up(
+            entry, command, timeout=build_timeout + _compose_publish_lock_wait(validated),
+            progress=progress, log_path=apply_log,
+            log_phase="compose_recreate" if force_recreate else "compose_converge",
+        )
+    except HostComposePublishBusy as exc:
+        if side_load is None or not side_load.serving:
+            raise
+        # The route already moved to the new side: the runtime did change, so
+        # this is an ordinary (uncertain) recreate failure, not a busy refusal.
+        raise HostRemoteCommandFailed(
+            "the route already moved to the new blue-green side, then the base up was "
+            "refused busy (another target held the compose-publish lock); the new revision "
+            "serves from the side; retry the apply to finish it",
+            phase="compose_recreate", exit_code=exc.exit_code) from None
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in init_services if force_recreate else ():
@@ -9755,9 +9815,17 @@ def cmd_host(cfg, args) -> None:
         detail = getattr(exc, 'detail', None)
         if isinstance(detail, dict):
             payload['detail'] = detail
+        # A busy publish lock is a named refusal with its own exit status, so a
+        # follow (which sees only the apply job's exit) retries on its next poll.
+        status = 1
+        if isinstance(exc, HostComposePublishBusy) and not record_incomplete:
+            from sandbox.hosting import ports
+            status = ports.LOCK_BUSY_EXIT
         if args.json:
             print(json.dumps(payload, sort_keys=True))
-            raise SystemExit(1)
+            raise SystemExit(status)
+        if status != 1:
+            die(payload['code'] + ': ' + payload['message'], code=status)
         msg = payload['code'] + ': ' + payload['message'] + '; inspect the original delivery and recovery evidence'
         if payload['code'] in {'required_evidence_missing', 'delivery_record_incomplete'} or 'required_evidence_missing' in payload['message']:
             prev_req_id = "<id>"

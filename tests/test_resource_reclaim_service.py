@@ -483,7 +483,7 @@ def fake_run(argv, timeout):
     return 127, "", "synthetic command denied"
 namespace["run"] = fake_run
 namespace["load_workspace_projection"] = lambda: {"records": [], "counts": {}}
-namespace["APPLY_TRANSACTION_LOCKS"] = ()
+namespace["RECLAIM_BLOCKING_LOCKS"] = ()
 namespace["docker_storage_resources"] = lambda *_args: ([], [])
 namespace["host_capacity_resources"] = lambda *_args: ([], [])
 namespace["platform"].node = lambda: "synthetic-host"

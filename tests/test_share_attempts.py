@@ -270,6 +270,57 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.repo.begin_mint(self.plan.id, self.plan.grants[0].id)
         self.assertEqual(other.read(self.plan.id).phase, "prepared")
 
+    # Fable review 8: a full ledger drops its oldest settled attempts.
+
+    def full_ledger(self, phase, expires_at):
+        rows = tuple(replace(self.plan, id=f"a-{index:032x}", created_at=expires_at - 600 + index,
+                             expires_at=expires_at, phase=phase, grants=tuple(
+                                 replace(grant, id=f"l-{index:012x}" if n == 0 else f"l-{index:032x}",
+                                         expires_at=expires_at, disposition=phase,
+                                         gate_revoked=phase == "revoked",
+                                         original_settled=phase == "revoked")
+                                 for n, grant in enumerate(self.plan.grants)))
+                     for index in range(256))
+        with self.repo.locked():
+            self.repo._commit(rows)
+        return rows
+
+    def test_a_full_ledger_drops_the_oldest_expired_attempt(self):
+        rows = self.full_ledger("expired", 1000)
+        fresh = replace(self.plan, id="a-" + "f" * 32, grants=tuple(
+            replace(grant, id=grant.id[:2] + "e" * (len(grant.id) - 2)) for grant in self.plan.grants))
+        self.assertEqual(self.repo.prepare(fresh), fresh)
+        kept = self.restart().list()
+        self.assertEqual(len(kept), 256)
+        self.assertNotIn(rows[0].id, {row.id for row in kept})
+        self.assertIn(rows[1].id, {row.id for row in kept})
+        self.assertEqual(kept[-1].id, fresh.id)
+
+    def test_a_full_ledger_of_unexpired_attempts_says_it_is_full(self):
+        import time
+        self.full_ledger("revoked", int(time.time()) + 3600)
+        fresh = replace(self.plan, id="a-" + "f" * 32, grants=tuple(
+            replace(grant, id=grant.id[:2] + "e" * (len(grant.id) - 2)) for grant in self.plan.grants))
+        with self.assertRaises(AttemptError) as raised:
+            self.repo.prepare(fresh)
+        self.assertTrue(str(raised.exception).startswith("share attempt ledger is full"), raised.exception)
+        self.assertEqual(len(self.restart().list()), 256)
+
+    @unittest.skipUnless(hasattr(os, "O_PATH") and os.geteuid() != 0,
+                         "O_PATH walk; root ignores directory modes")
+    def test_a_traverse_only_ancestor_does_not_block_the_ledger(self):
+        # Like xspeed-dev /home (0711): the walk may traverse but not read it.
+        ancestor = Path(self.temporary.name).resolve() / "traverse-only"
+        (ancestor / "inner").mkdir(parents=True)
+        ancestor.chmod(0o100)
+        self.addCleanup(ancestor.chmod, 0o700)
+        with self.assertRaises(PermissionError):
+            os.open(ancestor, os.O_RDONLY | os.O_DIRECTORY)
+        repo = AttemptRepository(ancestor / "inner" / "attempts", self.parent)
+        self.assertEqual(repo.prepare(self.plan), self.plan)
+        self.assertEqual(AttemptRepository(ancestor / "inner" / "attempts", self.parent).list(), (self.plan,))
+        self.assertEqual(len(AttemptRepository.list_recorded(ancestor / "inner" / "attempts")), 1)
+
     def test_expiry_keeps_terminal_records_and_grant_ids(self):
         self.repo.prepare(self.plan)
         self.repo.begin_mint(self.plan.id, self.plan.grants[1].id)

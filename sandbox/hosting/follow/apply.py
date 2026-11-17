@@ -31,6 +31,7 @@ from sandbox.hosting.follow import spec as follow_spec
 from sandbox.hosting.follow import tick as follow_tick
 from sandbox.hosting.follow.spec import FollowError
 from sandbox.hosting.follow.store import FollowStore, utc_now
+from sandbox.hosting.ports import LOCK_BUSY_EXIT
 
 TERMINAL = follow_tick.TERMINAL
 ACTOR = "follower"
@@ -316,6 +317,10 @@ class Attempt:
             self.sleep(POLL_SECONDS)
         if lifecycle != "succeeded":
             reason = f"stack_apply_{lifecycle}: exit {job.get('exit_code')}"
+            if job.get("exit_code") == LOCK_BUSY_EXIT:
+                # Another target's compose up held the publish lock; nothing ran.
+                return {"status": "busy", "apply_job_id": apply_job,
+                        "reason": f"hosting_compose_publish_busy after {reason}"}
             busy, _held = self.busy(self.stack_lookup(record["remote"], name), home=self.home())
             if busy is not None:
                 # The nested apply most likely met a lease taken after the last

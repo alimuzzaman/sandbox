@@ -1,9 +1,11 @@
 """Controller stack-share effects bound to physical leases and immutable services.
 
-The enclosing caller owns its local recovery effect locks first. Each physical
-lease has a fresh owner, so an apply from this same controller cannot take over
-an unknown original. Failed transport retains that lease for coordinated recovery;
-neither expiry nor a subsequent request proves the old process has stopped.
+The enclosing caller owns its local recovery effect locks first. The physical
+lease is taken under this controller's stable owner id, as `sb host apply` and
+`destroy` take it: a lease left by a lost transport, a failed release or a
+killed process is taken over by this controller's next share or apply instead of
+blocking the target for ever. Other controllers stay excluded. A remote command
+that returned non-zero has ended, so it settles the target like a success.
 """
 from __future__ import annotations
 
@@ -12,7 +14,6 @@ from dataclasses import dataclass, field
 import json
 import posixpath
 import shlex
-import uuid
 
 from sandbox.hosting import login_service as login, target_lease
 from sandbox.hosting.owner_share_record import digest, target_digest
@@ -26,14 +27,19 @@ class Ownership:
     uncertain: set = field(default_factory=set)
 
     def effect(self, target, entry, command, *, payload=None):
-        from sandbox.commands.hosting import _remote_checked
+        from sandbox.commands.hosting import HostRemoteCommandFailed, _remote_checked
         if not any(key == target and remote == entry for key, remote, _ in self.leases):
             raise ShareRefusal("share_target_busy", "physical target ownership is required")
         if target in self.uncertain:
             raise ShareRefusal("share_effect_unknown", "the original target operation has not settled")
         self.uncertain.add(target)
-        result = _remote_checked(entry, command, timeout=60,
-                                 **({"input_data": payload} if payload is not None else {}))
+        try:
+            result = _remote_checked(entry, command, timeout=60,
+                                     **({"input_data": payload} if payload is not None else {}))
+        except HostRemoteCommandFailed:
+            # A non-zero exit is a completed command, not a lost transport.
+            self.uncertain.discard(target)
+            raise
         # Returning from the original transport proves it stopped; parsing its
         # result may still fail. Any transport exception retains physical ownership.
         self.uncertain.discard(target)
@@ -44,7 +50,8 @@ class Ownership:
 def hold(targets):
     """Acquire the actual apply protocol, in stable unique target order."""
     from sandbox.core import _remote as remote
-    owner = uuid.uuid4().hex
+    from sandbox.commands.hosting import _controller_lease_owner
+    owner = _controller_lease_owner()
     held = Ownership()
     try:
         for target in sorted(set(targets)):

@@ -278,7 +278,11 @@ def _refuse_if_active(record: dict | None) -> None:
 
 
 def _submission_timeout(validated: dict) -> int:
-    return max(900, int(validated["compose"].get("build_timeout_seconds", 900)) + 600)
+    # 600 s of transfer/health slack, plus two compose-publish lock waits (a
+    # blue-green apply waits once for its side and once for its base up).
+    from sandbox.commands.hosting import _COMPOSE_PUBLISH_MAX_WAIT_SECONDS
+    return max(900, int(validated["compose"].get("build_timeout_seconds", 900)) + 600
+               + 2 * _COMPOSE_PUBLISH_MAX_WAIT_SECONDS)
 
 
 def _submit(argv: list[str], *, environment: dict | None = None) -> str:

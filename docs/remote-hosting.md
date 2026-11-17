@@ -4310,8 +4310,16 @@ admission. Named volumes, Compose project and target/copy identity are preserved
 normal full-recreate/initializer behavior still applies to a partial failed target.
 
 Builds run outside ingress locks. Immediately before the same Compose up, a fresh
-check of the admitted primary/gate pair runs under continuous existing Caddy then
-nginx flocks. Root-owned locks use the supported noninteractive sudo wrapper;
+check of the admitted primary/gate pair runs, and the check plus the up hold the
+server's compose-publish lock (`/run/lock/sandbox-hosting-compose-publish.lock`) so
+no other target's up binds the pair in between. It is not an edge lock: route
+installs, certificate reloads and Caddy transactions never wait on a recreate. One
+up waits for another for its build budget less 120 s (at least 30 s, at most 300 s,
+added to the up's own timeout); a lock still held then exits 75 before anything runs,
+the apply refuses `hosting_compose_publish_busy` with exit status 75, and a follow
+retries on its next poll. A blue-green base up that meets a busy lock after the route
+moved to the new side is an ordinary failed recreate instead (the runtime changed).
+Host storage reclaim treats a held compose-publish lock as an apply in progress. Root-owned locks use the supported noninteractive sudo wrapper;
 the check and Compose run as the observed account. A fixed context allowlist,
 original groups, working directory and umask cross the privilege boundary only
 through anonymous stdin. Provider/application environments are not copied.

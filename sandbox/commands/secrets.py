@@ -873,6 +873,46 @@ def _copy_from_remote(service, args) -> dict:
                                     intent=intent)
 
 
+# The process an SSH session's command runs under: OpenSSH (sshd, or
+# sshd-session from 9.8) or Tailscale SSH (tailscaled).
+_SSH_SESSION_PARENTS = frozenset(("sshd", "sshd-session", "tailscaled"))
+
+
+def _proc_parent(proc: str, pid: int) -> tuple[int, int, str] | None:
+    """(parent pid, real uid, comm) of ``pid`` from procfs, or None."""
+    try:
+        with open(f"{proc}/{pid}/stat", encoding="ascii") as handle:
+            parent = int(handle.read().rsplit(")", 1)[1].split()[1])
+        with open(f"{proc}/{pid}/status", encoding="ascii") as handle:
+            uid = next(int(line.split()[1]) for line in handle if line.startswith("Uid:"))
+        with open(f"{proc}/{pid}/comm", encoding="ascii") as handle:
+            comm = handle.read().strip()
+    except (OSError, UnicodeError, ValueError, IndexError, StopIteration):
+        return None
+    return parent, uid, comm
+
+
+def _direct_ssh_session_command(*, proc: str = "/proc", environ=None, parent: int | None = None) -> bool:
+    """True only when this process is the command an SSH session exec'd.
+
+    `copy --from-remote` runs `exec sb secrets egress` as the session's command,
+    so the parent is the SSH server's per-session process and the grandparent
+    its root-owned server or monitor. A name alone proves nothing (any user can
+    run a binary called sshd), so the grandparent must run as root: a host-side
+    agent or script, renamed or not, has its own processes above it. SSH to the
+    host itself, from this host or from a controller, is an SSH session and is
+    out of scope (docs/secret-inspection.md 6d).
+    """
+    environ = os.environ if environ is None else environ
+    if not environ.get("SSH_CONNECTION"):
+        return False
+    found = _proc_parent(proc, os.getppid() if parent is None else parent)
+    if found is None or found[2] not in _SSH_SESSION_PARENTS:
+        return False
+    server = _proc_parent(proc, found[0])
+    return server is not None and server[1] == 0 and server[2] in _SSH_SESSION_PARENTS
+
+
 def _egress(service, args) -> None:
     """Remote half of `copy --from-remote`: one JSON line to a non-terminal stdout."""
     from sandbox.secrets.remote_copy import EGRESS_NONCE_BYTES
@@ -880,7 +920,7 @@ def _egress(service, args) -> None:
         interactive = sys.stdout.isatty() or sys.stdin.isatty()
     except (OSError, ValueError):
         interactive = True
-    if interactive or not args.json:
+    if interactive or not args.json or not _direct_ssh_session_command():
         raise SecretBrokerError(
             "egress_requires_transport",
             "secret egress runs only as the transport of `secrets copy --from-remote`",

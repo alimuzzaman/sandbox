@@ -92,10 +92,17 @@ class LockPathParityCase(unittest.TestCase):
     def test_exactly_three_apply_locks(self):
         self.assertEqual(len(host_guard.APPLY_TRANSACTION_LOCKS), 3)
 
+    def test_reclaim_also_waits_for_a_recreate(self):
+        from sandbox.commands import hosting as hosting_cmd
+        self.assertEqual(host_guard.RECLAIM_BLOCKING_LOCKS,
+                         host_guard.APPLY_TRANSACTION_LOCKS + (hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH,))
+        from sandbox.resources.remote import _REMOTE_PROGRAM
+        self.assertIn(f'"{hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH}"', _REMOTE_PROGRAM)
+
     def test_probe_program_uses_the_same_literals(self):
         from sandbox.resources.remote import _REMOTE_PROGRAM
 
-        for path in host_guard.APPLY_TRANSACTION_LOCKS:
+        for path in host_guard.RECLAIM_BLOCKING_LOCKS:
             self.assertTrue(f'"{path}"' in _REMOTE_PROGRAM, path)
         self.assertTrue(f'"{host_guard.GUARD_NAME}"' in _REMOTE_PROGRAM)
 

@@ -2077,10 +2077,11 @@ DELETION_DIR = RUNTIME / "resources" / "deletions"
 # Kept in lockstep with sandbox/resources/host_guard.py (parity-tested).  The
 # probe is self-contained, so the guard and the apply-lock probe are inlined.
 RECLAIM_GUARD = RUNTIME / "resources" / "reclaim-host.lock"
-APPLY_TRANSACTION_LOCKS = (
+RECLAIM_BLOCKING_LOCKS = (
     "/run/lock/sandbox-hosting-caddy.lock",
     "/run/lock/sandbox-edge-nginx.lock",
     "/run/lock/sandbox-docker-pool.lock",
+    "/run/lock/sandbox-hosting-compose-publish.lock",
 )
 LEASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 # Kept in lockstep with sandbox/resources/reclaim.WORKSPACE_VOLUME_PATTERN.
@@ -2500,7 +2501,7 @@ def remove_path(path):
 def apply_transaction_active():
     # Probe, never take, the host-apply transaction locks.  A missing or
     # unopenable file cannot be held by a transaction this user can observe.
-    for path in APPLY_TRANSACTION_LOCKS:
+    for path in RECLAIM_BLOCKING_LOCKS:
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:

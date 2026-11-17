@@ -37,6 +37,7 @@ import os
 import re
 import stat
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -152,7 +153,8 @@ _PHASES = {
     "revoked": set(), "expired": set(),
 }
 _MAX_BYTES = 1024 * 1024
-_MAX_ATTEMPTS = 256  # Refuse when full; never discard unresolved identities.
+_MAX_ATTEMPTS = 256  # At capacity, drop the oldest settled attempts; never unresolved ones.
+LEDGER_FULL = "share attempt ledger is full"
 
 
 def _require(condition: bool) -> None:
@@ -348,9 +350,25 @@ class AttemptRepository:
         self._local = threading.local()
         self._mutex = threading.RLock()
 
+    @staticmethod
+    def _open_walk_dir(name: str, dir_fd: int | None) -> tuple[int, bool]:
+        """(descriptor, readable) for one directory of the walk.
+
+        A host may make an ancestor traverse-only (xspeed-dev /home is root
+        0711), which refuses O_RDONLY. Such a directory is opened O_PATH: enough
+        to create and open children, as in images/activation/private_inputs.py.
+        """
+        flags = os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            return os.open(name, os.O_RDONLY | flags, dir_fd=dir_fd), True
+        except PermissionError:
+            o_path = getattr(os, "O_PATH", None)
+            if o_path is None:
+                raise
+            return os.open(name, o_path | flags, dir_fd=dir_fd), False
+
     def _directory(self) -> int:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        descriptor = os.open(self.root.anchor, flags)
+        descriptor, readable = self._open_walk_dir(self.root.anchor, None)
         try:
             for part in self.root.parts[1:]:
                 try:
@@ -358,10 +376,14 @@ class AttemptRepository:
                 except FileExistsError:
                     pass
                 # Also sync entries created by a process that died before fsync.
-                os.fsync(descriptor)
-                child = os.open(part, flags, dir_fd=descriptor)
+                # An unreadable ancestor is not ours to have created entries in.
+                if readable:
+                    os.fsync(descriptor)
+                child, readable = self._open_walk_dir(part, descriptor)
                 os.close(descriptor)
                 descriptor = child
+            # The ledger directory itself is owner-only, so it is never O_PATH.
+            _require(readable)
             info = os.fstat(descriptor)
             _require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700)
             return descriptor
@@ -442,10 +464,39 @@ class AttemptRepository:
         finally:
             os.close(descriptor)
 
+    @staticmethod
+    def _body(records: tuple[Attempt, ...]) -> bytes:
+        return (json.dumps({"version": 3, "attempts": [asdict(row) for row in records]},
+                           sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    @classmethod
+    def _fits(cls, records: tuple[Attempt, ...]) -> bool:
+        return len(records) <= _MAX_ATTEMPTS and len(cls._body(records)) <= _MAX_BYTES
+
+    @classmethod
+    def _room_for(cls, records: tuple[Attempt, ...], attempt: Attempt, now: int) -> tuple[Attempt, ...]:
+        """``records`` less the oldest settled attempts ``attempt`` needs room for.
+
+        Only revoked or expired attempts whose expiry has passed go: their
+        grants are discharged and their link ids can no longer open anything.
+        """
+        if cls._fits(records + (attempt,)):
+            return records
+        settled = sorted((row for row in records
+                          if row.phase in ("revoked", "expired") and row.expires_at <= now),
+                         key=lambda row: (row.created_at, row.id))
+        dropped = set()
+        for row in settled:
+            dropped.add(row.id)
+            kept = tuple(item for item in records if item.id not in dropped)
+            if cls._fits(kept + (attempt,)):
+                return kept
+        raise AttemptError(f"{LEDGER_FULL}: every recorded share attempt of this stack is still "
+                           "live or unexpired; revoke one (sb host share --revoke) or wait for expiry")
+
     def _write(self, records: tuple[Attempt, ...]) -> None:
         _require(len(records) <= _MAX_ATTEMPTS)
-        body = (json.dumps({"version": 3, "attempts": [asdict(row) for row in records]},
-                           sort_keys=True, separators=(",", ":")) + "\n").encode()
+        body = self._body(records)
         _require(len(body) <= _MAX_BYTES)
         directory = self._local.directory
         staged = "." + self._stem + "." + uuid.uuid4().hex + ".tmp"
@@ -569,7 +620,7 @@ class AttemptRepository:
             # A source id cannot be reused for another attempt on the same gate.
             used = {(grant.target, grant.entry, grant.id) for row in records for grant in row.grants}
             _require(not any((grant.target, grant.entry, grant.id) in used for grant in attempt.grants))
-            self._commit(records + (attempt,))
+            self._commit(self._room_for(records, attempt, int(time.time())) + (attempt,))
             return attempt
 
     def _commit(self, records: tuple[Attempt, ...]) -> None:

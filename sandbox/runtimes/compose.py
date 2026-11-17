@@ -404,11 +404,8 @@ class ComposeAdapter:
         return float(value)
 
     def invoke(self, request: OperationRequest) -> OperationResult:
-        if request.operation in {'ensure', 'apply', 'destroy', 'start', 'stop',
-                                 'resume', 'suspend', 'ownership_repair'}:
-            from sandbox.project_registry.lifecycle import lifecycle_writer
-            with lifecycle_writer():
-                return self._invoke_coordinated(request)
+        # RuntimeService.invoke holds this project's writer lock for
+        # ensure/apply/destroy/start/stop/resume/suspend/ownership_repair.
         return self._invoke_coordinated(request)
 
     def _invoke_coordinated(self, request: OperationRequest) -> OperationResult:
@@ -753,7 +750,7 @@ class ComposeAdapter:
                 self.dependencies.proxy.remove(str(domain))
             self._artifact_dir(runtime_id).mkdir(parents=True, exist_ok=True)
         elif op in {"apply", "start", "stop", "resume", "suspend"}:
-            # These operations hold lifecycle_writer from before the record read.
+            # These operations hold the project writer lock from before the record read.
             # Observations/exec must never restore an old incarnation or receipt.
             stored = {key: value for key, value in data.items() if key != "root"}
             self.registry.registry_put(descriptor["root"], **stored)

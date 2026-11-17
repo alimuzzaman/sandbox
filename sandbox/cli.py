@@ -1725,13 +1725,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         return
 
     if args.cmd == 'instance' and args.action == 'delete':
-        # Resolve, compare and delete under the same writer boundary. Do not
-        # regenerate runtime/config files before a conditional mismatch refuses.
-        from sandbox.project_registry.lifecycle import lifecycle_writer
+        # cmd_instance resolves, compares and deletes under the owner's project
+        # writer lock. Do not regenerate runtime/config files before a
+        # conditional mismatch refuses.
         from sandbox.commands.instances_cmd import cmd_instance
-        with lifecycle_writer():
-            args.resolved_instance = None
-            cmd_instance(load_config(), args)
+        args.resolved_instance = None
+        cmd_instance(load_config(), args)
         return
 
     # Spec 072: before any command effect, fast-forward this controller to a

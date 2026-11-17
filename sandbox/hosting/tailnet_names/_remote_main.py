@@ -431,72 +431,17 @@ class _NameScope:
 # Host gate (re-checked inside the edge flock)
 
 def _check_locks(paths, *, holding_edge):
+    """Only Sandbox's host transaction locks conflict with a name's nginx change.
+
+    Durable jobs are not checked: tests, CI, attach and exec jobs never touch
+    the edge, and every Sandbox nginx write or reload (host apply, route
+    removal, destroy's certificate cleanup, certbot's deploy hook) holds the
+    edge lock.
+    """
     held = [p for p in paths["locks"] if not (holding_edge and p == paths["edge_lock"]) and _held(p, paths)]
     if held:
         raise Refusal("busy", "a Sandbox host transaction holds " + ", ".join(
             os.path.basename(p) for p in held))
-
-
-def _gate(paths, payload, runner, *, holding_edge):
-    _check_locks(paths, holding_edge=holding_edge)
-    if _jobs_active(payload.get("jobs_probe"), runner):
-        raise Refusal("busy", "a durable job is active on the remote")
-    # The job query takes a moment; look at the locks again after it.
-    _check_locks(paths, holding_edge=holding_edge)
-
-
-def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
-    """Ask the remote's own Sandbox CLI whether a durable job is active.
-
-    The controller passes the Sandbox home it validated for this remote; the
-    program runs as root under sudo, so the home is never derived here (root's
-    would be a different, empty one). The CLI runs as the invoking SSH user
-    (``SUDO_USER``) with ``SANDBOX_HOME`` set explicitly. Fails closed: a home
-    not owned by that user, a missing job registry, or anything but a clean
-    answer is ``gate_unavailable``; any listed job is busy.
-    """
-    import pwd
-    environ = os.environ if environ is None else environ
-    getpwnam = pwd.getpwnam if getpwnam is None else getpwnam
-    home = probe.get("home") if isinstance(probe, dict) else None
-    if not (isinstance(home, str) and home.startswith("/") and len(home) < 4096
-            and "\x00" not in home and not set(home.split("/")[1:]) & {"", ".", ".."}):
-        raise Refusal("request_invalid", "invalid job probe")
-    excluded = probe.get("exclude_job_id")
-    if excluded is not None and (not isinstance(excluded, str) or
-                                 re.fullmatch(r"[0-9a-f]{32}", excluded) is None):
-        raise Refusal("request_invalid", "invalid owner job identity")
-    user = environ.get("SUDO_USER") or "root"
-    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
-        raise Refusal("gate_unavailable", "the invoking user could not be determined")
-    try:
-        uid = getpwnam(user).pw_uid
-        home_st = lstat(home)
-        registry_st = lstat(home + "/runtime/jobs/registry.sqlite3")
-    except (KeyError, OSError):
-        raise Refusal("gate_unavailable", "the remote's job registry was not found") from None
-    if not stat.S_ISDIR(home_st.st_mode) or home_st.st_uid != uid \
-            or not stat.S_ISREG(registry_st.st_mode):
-        raise Refusal("gate_unavailable", "the Sandbox home is not the invoking user's")
-    command = ["env", "SANDBOX_HOME=" + home, "SANDBOX_AUTO_UPDATE=0",
-               home + "/sb-src/sb", "job-list", "--active-only", "--limit", "2" if excluded else "1", "--json"]
-    if user != "root":
-        command = ["runuser", "-u", user, "--"] + command
-    rc, out, _err = runner(command, timeout=60)
-    try:
-        page = json.loads(_text(out).strip().splitlines()[-1]) if rc == 0 else None
-    except (ValueError, IndexError):
-        page = None
-    if not (isinstance(page, dict) and page.get("ok") is True and isinstance(page.get("jobs"), list)):
-        raise Refusal("gate_unavailable", "the remote's durable jobs could not be listed")
-    jobs = page["jobs"]
-    if any(not isinstance(row, dict) or not isinstance(row.get("job_id"), str) for row in jobs):
-        raise Refusal("gate_unavailable", "the remote's job identities are unavailable")
-    if excluded is not None:
-        if not any(row["job_id"] == excluded for row in jobs):
-            return True
-        return any(row["job_id"] != excluded for row in jobs)
-    return bool(jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -1224,12 +1169,12 @@ def commit(payload, paths, runner, lock_wait):
                 raise Refusal("key_missing", "no private key for this name; run add again")
             facts = _check_chain(chain, key, fqdn, runner) if chain is not None else None
             edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"], paths=paths)
-            _gate(paths, payload, runner, holding_edge=True)
+            _check_locks(paths, holding_edge=True)
             current_block, managed = _block(conf_fd, fqdn, paths)
             if current_block is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
             def fence():
-                _gate(paths, payload, runner, holding_edge=True)
+                _check_locks(paths, holding_edge=True)
             proof = _disk_proof(conf_fd, name_fd, fqdn, paths, ip)
             settled = _settle(conf_fd, name_fd, fqdn, paths, runner, fence, proof)
             current_block, _managed = _block(conf_fd, fqdn, paths)
@@ -1337,13 +1282,13 @@ def settle(payload, paths, runner, lock_wait):
                 return {"ok": True, "settled": None}
             conf_fd = _open_dir(paths["conf_dir"], paths)
             edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"], paths=paths)
-            _gate(paths, payload, runner, holding_edge=True)
+            _check_locks(paths, holding_edge=True)
             current_block, managed = _block(conf_fd, fqdn, paths)
             if current_block is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
 
             def fence():
-                _gate(paths, payload, runner, holding_edge=True)
+                _check_locks(paths, holding_edge=True)
             proof = _disk_proof(conf_fd, name_fd, fqdn, paths, ip)
             return {"ok": True, "settled": _settle(conf_fd, name_fd, fqdn, paths, runner,
                                                    fence, proof)}
@@ -1377,7 +1322,7 @@ def remove(payload, paths, runner, lock_wait):
             edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"], paths=paths)
 
             def fence():
-                _gate(paths, payload, runner, holding_edge=True)
+                _check_locks(paths, holding_edge=True)
             fence()
             proof = _disk_proof(conf_fd, name_fd, fqdn, paths, ip)
             content, managed = _block(conf_fd, fqdn, paths)

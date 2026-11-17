@@ -163,9 +163,19 @@ The controller requires a clean checkout, packages the exact validated Git objec
 (never live worktree bytes), and rechecks clean HEAD before first remote contact.
 The remote extracts into an owner-only same-filesystem staging directory, verifies
 the archive receipt's exact source SHA, archive digest, and precomputed runtime-record
-revision, then atomically exchanges that complete tree with
-`$HOME/sandbox/sb-src`. Failure rolls the prior tree back before the existing service
-is changed. A failed rollback, restored-service restart, or backup cleanup is reported
+revision, then builds that complete tree as `$HOME/sandbox/releases/<runtime-revision>`
+and flips `current` to it (see "Side-by-side releases" below). Failure flips `current`
+back before the existing service is changed.
+
+The controller first asks the remote to fetch the exact commit itself, read-only,
+over anonymous HTTPS from the checkout's GitHub `origin` into a throwaway bare
+repository inside the stage temporary (no credential helper, no prompt, HTTPS only). The remote
+must produce the byte-identical uncompressed `git archive` the controller computed
+locally (same SHA, same digest; checked across git 2.43 and 2.47). If the fetch or
+the digest fails before publication, the controller uploads the archive as before; a
+fetch that times out is reported like an upload timeout (inspect before retrying).
+`SANDBOX_RUNTIME_SOURCE_FETCH=0` skips the fetch. A private repository needs a deploy
+key or token on the remote, which this does not configure; it then always uploads. A failed rollback, restored-service restart, or backup cleanup is reported
 as `remote_service_rollback_indeterminate`, never hidden as an ordinary install failure.
 Fresh provisioning uses the same handoff and never clones or activates a
 moving branch. The service unit and credential file are not changed until helper
@@ -1617,6 +1627,7 @@ project: xspeed-hub-{slug}
 stack:
   slug: '^[a-z0-9][a-z0-9-]{1,30}$'   # the stack name must fully match
   ports: [mailpit]                     # named ports, allocated per stack
+  mail_hostname: mail-{slug}.example.test   # optional tailnet-only inbox name
 environments:
   sandbox:
     host:
@@ -1652,8 +1663,8 @@ Direct cycles are accepted; no transitive expansion occurs.
 The relationship is stored on the controller. `stack list` includes `uses` in JSON
 and text; older records default to empty. Delivery preserves relationships and reapply
 replaces them. `stack down` reports `used_by` without refusing teardown. A relationship
-creates no routes, inbox names, stacks or access grants. Continue provisioning inbox
-names through `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
+creates no routes, inbox names, stacks or access grants. A stack's own inbox name
+comes from `stack.mail_hostname`, or from `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
 sections, recorded inbox links and delivered revision evidence. A controller without
 recorded inbox names shows the supported setup command. One-link teammate access
 and per-click sign-in are separate spec 088 work; this declaration alone does not
@@ -1769,6 +1780,69 @@ loopback allocations skip 18100-18199; ports already recorded are untouched. Use
 port in Compose through the value, for example
 `"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
 private `environment.env` file apply passes with `--env-file`.
+
+**Inbox name (`stack.mail_hostname`).** A hostname with exactly one `{slug}`,
+allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
+equals one of the stack's routes or a hostname another target holds. After every
+completed apply of the stack, Sandbox publishes the rendered name as a
+[tailnet-only name](#tailnet-only-hostnames-sb-host-tailnet-name-spec-078) at
+`127.0.0.1:<mailpit port>`, through the same `add` flow (lease, edge lock, DNS
+ownership, both probes). It is never a public route: the inbox holds every
+account's sign-in links. A rerun is a no-op and a changed port replaces the
+upstream.
+
+Ownership is decided under the name store's lock. The record is tagged with the
+stack (`stack` in the name's state). A name already published with another
+upstream and no record for this stack (for example one added by hand) is refused
+(`tailnet_name_upstream_differs`) and left alone; one with the same upstream is
+adopted and tagged. A name tagged for another stack is refused
+(`tailnet_name_stack_conflict`). `stack down` and `stack reap --remote` remove the
+names tagged for the stack, each removal re-checking under the lock that the name
+is still that stack's at the same upstream.
+
+Every apply first sweeps tagged names whose stack is gone: one on its own Mailpit
+port (live stacks never share a port), or one whose stack's lifetime record is
+`reaped` with no live copy, or that has neither a lifetime record nor a stack
+record on that machine. Without the lifetime listing nothing is swept. This is how
+names left by the reap timer (which has no tailnet-name context) or by a removal
+refused during `stack down` go away. Until that next apply, such a name keeps
+serving its old port; a target that is given that loopback port in between is
+reachable at the old name over the tailnet. Orphans and names not `published`
+are never renewed.
+
+Each apply renews at most one other live stack name within 30 days of expiry, the
+earliest first, so an apply stays bounded. A host with too few applies needs
+`sb host tailnet-name renew --all --remote R` (with `--server-held` for a joined
+remote, below).
+
+The name is published by the machine that runs the apply: the controller for a
+registered remote, the server itself for a joined remote, a this-server stack or a
+follow attempt. That machine needs the `tailnet_names` configuration, the
+Cloudflare token reference (only the machine-level reference; a project's secret
+profiles are not used here) and `lego` described below. Without the block the
+apply still succeeds and reports `mail_name: {"status": "unconfigured"}`, with no
+warning. Any other refusal (a host lock still held after four tries 20 seconds
+apart, a DNS conflict) is reported in `mail_name` and on stderr, never as an apply
+failure, and the next apply retries. On a server whose only interface address is
+private, `add` cannot pick a public address for the exposure check and every
+apply reports `tailnet_name_public_address_invalid`. The panel shows the stack's
+Open inbox link once the name is published.
+
+A joined remote's server holds these names in its own
+`$SANDBOX_HOME/runtime/tailnet-names/`. Reach them with
+`sb host tailnet-name list|add|renew|remove ... --remote R --server-held`, which runs
+as a server job with the server's authority; without `--server-held` the command
+acts on the controller's names as before. After a rollback to a release without
+this feature, a rewrite of the record by that release drops its `stack` tag, and
+`stack down` then leaves the name in place.
+
+**Security.** On a joined remote this puts the Cloudflare token (DNS:Edit on every
+zone in `tailnet_names.zones`) and the ACME account on the server that runs PR
+stacks, readable by the Sandbox user there. Anything that runs as that user (a
+build step, a container escape) can then edit any record in those zones or pass a
+DNS-01 challenge for any name in them. Prefer a token scoped to a zone used only
+for tailnet names. This needs human security review before it is enabled on a
+server.
 
 Runtime text publication sends bytes only on the selected owner's process stdin
 or the registered remote's SSH stdin. A fixed eight-byte length header travels
@@ -2216,10 +2290,15 @@ published name changes nothing.
    that one transaction (the same gate, lease, edge lock and proofs as an
    activation), then runs the nginx checks again. Any other failure is
    refused as before.
-2. **Gate**: no durable job is active on the remote and none of
+2. **Gate**: none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
    A busy remote is refused (`tailnet_name_busy`), never waited for. A lock
-   that cannot be probed counts as held. The run then takes a per-name lease
+   that cannot be probed counts as held. Durable jobs are not a conflict:
+   tests, CI, attach and exec jobs never touch the edge, and every Sandbox
+   nginx write or reload (host apply, route removal, `host destroy`'s
+   certificate cleanup, certbot's deploy hook) holds the edge lock. A deploy
+   hook written before 2026-11-17 reloads without it until the next public
+   certificate issue rewrites the hook. The run then takes a per-name lease
    on the remote (token and expiry, under a per-name lock), so a second
    controller working on the same name is refused (`tailnet_name_busy`) until
    the lease is released or expires. Under the lease the name is inspected
@@ -2238,7 +2317,7 @@ published name changes nothing.
    while it has more than 30 days left and the remote accepts it.
 5. **Activate**: the chain and the block are installed together by the remote
    program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
-   lease, re-checks the gate (locks and durable jobs, failing closed, and
+   lease, re-checks the gate (the locks, failing closed, and
    again right before `nginx -t` and right before the reload, including
    recovery reloads),
    writes an activation journal (`written`, `tested`, `loaded`), installs
@@ -2335,8 +2414,8 @@ proxy). Otherwise it leaves the records in place
 (`tailnet_name_dns_not_owned`). The provider has no compare-and-delete, so a
 change made between that read and the delete is not excluded.
 
-Limits: the host gate is a set of checks, not a reservation. A durable job or
-host lock taken between the last check and the reload is not excluded, and a
+Limits: the host gate is a set of checks, not a reservation. A host lock taken
+between the last check and the reload is not excluded, and a
 run suspended between re-proving its lease and the provider call it guards is
 not fenced. The public check probes one IPv4 address from this controller; it
 says nothing about IPv6 or other vantage points.
@@ -2350,9 +2429,16 @@ with `zone_not_allowed`. A controller state file that does not parse is
 **Configuration and the token.** The zones, the token reference and the ACME
 contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
-These are controller-owned even for a joined Tailnet remote. `host tailnet-name`
-runs on the controller; only its fixed nginx runner uses the registered remote
-transport. Do not move its broker, name records, or ACME account onto the server.
+`host tailnet-name` runs on the controller; only its fixed nginx runner uses the
+registered remote transport, and the command is never dispatched to a server job.
+The exceptions are `stack.mail_hostname` and `--server-held`: a stack apply that
+runs on the server (joined remote, this-server stack, follow attempt), and an
+explicit `--server-held` command, use the server's own `tailnet_names` block,
+token reference, `lego`, ACME account and records under the server's
+`$SANDBOX_HOME/runtime/tailnet-names/`. When the
+server adopts a name the controller published earlier (same block, same DNS-only
+record), the controller's record stays behind: do not run `remove` for that name from
+the controller, which still holds the DNS record id and would take the name down.
 The Cloudflare token (Zone:Read and DNS:Edit on those zones) is read through
 the secrets broker. It reaches only two programs, each run through a use
 profile that Sandbox defines in-process (`sandbox-tailnet-name-dns` and
@@ -2953,42 +3039,96 @@ program is still honoured until it expires. `remote up` and
 `remote provision` take no `--break-pin`, so they refuse over any binding pin;
 migrate is the path that acknowledges pins.
 
-**Unfinished jobs.** An install restarts the service and replaces the runtime
-under every server-side job, and a running server-owner job (such as a nested
-`server-cli` host apply) then fails with its rollback withheld and its target
-lease kept. So every install path refuses with `remote_jobs_active` while any
-job on the remote is `accepted`, `running` or `cancelling`. Queued jobs do not
-block: they cannot start during the install and the new service starts them.
-The deciding check is in `pins.INSTALL_GATE`, after the pin check: it opens the
-job registry (`runtime/jobs/registry.sqlite3`) with `BEGIN IMMEDIATE`, the
-write lock every job admission takes, and keeps that lock from before the
-source swap until the old service is stopped, then releases it before any
-service starts. So no job can be admitted between the check and the restart.
-That window includes the install's virtualenv and `pip` steps, so it can last
-minutes; during it every submission fails, and so does anything that opens the
-registry anew (`JobRepository` writes its schema on open, for example
-`sb job-start`, `server-cli` dispatch and host-side `sb` job lookups). Only
-connections that were already open can still read. If the lock cannot be taken
-within 15 seconds the install refuses with `remote_jobs_gate_unavailable`; an
-install that fails with a status of 45 to 48 is reported as 1, so it is never
-mistaken for a gate refusal.
+**Side-by-side releases.** Each runtime revision is installed into its own
+directory, `$HOME/sandbox/releases/<runtime-revision>/`, with its own virtual
+environments (`sandbox/remote_runtime/releases.py`). The install runs in two
+parts inside `pins.INSTALL_GATE`:
 
-Wait for the jobs to end (`sb job-list --remote NAME --active-only`) or cancel
-them, then rerun. A row can stay `running` after its supervisor died (only a
-service start reconciles it, and cancel refuses without a process): name each
-such job with `--ignore-job JOB_ID` (repeatable). The gate skips exactly those
-ids, re-checked under the lock; any other unfinished job still refuses. A
-refused `remote up` or `remote provision` leaves its uploaded runtime stage on
-the remote, as a pin refusal does.
+1. **Prepare, with no lock held.** The staged tree is verified (owner, modes,
+   receipt with exact source SHA, archive digest and runtime revision), moved
+   to `releases/<rev>` and built there: CLI venv and MCP venv, plus the image
+   staging helper provisioned from that release's own tree (`--source-root`).
+   The browser tools venv (`runtime/.venv-tools`) stays shared across releases. A venv bakes its absolute path, so a release is built in
+   place and marked complete (`.release.json`) last. A complete release of the
+   same revision is reused. The old service keeps serving and jobs keep being
+   admitted for the whole build.
+2. **Switch, under the locks, for seconds.** `current` is flipped to the new
+   release by a rename over the symlink (`previous` keeps the old target), the
+   unit and credential file are written, and the service is stopped and
+   started. `sb-src` stays as a compatibility symlink to `current`, so
+   routines, hosted helpers and SSH submissions that run `sb-src/sb` keep
+   working. A failure flips `current` back and restores the old unit.
 
-The gate covers registry jobs only. Controller-side host applies run over SSH
-with shipped programs and their target lease, not the service or `sb-src`, so
-a restart does not affect them. Host-side routines that run `sb-src/sb`
-directly (the resources routine timer, `stack reap --here`) are not checked.
+After a successful switch the release keeps a copy of its unit, source receipt
+and owner origin record, and releases beyond `current`, `previous` and the last
+3 activated are removed unless a live process runs from them (cwd or command
+line under the release directory).
+
+`sb remote service releases NAME` lists the layout, `current`, `previous` and
+every release. `sb remote service rollback NAME --plan|--confirm` flips
+`current` back to `previous` and restores that release's recorded unit and
+receipts; running it again flips forward. Rollback takes the same gate (pins,
+job check) and builds nothing.
+
+**Converting an existing host.** The first install onto a host whose `sb-src`
+is still a plain directory converts it: `current` is pointed at the new
+release, a symlink to `current` is exchanged with the old directory
+(`renameat2` `RENAME_EXCHANGE`, so `sb-src` is never missing), and the old tree
+is filed as `releases/<old-unit-revision>` with its unit and receipts, so
+`rollback` can return to it. A failed conversion exchanges the directory back
+into place. `activate` records each step it takes and undoes them itself when
+a later step fails, so a failure leaves either the old layout or a recorded
+state the install rolls back.
+
+A controller older than this change cannot migrate a converted host: its
+install requires `sb-src` to be a plain directory and fails with a generic
+error. Use a controller at or after this change.
+
+**Unfinished jobs.** Job supervisors start in their own transient
+`systemd --user` scope (`sandbox/jobs/scope.py`, the follow-attempt pattern:
+a probe first, `env -u` for any manager variable it had to add) and run from
+the resolved release directory they were admitted with. A service restart
+therefore no longer kills or swaps the runtime under them, and the new service
+needs nothing to adopt them: each supervisor already owns its registry row,
+lease, heartbeat and output. A job still running from a retained release keeps
+its own server-cli owner identity (`_retained_release_revision` in
+`sandbox/application/server_cli.py`), so its checks and nested submissions keep
+agreeing with the revision it was bound to. A launcher inside a service
+cgroup with no working scope refuses the launch rather than lose the job.
+
+So the gate refuses with `remote_jobs_active` only over jobs a restart could
+still kill:
+
+- **Release layout** (`sb-src` is a symlink): only a job whose supervisor
+  still sits in `sandbox-mcp-remote.service`'s cgroup.
+- **Old layout** (the one-time conversion): every job that is `accepted`,
+  `running` or `cancelling`, as before.
+
+In both, the gate then holds the registry's write lock (`BEGIN IMMEDIATE`)
+until the old service is stopped, so no job can be admitted between the check
+and the restart. The build already happened outside the lock, so that window
+is the flip, unit write and stop: seconds. A submission arriving then waits on
+the lock (`JobRepository`'s 5-second busy timeout) and is admitted once the old
+service stops.
+
+A queued job runs from the release that admitted it, even when another
+release's supervisor starts it on freeing a slot: the admitting release is
+recorded beside its descriptor (`release.json`). A release removed by cleanup
+falls back to the launcher's own.
+
+Queued jobs never block. If the lock cannot be taken within 15 seconds the
+install refuses with `remote_jobs_gate_unavailable`; an install that fails with
+a status of 45 to 48 is reported as 1, so it is never mistaken for a gate
+refusal. A row can stay `running` after its supervisor died: name each such job
+with `--ignore-job JOB_ID` (repeatable), re-checked under the lock.
+
+`sb job-list --active-only` can look busier than the gate: it also counts
+`queued`, and a job that lives between two polls is never seen by the list
+(the gate may still catch it). Trust the plan's `blockers`.
 
 `--plan` reports `active_jobs` (`state` `observed` with `count` and up to 50
 `jobs`, or `remote_jobs_gate_unavailable` when the listing could not be read)
-and lists them under `blockers`; an unreadable listing is itself a blocker
+and lists the ones the gate would refuse over under `blockers`; an unreadable listing is itself a blocker
 (`{"code": "remote_jobs_gate_unavailable"}`). A confirmed migrate makes the
 same read-only listing before it uploads anything, so it usually refuses before
 the upload. The refusal, from either check, looks like this:

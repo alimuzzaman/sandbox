@@ -6762,7 +6762,34 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     if summary_recorder is not None:
         summary_recorder.finished((delivery or {}).get("delivery_succeeded") is not False)
     _record_stack_delivery(validated, remote_name, delivery)
+    mail_name = _ensure_stack_mail_name(validated, remote_name, delivery)
+    if mail_name is not None:
+        result["mail_name"] = mail_name
     return result
+
+
+def _ensure_stack_mail_name(validated: dict, remote_name: str, delivery: dict | None) -> dict | None:
+    """Keep a stack's ``stack.mail_hostname`` pointed at its Mailpit port.
+
+    Runs where the apply completed (controller applies, this-server stacks and
+    follow attempts all end here), through the ordinary tailnet-name ``add``:
+    a rerun is a no-op and a changed port replaces the upstream. The apply has
+    already succeeded, so a refusal is reported (``mail_name`` and stderr),
+    never raised.
+    """
+    stack = validated.get("stack") or {}
+    fqdn = stack.get("mail_hostname")
+    port = (stack.get("ports") or {}).get("mailpit")
+    if (not fqdn or not isinstance(port, int)
+            or (delivery or {}).get("delivery_state") not in {"succeeded", "incomplete"}):
+        return None
+    from sandbox.hosting.tailnet_names import stack_mail
+    report = stack_mail.ensure(remote_name, stack["slug"], fqdn, port)
+    if report.get("status") not in ("ready", "unconfigured"):
+        print(f"warning: inbox name {fqdn} not published ({report.get('code')}): "
+              f"{remote.redact_text(str(report.get('error') or ''))[:200]}; the next apply retries it",
+              file=sys.stderr)
+    return report
 
 
 def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | None) -> None:

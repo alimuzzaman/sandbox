@@ -56,25 +56,26 @@ class JoinedOwnerPreservationShellTests(unittest.TestCase):
         self.log = self.home / 'service.log'
         self.executable(self.bin / 'systemctl', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SERVICE_LOG"\n'
             'case "$*" in *"show --property=LoadState --property=ActiveState --value"*) '
-            'printf "loaded\\nactive\\n";; *) exit 0;; esac\n')
+            'printf "loaded\\nactive\\n";; *"--user start "*) test "$FAIL_START" != 1;; *) exit 0;; esac\n')
         self.executable(self.bin / 'loginctl', '#!/bin/sh\nexit 0\n')
-        # Execute the real metadata/activation/rollback Python programs. Only
-        # the optional tool-venv provisioning port is replaced with a no-op.
-        tools = 'from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()'
+        # Execute the real metadata/release/rollback Python programs. Only
+        # venv creation (and so pip and tool-venv provisioning) is a no-op.
         self.executable(self.bin / 'python3', '#!' + sys.executable + '\nimport os,sys\n'
-            'if len(sys.argv)>2 and sys.argv[1]=="-c" and sys.argv[2]==' + repr(tools) + ':\n'
-            ' raise SystemExit(0)\n'
+            'if sys.argv[1:3]==["-m","venv"]:\n'
+            ' os.makedirs(sys.argv[3]+"/bin");p=sys.argv[3]+"/bin/python"\n'
+            ' open(p,"w").write("#!/bin/sh\\nexit 0\\n");os.chmod(p,0o700);raise SystemExit(0)\n'
             'os.execv(sys.executable,[sys.executable,*sys.argv[1:]])\n')
         self.executable(self.bin / 'stat', '#!' + sys.executable + '\nimport os,stat,sys\n'
             'i=os.stat(sys.argv[3]);print(sys.argv[2].replace("%u",str(i.st_uid))'
             '.replace("%a",oct(stat.S_IMODE(i.st_mode))[2:]))\n')
-        (self.tree / '.cli-venv/bin').mkdir(parents=True)
-        (self.tree / '.cli-venv/bin/python').symlink_to(self.bin / 'python3')
-        (self.tree / 'scripts/provision_image_stage_helper.py').write_text(
-            'import os\nraise SystemExit(1 if os.environ.get("FAIL_HELPER")=="1" else 0)\n')
+        (self.tree / 'scripts/provision_image_stage_helper.py').write_text('')
+        self.release = self.home / 'sandbox/releases' / self.record['runtime_revision']
 
     def executable(self, path, text):
         path.write_text(text); path.chmod(0o700)
+
+    def log_text(self):
+        return self.log.read_text() if self.log.exists() else ''
 
     def invoke(self, *, fail=False):
         self.assertNotIn(self.canary.decode().strip(), self.command)
@@ -82,7 +83,7 @@ class JoinedOwnerPreservationShellTests(unittest.TestCase):
         result = run_test_process(('/bin/sh', '-c', self.command), input=b'',
             capture_output=True, timeout=15, env={'HOME': str(self.home), 'USER': 'fixture',
                 'PATH': str(self.bin) + ':/usr/bin:/bin', 'SERVICE_LOG': str(self.log),
-                'FAIL_HELPER': '1' if fail else '0'})
+                'FAIL_START': '1' if fail else '0'})
         self.assertNotIn(self.canary, result.stdout + result.stderr)
         self.assertNotIn(base64.b64encode(self.canary), result.stdout + result.stderr)
         return result
@@ -99,13 +100,15 @@ class JoinedOwnerPreservationShellTests(unittest.TestCase):
         self.assertFalse(self.stage.exists())
 
     def test_failed_install_restores_old_source_unit_and_preserves_recipient(self):
+        # The release is built; the start fails, so the switch is undone.
         result = self.invoke(fail=True)
+        self.assertFalse(self.runtime.is_symlink())
         self.assertEqual(result.returncode, 1, result.stderr.decode())
         self.assertEqual((self.runtime / 'identity').read_text(), 'old')
         self.assertEqual(self.unit.read_text(), self.old_unit)
         self.assertEqual(self.credential.read_bytes(), self.canary)
         self.assertEqual(self.credential.stat().st_mode & 0o777, 0o600)
-        self.assertIn('restart ' + remote.REMOTE_MCP_SERVICE, self.log.read_text())
+        self.assertIn('restart ' + remote.REMOTE_MCP_SERVICE, self.log_text())
 
     def test_changed_unit_revision_refuses_before_exchange(self):
         self.unit.write_text(self.old_unit.replace(self.old_revision, 'c' * 24))
@@ -123,7 +126,7 @@ class JoinedOwnerPreservationShellTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.runtime / 'identity').read_text(), 'old')
         self.assertEqual(self.credential.read_bytes(), self.canary)
-        self.assertNotIn('restart ' + remote.REMOTE_MCP_SERVICE, self.log.read_text())
+        self.assertNotIn('restart ' + remote.REMOTE_MCP_SERVICE, self.log_text())
         self.assertTrue(self.stage.is_symlink())
 
     def test_symlink_runtime_refuses_without_replacing_its_original_target(self):
@@ -134,8 +137,8 @@ class JoinedOwnerPreservationShellTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.runtime.is_symlink())
         self.assertEqual((backing / 'identity').read_text(), 'old')
-        self.assertEqual((self.tree / 'identity').read_text(), 'new')
-        self.assertNotIn('restart ' + remote.REMOTE_MCP_SERVICE, self.log.read_text())
+        self.assertEqual((self.release / 'identity').read_text(), 'new')
+        self.assertNotIn('restart ' + remote.REMOTE_MCP_SERVICE, self.log_text())
 
     def test_credential_symlink_or_nonprivate_mode_refuses_before_exchange(self):
         for linked in (False, True):

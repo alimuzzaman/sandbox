@@ -905,6 +905,8 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
             "  ./sb remote service refresh NAME [--json]  # adopt joined service identity locally\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
+            "  ./sb remote service releases NAME [--json]  # side-by-side runtime releases\n"
+            "  ./sb remote service rollback NAME --plan|--confirm [--json]  # current -> previous\n"
             "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]\n"
             "\n"
@@ -1108,6 +1110,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host tailnet-name add/renew: ACME directory for this call (default: tailnet_names.acme_server)")
     host_p.add_argument("--force", action="store_true",
         help="host tailnet-name renew: reissue even when the certificate is not due")
+    host_p.add_argument("--server-held", dest="server_held", action="store_true",
+        help="host tailnet-name: act on the names a joined remote's server holds itself "
+             "(stack.mail_hostname), as a server job")
     host_p.add_argument('--repair-source', choices=['deployed'], help='repair-source: explicitly use recorded deployed Git objects')
     host_p.add_argument('--repair-plan-digest', help='repair-source: exact plan digest required for confirmation')
     host_p.add_argument('--installed-source-repair', help=argparse.SUPPRESS)

@@ -61,7 +61,7 @@ class InstallReceiptTests(RemoteCase):
         command = mock_ssh_run.call_args.args[1]
         self.assertIn("$HOME/sandbox/runtime/source-revision.json", command)
         self.assertIn('{"schema_version":1,"source_revision":"' + SOURCE + '"}', command)
-        self.assertLess(command.rindex("trap - EXIT"), command.index("source-revision.json"))
+        self.assertLess(command.rindex("trap - EXIT"), command.index("/.source-revision.XXXXXX"))
         # Best effort: a failed receipt write cannot fail the finished install.
         receipt_segment = command[command.index("source-revision.json") - 400:]
         self.assertIn("|| true", receipt_segment)

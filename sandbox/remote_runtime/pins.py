@@ -322,16 +322,18 @@ SERVICE_SUPERVISORS = r'''def service_supervisors():
 # (``JobRepository.accept``), and refuses with exit 47 over any job whose
 # lifecycle is in ACTIVE_JOB_LIFECYCLES and whose id the operator did not name
 # (``--ignore-job``), listed as one JSON line; exit 48 when that lock cannot be
-# taken. Queued jobs do not block: they cannot start while the lock is held and
-# the new service starts them. A child status of 45-48 is reported as 1, so an
+# taken. Queued jobs do not block: while the lock is held they cannot start,
+# and otherwise (scoped release, below) they start in their own scopes; an
+# accepted job whose launch dies with the old service is failed by
+# JobService.reconcile_startup after its launch grace. A child status of 45-48 is reported as 1, so an
 # install failure is never read as a gate refusal. With no such job it keeps the write lock, so no
 # job is admitted, until the install creates the file named by
 # ``SANDBOX_JOBS_GATE_RELEASE`` (after it has stopped the old service and
 # before it starts any service, whose startup writes the registry) or exits.
 # The gate removes that file once the lock is released.
-# In the release layout, when the serving release launches supervisors in
-# their own scopes (sandbox/jobs/scope.py), the lock is released right after
-# the check instead: nothing admitted later can die with the restart, and a
+# In the release layout, when both sb-src and the running service's own
+# release launch supervisors in their own scopes (sandbox/jobs/scope.py), the
+# lock is released right after the check instead: nothing admitted later can die with the restart, and a
 # lock held through the old service's stop fails admissions and running
 # supervisors' registry writes once it outlasts their busy timeout.
 INSTALL_GATE = r'''
@@ -392,7 +394,30 @@ ACTIVE = ("accepted", "running", "cancelling")
 registry = os.path.join(home, "runtime", "jobs", "registry.sqlite3")
 hold = None
 
-%%SERVICE_SUPERVISORS%%if os.path.exists(registry):
+%%SERVICE_SUPERVISORS%%
+def serving_scoped():
+    """Whether the control service now running was started from a release that
+    launches supervisors in scopes (its cwd, not the sb-src link, which can
+    already point elsewhere). No service: nothing to lose. Unreadable: no."""
+    try:
+        pid = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "MainPID", "--value", "sandbox-mcp-remote.service"],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL).stdout.strip()
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return False
+    if pid == "0":
+        return True
+    if not pid.isdigit():
+        return False
+    try:
+        cwd = os.readlink("/proc/%s/cwd" % pid)
+    except OSError:
+        return False
+    return os.path.isfile(os.path.join(cwd, "sandbox", "jobs", "scope.py"))
+
+if os.path.exists(registry):
     try:
         hold = sqlite3.connect(registry, timeout=15, isolation_level=None,
                                check_same_thread=False)
@@ -417,7 +442,8 @@ hold = None
         print(json.dumps({"jobs_gate": "blocked", "count": len(rows), "jobs": [
             {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
         raise SystemExit(47)
-    if releases and os.path.isfile(os.path.join(home, "sb-src", "sandbox", "jobs", "scope.py")):
+    if releases and os.path.isfile(os.path.join(home, "sb-src", "sandbox", "jobs", "scope.py")) \
+            and serving_scoped():
         # The serving release launches every supervisor in its own scope, so
         # no job admitted from here on can die with the restart. Holding the
         # lock through the old service's stop would only fail admissions and

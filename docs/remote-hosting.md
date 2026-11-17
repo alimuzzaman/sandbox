@@ -3112,9 +3112,15 @@ still kill:
   `running` or `cancelling`, as before.
 
 The gate makes its check under the registry's write lock (`BEGIN IMMEDIATE`).
-In the release layout, when the serving release launches supervisors in scopes
-(`sandbox/jobs/scope.py` exists), it releases the lock right after the check:
-nothing admitted later can die with the restart, so admission never pauses.
+In the release layout, when both `sb-src` and the running service's own release
+(its working directory) launch supervisors in scopes (`sandbox/jobs/scope.py`
+exists), it releases the lock right after the check, so admission never pauses.
+A job accepted in the moment before the old service stops can still lose its
+launch (`systemd-run` has not yet left the service's cgroup); any process
+running a job command then fails it as `supervisor_launch_failed` once it has
+had no supervisor for 120 s, freeing its slot, so a replay reports that
+outcome instead of `accepted`. The unit's `TimeoutStopSec=30` bounds the hold
+on hosts that still take it.
 Otherwise (the old layout, or a retained pre-scope release) it holds the lock
 until the old service is stopped, so no job is admitted between the check and
 the restart; a submission then waits on the lock (`JobRepository`'s 5-second

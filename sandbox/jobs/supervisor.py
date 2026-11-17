@@ -22,7 +22,8 @@ from .artifacts import collect as collect_artifacts
 from .metrics import append as append_metric, sample as sample_metric
 from sandbox.services.redaction import redact_structure, redact_text
 
-# Longer than any install holds the job admission lock (pins.INSTALL_GATE).
+# Waits out the install gate's hold of job admission (pins.INSTALL_GATE),
+# which the unit's TimeoutStopSec=30 bounds, and other short writers.
 SUPERVISOR_BUSY_TIMEOUT_MS = 60_000
 
 

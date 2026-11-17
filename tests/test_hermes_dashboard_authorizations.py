@@ -301,6 +301,8 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
 
     def test_dashboard_bundle_has_valid_javascript_syntax(self):
         node = shutil.which("node")
+        if node is None and not os.environ.get("CI"):
+            self.skipTest("Node.js is not installed on this host; CI runs this check")
         self.assertIsNotNone(node, "Node.js is required to validate the dashboard bundle")
         bundle = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/dist/index.js"
         checked = subprocess.run([node, "--check", str(bundle)], text=True, capture_output=True, check=False)

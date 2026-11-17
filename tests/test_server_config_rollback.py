@@ -37,13 +37,14 @@ from tests.server_config_fixtures import (
     FakeClock,
     fragment,
 )
+from tests.server_config_support import private_base
 
 
 class TestServerConfigRollback(unittest.TestCase):
     """T058: Post-validation faults, automatic rollback, and recovery-needed semantics."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.clock = FakeClock()
         self.descriptor = AdapterDescriptor(
             server_type="nginx",

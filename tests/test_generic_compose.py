@@ -72,6 +72,11 @@ class _Registry:
 
 class TestGenericComposeAdapter(unittest.TestCase):
     def setUp(self):
+        # A host with network ranges (e.g. a remote under $SANDBOX_HOME) must not
+        # reach these fixtures; tests that need ranges patch their own.
+        _ranges = patch("sandbox.remote_network.runtime.default_runtime", return_value=None)
+        _ranges.start()
+        self.addCleanup(_ranges.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         artifacts = Path(temporary.name)
@@ -361,7 +366,8 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual(result.data["output"], stdout)
             self.assertNotIn("separate-stderr", result.data["output"])
-            self.assertEqual(registry.registry_get(str(root))["output"], stdout[-10000:])
+            # ba09289: exec is an observation and never writes the registry record.
+            self.assertIsNone(registry.registry_get(str(root)))
 
     def test_exec_success_bounds_utf8_output_with_both_edges(self):
         with tempfile.TemporaryDirectory() as tmp:

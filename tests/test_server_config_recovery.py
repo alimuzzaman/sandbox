@@ -41,6 +41,7 @@ from tests.server_config_fixtures import (
     FakeClock,
     fragment,
 )
+from tests.server_config_support import private_base
 
 
 def _setup_service(repo_dir: str, clock: Clock, adapter: FakeAdapter) -> ServerConfigService:
@@ -56,7 +57,7 @@ class TestServerConfigRecovery(unittest.TestCase):
     """T057: Recovery from process interruptions, corrupt journals, and runtime drift."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.clock = FakeClock()
         self.descriptor = AdapterDescriptor(
             server_type="nginx",

@@ -12,6 +12,7 @@ from sandbox.server_config.models import (
 from sandbox.server_config.repository import ServerConfigRepository
 from sandbox.server_config.service import ServerConfigService
 from sandbox.server_config.adapters.base import AdapterDescriptor
+from tests.server_config_support import private_base
 
 
 @dataclass(frozen=True)
@@ -27,8 +28,8 @@ class TestServerConfigControlInstance(unittest.TestCase):
 
     def setUp(self):
         self.clock = FakeClock()
-        self.target_dir = tempfile.mkdtemp()
-        self.control_dir = tempfile.mkdtemp()
+        self.target_dir = private_base(self)
+        self.control_dir = private_base(self)
 
         self.target_incarnation = "inc_" + "1" * 32
         self.control_incarnation = "inc_" + "2" * 32

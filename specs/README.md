@@ -75,8 +75,21 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 068 | Local Images for Hosted Deployments | Open (4 of 35) | — | Internal |
 | 069 | Secret Profiles and Create-Only Manager Migration | Open (3 of 67) | — | Internal |
 | 070 | Wildcard Subdomain Hosting | Open (49 of 49) | — | Internal |
+| 071 | Host Stack Templates | Ledger closed | — | Internal |
+| 072 | Controller Auto-Update | Ledger closed | — | Internal |
+| 073 | Secrets Unset and Remote Copy | Ledger closed | — | Internal |
+| 074 | Host Exec | Ledger closed | — | Internal |
+| 075 | Login Service Site Gate | Ledger closed | — | Internal |
+| 076 | Stacks and Hosted Sites View | Ledger closed | — | Internal |
+| 077 | Stack Lifetime and Per-Copy Stack Identity | Ledger closed | — | Internal |
+| 078 | Tailnet-Only Hostnames | Open (1 of 31) | — | Internal |
+| 080 | Reclaim Stray Unlabeled Containers Owned by a Workspace | Ledger closed | — | Internal |
 | 081 | Hosted Share Links | Ledger closed | Live apply and browser run | Internal |
+| 082 | Clean-URL Proxy on Demand and Remote-Only Controllers | Ledger closed | — | Internal |
+| 083 | Oldest-First Durable-Job Admission | Ledger closed | — | Internal |
 | 084 | Front-Door-Only Refresh for Hosted Targets | In progress | Live refresh by the orchestrator after merge | Feedback e674a79e |
+| 088 | Stack Page Access | Open (6 of 26) | — | Internal |
+| 089 | Stack Branch Follower | Open (1 of 13) | — | Internal |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`
 means no unchecked task; `Open (n of m)` counts unchecked tasks, which are mostly

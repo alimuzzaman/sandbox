@@ -164,7 +164,7 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/commands/lifecycle.py", "cmd_logs"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_open"): 1,
                 ("sandbox/commands/debug.py", "cmd_test"): 1,
-                ("sandbox/application/runtime_service.py", "invoke"): 3,
+                ("sandbox/application/runtime_service.py", "_invoke_coordinated"): 3,
                 ("sandbox/application/runtime_service.py", "check"): 1,
                 ("mcp/wp-server/tools/instances.py", "destroy_instance"): 1,
                 ("mcp/wp-server/tools/instances.py", "recreate_instance"): 1,

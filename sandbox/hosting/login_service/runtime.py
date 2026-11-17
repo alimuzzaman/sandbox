@@ -1219,6 +1219,10 @@ def _probe(hostname, probe, upstream, suffixes):
         connection.request("GET", "/", headers={"Host": hostname, "User-Agent": "sandbox-share-health"})
         response = connection.getresponse()
         response.read(65536)
+        if response.status == 404 and response.getheader(GATE_HEADER) == "1":
+            # Another share gate: its marked 404 means up behind sign-in
+            # (sandbox.hosting.panel_health.probe reads it the same way).
+            return "up_login"
         return classify(response.status)
     except (OSError, http.client.HTTPException, ValueError):
         return "unreachable"

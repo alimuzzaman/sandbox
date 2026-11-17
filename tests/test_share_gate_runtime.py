@@ -590,6 +590,27 @@ class HealthTests(_Gate):
         self.assertEqual(result, "up")
         self.assertEqual(dict(self.upstream_store["requests"][-1]["headers"])["Host"], HUB)
 
+    def test_another_gates_marked_404_is_up_behind_sign_in(self):
+        import http.server
+        import threading
+
+        class Gated(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header(runtime.GATE_HEADER, "1")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Gated)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.assertEqual(runtime._probe(HUB, "internal", ("127.0.0.1", server.server_address[1]), []),
+                         "up_login")
+
     def test_public_probe_skips_hosts_off_the_allowed_suffixes(self):
         self.assertEqual(runtime._probe("elsewhere.example.org", "public", None, ["dev.example.test"]),
                          "not_checked")

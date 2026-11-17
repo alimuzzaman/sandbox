@@ -6,6 +6,7 @@ home through a local ``sh -c`` stand-in for ``ssh_run``.
 import json
 import os
 import shlex
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -331,6 +332,128 @@ class PinTests(unittest.TestCase):
         leftover = self.store.list()
         self.assertEqual([pin.revision for pin in leftover], [REV_A])
         self.assertLessEqual(leftover[0].expires_at - leftover[0].renewed_at, pins.MAX_TTL_SECONDS)
+
+    # -- Running jobs: the gate refuses under the job admission lock ----------
+
+    def _registry(self):
+        from sandbox.jobs.registry import JobRepository
+        path = self.remote_home / "runtime" / "jobs" / "registry.sqlite3"
+        repository = JobRepository(path, busy_timeout_ms=200)
+        self.addCleanup(repository.close)
+        return path, repository
+
+    @staticmethod
+    def _submission(request_id):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        return JobSubmission(
+            kind="server-cli", project_root="/tmp/project", project_identity="project-1",
+            target_kind="local", workspace_label="default", argv=("python", "-V"),
+            deadline_seconds=60, request_id=request_id, source=SourceIdentity("sha256:source"))
+
+    def test_gate_refuses_over_an_unfinished_job_and_runs_nothing(self):
+        path, repository = self._registry()
+        row, _ = repository.accept(self._submission("r-1"))
+        marker = self.remote_home / "installed"
+        result = self._gated(f"touch {marker}")
+        self.assertEqual(result.returncode, pins.JOBS_ACTIVE_EXIT)
+        refusal = pins.install_gate_refusal(result.returncode, result.stdout)
+        self.assertEqual(refusal.code, pins.JOBS_ACTIVE)
+        self.assertEqual(refusal.job_count, 1)
+        self.assertEqual(refusal.jobs, [{"job_id": row["job_id"], "kind": "server-cli",
+                                         "lifecycle": "accepted"}])
+        self.assertIn(row["job_id"], str(refusal))
+        self.assertFalse(marker.exists())
+        for lifecycle in ("queued", "running", "cancelling"):
+            with self.subTest(lifecycle=lifecycle):
+                with repository.transaction(immediate=True) as connection:
+                    connection.execute("UPDATE jobs SET lifecycle=? WHERE job_id=?",
+                                       (lifecycle, row["job_id"]))
+                self.assertEqual(self._gated("true").returncode, pins.JOBS_ACTIVE_EXIT)
+        with repository.transaction(immediate=True) as connection:
+            connection.execute("UPDATE jobs SET lifecycle='failed' WHERE job_id=?",
+                               (row["job_id"],))
+        self.assertEqual(self._gated(f"touch {marker}").returncode, 0)
+        self.assertTrue(marker.exists())
+        # A failed install releases the admission lock too.
+        self.assertEqual(self._gated("exit 3").returncode, 3)
+        repository.accept(self._submission("r-2"))
+
+    def test_no_job_is_admitted_between_the_check_and_the_release(self):
+        from sandbox.jobs.registry import JobRepository
+        path, repository = self._registry()
+        started, go, released, end = (self.remote_home / name
+                                      for name in ("started", "go", "released", "end"))
+        wait = "while [ ! -e {0} ]; do sleep 0.05; done; "
+        inner = (f"touch {started}; " + wait.format(go)
+                 + ': > "$SANDBOX_JOBS_GATE_RELEASE"; '
+                 'while [ -e "$SANDBOX_JOBS_GATE_RELEASE" ]; do sleep 0.05; done; '
+                 f"touch {released}; " + wait.format(end))
+        env = synthetic_environment({"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
+               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
+        proc = subprocess.Popen(["sh", "-c", pins.install_gate_command(REV_B, (), inner)],
+                                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (go.touch(), end.touch(), proc.wait(30)))
+
+        def until(marker):
+            deadline = time.time() + 20
+            while not marker.exists():
+                self.assertLess(time.time(), deadline, f"{marker.name} never appeared")
+                time.sleep(0.05)
+
+        until(started)
+        # Admission takes the same write lock and is refused while it is held.
+        with self.assertRaises(sqlite3.OperationalError):
+            repository.accept(self._submission("r-held"))
+        with self.assertRaises(sqlite3.OperationalError):
+            JobRepository(path, busy_timeout_ms=200)
+        # Reads still work (WAL): status and listings stay available.
+        self.assertEqual(pins.list_active_jobs({"name": "fixture"}, self.remote), (0, []))
+        go.touch()
+        until(released)
+        row, _ = repository.accept(self._submission("r-after"))
+        self.assertEqual(row["lifecycle"], "accepted")
+        end.touch()
+        self.assertEqual(proc.wait(30), 0)
+
+    def test_listing_reads_unfinished_jobs_without_creating_a_registry(self):
+        self.assertEqual(pins.list_active_jobs({"name": "fixture"}, self.remote), (0, []))
+        self.assertFalse((self.remote_home / "runtime" / "jobs").exists())
+        _path, repository = self._registry()
+        first, _ = repository.accept(self._submission("r-1"))
+        second, _ = repository.accept(self._submission("r-2"))
+        with repository.transaction(immediate=True) as connection:
+            connection.execute("UPDATE jobs SET lifecycle='succeeded' WHERE job_id=?",
+                               (second["job_id"],))
+        count, jobs = pins.list_active_jobs({"name": "fixture"}, self.remote)
+        self.assertEqual((count, [job["job_id"] for job in jobs]), (1, [first["job_id"]]))
+        self.remote.fail = True
+        with self.assertRaises(pins.PinError) as raised:
+            pins.list_active_jobs({"name": "fixture"}, self.remote)
+        self.assertEqual(raised.exception.code, pins.JOBS_GATE_UNAVAILABLE)
+        self.assertNotIn("token", str(raised.exception))
+
+    def test_active_lifecycles_are_the_non_terminal_ones_in_every_copy(self):
+        from sandbox.jobs.models import Lifecycle, TERMINAL_LIFECYCLES
+        expected = {item.value for item in Lifecycle} - {item.value for item in TERMINAL_LIFECYCLES}
+        self.assertEqual(set(pins.ACTIVE_JOB_LIFECYCLES), expected)
+        literal = f"ACTIVE = {pins.ACTIVE_JOB_LIFECYCLES!r}"
+        self.assertIn(literal, pins.INSTALL_GATE)
+        self.assertIn(literal, pins.ACTIVE_JOBS_PROGRAM)
+
+    def test_malformed_job_output_is_unavailable_never_a_pass(self):
+        for stdout in ("", "{}", '{"jobs_gate": "blocked", "count": 1, "jobs": [{"job_id": "x"}]}',
+                       '{"jobs_gate": "blocked", "count": 0, "jobs": [{"job_id": "' + "a" * 32 + '"}]}'):
+            with self.subTest(stdout=stdout):
+                refusal = pins.install_gate_refusal(pins.JOBS_ACTIVE_EXIT, stdout)
+                self.assertEqual(refusal.code, pins.JOBS_GATE_UNAVAILABLE)
+        self.assertEqual(pins.install_gate_refusal(pins.JOBS_GATE_UNAVAILABLE_EXIT, "").code,
+                         pins.JOBS_GATE_UNAVAILABLE)
+        shown = pins.install_gate_refusal(pins.JOBS_ACTIVE_EXIT, json.dumps(
+            {"jobs_gate": "blocked", "count": 3, "jobs": [
+                {"job_id": "a" * 32, "kind": "bad kind;", "lifecycle": "running"}]}))
+        self.assertEqual(shown.jobs, [{"job_id": "a" * 32, "kind": "unknown", "lifecycle": "running"}])
+        self.assertIn("and 2 more", str(shown))
 
     def test_pin_record_shape_is_fixed_for_its_schema(self):
         """Pin records are versioned by pins.SCHEMA, not the control protocol

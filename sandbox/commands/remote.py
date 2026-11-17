@@ -527,6 +527,31 @@ def _pin_listing(entry: dict) -> dict:
     return {"pins": [pin.as_mapping() for pin in listed], "pins_state": "observed"}
 
 
+def _active_jobs_listing(entry: dict) -> dict:
+    """Unfinished server-side jobs for a migrate plan; never fails the plan."""
+    from sandbox.remote_runtime.pins import JOBS_GATE_UNAVAILABLE, PinError, list_active_jobs
+    try:
+        count, jobs = list_active_jobs(entry)
+    except PinError:
+        return {"state": JOBS_GATE_UNAVAILABLE, "count": None, "jobs": None}
+    return {"state": "observed", "count": count, "jobs": jobs}
+
+
+def _migrate_jobs_precheck(entry: dict) -> None:
+    """Refuse a confirmed migrate before any upload while jobs are unfinished.
+
+    A listing that cannot be read does not refuse here: the install gate makes
+    the deciding check under the job admission lock and refuses on its own.
+    """
+    from sandbox.remote_runtime.pins import PinError, jobs_active_error, list_active_jobs
+    try:
+        count, jobs = list_active_jobs(entry)
+    except PinError:
+        return
+    if count:
+        raise jobs_active_error(count, jobs)
+
+
 def _break_pin_args(args) -> list[str]:
     values = getattr(args, "break_pins", None) or []
     return sorted({value for value in values if isinstance(value, str)})
@@ -949,6 +974,9 @@ def _cmd_service(args, as_json: bool) -> None:
                 # Re-read pins at the moment of acting; refuse before any write.
                 _would_break, acknowledged_pins = _migrate_pin_gate(
                     entry, args, target_revision)
+                # Early, read-only: refuse before the upload. The install gate
+                # repeats this under the job admission lock, which decides.
+                _migrate_jobs_precheck(entry)
                 source_revision = _local_git_revision()
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
                 _invalidate_readiness(name, before=True)
@@ -986,6 +1014,10 @@ def _cmd_service(args, as_json: bool) -> None:
                     f"controllers below {oldest} are refused")
                 from sandbox.hosting import login_reapply_plan
                 plan["login_reapply"] = login_reapply_plan.plan(entry, sr.ssh_run)
+                plan["active_jobs"] = _active_jobs_listing(entry)
+                plan["blockers"] = [] if not plan["active_jobs"]["count"] else [{
+                    "code": "remote_jobs_active", "count": plan["active_jobs"]["count"],
+                    "jobs": plan["active_jobs"]["jobs"]}]
             if observed.get("runtime_revision_state") == "mismatch":
                 # One remote serves one runtime revision. Replacing it breaks
                 # any other checkout or deploy that requires the installed one.
@@ -1087,9 +1119,12 @@ def _cmd_service(args, as_json: bool) -> None:
                 else "remote_service_failed")
         payload = {"ok": False, "name": name, "status": "degraded", "data": {},
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
+        if isinstance(getattr(exc, "jobs", None), list):
+            payload["error"]["jobs"] = exc.jobs
+            payload["error"]["job_count"] = exc.job_count
     if as_json:
         print(json.dumps(payload))
-        if operation in ("status", "capability", "refresh") and not payload["ok"]:
+        if operation in ("status", "capability", "refresh", "migrate") and not payload["ok"]:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")
@@ -2189,8 +2224,9 @@ def _cmd_provision(args, as_json: bool) -> None:
         _record_provision_event(journal, "runtime_staged")
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "runtime_staging_failed", status="failed", detail=str(e))
-        error_code = (f"{e.code}: " if isinstance(
-            e, RemoteRuntimeSourceIndeterminate) else "")
+        error_code = (f"{e.code}: " if isinstance(e, RemoteRuntimeSourceIndeterminate)
+                      or getattr(e, "code", None) in {
+                          "remote_jobs_active", "remote_jobs_gate_unavailable"} else "")
         die(f"{error_code}could not stage the sandbox runtime on '{name}': "
             f"{sr.redact_ssh_connection(str(e), entry)}")
     cmd = (
@@ -2431,8 +2467,9 @@ def _cmd_up(args, as_json: bool) -> None:
             sr.put_remote(name, mcp_service=plan["service"])
             _invalidate_readiness(name)
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
-        error_code = (f"{e.code}: " if isinstance(
-            e, RemoteRuntimeSourceIndeterminate) else "")
+        error_code = (f"{e.code}: " if isinstance(e, RemoteRuntimeSourceIndeterminate)
+                      or getattr(e, "code", None) in {
+                          "remote_jobs_active", "remote_jobs_gate_unavailable"} else "")
         die(f"{error_code}could not start '{name}''s MCP server: "
             f"{sr.redact_ssh_connection(str(e), entry)}")
         return

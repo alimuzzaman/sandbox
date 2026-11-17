@@ -2902,6 +2902,36 @@ program is still honoured until it expires. `remote up` and
 `remote provision` take no `--break-pin`, so they refuse over any binding pin;
 migrate is the path that acknowledges pins.
 
+**Unfinished jobs.** An install restarts the service and replaces the runtime
+under every server-side job, and a running server-owner job (such as a nested
+`server-cli` host apply) then fails with its rollback withheld and its target
+lease kept. So every install path refuses with `remote_jobs_active` while any
+job on the remote is `accepted`, `queued`, `running` or `cancelling`. The
+deciding check is in `pins.INSTALL_GATE`, after the pin check: it opens the job
+registry (`runtime/jobs/registry.sqlite3`) with `BEGIN IMMEDIATE`, the write
+lock every job admission takes, and keeps that lock until the old service is
+stopped, so no job can be admitted between the check and the restart (a
+submission in that window fails; reads still work). It then releases the lock
+before any service starts. If that lock cannot be taken within 15 seconds the
+install refuses with `remote_jobs_gate_unavailable`. There is no override:
+wait for the jobs to end (`sb job-list --remote NAME --active-only`) or cancel
+them, then rerun.
+
+`--plan` reports `active_jobs` (`state` `observed` with `count` and up to 50
+`jobs`, or `remote_jobs_gate_unavailable` when the listing could not be read)
+and lists them under `blockers`. A confirmed migrate makes the same read-only
+listing before it uploads anything, so it usually refuses before the upload.
+The refusal, from either check, looks like this:
+
+```json
+{"ok": false, "name": "vps", "status": "degraded", "data": {},
+ "error": {"code": "remote_jobs_active", "message": "1 server-side job(s) have not finished on the remote: <job id> (server-cli, running); ...",
+           "jobs": [{"job_id": "<job id>", "kind": "server-cli", "lifecycle": "running"}],
+           "job_count": 1}}
+```
+
+With `--json`, a failed `remote service migrate` (plan or confirm) exits 1.
+
 Remote workspace list, status, migration planning, creation, reset, and destroy all
 run the same read-only service preflight before sending a workspace request. The
 selected owned MCP service must report `ownership=proven` and an admitted

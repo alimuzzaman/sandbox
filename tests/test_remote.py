@@ -2512,6 +2512,7 @@ class TestInstallHandlersFailClosedOnReadinessInvalidation(unittest.TestCase):
                      patch.object(remote_cmd.sr, "remote_mcp_service_status",
                                   return_value={"probe_state": "complete"}), \
                      patch.object(remote_cmd, "_migrate_pin_gate", return_value=(False, [])), \
+                     patch.object(remote_cmd, "_migrate_jobs_precheck"), \
                      patch.object(remote_cmd, "_front_door_provision_preflight"), \
                      patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
                      patch.object(remote_cmd, "_assert_clean_source_revision"), \
@@ -2839,6 +2840,36 @@ class TestStartRemoteMcpServer(unittest.TestCase):
             sr.migrate_remote_mcp_service({"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174, "d" * 64,
                                           "https://sandbox.example.test", confirm=True,
                                           source_revision="f" * 40, staged_source=_staged_source())
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_gate_refusal_over_unfinished_jobs_keeps_its_code_and_job_ids(self, mock_ssh_run):
+        from sandbox.remote_runtime import pins
+        line = json.dumps({"jobs_gate": "blocked", "count": 1, "jobs": [
+            {"job_id": "d" * 32, "kind": "server-cli", "lifecycle": "running"}]})
+        mock_ssh_run.return_value = _completed(returncode=pins.JOBS_ACTIVE_EXIT, stdout=line + "\n")
+        with self.assertRaises(pins.PinError) as raised:
+            sr.migrate_remote_mcp_service(
+                {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
+                source_revision="f" * 40, staged_source=_staged_source())
+        self.assertEqual(raised.exception.code, "remote_jobs_active")
+        self.assertEqual([job["job_id"] for job in raised.exception.jobs], ["d" * 32])
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_install_stops_the_old_service_before_releasing_job_admission(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.migrate_remote_mcp_service(
+            {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
+            source_revision="f" * 40, staged_source=_staged_source())
+        command = mock_ssh_run.call_args.args[1]
+        unit = "sandbox-mcp-remote.service"
+        stop = command.index(f"! systemctl --user stop {unit} || ! release_jobs_gate; then exit 1")
+        self.assertLess(stop, command.index(f"systemctl --user start {unit}"))
+        self.assertNotIn(f"! systemctl --user restart {unit}", command)
+        # A rollback stops whatever runs and releases before it restarts anything.
+        rollback = command.index("rollback() {")
+        released = command.index("release_jobs_gate || failed=1", rollback)
+        self.assertLess(command.index(f"systemctl --user stop {unit}", rollback), released)
+        self.assertLess(released, command.index(f"systemctl --user restart {unit}", rollback))
 
     @patch("sandbox.core._remote.ssh_run")
     def test_rollback_indeterminate_is_distinct_and_prior_active_restore_is_required(self, mock_ssh_run):
@@ -3938,8 +3969,10 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=incomplete), \
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
-                     redirect_stdout(StringIO()) as output:
+                     redirect_stdout(StringIO()) as output, \
+                     self.assertRaises(SystemExit) as raised:
                     remote_cmd._cmd_service(args, as_json=True)
+                self.assertEqual(raised.exception.code, 1)
                 upload.assert_not_called()
                 migrate.assert_not_called()
                 payload = json.loads(output.getvalue())
@@ -3964,8 +3997,10 @@ class TestRemoteServiceCommand(unittest.TestCase):
                         return_value={"legacy_pidfile": "absent"}), \
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
-                     redirect_stdout(StringIO()) as output:
+                     redirect_stdout(StringIO()) as output, \
+                     self.assertRaises(SystemExit) as raised:
                     remote_cmd._cmd_service(args, as_json=True)
+                self.assertEqual(raised.exception.code, 1)
                 upload.assert_not_called()
                 migrate.assert_not_called()
                 payload = json.loads(output.getvalue())
@@ -4067,14 +4102,21 @@ class TestRemoteServiceCommand(unittest.TestCase):
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
                     remote_cmd._cmd_service(args, as_json=True)
-                # The only remote call is the read-only login runtime listing.
+                # The only remote calls are the read-only login runtime and
+                # unfinished-job listings.
                 from sandbox.hosting import login_reapply_plan
-                self.assertEqual([shlex.split(call.args[1]) for call in ssh_run.call_args_list],
-                                 [["python3", "-c", login_reapply_plan._PROGRAM]])
+                from sandbox.remote_runtime import pins
+                self.assertEqual([shlex.split(call.args[1])[:3] for call in ssh_run.call_args_list],
+                                 [["python3", "-c", login_reapply_plan._PROGRAM],
+                                  ["python3", "-c", pins.ACTIVE_JOBS_PROGRAM]])
                 upload.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")
                 self.assertTrue(payload["data"]["legacy_pidfile_detected"])
+                # An unreadable job listing is reported, never a pass or a failure.
+                self.assertEqual(payload["data"]["active_jobs"]["state"],
+                                 "remote_jobs_gate_unavailable")
+                self.assertEqual(payload["data"]["blockers"], [])
                 self.assertNotIn("a" * 64, json.dumps(payload))
 
     def test_confirmed_service_migration_stages_runtime_before_handoff(self):
@@ -4117,8 +4159,13 @@ class TestRemoteServiceCommand(unittest.TestCase):
                                   return_value={"legacy_pidfile": "absent"}), \
                      patch.object(remote_cmd, "_upload_runtime_source",
                                   side_effect=timeout), \
-                     redirect_stdout(StringIO()) as output:
+                     patch.object(remote_cmd, "_migrate_pin_gate", return_value=([], [])), \
+                     patch.object(remote_cmd, "_migrate_jobs_precheck"), \
+                     redirect_stdout(StringIO()) as output, \
+                     self.assertRaises(SystemExit) as raised:
                     remote_cmd._cmd_service(args, as_json=True)
+                # 85a00075: a failed migrate --json exits non-zero.
+                self.assertEqual(raised.exception.code, 1)
                 payload = json.loads(output.getvalue())
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["error"]["code"],

@@ -228,6 +228,8 @@ def configure_parser(parser) -> None:
         child.add_argument("--json", action="store_true")
         if action == "classify":
             child.add_argument("--check-destination", action="store_true")
+            # Whole existence check; the destination's timeoutSeconds caps each request.
+            child.add_argument("--timeout-seconds", type=int, default=300)
         elif action == "credential-set":
             child.add_argument("--capability", choices=("read", "create"), required=True)
             child.add_argument("--stdin", action="store_true")
@@ -644,9 +646,16 @@ def _ownership_command(ctx, args, adapter):
             return report_payload(report, "classification_blocked" if report.blocking else "classified",
                                   ok=not report.blocking)
         from sandbox.secrets.ownership.classify import classify
+        from sandbox.secrets.ownership.migrate import MAX_RUN_SECONDS
+        timeout_seconds = args.timeout_seconds
+        if (not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool)
+                or not 1 <= timeout_seconds <= MAX_RUN_SECONDS):
+            raise SecretBrokerError("input_invalid", "timeout must be between 1 and 3600 seconds")
         grant = build_grant(ctx, profile, "read", tuple(sorted(e.name for e in entries)))
+        # The destination's timeoutSeconds bounds each request (provider
+        # contract); one GET per name needs a run deadline of its own.
         session = resolve_adapter(adapter, capability="read").open_session(
-            grant, deadline=time.time() + grant.destination.timeout_seconds)
+            grant, deadline=time.time() + timeout_seconds)
         exists_exc = None
         try:
             with session:

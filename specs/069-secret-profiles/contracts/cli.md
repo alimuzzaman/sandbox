@@ -5,6 +5,7 @@ New action `ownership` under `sb secrets` (added to `ACTIONS` in `sandbox/comman
 ```
 sb secrets ownership classify  --profile P                         # dry-run, credential-free unless --check-destination
                                 [--check-destination]              # value-free existence via read grant -> would_create/pre_existing/unknown
+                                [--timeout-seconds 1..3600]        # whole check, default 300; destination timeoutSeconds caps each request
 sb secrets ownership credential-set --profile P --capability read|create --stdin [--create-only|--replace-only]
                                                                    # operator stores bootstrap client secret in OS store (TTY or stdin pipe; never argv)
 sb secrets ownership evidence-check --profile P --evidence FILE    # parse + admission report (operator_attested), no provider call

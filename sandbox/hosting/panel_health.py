@@ -25,6 +25,8 @@ DEFAULT_TIMEOUT_SECONDS = 4
 DEFAULT_MAX_HOSTS = 64
 DEFAULT_WORKERS = 4
 USER_AGENT = "sandbox-panel-health/1"
+# Every share-gate answer carries it (sandbox.hosting.login_service.runtime.GATE_HEADER).
+GATE_HEADER = "X-Sandbox-Gate"
 
 _HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z")
 _PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@/%-]{0,499}\Z")
@@ -74,10 +76,15 @@ def probe(hostname: str, path: str, timeout: float, *, wall: Callable[[], float]
                                                  "Connection": "close"})
         response = connection.getresponse()
         status = int(response.status)
+        gated = response.getheader(GATE_HEADER) == "1"
     except (OSError, http.client.HTTPException, ValueError):
         return {"status": "unreachable", "http_status": None, "checked_at": checked_at}
     finally:
         connection.close()
+    if status == 404 and gated:
+        # A share gate answers every request without a session 404, health path
+        # included (spec 081). Its marked 404 means the gate is up and private.
+        return {"status": "up_login", "http_status": status, "checked_at": checked_at}
     return {"status": classify(status), "http_status": status, "checked_at": checked_at}
 
 

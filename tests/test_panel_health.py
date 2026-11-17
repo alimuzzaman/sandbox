@@ -90,12 +90,15 @@ class HealthCacheTest(unittest.TestCase):
 
 
 class ProbeTest(unittest.TestCase):
-    def connection(self, *, status=200, error=None):
+    def connection(self, *, status=200, error=None, headers=None):
         record = {}
 
         class Response:
             def __init__(self):
                 self.status = status
+
+            def getheader(self, name, default=None):
+                return (headers or {}).get(name, default)
 
         class Connection:
             def __init__(self, host, port, timeout, context):
@@ -119,6 +122,16 @@ class ProbeTest(unittest.TestCase):
             connection, _ = self.connection(status=status)
             result = ph.probe("hub.example.test", "/", 4, wall=lambda: 7, connection_class=connection)
             self.assertEqual(result, {"status": expected, "http_status": status, "checked_at": 7})
+
+    def test_a_share_gate_404_is_a_live_gated_host(self):
+        connection, _ = self.connection(status=404, headers={"X-Sandbox-Gate": "1"})
+        result = ph.probe("share-demo.example.test", "/readme.html", 4, wall=lambda: 7,
+                          connection_class=connection)
+        self.assertEqual(result, {"status": "up_login", "http_status": 404, "checked_at": 7})
+        # Only the gate's 404: any other gated answer keeps its own class.
+        connection, _ = self.connection(status=502, headers={"X-Sandbox-Gate": "1"})
+        self.assertEqual(ph.probe("share-demo.example.test", "/", 4, connection_class=connection)
+                         ["status"], "server_error")
 
     def test_request_shape_has_no_credentials(self):
         connection, record = self.connection()

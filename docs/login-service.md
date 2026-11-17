@@ -244,6 +244,8 @@ the route marker that apply checks.
   route or a cached page cannot pass. Every probe asks a new URL (a random
   `sandbox-verify` query). A gate behind a public target's Basic Auth gets its
   credentials. The application's own health is still checked on its loopback port.
+  The `sb web` panel's health column reads a gate's marked 404 (`X-Sandbox-Gate: 1`) as
+  a live host behind sign-in, the same class as a 401 or 403.
   Image activation does not re-render the route, so it checks privacy without the tag.
 - **No Cloudflare proxying.** `private: true` refuses `cloudflare.proxied: true`, and the
   apply refuses, before any effect, when Cloudflare still proxies any of the target's

@@ -437,9 +437,12 @@ class PinTests(unittest.TestCase):
         from sandbox.jobs.models import Lifecycle, TERMINAL_LIFECYCLES
         expected = {item.value for item in Lifecycle} - {item.value for item in TERMINAL_LIFECYCLES}
         self.assertEqual(set(pins.ACTIVE_JOB_LIFECYCLES), expected)
-        literal = f"ACTIVE = {pins.ACTIVE_JOB_LIFECYCLES!r}"
-        self.assertIn(literal, pins.INSTALL_GATE)
-        self.assertIn(literal, pins.ACTIVE_JOBS_PROGRAM)
+        import ast
+        for program in (pins.INSTALL_GATE, pins.ACTIVE_JOBS_PROGRAM):
+            assigned = [ast.literal_eval(node.value) for node in ast.parse(program).body
+                        if isinstance(node, ast.Assign)
+                        and [getattr(t, "id", None) for t in node.targets] == ["ACTIVE"]]
+            self.assertEqual(assigned, [pins.ACTIVE_JOB_LIFECYCLES])
 
     def test_malformed_job_output_is_unavailable_never_a_pass(self):
         for stdout in ("", "{}", '{"jobs_gate": "blocked", "count": 1, "jobs": [{"job_id": "x"}]}',

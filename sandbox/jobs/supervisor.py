@@ -973,7 +973,16 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("descriptor")
     args = parser.parse_args(argv)
-    return run_descriptor(args.descriptor)
+    try:
+        return run_descriptor(args.descriptor)
+    finally:
+        # The job is terminal (or its supervisor failed): nothing it started
+        # may outlive it in its scope.
+        from .scope import sweep_own_scope
+        try:
+            sweep_own_scope(json.loads(Path(args.descriptor).read_text())["job_id"])
+        except Exception:  # noqa: BLE001 - best effort after the durable record
+            pass
 
 
 if __name__ == "__main__":

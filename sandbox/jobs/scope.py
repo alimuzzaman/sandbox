@@ -17,8 +17,10 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _USER_MANAGER_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
@@ -124,3 +126,48 @@ def admitted_release(descriptor_path, own_root: Path, interpreter: str) -> tuple
         if os.access(mapped, os.X_OK):
             interpreter = mapped
     return root, interpreter
+
+
+def sweep_own_scope(job_id: str, *, cgroup: str | None = None, root: Path = Path("/sys/fs/cgroup"),
+                    grace_seconds: float = 2.0) -> int:
+    """Stop every other process left in this supervisor's own job scope.
+
+    Called once the job is terminal: a helper the job left behind (a test
+    waiter, a stray loop) would otherwise keep the scope alive forever. Before
+    scopes, such leftovers sat in the control service's cgroup and died with
+    its next restart. Only the scope scoped_launch created for this very job
+    is swept: a supervisor started inside another job's scope (a test suite
+    running supervisors) must never stop that job. Returns the number of
+    processes signalled.
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id or ""):
+        return 0
+    path = cgroup if cgroup is not None else _own_cgroup()
+    own_scope = re.compile(r"sandbox-job-" + job_id[:16] + r"-[0-9a-f]{6}\.scope")
+    if not path or not own_scope.fullmatch(path.rstrip("/").rsplit("/", 1)[-1]):
+        return 0
+    procs = root / path.lstrip("/") / "cgroup.procs"
+    own = os.getpid()
+    signalled = set()
+
+    def others():
+        try:
+            return {int(value) for value in procs.read_text().split() if int(value) != own}
+        except (OSError, ValueError):
+            return set()
+
+    for sig, wait in ((signal.SIGTERM, grace_seconds), (signal.SIGKILL, 0.5)):
+        remaining = others()
+        for pid in remaining:
+            try:
+                os.kill(pid, sig)
+                signalled.add(pid)
+            except OSError:
+                pass
+        deadline = time.monotonic() + wait
+        while remaining and time.monotonic() < deadline:
+            time.sleep(0.05)
+            remaining = others()
+        if not remaining:
+            break
+    return len(signalled)

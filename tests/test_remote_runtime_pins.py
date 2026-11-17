@@ -158,7 +158,11 @@ class PinTests(unittest.TestCase):
         """Start a gated install that holds the lock until ``release`` exists."""
         release = self.remote_home / "release"
         started = self.remote_home / "started"
-        script = f"touch {started}; while [ ! -e {release} ]; do sleep 0.05; done; {inner}"
+        # The wait also ends once the fixture home is gone, so a failed test
+        # (whose cleanup touches release and then removes the directory before
+        # the loop sees it) never leaves the waiter spinning.
+        script = (f"touch {started}; while [ ! -e {release} ] && [ -d {self.remote_home} ]; "
+                  f"do sleep 0.05; done; {inner}")
         env = synthetic_environment({"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
                "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         proc = subprocess.Popen(["sh", "-c", pins.install_gate_command(target, (), script)],

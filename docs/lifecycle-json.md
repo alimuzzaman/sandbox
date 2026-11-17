@@ -69,15 +69,21 @@ requires a succeeded `created` relation, and refuses mismatch before teardown.
 It does not mint new receipts or accept a name/label as proof. Installed parsers
 without these options fail closed; the caller never retries without them.
 
-The host-wide instance lifecycle guard orders before project and registry locks.
-It covers the full WordPress ensure operation, native/generic runtime
-ensure/apply/destroy/start/stop/resume/suspend/ownership-repair, explicit CLI
-deletion, project-lock callers, and canonical
-registry put/remove (including the MCP recreate pending-record transition).
-Nested calls retain one reentrant process/thread guard. Independent lifecycle
-writers on this host consequently serialize. Inventory keeps its existing read
-path. CLI deletion bypasses automatic migration and generated-runtime rewrites;
-configuration is read inside the guard and owner comparison precedes effects.
+Instance lifecycle writers use two locks. The per-project writer lock (one
+file per canonical project root under `runtime/locks/`) is held from the record
+read through effects (Compose up/down, readiness) and the final registry write by
+the full WordPress ensure, every RuntimeService
+ensure/apply/destroy/start/stop/resume/suspend/ownership-repair (native and
+generic), explicit CLI deletion (taken for the owner's root, then the owner is
+re-read and compared before effects), and other project-lock callers. It is
+reentrant within a thread. Operations on different projects run in parallel.
+The host-wide guard (`runtime/locks/instance-lifecycle.lock`) is a leaf held only
+around canonical registry put/remove (including the MCP recreate pending-record
+transition); it is never held across Compose or while taking a project lock.
+When it is busy the waiter prints one `waiting for another instance operation`
+line to stderr and gives up after `SANDBOX_LIFECYCLE_LOCK_TIMEOUT` seconds
+(default 120). `sb instance list` and inventory take neither lock. CLI deletion
+bypasses automatic migration and generated-runtime rewrites.
 Preview teardown separately retains unknown outcomes before dispatch, and does
 not authorize another attempt from a timeout or process-disappearance observation.
 No concurrency/runtime checks were run for this source-only change.
@@ -85,6 +91,6 @@ No concurrency/runtime checks were run for this source-only change.
 Generic Compose status/logs/exec do not persist their captured owner record.
 Successful logs/exec therefore cannot resurrect an old incarnation/receipt after
 a concurrent replacement. Runtime-changing start/stop/resume/suspend and ownership
-repair join ensure/apply/destroy under the full shared writer guard before the
+repair join ensure/apply/destroy under the project writer lock before the
 record read, through effects and any final registry update. Long-running ordinary
-logs/exec do not hold the host lifecycle guard merely to capture output.
+logs/exec do not hold a lifecycle lock merely to capture output.

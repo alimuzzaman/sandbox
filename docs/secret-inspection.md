@@ -626,15 +626,20 @@ no MCP form.
 This is the reverse of 6c. Use it to keep a copy of a host's own key on the controller,
 such as an application's encryption key that its backups need.
 
-**Grant.** A value leaves a host only when that host's registration of the source names the
-exact key in `egressKeys`:
+**Grant.** A value leaves a host only when that host's own Sandbox home registers the source and
+names the exact key in `egressKeys`, in the config of `$SANDBOX_HOME` itself:
 
 ```jsonc
+// $SANDBOX_HOME/sandbox.config.json on the host
 "secrets": { "sources": { "app-env": {
   "path": ".env.app",
   "egressKeys": ["ENCRYPTION_KEY", "AUTH_SECRET"]
 } } }
 ```
+
+A project's config (any `--source-project-dir` other than `$SANDBOX_HOME`) never grants egress,
+even when it lists `egressKeys`: a project file is one an agent can edit. Such a request refuses
+with `egress_not_granted`.
 
 The grant is the owner's approval. It lists exact key names only, with no wildcard. It needs a
 dotenv source, and the built-in `personal` source can never grant egress. Agents do not add or
@@ -647,8 +652,10 @@ with `source_unknown`, and an unknown remote with `remote_unknown`.
 there. Only names are in that command. The controller sends a fresh random 32-byte nonce on the
 session's stdin. The remote broker checks the grant, then writes one JSON line to the SSH channel
 holding the value and an HMAC-SHA256 of it keyed by that nonce. `egress` refuses
-(`egress_requires_transport`) when its stdout or stdin is a terminal or `--json` is missing, and it
-has no MCP form. The controller keeps the answer in memory. It never logs, prints or writes it to
+(`egress_requires_transport`) when its stdout or stdin is a terminal, `--json` is missing, or it is
+not the direct command of an SSH session (`SSH_CONNECTION` set and its parent process `sshd`,
+`sshd-session` or `tailscaled`): a host-side process piping in its own nonce is refused. It has no
+MCP form. The controller keeps the answer in memory. It never logs, prints or writes it to
 a temporary file. The value never appears in argv, an environment variable, console output or
 either audit journal.
 

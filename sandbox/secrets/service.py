@@ -944,6 +944,15 @@ class SecretService:
                 "input_invalid", "secret value cannot travel as one line",
             )
 
+    def _owner_registration(self) -> bool:
+        """True when the sources come from $SANDBOX_HOME's own config, not a project's."""
+        from pathlib import Path
+        from sandbox.core._paths import BASE
+        try:
+            return Path(self.registry.project_root).resolve() == Path(BASE).resolve()
+        except (AttributeError, OSError):
+            return False
+
     def egress(self, source: str, key: str, nonce: bytes, writer: Callable[[str, str], None], *,
                surface: str = "cli") -> dict:
         """Hand one owner-granted value to the controller's ``copy --from-remote``.
@@ -969,6 +978,14 @@ class SecretService:
             policy = self.registry.policy(source)
             if policy.format != "dotenv":
                 raise SecretBrokerError("egress_denied", "secret egress requires a dotenv source")
+            if not self._owner_registration():
+                # A project's config is agent-writable; only the Sandbox home's
+                # own registration (the owner's) can grant a value leave the host.
+                raise SecretBrokerError(
+                    "egress_not_granted", "egress grants are read only from the Sandbox home's registration",
+                    remedy="The host owner lists the source and its egressKeys in the config of "
+                           "$SANDBOX_HOME itself, then retry without --source-project-dir.",
+                )
             if key not in getattr(policy, "egress_keys", frozenset()):
                 raise SecretBrokerError(
                     "egress_not_granted", "the source owner has not granted this key egress",

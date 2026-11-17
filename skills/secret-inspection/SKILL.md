@@ -292,8 +292,8 @@ Reverse direction, from a remote host into a local source:
   --project-dir PROJECT_DIR
 ```
 
-It works only for keys the host's source registration lists in `egressKeys`
-(`egress_not_granted` otherwise). The owner grants that, never an agent on its own. The value
+It works only for keys the host's Sandbox home registration (`$SANDBOX_HOME`'s own config, never a
+project's) lists in `egressKeys` (`egress_not_granted` otherwise). The owner grants that, never an agent on its own. The value
 travels on the SSH channel inside one JSON answer and is checked against a nonce-keyed fingerprint
 before and after the local create-only write. The result shows `fingerprint_match` and length
 buckets only. `secrets egress` is that command's remote half: never run it yourself. See

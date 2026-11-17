@@ -873,6 +873,27 @@ def _copy_from_remote(service, args) -> dict:
                                     intent=intent)
 
 
+# The process an SSH session's command runs under: OpenSSH (sshd, or
+# sshd-session from 9.8) or Tailscale SSH (tailscaled).
+_SSH_SESSION_PARENTS = frozenset(("sshd", "sshd-session", "tailscaled"))
+
+
+def _direct_ssh_session_command() -> bool:
+    """True only when this process is the command an SSH session exec'd.
+
+    `copy --from-remote` runs `exec sb secrets egress` as the session's command,
+    so the parent is the SSH server. A host-side agent or script piping a nonce
+    in has its own shell or agent as the parent and is refused.
+    """
+    if not os.environ.get("SSH_CONNECTION"):
+        return False
+    try:
+        with open(f"/proc/{os.getppid()}/comm", encoding="ascii") as handle:
+            return handle.read().strip() in _SSH_SESSION_PARENTS
+    except (OSError, UnicodeError):
+        return False
+
+
 def _egress(service, args) -> None:
     """Remote half of `copy --from-remote`: one JSON line to a non-terminal stdout."""
     from sandbox.secrets.remote_copy import EGRESS_NONCE_BYTES
@@ -880,7 +901,7 @@ def _egress(service, args) -> None:
         interactive = sys.stdout.isatty() or sys.stdin.isatty()
     except (OSError, ValueError):
         interactive = True
-    if interactive or not args.json:
+    if interactive or not args.json or not _direct_ssh_session_command():
         raise SecretBrokerError(
             "egress_requires_transport",
             "secret egress runs only as the transport of `secrets copy --from-remote`",

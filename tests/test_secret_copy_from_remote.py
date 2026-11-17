@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -78,6 +79,10 @@ class Base(unittest.TestCase):
         }, self.remote_root / ".remote-personal")
         self.local = _service(self.local_root, {}, self.personal)
         self.request = RemoteGetRequest(remote="example-remote", source="app-env", key="GRANTED")
+        # Egress grants count only from the Sandbox home's own registration.
+        home = patch("sandbox.core._paths.BASE", self.remote_root)
+        home.start()
+        self.addCleanup(home.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -144,6 +149,15 @@ class EgressServiceTests(Base):
                 self.assertEqual(caught.exception.code, "egress_not_granted")
         self.assertEqual({e["reason_code"] for e in self.audit(self.remote_root)
                           if e["phase"] == "outcome"}, {"egress_not_granted"})
+        self.assert_value_free()
+
+    def test_a_project_registration_cannot_grant_egress(self):
+        # Fable review 10: a project config is agent-writable, so its egressKeys
+        # never let a value leave the host.
+        with patch("sandbox.core._paths.BASE", self.local_root):
+            with self.assertRaises(SecretBrokerError) as caught:
+                self.remote.egress("app-env", "GRANTED", NONCE, lambda *_: self.fail("value written"))
+        self.assertEqual(caught.exception.code, "egress_not_granted")
         self.assert_value_free()
 
     def test_personal_bad_nonce_and_non_cli_refuse_before_audit(self):
@@ -280,31 +294,44 @@ class RealCliEgressTests(Base):
 
     def setUp(self):
         super().setUp()
-        (self.remote_root / "sandbox.config.json").write_text(json.dumps({"secrets": {"sources": {
-            "app-env": {"path": ".env.app", "egressKeys": ["GRANTED"]}}}}))
+        if not Path("/proc/self/comm").exists():
+            self.skipTest("egress identifies its SSH session through /proc")
+        # The grant lives in the remote Sandbox home's own config (owner level).
         self.home = self.remote_root / "sandbox-home"
         self.home.mkdir()
+        (self.home / "sandbox.config.json").write_text(json.dumps({"secrets": {"sources": {
+            "app-env": {"path": ".env.app", "egressKeys": ["GRANTED"]}}}}))
+        source = self.home / ".env.app"
+        source.write_bytes(REMOTE_FIXTURE)
+        source.chmod(0o600)
         (self.home / "sb-src").symlink_to(REPO)
+        # A copy of sh named sshd stands in for the SSH server that runs the
+        # session's command; its child subshell execs sb, so sb's parent is "sshd".
+        self.sshd = self.remote_root / "bin" / "sshd"
+        self.sshd.parent.mkdir()
+        self.sshd.write_bytes(Path("/bin/sh").read_bytes())
+        self.sshd.chmod(0o755)
 
-    def env(self):
-        return {"HOME": str(self.home), "SANDBOX_HOME": str(self.home),
-                "SANDBOX_PROJECT_ROOTS": str(self.remote_root), "SANDBOX_AUTO_UPDATE": "0",
-                "SANDBOX_SECRETS_FILE": str(self.home / ".none"), "PYTHONDONTWRITEBYTECODE": "1"}
+    def env(self, *, ssh=True):
+        env = {"HOME": str(self.home), "SANDBOX_HOME": str(self.home), "PATH": os.environ["PATH"],
+               "SANDBOX_PROJECT_ROOTS": str(self.home), "SANDBOX_AUTO_UPDATE": "0",
+               "SANDBOX_SECRETS_FILE": str(self.home / ".none"), "PYTHONDONTWRITEBYTECODE": "1"}
+        if ssh:
+            env["SSH_CONNECTION"] = "192.0.2.1 50000 192.0.2.2 22"
+        return env
 
     def runner(self, entry, command_text, *, timeout, input_data):
-        return run_test_process(["/bin/sh", "-c", command_text], input=input_data,
+        return run_test_process([str(self.sshd), "-c", "(" + command_text + ")"], input=input_data,
                                 capture_output=True, env=self.env(), timeout=60)
 
     def test_real_egress_lands_in_local_source_and_refuses_ungranted(self):
         origin = SshRemoteSecretSink({"provisioned": True}, runner=self.runner)
-        request = RemoteGetRequest(remote="example-remote", source="app-env", key="GRANTED",
-                                   source_project_dir=str(self.remote_root))
+        request = RemoteGetRequest(remote="example-remote", source="app-env", key="GRANTED")
         payload = self.local.copy_from_remote("personal", "ESCROWED", request, origin)
         self.assertEqual((payload["action"], payload["verification"]["fingerprint_match"]),
                          ("created", True))
         self.assertTrue(self.personal_has("ESCROWED", CANARY))
-        withheld = RemoteGetRequest(remote="example-remote", source="app-env", key="WITHHELD",
-                                    source_project_dir=str(self.remote_root))
+        withheld = RemoteGetRequest(remote="example-remote", source="app-env", key="WITHHELD")
         with self.assertRaises(SecretBrokerError) as caught:
             self.local.copy_from_remote("personal", "OTHER_ESCROW", withheld, origin)
         self.assertEqual(caught.exception.code, "egress_not_granted")
@@ -312,11 +339,17 @@ class RealCliEgressTests(Base):
 
     def test_real_egress_refuses_without_json_and_with_bad_nonce(self):
         base = [str(REPO / "sb"), "secrets", "egress", "--project-dir",
-                str(self.remote_root), "--source", "app-env", "--key", "GRANTED"]
-        env = self.env()
-        for argv, stdin, code in ((base, NONCE.hex() + "\n", "egress_requires_transport"),
-                                  (base + ["--json"], "not-a-nonce\n", "input_invalid")):
-            with self.subTest(code=code):
+                str(self.home), "--source", "app-env", "--key", "GRANTED"]
+        session = lambda argv: [str(self.sshd), "-c", "(exec " + " ".join(map(shlex.quote, argv)) + ")"]
+        for argv, stdin, code, env in (
+                (session(base), NONCE.hex() + "\n", "egress_requires_transport", self.env()),
+                (session(base + ["--json"]), "not-a-nonce\n", "input_invalid", self.env()),
+                # Fable review 10: a host-side process piping a nonce in is not an
+                # SSH session's command, with or without SSH_CONNECTION set.
+                (base + ["--json"], NONCE.hex() + "\n", "egress_requires_transport", self.env()),
+                (session(base + ["--json"]), NONCE.hex() + "\n", "egress_requires_transport",
+                 self.env(ssh=False))):
+            with self.subTest(code=code, argv=argv[0]):
                 result = run_test_process(argv, input=stdin.encode(), capture_output=True, env=env)
                 self.assertNotEqual(result.returncode, 0)
                 output = (result.stdout + result.stderr).decode("utf-8", "replace")

@@ -37,7 +37,10 @@ imports it. Actions:
     Put a release's recorded unit, source receipt and owner origin back.
 ``gc HOME``
     Keep ``current``, ``previous`` and the last ``KEEP`` activated releases;
-    remove older ones that no live process references.
+    remove older ones that no live process references. Also remove upload
+    staging directories (``.sb-src-stage-*``) older than an hour that no
+    live process uses: prepare renames a stage it builds, so these are left
+    by interrupted or pre-release installs.
 ``list HOME``
     Read-only listing.
 """
@@ -61,6 +64,8 @@ LEGACY = os.path.join(home, "sb-src")
 MARKER = ".release.json"
 KEEP = 3
 NAME = re.compile(r"[0-9a-f]{24}|legacy-[0-9]{10,12}")
+STAGE = re.compile(r"\.sb-src-stage-(?:[0-9a-f]{12}-[0-9a-f]{32}|tmp\.[A-Za-z0-9]{6,})")
+STAGE_AGE = 3600
 uid = os.geteuid()
 
 def fail(code, message):
@@ -328,9 +333,9 @@ def restore(rev, unit_path, receipt_path, origin_path):
                          (origin_path, ".owner-origin.json")):
         copy_private(os.path.join(REL, rev, kept), target)
 
-def referenced():
-    """Release names a live process runs from (cwd or command line)."""
-    prefix = os.path.realpath(REL) + "/"; found = set()
+def referenced(base=None):
+    """Entries of ``base`` (default: releases) a live process runs from or maps."""
+    prefix = os.path.realpath(base or REL) + "/"; found = set()
     for pid in os.listdir("/proc") if os.path.isdir("/proc") else ():
         if not pid.isdigit():
             continue
@@ -384,8 +389,35 @@ def gc():
             continue
         shutil.rmtree(os.path.join(REL, name), ignore_errors=True)
         removed.append(name)
+    stages = gc_stages()
     os.close(held)
-    print(json.dumps({"removed": sorted(removed), "kept": sorted(n for n in keep if n)}), flush=True)
+    print(json.dumps({"removed": sorted(removed), "kept": sorted(n for n in keep if n),
+                      "stages_removed": stages}), flush=True)
+
+def gc_stages():
+    """Upload staging directories left by interrupted or pre-release installs.
+
+    A stage is renamed into releases/ by prepare, so one still here is
+    leftover once it is older than STAGE_AGE (an upload in flight is
+    younger) and no live process uses it.
+    """
+    live = referenced(home)
+    removed = []
+    for name in sorted(os.listdir(home)):
+        if not STAGE.fullmatch(name) or name in live:
+            continue
+        path = os.path.join(home, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                or time.time() - info.st_mtime < STAGE_AGE):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.lexists(path):
+            removed.append(name)
+    return removed
 
 if action == "prepare":
     prepare(*argv)

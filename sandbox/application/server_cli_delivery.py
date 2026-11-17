@@ -16,7 +16,10 @@ from sandbox.jobs.models import validate_job_id
 CONTRACT = 'delivery.inspect-exact.v1'
 REQUEST_BYTES = 2048
 RESPONSE_BYTES = 4096
-SECONDS = 15
+# One budget covers identity, the capability read and the inspect read. Each
+# remote `sb` start costs ~3.5s on a loaded host (xspeed-dev, load ~27), so
+# 15s expired before the inspect and reported a found record as unavailable.
+SECONDS = 60
 STATUSES = {'found', 'missing', 'expired', 'binding_unavailable', 'binding_mismatch',
             'unsupported', 'bounds', 'unavailable'}
 SERVICED = {'found', 'missing', 'expired'}

@@ -1420,6 +1420,7 @@ class ListRenewRemoveTests(ServiceTestCase):
         self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
         self.assertEqual(self.remote.blocks[FQDN], theirs)
         self.assertEqual(self.remote.leases, {})
+        self.assertNotIn(FQDN, self.store.load(), "a refused first add leaves no record")
 
 
     def test_a_run_whose_lease_was_taken_over_does_not_touch_dns(self):

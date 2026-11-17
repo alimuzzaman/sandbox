@@ -519,6 +519,13 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                          "refused")
             row = info.rows.get(name.fqdn)
             _ownership(run, row)
+            if row and row.block_present and row.upstream and row.upstream != str(upstream) \
+                    and not replace_upstream:
+                # Refused before anything is recorded: a stack must never come
+                # to own (and later remove) a name published by someone else.
+                run.stop("preflight", UPSTREAM_DIFFERS,
+                         f"already published with upstream {row.upstream}; "
+                         "pass --replace-upstream to change it", "refused")
             run.done("preflight")
             _gate(ctx, deps, run, info.locks)
             token = (existing.lease_token if existing and existing.lease_token
@@ -532,6 +539,8 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                 row = _fresh(run, ctx, deps, name.fqdn, "gate", require_bound=True)
                 if row and row.block_present and row.upstream and row.upstream != str(upstream) \
                         and not replace_upstream:
+                    if existing is None:
+                        store.drop(name.fqdn)  # recorded by this run only
                     run.stop("activate", UPSTREAM_DIFFERS,
                              f"already published with upstream {row.upstream}; "
                              "pass --replace-upstream to change it", "refused")

@@ -202,3 +202,42 @@ def checkout(repo: Path, commit: str, branch: str | None = None) -> None:
     result = _git(Path(repo), *checkout_argv(commit, branch), timeout=300)
     if result.returncode != 0 or head(repo) != commit:
         raise FollowError("follow_checkout_failed", f"checkout of {commit[:12]} failed: {_detail(result)}")
+    normalize_modes(Path(repo))
+
+
+# What a checkout gets under the user manager's default umask (0022), as on the
+# controller's path; the poll itself runs with UMask=0077.
+_TRACKED_MODES = {"100644": 0o644, "100755": 0o755}
+
+
+def normalize_modes(repo: Path) -> None:
+    """Give tracked files and their directories the modes of a checkout made under umask 0022.
+
+    The poll checks out under 0077, so files would be 0600 and directories 0700,
+    and an image built from them keeps those modes: a container running as a
+    non-root user cannot read them (feedback d96eaf4c). A forced checkout keeps
+    the modes of files it does not rewrite, so this also repairs older clones.
+    Symlinks and submodules are left alone; ``.git`` is never touched.
+    """
+    repo = Path(repo)
+    listed = _git(repo, "ls-files", "--stage", "-z", timeout=120)
+    if listed.returncode != 0:
+        raise FollowError("follow_checkout_failed", f"git ls-files failed: {_detail(listed)}")
+    directories = {repo}
+    for entry in (listed.stdout or "").split("\0"):
+        meta, _tab, name = entry.partition("\t")
+        mode = _TRACKED_MODES.get(meta.split(" ", 1)[0])
+        if mode is None or not name:
+            continue
+        path = repo / name
+        if path.is_symlink() or not path.is_file():
+            continue
+        if (os.lstat(path).st_mode & 0o7777) != mode:
+            os.chmod(path, mode)
+        parent = path.parent
+        while parent != repo and parent not in directories:
+            directories.add(parent)
+            parent = parent.parent
+    for directory in directories:
+        if not directory.is_symlink() and (os.lstat(directory).st_mode & 0o7777) != 0o755:
+            os.chmod(directory, 0o755)

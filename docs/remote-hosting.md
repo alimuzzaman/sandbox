@@ -2073,6 +2073,15 @@ poll. `run-now` starts the same poll unit and takes the same path. Stopping the 
 removing the follow does not stop a running attempt; cancel its job with
 `sb job-cancel <job_id>` (`follow status` shows the ids).
 
+**File modes.** The poll runs with `UMask=0077`, which keeps the follow's state and keys
+private. The source a follow builds from gets the modes a controller's apply gets, under
+the user manager's default umask of 0022. After each checkout the poll sets tracked files
+to 0644 (0755 when executable in Git) and their directories to 0755. This also repairs
+clones checked out before this fix; `.git`, symlinks and submodules are left as they are.
+The attempt job itself runs with umask 0022, so its prepare outputs and the stack build
+get the same modes too. Without this, an image built from the follow's tree would keep
+0600 and 0700 modes, and a container running as a non-root user could not read them.
+
 ### Running a command in a hosted service (`sb host exec`, spec 074)
 
 ```bash

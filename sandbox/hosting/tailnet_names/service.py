@@ -484,7 +484,9 @@ def _recover_then_preflight(ctx: Context, deps: Deps, run: _Run, name: TailnetNa
 
 
 def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
-        replace_upstream: bool = False) -> Result:
+        replace_upstream: bool = False, stack: str | None = None) -> Result:
+    """``stack`` tags a new record with the stack that owns it; an existing
+    record keeps its tag (the caller decides whether a stack may take a name)."""
     run = _Run("add", name.fqdn)
     target = ctx.target
     entry = target.entry
@@ -515,7 +517,8 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
             token = (existing.lease_token if existing and existing.lease_token
                      else deps.new_token())
             rec = _Recorder(store, replace(
-                existing or TailnetNameRecord(name.fqdn, name.zone, str(upstream), target.tailnet_ip),
+                existing or TailnetNameRecord(name.fqdn, name.zone, str(upstream), target.tailnet_ip,
+                                              stack=stack),
                 state="publishing", tailnet_ip=target.tailnet_ip, lease_token=token), deps.now)
             rec.save()
             with _lease(run, deps, ctx, name.fqdn, token):

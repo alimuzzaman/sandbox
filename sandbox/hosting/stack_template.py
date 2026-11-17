@@ -88,6 +88,9 @@ class StackTemplate:
     raw: dict = field(repr=False)  # the manifest without ``stack:``
     dev_branch: str = DEFAULT_DEV_BRANCH  # spec 077: the repo's dev branch
     uses: tuple[str, ...] = ()  # direct same-remote stack names (spec 088)
+    # The stack's tailnet-only inbox name, e.g. ``mail-{slug}.example.com``;
+    # Sandbox points it at the ``mailpit`` port after each apply.
+    mail_hostname: str | None = None
 
     def environment_names(self) -> tuple[str, ...]:
         environments = self.raw.get("environments")
@@ -212,7 +215,7 @@ def parse_template(manifest: dict) -> StackTemplate:
         raise StackTemplateError(TEMPLATE_INVALID, "a stack template needs a stack: mapping")
     if INSTANCE_KEY in manifest:
         raise StackTemplateError(TEMPLATE_INVALID, "a template cannot carry stack_instance")
-    unknown = set(block) - {"slug", "ports", "dev_branch", "uses"}
+    unknown = set(block) - {"slug", "ports", "dev_branch", "uses", "mail_hostname"}
     if unknown:
         raise StackTemplateError(
             TEMPLATE_INVALID, "unknown stack keys: " + ", ".join(sorted(map(str, unknown))))
@@ -244,13 +247,29 @@ def parse_template(manifest: dict) -> StackTemplate:
         raise StackTemplateError(USES_LIMIT, f"stack.uses accepts at most {MAX_STACK_USES} stacks")
     if len(set(uses)) != len(uses):
         raise StackTemplateError(USES_DUPLICATE, "stack.uses names must be unique")
+    mail_hostname = block.get("mail_hostname")
+    if mail_hostname is not None:
+        if "mailpit" not in ports:
+            raise StackTemplateError(TEMPLATE_INVALID, "stack.mail_hostname needs mailpit in stack.ports")
+        if (not isinstance(mail_hostname, str) or mail_hostname.count("{slug}") != 1
+                or mail_host(mail_hostname, "x") is None):
+            raise StackTemplateError(
+                TEMPLATE_INVALID, "stack.mail_hostname must be a hostname with one {slug}, "
+                "such as mail-{slug}.example.com")
     raw = {key: value for key, value in manifest.items()
            if key != STACK_KEY and not str(key).startswith("_")}
     _scan(raw, (), tuple(ports))
     project = raw.get("project")
     if isinstance(project, str) and "{port:" in project:
         raise StackTemplateError(TEMPLATE_INVALID, "project cannot use {port:...}; ports belong to the project")
-    return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw, dev_branch=dev_branch, uses=tuple(uses))
+    return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw, dev_branch=dev_branch,
+                         uses=tuple(uses), mail_hostname=mail_hostname)
+
+
+def mail_host(pattern: str, slug: str) -> str | None:
+    """``pattern`` with ``{slug}`` filled in, when the result is a lowercase DNS name."""
+    from sandbox.hosting.tailnet_names.models import hostname
+    return hostname(pattern.replace("{slug}", slug))
 
 
 def validate_uses(template: StackTemplate, slug: str, recorded_names: set[str]) -> None:
@@ -368,6 +387,11 @@ def render(template: StackTemplate, *, slug: str, ref: StackRef, ports: dict[str
         "template": str(template_path),
         "ports": {name: int(port) for name, port in sorted(ports.items())},
     }
+    if template.mail_hostname:
+        fqdn = mail_host(template.mail_hostname, slug)
+        if fqdn is None:
+            raise StackTemplateError(TEMPLATE_INVALID, f"stack.mail_hostname is not a hostname for slug {slug!r}")
+        rendered[INSTANCE_KEY]["mail_hostname"] = fqdn
     return rendered
 
 
@@ -400,12 +424,17 @@ def rendered_instance(manifest: dict, manifest_path: str | Path, stacks_root: st
             isinstance(name, str) and isinstance(port, int) and not isinstance(port, bool)
             for name, port in ports.items()):
         raise StackTemplateError(TEMPLATE_INVALID, "stack_instance.ports must map names to ports")
+    mail_hostname = block.get("mail_hostname")
+    if mail_hostname is not None and (mail_host(mail_hostname, slug) != mail_hostname
+                                      or "mailpit" not in ports):
+        raise StackTemplateError(TEMPLATE_INVALID, "stack_instance.mail_hostname is invalid")
     source_root = manifest.get("source_root")
     if not isinstance(source_root, str) or not Path(source_root).is_absolute():
         raise StackTemplateError(TEMPLATE_INVALID, "a rendered stack manifest needs an absolute source_root")
     return {"slug": slug, "ref": str(block.get("ref") or ""), "ref_branch": ref_branch,
             "commit": commit, "template": str(block.get("template") or ""),
-            "ports": dict(ports), "source_root": source_root}
+            "ports": dict(ports), "source_root": source_root,
+            **({"mail_hostname": mail_hostname} if mail_hostname else {})}
 
 
 def branch_allowed(branch: str | None, patterns: list) -> bool:

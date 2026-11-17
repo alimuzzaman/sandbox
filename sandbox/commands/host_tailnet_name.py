@@ -135,8 +135,36 @@ def default_deps(project_dir: str | None):
     )
 
 
-def cmd_host_tailnet_name(args) -> None:
+def resolve_context(remote_name: str, config, *, public: bool, public_address: str | None = None):
+    """The remote (a registered entry, or this host's owner target inside a
+    server CLI job) with its tailnet and, when ``public``, public address."""
+    from sandbox.core import _remote
     from sandbox.hosting import front_door
+    from sandbox.hosting.server_cli_target import host_target, is_owner_target
+    from sandbox.hosting.tailnet_names import models, service
+    entry = host_target(remote_name)
+    owner = is_owner_target(entry)
+    if not isinstance(entry, dict) and not owner:
+        raise TailnetNameError(REMOTE_UNKNOWN, f"remote {remote_name!r} is not registered")
+    front_door.require_capability(entry, front_door.TAILNET_NAMES)
+    tailnet_ip = models.tailnet_address(entry.get("tailscale_host"))
+    public_ip = None
+    if public:
+        if owner:
+            # Actual receiver interface metadata is bound into the original job.
+            # An override cannot replace its public exposure-check target.
+            observed = entry.get("origin_ipv4")
+            if not observed or (public_address is not None and public_address != observed):
+                raise TailnetNameError(models.PUBLIC_ADDRESS_INVALID,
+                                       "the receiver's unique public IPv4 address is required")
+            public_ip = models.public_address(override=observed, ssh_host=None)
+        else:
+            public_ip = models.public_address(override=public_address,
+                ssh_host=_remote.remote_ssh_parts(entry).get("host"))
+    return service.Context(config, models.RemoteTarget(remote_name, entry, tailnet_ip, public_ip))
+
+
+def cmd_host_tailnet_name(args) -> None:
     from sandbox.hosting.front_door import FrontDoorError
     from sandbox.hosting.tailnet_names import models, service
 
@@ -160,29 +188,8 @@ def cmd_host_tailnet_name(args) -> None:
                 name = models.TailnetName.parse(args.tailnet_hostname, config.zones)
             if action == "add":
                 upstream = models.Upstream.parse(args.upstream)
-        from sandbox.core import _remote
-        from sandbox.hosting.server_cli_target import host_target, is_owner_target
-        entry = host_target(args.remote)
-        owner = is_owner_target(entry)
-        if not isinstance(entry, dict) and not owner:
-            raise TailnetNameError(REMOTE_UNKNOWN, f"remote {args.remote!r} is not registered")
-        front_door.require_capability(entry, front_door.TAILNET_NAMES)
-        tailnet_ip = models.tailnet_address(entry.get("tailscale_host"))
-        public_ip = None
-        if action in ("add", "renew"):
-            if owner:
-                # Actual receiver interface metadata is bound into the original job.
-                # An override cannot replace its public exposure-check target.
-                supplied = getattr(args, "public_address", None)
-                observed = entry.get("origin_ipv4")
-                if not observed or (supplied is not None and supplied != observed):
-                    raise TailnetNameError(models.PUBLIC_ADDRESS_INVALID,
-                                           "the receiver's unique public IPv4 address is required")
-                public_ip = models.public_address(override=observed, ssh_host=None)
-            else:
-                public_ip = models.public_address(override=getattr(args, "public_address", None),
-                    ssh_host=_remote.remote_ssh_parts(entry).get("host"))
-        ctx = service.Context(config, models.RemoteTarget(args.remote, entry, tailnet_ip, public_ip))
+        ctx = resolve_context(args.remote, config, public=action in ("add", "renew"),
+                              public_address=getattr(args, "public_address", None))
         deps = default_deps(getattr(args, "project_dir", None))
         if action == "add":
             result = service.add(ctx, deps, name, upstream,

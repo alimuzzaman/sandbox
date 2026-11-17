@@ -1021,7 +1021,11 @@ def _down(args) -> dict:
             if directory.is_dir() and stack_registry.stacks_dir().resolve() in directory.resolve().parents:
                 shutil.rmtree(directory, ignore_errors=True)
             registry.delete(remote_name, slug)
+    # Outside the registry lock: each removal is its own tailnet-name transaction.
+    from sandbox.hosting.tailnet_names import stack_mail
+    mail_names = stack_mail.release(remote_name, slug)
     return {"ok": True, "action": "stack-down", "slug": slug, "remote": remote_name,
+            **({"mail_names": mail_names} if mail_names else {}),
             "project": project, "environment": environment,
             "used_by": used_by, "released_ports": (record or {}).get("ports") or (remote_item or {}).get("ports") or {},
             "destroy": destroyed, "forced_owner": force and bool(remote_item) and not (
@@ -1122,7 +1126,15 @@ def _reap(args) -> dict:
             raise StackCommandError(CONFIRMATION_REQUIRED, "--here runs on the host itself; drop --remote")
         return reaper.run_here(confirm=confirm, trigger=getattr(args, "trigger", None) or "stack_reap")
     entry = _entry(getattr(args, "remote", None))
-    return reaper.run_remote(entry, args.remote, confirm=confirm)
+    result = reaper.run_remote(entry, args.remote, confirm=confirm)
+    slugs = {row.get("compose_project"): row.get("slug") for row in result.get("candidates") or []}
+    reaped = [slugs.get(row.get("compose_project")) for row in result.get("outcomes") or []
+              if row.get("status") == "reaped"]
+    from sandbox.hosting.tailnet_names import stack_mail
+    mail_names = [report for slug in reaped if slug for report in stack_mail.release(args.remote, slug)]
+    if mail_names:
+        result["mail_names"] = mail_names
+    return result
 
 
 def _when(value) -> str:

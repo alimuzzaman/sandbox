@@ -273,7 +273,7 @@ class AttemptRepositoryTests(unittest.TestCase):
     # Fable review 8: a full ledger drops its oldest settled attempts.
 
     def full_ledger(self, phase, expires_at):
-        rows = tuple(replace(self.plan, id=f"a-{index:032x}", created_at=100 + index,
+        rows = tuple(replace(self.plan, id=f"a-{index:032x}", created_at=expires_at - 600 + index,
                              expires_at=expires_at, phase=phase, grants=tuple(
                                  replace(grant, id=f"l-{index:012x}" if n == 0 else f"l-{index:032x}",
                                          expires_at=expires_at, disposition=phase,

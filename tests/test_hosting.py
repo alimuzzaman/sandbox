@@ -1953,7 +1953,11 @@ class TestHostingManifest(unittest.TestCase):
                        if "--force-recreate" in call.args[1]
                        or " build --with-dependencies setup" in call.args[1]]
         self.assertGreaterEqual(len(build_calls), 2)
-        self.assertTrue(all(call.kwargs.get("timeout") == 2400 for call in build_calls))
+        # The recreating up also gets its wait for the compose-publish lock.
+        wait = hosting_cmd._compose_publish_lock_wait(validated)
+        self.assertTrue(all(call.kwargs.get("timeout") ==
+                            (2400 + wait if "--force-recreate" in call.args[1] else 2400)
+                            for call in build_calls))
 
     def test_build_defaults_to_true_and_rejects_a_non_boolean(self):
         with self._write(_manifest()) as directory:

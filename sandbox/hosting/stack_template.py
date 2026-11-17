@@ -425,7 +425,8 @@ def rendered_instance(manifest: dict, manifest_path: str | Path, stacks_root: st
             for name, port in ports.items()):
         raise StackTemplateError(TEMPLATE_INVALID, "stack_instance.ports must map names to ports")
     mail_hostname = block.get("mail_hostname")
-    if mail_hostname is not None and (mail_host(mail_hostname, slug) != mail_hostname
+    if mail_hostname is not None and (not isinstance(mail_hostname, str) or "{" in mail_hostname
+                                      or mail_host(mail_hostname, slug) != mail_hostname
                                       or "mailpit" not in ports):
         raise StackTemplateError(TEMPLATE_INVALID, "stack_instance.mail_hostname is invalid")
     source_root = manifest.get("source_root")

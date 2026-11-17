@@ -40,7 +40,8 @@ class StackMailTests(ServiceTestCase):
         self.ensure(port=18188)
         self.assertEqual(self.ensure(port=18190)["status"], "ready")
         self.assertEqual(self.record().upstream, "127.0.0.1:18190")
-        self.assertEqual(self.remote.blocks[MAIL].count("127.0.0.1:18190"), 1)
+        self.assertIn("127.0.0.1:18190", self.remote.blocks[MAIL])
+        self.assertNotIn("127.0.0.1:18188", self.remote.blocks[MAIL])
 
     def test_a_hand_made_name_is_never_re_pointed_or_taken(self):
         self.name, self.upstream = m.TailnetName(MAIL, "example.test"), m.Upstream("127.0.0.1", 9000)
@@ -147,9 +148,10 @@ class TemplateTests(unittest.TestCase):
         path = root / "demo" / stack_template.MANIFEST_NAME
         with mock.patch.object(Path, "resolve", lambda self: self):
             self.assertEqual(stack_template.rendered_instance(rendered, path, root)["mail_hostname"], MAIL)
-            forged = {**rendered, stack_template.INSTANCE_KEY: {**block, "mail_hostname": "mail-x.example.test"}}
-            with self.assertRaises(stack_template.StackTemplateError):
-                stack_template.rendered_instance(forged, path, root)
+            for bad in ("Mail-demo.example.test", "mail-{slug}.example.test", "x", 7):
+                forged = {**rendered, stack_template.INSTANCE_KEY: {**block, "mail_hostname": bad}}
+                with self.subTest(bad=bad), self.assertRaises(stack_template.StackTemplateError):
+                    stack_template.rendered_instance(forged, path, root)
         plain = stack_template.parse_template({**TEMPLATE, "stack": {"slug": "^[a-z]+$", "ports": ["mailpit"]}})
         rendered = stack_template.render(plain, slug="demo", ref=ref, ports={"mailpit": 18188},
                                          source_root="/src", template_path="/src/t.yml")

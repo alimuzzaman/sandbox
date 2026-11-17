@@ -47,15 +47,15 @@ class PortProbeScanTests(unittest.TestCase):
         listings = list(listings)
         projects = projects or {}
 
-        def attempt(args, payload=None):
+        def attempt(args, payload=None, budget=15):
             calls.append(args[:2])
             if args[:2] == ["docker", "ps"]:
                 return 0, "".join(json.dumps([cid, projects.get(cid, "p")]) + "\n"
                                   for cid in listings.pop(0)), ""
-            if args[:3] == ["docker", "inspect", "--format"]:
+            if args[:5] == ["docker", "inspect", "--type", "container", "--format"]:
                 outs, errs, code = [], [], 0
-                for cid in args[4:]:
-                    if args[3] == '{"id":{{json .Id}}}':
+                for cid in args[6:]:
+                    if args[5] == '{"id":{{json .Id}}}':
                         result = (0, json.dumps({"id": cid}), "") if exists(cid) else (1, "", _gone(cid))
                     else:
                         result = inspect(cid)
@@ -92,11 +92,39 @@ class PortProbeScanTests(unittest.TestCase):
         self.assertEqual([row["container"] for row in probe["settled_scan"](["p"])], [A])
         self.assertEqual(calls.count(["docker", "ps"]), 2)
 
-    def test_another_targets_removed_container_is_dropped_not_retried(self):
+    def test_another_targets_removed_container_keeps_an_unknown_claim_without_a_rescan(self):
+        # Its replacement may bind the port after the re-list: the claim stays.
         probe, calls = self.scan([[A, B], [A]], self.ok, exists=lambda cid: cid != B,
                                  projects={B: "q"})
-        self.assertEqual([row["container"] for row in probe["settled_scan"](["p"])], [A])
+        publications = {row["container"]: row for row in probe["settled_scan"](["p"])}
+        self.assertEqual(sorted(publications), [A, B])
+        self.assertEqual((publications[B]["project"], publications[B]["container_addresses"]),
+                         ("unknown:" + B, []))
         self.assertEqual(calls.count(["docker", "ps"]), 2)
+
+    def test_not_found_lines_may_come_in_any_order(self):
+        missing = {B, C}
+        probe, calls = self.scan([[A, B, C], [A]], lambda cid: (
+            (1, "", _gone(cid)) if cid in missing else self.ok(cid)), projects={B: "q", C: "q"})
+        original = probe["attempt"]
+
+        def reversed_errors(args, payload=None, **kwargs):
+            code, out, err = original(args, payload)
+            return code, out, "".join(reversed(err.splitlines(keepends=True)))
+        probe["attempt"] = reversed_errors
+        self.assertEqual([row["container"] for row in probe["settled_scan"](["p"])], [A])
+
+    def test_a_batch_gets_a_budget_that_grows_with_its_size(self):
+        probe, _ = self.scan([[A]], self.ok)
+        budgets = []
+
+        def attempt(args, payload=None, budget=15):
+            budgets.append(budget)
+            return 0, "".join(_item(cid, 9000 + i) + "\n" for i, cid in enumerate(args[6:])), ""
+        probe["attempt"] = attempt
+        ids = [format(i, "064x") for i in range(100)]
+        probe["inspect_many"](ids)
+        self.assertEqual(budgets, [15 + 0.25 * 100])
 
     def test_a_restart_loop_leaving_the_list_reserves_its_ports_as_unknown(self):
         # ocp-trial wp-setup in `Restarting (1)` dropped in and out of docker ps.
@@ -212,6 +240,17 @@ class RefusalReasonTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(ports.refusal_reason(result.stderr), "identity/invalid")
 
+    def test_the_in_lock_recheck_reports_its_stage_too(self):
+        import os
+        import shlex
+        identity = {"target": "t", "uid": os.getuid() + 1, "home": "/"}
+        argv = shlex.split(ports.recheck_command(
+            identity=identity, runtime_dir="/tmp", port=18044, engine_id="e",
+            owner={"project": "p", "service": "web", "container_port": 80}))
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(ports.refusal_reason(result.stderr), "identity/invalid")
+
     def test_observe_ports_relays_only_a_matching_line(self):
         cases = {
             "sandbox-port-probe: own_containers/unsettled\n": "own_containers/unsettled",
@@ -246,6 +285,7 @@ class _Docker:
         self.lock = threading.Lock()
         self.running = {}   # cid -> (project, port)
         self.serial = 0
+        self.gone = 0       # not-found replies: proof the scans saw churn
 
     def start(self, project, port):
         with self.lock:
@@ -254,17 +294,18 @@ class _Docker:
             self.running[cid] = (project, port)
             return cid
 
-    def attempt(self, args, payload=None):
+    def attempt(self, args, payload=None, budget=15):
         time.sleep(0.001)  # yield: interleave the two applies
         with self.lock:
             if args[:2] == ["docker", "ps"]:
                 return 0, "".join(json.dumps([cid, project]) + "\n"
                                   for cid, (project, _) in self.running.items()), ""
             outs, errs = [], []
-            for cid in args[4:]:
+            for cid in args[6:]:
                 if cid not in self.running:
                     errs.append(_gone(cid))
-                elif args[3] == '{"id":{{json .Id}}}':
+                    self.gone += 1
+                elif args[5] == '{"id":{{json .Id}}}':
                     outs.append(json.dumps({"id": cid}))
                 else:
                     outs.append(_item(cid, self.running[cid][1], self.running[cid][0]))
@@ -275,7 +316,7 @@ class _Docker:
         for cid in [c for c, (p, _) in list(self.running.items()) if p == project]:
             with self.lock:
                 self.running.pop(cid, None)
-            time.sleep(0.002)
+            time.sleep(0.004)  # a removal lands inside the other side's scan
         self.start(project, port)
         for index in range(sidecars):
             self.start(project, port + 100 + index)
@@ -286,7 +327,8 @@ class ParallelApplyTests(unittest.TestCase):
 
     def test_two_parallel_applies_both_observe_and_claim_their_ports(self):
         docker = _Docker()
-        targets = {"sandbox-host-a-env": 20001, "sandbox-host-b-env": 20002}
+        # Separate port bands: overlapping claims are a different rule (below).
+        targets = {"sandbox-host-a-env": 20001, "sandbox-host-b-env": 30001}
         for project, port in targets.items():
             docker.start(project, port)
             for index in range(6):
@@ -316,6 +358,7 @@ class ParallelApplyTests(unittest.TestCase):
             thread.join(60)
         self.assertEqual(errors, [])
         self.assertEqual(sorted(results), sorted(targets))
+        self.assertGreater(docker.gone, 0, "the applies never interleaved; nothing was tested")
 
 
 class ExecSnapshotScanTests(unittest.TestCase):

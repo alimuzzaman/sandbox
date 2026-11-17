@@ -2053,7 +2053,11 @@ def _port_reallocation(args, validated, entry, state, observation):
         refuse()
     owner = {"project": summary["compose_project"], "service": validated["compose"]["service"],
              "container_port": validated["compose"]["container_port"]}
-    if (ports.primary_ports(observation, owner)
+    try:
+        live_primary = ports.primary_ports(observation, owner)
+    except ports.PortObservationError:
+        refuse()  # An ambiguous own primary is never relocation evidence.
+    if (live_primary
             or any(row["project"] == summary["compose_project"] and row["port"] == old
                    for row in observation["publications"])):
         refuse()  # Never relocate a live primary, even if another bind conflicts.

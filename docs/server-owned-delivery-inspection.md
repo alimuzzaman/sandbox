@@ -75,8 +75,10 @@ Existing remote, stack, target, job, UUID and request-ID codecs constrain select
 Unknown or duplicate keys, empty strings, booleans as versions and mixed modes
 refuse. The request limit is 2048 encoded bytes. The response limit is 4096 bytes;
 the transport drains stdout/stderr with caps before JSON decoding. The whole client
-read has one 15-second budget. The receiver also has a 15-second budget, with
-remaining time applied to SQLite reads. No unbounded raw error text is printed.
+read has one 60-second budget (15 seconds ran out on a loaded host, where each of
+its three remote `sb` starts costs about 3.5 seconds). The receiver also has a
+60-second budget, with remaining time applied to SQLite reads; a remote gets the
+receiver's value only after `sb remote service migrate`. No unbounded raw error text is printed.
 
 The exact response contains only `schema_version`, `contract`, `ok`, `owner`,
 `selector`, `status`, `operation`. Owner contains exactly `target_identity`,

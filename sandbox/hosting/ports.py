@@ -324,13 +324,13 @@ def strict_pairs(items):
 STAGE=['start']
 class Refused(RuntimeError): pass
 def fail(kind='invalid'): raise Refused('port observation refused: '+STAGE[0]+'/'+kind)
-def attempt(args, payload=None):
+def attempt(args, payload=None, budget=15):
     if time.monotonic()>DEADLINE: fail('deadline')
     import tempfile
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, tempfile.TemporaryFile() as source:
         if payload is not None: source.write(payload.encode()); source.seek(0)
         p=subprocess.Popen(args, stdout=out, stderr=err, stdin=source if payload is not None else subprocess.DEVNULL)
-        deadline=min(DEADLINE,time.monotonic()+15)
+        deadline=min(DEADLINE,time.monotonic()+budget)
         while p.poll() is None:
             if time.monotonic()>deadline or os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT:
                 p.kill(); p.wait(); fail('deadline' if time.monotonic()>DEADLINE else 'timeout' if time.monotonic()>deadline else 'output_limit')
@@ -386,7 +386,9 @@ def inspect_many(ids, form=None):
     Only Docker's own per-id not-found lines may accompany a failed exit.
     """
     if not ids: return {}
-    code,out,err=attempt(['docker','inspect','--format',form or FORMAT,*ids])
+    # The CLI looks ids up one after another: the budget grows with the batch.
+    code,out,err=attempt(['docker','inspect','--type','container','--format',form or FORMAT,*ids],
+                         budget=15+0.25*len(ids))
     items={}
     for line in out.splitlines():
         if not line.strip(): continue
@@ -399,7 +401,9 @@ def inspect_many(ids, form=None):
     if code==0:
         if gone or lines: fail()
         return items
-    if not gone or len(lines)!=len(gone) or not all(vanished(cid,1,line) for cid,line in zip(gone,lines)): fail('docker_error')
+    # Each missing id needs exactly one not-found line, in any order, and nothing else.
+    if not gone or len(lines)!=len(gone) or len(set(lines))!=len(lines) or not all(
+            any(vanished(cid,1,line) for line in lines) for cid in gone): fail('docker_error')
     return dict(items,**{cid:None for cid in gone})
 def scan(own):
     # Spec: an apply observes only its own target strictly. Containers of the
@@ -432,10 +436,10 @@ def scan(own):
     take(entered)
     departed=[cid for cid in first if cid not in second and cid in rows]
     for cid,item in inspect_many(departed,'{"id":{{json .Id}}}').items():
-        if item is None:
-            if mine[cid]: raise Churn()
-            del rows[cid]
-            continue
+        if item is None and mine[cid]: raise Churn()
+        # Gone or merely stopped, another target's departed container keeps its
+        # ports as an unknown-owner claim: a replacement may bind them after the
+        # re-list. A stale claim can refuse a port but never prove ownership.
         rows[cid]=[dict(row,project='unknown:'+cid,service='unknown',container_addresses=[]) for row in rows[cid]]
     publications=[row for cid in rows for row in rows[cid]]
     if len(publications)>ROWS: fail()
@@ -443,6 +447,7 @@ def scan(own):
 def settled_scan(own):
     # Facts come only from one scan whose own inspects all succeeded; own
     # churn that never settles within SCANS refuses.
+    STAGE[0]='own_projects'
     if type(own) is not list or not own or any(type(p) is not str or not p for p in own): fail()
     own=set(own)
     for _ in range(SCANS):
@@ -558,8 +563,10 @@ def probe_command(*, identity, runtime_dir, own_projects):
     if not runtime_dir.startswith("/"):
         _fail("runtime directory must be absolute")
     invocation = ("\ntry:\n    result=collect(json.loads(sys.argv[1]),sys.argv[2],json.loads(sys.argv[3]))\n"
-                  + _REPORT + "encoded=json.dumps(result,separators=(',',':'))\n"
-                  "if len(encoded.encode())>LIMIT: fail('output_limit')\nprint(encoded)\n")
+                  "    STAGE[0]='output'\n"
+                  "    encoded=json.dumps(result,separators=(',',':'))\n"
+                  "    if len(encoded.encode())>LIMIT: fail('output_limit')\n"
+                  + _REPORT + "print(encoded)\n")
     return shlex.join(["python3", "-c", _PROBE + invocation, json.dumps(identity), runtime_dir,
                        json.dumps(own_projects)])
 

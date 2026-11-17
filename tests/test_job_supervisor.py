@@ -721,6 +721,40 @@ class NormalExitCessationTests(unittest.TestCase):
         self.addCleanup(kill)
         return pid
 
+    def test_a_registry_write_lock_held_past_the_default_busy_timeout_does_not_fail_the_job(self):
+        """An install gate (or any writer) holding the lock for seconds is waited out."""
+        import sqlite3
+        held = threading.Event()
+
+        def hold_while_running():
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                path = getattr(self, "repo", None)
+                if path is not None:
+                    reader = sqlite3.connect(path.path, timeout=1)
+                    try:
+                        row = reader.execute("SELECT lifecycle FROM jobs").fetchone()
+                    except sqlite3.Error:
+                        row = None
+                    reader.close()
+                    if row and row[0] == "running":
+                        break
+                time.sleep(.02)
+            lock = sqlite3.connect(self.repo.path, timeout=5, isolation_level=None)
+            lock.execute("BEGIN IMMEDIATE")
+            held.set()
+            time.sleep(6.5)  # past JobRepository's 5 s default
+            lock.rollback()
+            lock.close()
+
+        holder = threading.Thread(target=hold_while_running, daemon=True)
+        holder.start()
+        snap, _result = self.run_job("sleep 1; printf done")
+        holder.join(30)
+        self.assertTrue(held.is_set(), "the lock was never taken while the job ran")
+        self.assertEqual(snap["lifecycle"], "succeeded", snap)
+        self.assertGreater(supervisor.SUPERVISOR_BUSY_TIMEOUT_MS, 15_000)
+
     def test_a_job_that_ended_by_itself_records_its_owned_work_stopped(self):
         for script, lifecycle, code in (("exit 0", "succeeded", 0), ("exit 255", "failed", 255),
                                         ("(sleep .2) & exit 3", "failed", 3)):

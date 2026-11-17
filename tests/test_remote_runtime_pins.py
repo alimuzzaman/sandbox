@@ -158,7 +158,11 @@ class PinTests(unittest.TestCase):
         """Start a gated install that holds the lock until ``release`` exists."""
         release = self.remote_home / "release"
         started = self.remote_home / "started"
-        script = f"touch {started}; while [ ! -e {release} ]; do sleep 0.05; done; {inner}"
+        # The wait also ends once the fixture home is gone, so a failed test
+        # (whose cleanup touches release and then removes the directory before
+        # the loop sees it) never leaves the waiter spinning.
+        script = (f"touch {started}; while [ ! -e {release} ] && [ -d {self.remote_home} ]; "
+                  f"do sleep 0.05; done; {inner}")
         env = synthetic_environment({"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
                "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         proc = subprocess.Popen(["sh", "-c", pins.install_gate_command(target, (), script)],
@@ -410,6 +414,23 @@ class PinTests(unittest.TestCase):
         # The old layout still refuses over it.
         os.unlink(self.remote_home / "sb-src")
         self.assertEqual(self._gated("true").returncode, pins.JOBS_ACTIVE_EXIT)
+
+    def test_scoped_release_frees_admission_right_after_the_check(self):
+        """A serving release with scoped supervisors does not hold the lock through the install."""
+        path, repository = self._registry()
+        os.symlink("current", self.remote_home / "sb-src")
+        probe = (f"python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1], timeout=0.2); "
+                 f"c.execute(\"BEGIN IMMEDIATE\"); c.rollback()' {path}")
+        # A legacy release in the release layout (no scope.py) keeps it held.
+        (self.remote_home / "current").mkdir()
+        self.assertEqual(self._gated(f"if {probe} 2>/dev/null; then exit 9; fi").returncode, 0)
+        scope = self.remote_home / "current" / "sandbox" / "jobs" / "scope.py"
+        scope.parent.mkdir(parents=True)
+        scope.write_text("")
+        # Admission and running supervisors' writes go through during the install.
+        self.assertEqual(self._gated(probe).returncode, 0)
+        os.unlink(self.remote_home / "sb-src")
+        self.assertEqual(self._gated(f"if {probe} 2>/dev/null; then exit 9; fi").returncode, 0)
 
     def test_prepare_runs_before_the_lock_and_its_failure_runs_nothing(self):
         marker = self.remote_home / "installed"

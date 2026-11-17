@@ -329,6 +329,11 @@ SERVICE_SUPERVISORS = r'''def service_supervisors():
 # ``SANDBOX_JOBS_GATE_RELEASE`` (after it has stopped the old service and
 # before it starts any service, whose startup writes the registry) or exits.
 # The gate removes that file once the lock is released.
+# In the release layout, when the serving release launches supervisors in
+# their own scopes (sandbox/jobs/scope.py), the lock is released right after
+# the check instead: nothing admitted later can die with the restart, and a
+# lock held through the old service's stop fails admissions and running
+# supervisors' registry writes once it outlasts their busy timeout.
 INSTALL_GATE = r'''
 import base64, fcntl, json, os, re, shutil, signal, sqlite3, subprocess, sys, tempfile, threading, time
 home, target = sys.argv[1], sys.argv[2]
@@ -412,6 +417,14 @@ hold = None
         print(json.dumps({"jobs_gate": "blocked", "count": len(rows), "jobs": [
             {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
         raise SystemExit(47)
+    if releases and os.path.isfile(os.path.join(home, "sb-src", "sandbox", "jobs", "scope.py")):
+        # The serving release launches every supervisor in its own scope, so
+        # no job admitted from here on can die with the restart. Holding the
+        # lock through the old service's stop would only fail admissions and
+        # registry writes of running supervisors with "database is locked".
+        hold.rollback()
+        hold.close()
+        hold = None
 signal.signal(signal.SIGHUP, signal.SIG_IGN)
 gate_dir = tempfile.mkdtemp(prefix=".jobs-gate-", dir=root)
 release = os.path.join(gate_dir, "release")

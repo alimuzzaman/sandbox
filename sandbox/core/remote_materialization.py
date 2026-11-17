@@ -95,8 +95,13 @@ if action in ("run", "measure"):
     value.pop('content_digest', None)
     write(value)
     if action == "measure":
-        value['content_digest'] = content_digest(command)
-        code = 0
+        # A raise must still reach "complete": an "active" receipt with no
+        # running coordinator would hold the lock for ever.
+        try:
+            value['content_digest'] = content_digest(command)
+            code = 0
+        except Exception:
+            code = 1
     else:
         child = subprocess.Popen(["/bin/sh", "-c", command], stdin=sys.stdin.buffer,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -146,6 +151,10 @@ class RemoteMaterializationUnknown(RuntimeError):
 
 class RemoteMaterializationBusy(RuntimeError):
     """An existing operation owns the shared source directory lease."""
+
+
+class RemoteMaterializationMeasureFailed(RuntimeError):
+    """The coordinator completed the measure and reported failure; release is safe."""
 
 
 class RemoteMaterializationLease:
@@ -199,7 +208,13 @@ class RemoteMaterializationLease:
                     value.get("intent_digest") != intent or
                     type(value.get("exit_code")) is not int):
                 raise ValueError("wrong materialization step")
-            if action == 'measure' and (value.get('exit_code') != 0 or
+            if action == 'measure' and value.get('exit_code') != 0:
+                # Positive completion: the lease stays releasable.
+                self.step = value["step"]
+                raise RemoteMaterializationMeasureFailed(
+                    "could not measure the remote source content "
+                    "(unreadable, changing or unsupported entries under the target)")
+            if action == 'measure' and (
                     not isinstance(value.get('content_digest'), str) or
                     re.fullmatch(r'sha256:[0-9a-f]{64}', value['content_digest']) is None):
                 raise ValueError('missing measured source content')
@@ -207,7 +222,7 @@ class RemoteMaterializationLease:
                 raise ValueError("wrong initial materialization step")
             self.step = value["step"]
             return value
-        except RemoteMaterializationBusy:
+        except (RemoteMaterializationBusy, RemoteMaterializationMeasureFailed):
             raise
         except BaseException as exc:
             self.unknown = True

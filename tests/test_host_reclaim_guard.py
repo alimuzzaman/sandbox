@@ -102,7 +102,7 @@ class LockPathParityCase(unittest.TestCase):
     def test_probe_program_uses_the_same_literals(self):
         from sandbox.resources.remote import _REMOTE_PROGRAM
 
-        for path in host_guard.APPLY_TRANSACTION_LOCKS:
+        for path in host_guard.RECLAIM_BLOCKING_LOCKS:
             self.assertTrue(f'"{path}"' in _REMOTE_PROGRAM, path)
         self.assertTrue(f'"{host_guard.GUARD_NAME}"' in _REMOTE_PROGRAM)
 

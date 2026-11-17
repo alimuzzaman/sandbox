@@ -42,6 +42,13 @@ class ComposePublishLockTests(unittest.TestCase):
         long = {**VALIDATED, "compose": {**VALIDATED["compose"], "build_timeout_seconds": 3600}}
         self.assertEqual(hosting_cmd._compose_publish_lock_wait(long), 300)
 
+    def test_the_stack_job_deadline_carries_two_waits(self):
+        # Re-check round 2: a blue-green apply waits for its side and its base up.
+        from sandbox.commands import host_stack
+        budget = VALIDATED["compose"]["build_timeout_seconds"]
+        self.assertGreaterEqual(host_stack._submission_timeout(VALIDATED),
+                                budget + 600 + 2 * hosting_cmd._compose_publish_lock_wait(VALIDATED))
+
     def test_a_short_budget_still_waits_thirty_seconds(self):
         short = {**VALIDATED, "compose": {**VALIDATED["compose"], "build_timeout_seconds": 60}}
         argv = _locked_argv(hosting_cmd._locked_host_compose_up(short, RUNTIME, "true"))

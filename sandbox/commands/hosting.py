@@ -2107,8 +2107,9 @@ def _port_reallocation(args, validated, entry, state, observation):
                                     for section in ("listeners", "publications", "reservations")}}
 
 
-# A waiting up adds its wait to its own SSH timeout; 300 s fits the stack job's
-# 600 s of slack beyond the build budget (host_stack._submission_timeout).
+# A waiting up adds its wait to its own SSH timeout. A blue-green apply can wait
+# twice (side start, then base up); the stack job's deadline carries two waits
+# beyond its 600 s of slack (host_stack._submission_timeout).
 _COMPOSE_PUBLISH_MAX_WAIT_SECONDS = 300
 
 
@@ -2553,8 +2554,11 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
             raise
         # The route already moved to the new side: the runtime did change, so
         # this is an ordinary (uncertain) recreate failure, not a busy refusal.
-        raise HostRemoteCommandFailed(str(exc), phase="compose_recreate",
-                                      exit_code=exc.exit_code) from None
+        raise HostRemoteCommandFailed(
+            "the route already moved to the new blue-green side, then the base up was "
+            "refused busy (another target held the compose-publish lock); the new revision "
+            "serves from the side; retry the apply to finish it",
+            phase="compose_recreate", exit_code=exc.exit_code) from None
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in init_services if force_recreate else ():

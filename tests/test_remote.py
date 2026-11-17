@@ -2511,8 +2511,8 @@ class TestInstallHandlersFailClosedOnReadinessInvalidation(unittest.TestCase):
                 with patch("sandbox.readiness.check.invalidate", unwritable), \
                      patch.object(remote_cmd.sr, "remote_mcp_service_status",
                                   return_value={"probe_state": "complete"}), \
-                     patch.object(remote_cmd, "_migrate_pin_gate", return_value=(False, [])), \
-                     patch.object(remote_cmd, "_migrate_jobs_precheck"), \
+                     patch.multiple(remote_cmd, _migrate_jobs_precheck=MagicMock(),
+                                    _migrate_pin_gate=MagicMock(return_value=(False, []))), \
                      patch.object(remote_cmd, "_front_door_provision_preflight"), \
                      patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
                      patch.object(remote_cmd, "_assert_clean_source_revision"), \

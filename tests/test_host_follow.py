@@ -1199,15 +1199,71 @@ class AttemptModeTests(unittest.TestCase):
         follow = self.root / "follow"
         self._git("clone", "-q", str(self.origin), str(follow), umask=0o077)
         self.assertEqual(self._modes(follow)["stacks/build/init.sh"], "0o700")
+        # What an earlier 0077 attempt's prepare left behind, untracked.
         old = os.umask(0o077)
         try:
+            (follow / "vendor" / "pkg").mkdir(parents=True)
+            (follow / "vendor" / "pkg" / "lib.php").write_text("<?php\n")
+            (follow / "build.zip").write_text("zip")
+            (follow / "tool").write_text("#!/bin/sh\n")
+            os.chmod(follow / "tool", 0o700)
+            (follow / "links").mkdir()
+            os.symlink("../README", follow / "links" / "readme")
+            outside = self.root / "outside.txt"
+            outside.write_text("x")
+            os.chmod(outside, 0o600)
+            os.symlink(str(outside), follow / "escape")
             git.checkout(follow, self.commit, "main")  # nothing to rewrite: same commit
         finally:
             os.umask(old)
         modes = self._modes(follow)
         self.assertEqual((modes["stacks/build/init.sh"], modes["README"], modes["stacks"]),
                          ("0o755", "0o644", "0o755"))
+        self.assertEqual((modes["vendor"], modes["vendor/pkg/lib.php"], modes["build.zip"],
+                          modes["tool"], modes["links"]),
+                         ("0o755", "0o644", "0o644", "0o755", "0o755"))
+        self.assertEqual(oct(os.stat(follow).st_mode & 0o777), "0o755")
         self.assertEqual(oct(os.stat(follow / ".git").st_mode & 0o777), "0o700")
+        # Symlinks are never followed out of the checkout.
+        self.assertEqual(oct(os.stat(outside).st_mode & 0o777), "0o600")
+
+    def test_the_stack_worktree_an_attempt_adds_gets_controller_modes(self):
+        """The image source is a worktree the attempt adds (host_stack._add_worktree)."""
+        controller = self.root / "controller"
+        self._git("clone", "-q", str(self.origin), str(controller), umask=0o022)
+        follow = self.root / "follow"
+        self._git("clone", "-q", str(self.origin), str(follow), umask=0o077)
+        worktree = self.root / "source"
+        old = os.umask(0o077)
+        try:
+            subprocess.run(["sh", "-c", follow_tick.ATTEMPT_UMASK_SH, "attempt",
+                            "git", "-C", str(follow), "worktree", "add", "-q", "--detach",
+                            str(worktree), self.commit],
+                           check=True, capture_output=True, timeout=60,
+                           env=synthetic_environment({"HOME": str(self.root)}))
+        finally:
+            os.umask(old)
+        self.assertEqual(self._modes(worktree), self._modes(controller))
+
+    def test_personal_secrets_are_never_written_under_the_attempts_umask(self):
+        from sandbox.core import _secrets
+        target = self.root / "secrets.env"
+        created = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *args, **kwargs):
+            if str(path).endswith(".tmp"):
+                created.append(mode)
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        old = os.umask(0o022)
+        try:
+            with patch.object(_secrets.os, "open", spy):
+                _secrets.write_secret("SANDBOX_TEST_KEY", "value-1", path=target)
+        finally:
+            os.umask(old)
+        self.assertEqual(created, [0o600])
+        self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o600")
 
     def test_the_attempt_command_runs_with_umask_0022_under_a_0077_parent(self):
         argv = follow_tick.scoped_argv([sys.executable, "-c", "import os; print(oct(os.umask(0)))",

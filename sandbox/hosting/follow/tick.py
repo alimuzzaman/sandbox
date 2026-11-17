@@ -188,10 +188,12 @@ def scoped_argv(argv: list[str]) -> list[str]:
     label = attempt if _ATTEMPT_RE.fullmatch(attempt) else "submission"
     # The two variables only let systemd-run reach the user manager; the
     # attempt itself runs with the same stripped environment as before. The
-    # poll's UMask=0077 protects its own state; the attempt runs with the user
-    # manager's default 0022, as a controller's apply does in the remote
-    # service, so its prepared files and build tree get the same modes
-    # (feedback d96eaf4c). Code that writes secrets sets its own modes.
+    # poll's UMask=0077 protects its own state; the attempt runs with a fixed
+    # umask 0022, the user manager's default under which a controller's apply
+    # runs in the remote service, so its prepared files and the stack's source
+    # worktree get the same modes (feedback d96eaf4c). Sandbox's own secret
+    # writers (follow store, stack records, personal secrets) create their
+    # files 0600 explicitly; the owner's prepare step must do the same.
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
             f"--unit=sandbox-follow-{label}-{secrets.token_hex(4)}",
             "--description=Sandbox follow attempt job", "--",

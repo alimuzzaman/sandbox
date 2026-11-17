@@ -205,39 +205,57 @@ def checkout(repo: Path, commit: str, branch: str | None = None) -> None:
     normalize_modes(Path(repo))
 
 
-# What a checkout gets under the user manager's default umask (0022), as on the
-# controller's path; the poll itself runs with UMask=0077.
+# What a checkout gets under a fixed umask of 0022, the user manager's default
+# and so the controller path's; the poll itself runs with UMask=0077.
 _TRACKED_MODES = {"100644": 0o644, "100755": 0o755}
 
 
 def normalize_modes(repo: Path) -> None:
-    """Give tracked files and their directories the modes of a checkout made under umask 0022.
+    """Give the checkout the modes it would have under umask 0022.
 
     The poll checks out under 0077, so files would be 0600 and directories 0700,
-    and an image built from them keeps those modes: a container running as a
-    non-root user cannot read them (feedback d96eaf4c). A forced checkout keeps
-    the modes of files it does not rewrite, so this also repairs older clones.
-    Symlinks and submodules are left alone; ``.git`` is never touched.
+    and a prepare step that packs them with their modes (zip, tar, cp -p) ships
+    files a non-root container cannot read (feedback d96eaf4c). Tracked files
+    get exactly 0644 or 0755 from the index; every directory gets 0755; files
+    an earlier attempt left untracked (build outputs, ``vendor/``) gain group
+    and other read, and execute where the owner has it, as a 0022 write would
+    have given them. A forced checkout keeps the modes of files it does not
+    rewrite, so this repairs older clones. ``.git`` and symlinks are never
+    changed or followed; the directories above the repo stay private.
     """
     repo = Path(repo)
+    root = os.path.realpath(repo)
     listed = _git(repo, "ls-files", "--stage", "-z", timeout=120)
     if listed.returncode != 0:
         raise FollowError("follow_checkout_failed", f"git ls-files failed: {_detail(listed)}")
-    directories = {repo}
+    tracked = {}
     for entry in (listed.stdout or "").split("\0"):
         meta, _tab, name = entry.partition("\t")
         mode = _TRACKED_MODES.get(meta.split(" ", 1)[0])
-        if mode is None or not name:
-            continue
-        path = repo / name
-        if path.is_symlink() or not path.is_file():
-            continue
-        if (os.lstat(path).st_mode & 0o7777) != mode:
-            os.chmod(path, mode)
-        parent = path.parent
-        while parent != repo and parent not in directories:
-            directories.add(parent)
-            parent = parent.parent
-    for directory in directories:
-        if not directory.is_symlink() and (os.lstat(directory).st_mode & 0o7777) != 0o755:
-            os.chmod(directory, 0o755)
+        if name and mode is not None:
+            tracked[os.path.normpath(os.path.join(root, name))] = mode
+    try:
+        for directory, subdirectories, files in os.walk(root, followlinks=False):
+            if directory == root and ".git" in subdirectories:
+                subdirectories.remove(".git")
+            _chmod_inside(root, directory, lambda current: 0o755)
+            for name in files:
+                path = os.path.join(directory, name)
+                if os.path.islink(path):
+                    continue
+                wanted = tracked.get(path)
+                _chmod_inside(root, path, (lambda current, wanted=wanted: wanted) if wanted else
+                              (lambda current: current | 0o044 | (0o011 if current & 0o100 else 0)))
+    except OSError as exc:
+        raise FollowError("follow_checkout_failed",
+                          f"could not set checkout file modes: {type(exc).__name__}") from None
+
+
+def _chmod_inside(root: str, path: str, mode_for) -> None:
+    """chmod ``path`` only when it really is inside ``root`` and not a symlink."""
+    if os.path.islink(path) or os.path.commonpath([root, os.path.realpath(path)]) != root:
+        return
+    current = os.lstat(path).st_mode & 0o7777
+    wanted = mode_for(current)
+    if wanted != current:
+        os.chmod(path, wanted)

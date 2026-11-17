@@ -2073,14 +2073,19 @@ poll. `run-now` starts the same poll unit and takes the same path. Stopping the 
 removing the follow does not stop a running attempt; cancel its job with
 `sb job-cancel <job_id>` (`follow status` shows the ids).
 
-**File modes.** The poll runs with `UMask=0077`, which keeps the follow's state and keys
-private. The source a follow builds from gets the modes a controller's apply gets, under
-the user manager's default umask of 0022. After each checkout the poll sets tracked files
-to 0644 (0755 when executable in Git) and their directories to 0755. This also repairs
-clones checked out before this fix; `.git`, symlinks and submodules are left as they are.
-The attempt job itself runs with umask 0022, so its prepare outputs and the stack build
-get the same modes too. Without this, an image built from the follow's tree would keep
-0600 and 0700 modes, and a container running as a non-root user could not read them.
+**File modes.** The poll runs with `UMask=0077`, which keeps the follow's state, keys and
+work directories private (`work/` and `work/<name>/repos` stay 0700; leave them so). The
+attempt job runs with a fixed umask of 0022, the user manager's default under which a
+controller's apply runs in the remote service. So the stack's source worktree and the
+prepare outputs get a controller apply's modes. After each checkout the poll also resets
+the follow's clones: tracked files to 0644 (0755 when executable in Git), every directory
+to 0755, and untracked files an earlier attempt left (build outputs, `vendor/`) gain group
+and other read, plus execute where the owner has it. That repairs clones made before this
+fix. `.git` and symlinks are never changed or followed. The prepare step runs at 0022 too,
+so anything it writes outside the follow's work directory, such as caches in `$HOME` or
+`/tmp`, is readable by other local users unless it sets its own modes; write credentials
+with explicit modes. Without this, an image built by a follow kept 0600 and 0700 modes,
+and a container running as a non-root user could not read them.
 
 ### Running a command in a hosted service (`sb host exec`, spec 074)
 

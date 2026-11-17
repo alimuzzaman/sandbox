@@ -373,7 +373,10 @@ def edge_cleanup_command(name: str, front_door: str) -> str:
     if front_door == "nginx":
         # A retry after an interrupted route removal finds the file gone while
         # nginx may still serve it; reload so the loaded config matches disk.
-        command += "; $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload nginx || exit 1"
+        # Under the edge lock, like every other Sandbox reload, so it never
+        # loads another transaction's untested candidate block.
+        command += ("; $SUDO flock -w 60 /run/lock/sandbox-edge-nginx.lock "
+                    "sh -c 'nginx -t >/dev/null 2>&1 && systemctl reload nginx' || exit 1")
     return command
 
 

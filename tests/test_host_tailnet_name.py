@@ -1016,7 +1016,7 @@ class AddTests(ServiceTestCase):
         self.assertNotIn(FQDN, self.remote.blocks)
 
     def test_remote_gate_and_nginx_refusals_map_to_codes(self):
-        for remote_code, code in (("gate_unavailable", m.GATE_UNAVAILABLE), ("busy", m.BUSY),
+        for remote_code, code in (("busy", m.BUSY),
                                   ("nginx_rejected", m.NGINX_REJECTED),
                                   ("reload_failed", m.RELOAD_FAILED),
                                   ("unmanaged", m.UNMANAGED),

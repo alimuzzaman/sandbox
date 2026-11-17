@@ -434,9 +434,9 @@ def _check_locks(paths, *, holding_edge):
     """Only Sandbox's host transaction locks conflict with a name's nginx change.
 
     Durable jobs are not checked: tests, CI, attach and exec jobs never touch
-    the edge, and every Sandbox nginx write (host apply, route removal) holds
-    the edge lock. The reloads that do not (certbot's deploy hook, destroy's
-    certificate cleanup) run ``nginx -t`` first and only load what is on disk.
+    the edge, and every Sandbox nginx write or reload (host apply, route
+    removal, destroy's certificate cleanup, certbot's deploy hook) holds the
+    edge lock.
     """
     held = [p for p in paths["locks"] if not (holding_edge and p == paths["edge_lock"]) and _held(p, paths)]
     if held:

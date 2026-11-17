@@ -24,7 +24,6 @@ from sandbox.hosting.tailnet_names.models import (
     DNS_CONFLICT,
     DNS_FAILED,
     DNS_NOT_OWNED,
-    GATE_UNAVAILABLE,
     INSTALL_FAILED,
     NGINX_REJECTED,
     NOT_DUE,
@@ -55,11 +54,11 @@ from sandbox.hosting.tailnet_names.verify import ProbeResult, public_outcome, ta
 
 LEASE_SECONDS = 1800
 TAILNET_ATTEMPTS = 5
-_REFUSALS = frozenset({BUSY, GATE_UNAVAILABLE, SECRET_UNAVAILABLE, UNMANAGED, REMOTE_PATH_UNSAFE,
+_REFUSALS = frozenset({BUSY, SECRET_UNAVAILABLE, UNMANAGED, REMOTE_PATH_UNSAFE,
                        ZONE_NOT_ALLOWED, "tailnet_name_acme_client_untrusted",
                        "tailnet_name_acme_client_missing", "tailnet_name_state_corrupt"})
 _REMOTE_CODES = {
-    "busy": BUSY, "lease_lost": BUSY, "lock_busy": BUSY, "gate_unavailable": GATE_UNAVAILABLE,
+    "busy": BUSY, "lease_lost": BUSY, "lock_busy": BUSY,
     "unmanaged": UNMANAGED, "path_unsafe": REMOTE_PATH_UNSAFE,
     "nginx_rejected": NGINX_REJECTED, "reload_failed": RELOAD_FAILED,
     "recovery_failed": RELOAD_FAILED, "restore_failed": RELOAD_FAILED,

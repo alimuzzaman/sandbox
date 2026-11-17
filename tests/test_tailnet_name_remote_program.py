@@ -142,13 +142,13 @@ class Base(unittest.TestCase):
         return Path(self.paths["conf_dir"]) / f"sandbox-tailnet-{FQDN}.conf"
 
     def busy_on(self, check):
-        """A host lock is taken just before the ``check``-th gate check (1-based)."""
+        """A host lock is held at exactly the ``check``-th gate check (1-based), then released."""
         real = rp._check_locks
         count = [0]
 
         def checks(paths, *, holding_edge):
             count[0] += 1
-            if count[0] >= check:
+            if count[0] == check:
                 raise rp.Refusal("busy", "a Sandbox host transaction holds sandbox-docker-pool.lock")
             return real(paths, holding_edge=holding_edge)
         return mock.patch.object(rp, "_check_locks", side_effect=checks)
@@ -420,7 +420,7 @@ class LeaseAndGateTests(Base):
         self.assertTrue(result["ok"], result)
         self.assertFalse(any("job-list" in argv for argv in self.host.calls))
 
-    def test_commit_rechecks_host_locks_and_fails_closed(self):
+    def test_commit_refuses_while_a_host_lock_is_held(self):
         self.reserve()
         chain = self.sign(self.csr())
         fd = os.open(self.paths["locks"][0], os.O_RDWR | os.O_CREAT, 0o600)

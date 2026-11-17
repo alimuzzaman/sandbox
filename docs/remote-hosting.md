@@ -2231,9 +2231,10 @@ published name changes nothing.
    A busy remote is refused (`tailnet_name_busy`), never waited for. A lock
    that cannot be probed counts as held. Durable jobs are not a conflict:
    tests, CI, attach and exec jobs never touch the edge, and every Sandbox
-   nginx write (host apply, route removal) holds the edge lock. The unlocked
-   reloads (certbot's deploy hook, `host destroy`'s certificate cleanup) run
-   `nginx -t` first and load only what is on disk. The run then takes a per-name lease
+   nginx write or reload (host apply, route removal, `host destroy`'s
+   certificate cleanup, certbot's deploy hook) holds the edge lock. A deploy
+   hook written before 2026-11-17 reloads without it until the next public
+   certificate issue rewrites the hook. The run then takes a per-name lease
    on the remote (token and expiry, under a per-name lock), so a second
    controller working on the same name is refused (`tailnet_name_busy`) until
    the lease is released or expires. Under the lease the name is inspected

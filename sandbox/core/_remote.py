@@ -5449,7 +5449,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
                                legacy_pidfile: bool = False,
                                source_revision: str | None = None,
                                staged_source: dict | None = None,
-                               acknowledged_pins=(), preserve_credentials: bool = False) -> dict:
+                               acknowledged_pins=(), preserve_credentials: bool = False,
+                               ignored_jobs=()) -> dict:
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
@@ -5458,6 +5459,10 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     ``acknowledged_pins`` and over another running install, and the lock is
     held by the remote install process itself until it exits. Every installer
     path (migrate, ``remote up``, provision) comes through here.
+
+    The gate also refuses (``remote_jobs_active``, a PinError carrying
+    ``jobs``) while any server-side job is unfinished, checked under the job
+    registry's admission lock, which it holds until the old service is stopped.
     """
     if remote.get('joined') is True:
         if (remote.get('control_transport') != 'tailscale' or remote.get('control_access') != 'tailnet'
@@ -5469,6 +5474,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         raise ValueError('preserving credentials requires the joined Tailnet owner path')
     if preserve_credentials and legacy_pidfile:
         raise RuntimeError('owner_service_credential_preservation_unavailable: legacy process requires a separate lifecycle repair')
+    from sandbox.remote_runtime.pins import RELEASE_JOBS_GATE_SH
     if not confirm:
         return remote_mcp_service_plan(
             remote, bind, port, public_url,
@@ -5610,7 +5616,13 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "restore_file() { saved=$1; target=$2; tmp=$(mktemp \"$target.rollback.XXXXXX\") || return 1; "
         "cp \"$saved\" \"$tmp\" && chmod 600 \"$tmp\" && mv \"$tmp\" \"$target\" || "
         "{ rm -f -- \"$tmp\"; return 1; }; }; "
+        # The install gate holds the job registry's admission lock until this
+        # file exists (pins.INSTALL_GATE). Release it only once the old service
+        # is stopped and before any service starts: a starting service writes
+        # the registry, so it would wait on the lock.
+        + RELEASE_JOBS_GATE_SH +
         "rollback() { set +e; failed=0; "
+        f"systemctl --user stop {REMOTE_MCP_SERVICE}; release_jobs_gate || failed=1; "
         f"if test \"$had_active\" = 0; then systemctl --user stop {REMOTE_MCP_SERVICE}; stop_rc=$?; "
         "if test \"$stop_rc\" != 0 && test \"$stop_rc\" != 5; then failed=1; fi; fi; "
         "if test \"$had_unit\" = 1; then restore_file \"$backup/unit\" \"$unit_path\" || failed=1; else rm -f \"$unit_path\" || failed=1; fi; "
@@ -5642,10 +5654,13 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         # enablement and active-state checks below.
         f"systemctl --user reset-failed {REMOTE_MCP_SERVICE} || true; "
         # `enable --now` does not restart an already-active unit.  The
-        # credential EnvironmentFile was replaced above, so explicitly restart
-        # the Sandbox-owned unit to ensure its bearer middleware receives the
-        # newly minted token rather than retaining an old process environment.
-        f"if ! systemctl --user enable {REMOTE_MCP_SERVICE} || ! systemctl --user restart {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
+        # credential EnvironmentFile was replaced above, so explicitly stop and
+        # start the Sandbox-owned unit to ensure its bearer middleware receives
+        # the newly minted token rather than retaining an old process
+        # environment. The job admission lock is released between the two.
+        f"if ! systemctl --user enable {REMOTE_MCP_SERVICE} || ! systemctl --user stop {REMOTE_MCP_SERVICE} "
+        "|| ! release_jobs_gate; then exit 1; fi; "
+        f"if ! systemctl --user start {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
         "exit 1; fi; trap - EXIT; source_mode=''; "
         # Spec 072: leave the installed git source revision where the status
         # probe can read it. The service is already live, so this is best
@@ -5656,10 +5671,11 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "test ! -e \"$backup\""
     )
     from sandbox.remote_runtime.pins import (
-        PinError, install_gate_command, install_gate_refusal,
+        JOBS_ACTIVE, JOBS_GATE_UNAVAILABLE, PinError, install_gate_command, install_gate_refusal,
     )
     try:
-        gated = install_gate_command(record["runtime_revision"], acknowledged_pins, command)
+        gated = install_gate_command(record["runtime_revision"], acknowledged_pins, command,
+                                     ignored_jobs=ignored_jobs)
     except PinError as exc:
         raise RuntimeError(f"{exc.code}: {exc}") from None
     try:
@@ -5669,6 +5685,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         raise RuntimeError("timed out installing the remote MCP service") from exc
     if res.returncode != 0:
         refusal = install_gate_refusal(res.returncode, res.stdout)
+        if refusal is not None and refusal.code in {JOBS_ACTIVE, JOBS_GATE_UNAVAILABLE}:
+            raise refusal  # carries .code and, for active jobs, .jobs
         if refusal is not None:
             raise RuntimeError(f"{refusal.code}: {refusal}")
         if res.returncode in {42, 43}:

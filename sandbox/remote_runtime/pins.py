@@ -288,11 +288,27 @@ print(json.dumps(result, sort_keys=True))
 # descriptor, so a process it leaves running never holds the lock; SIGHUP is
 # ignored so a dropped connection neither kills the install halfway nor
 # releases the lock while it runs.
+#
+# Running jobs: a restart replaces the runtime under every unfinished
+# server-side job (a nested server-cli host apply then fails with its rollback
+# withheld). After the pin check the gate opens the job registry with
+# ``BEGIN IMMEDIATE``, the write lock every admission takes
+# (``JobRepository.accept``), and refuses with exit 47 over any job whose
+# lifecycle is in ACTIVE_JOB_LIFECYCLES and whose id the operator did not name
+# (``--ignore-job``), listed as one JSON line; exit 48 when that lock cannot be
+# taken. Queued jobs do not block: they cannot start while the lock is held and
+# the new service starts them. A child status of 45-48 is reported as 1, so an
+# install failure is never read as a gate refusal. With no such job it keeps the write lock, so no
+# job is admitted, until the install creates the file named by
+# ``SANDBOX_JOBS_GATE_RELEASE`` (after it has stopped the old service and
+# before it starts any service, whose startup writes the registry) or exits.
+# The gate removes that file once the lock is released.
 INSTALL_GATE = r'''
-import base64, fcntl, json, os, re, signal, subprocess, sys, time
+import base64, fcntl, json, os, re, shutil, signal, sqlite3, subprocess, sys, tempfile, threading, time
 home, target = sys.argv[1], sys.argv[2]
 acknowledged = set(json.loads(base64.b64decode(sys.argv[3]).decode()))
 wait, inner = float(sys.argv[4]), sys.argv[5]
+ignored = set(json.loads(base64.b64decode(sys.argv[6]).decode())) if len(sys.argv) > 6 else set()
 HOLDER = re.compile(r"h-[0-9a-f]{16}")
 root = os.path.join(home, "runtime", "remote-pins")
 os.makedirs(root, mode=0o700, exist_ok=True)
@@ -333,28 +349,188 @@ for name in sorted(os.listdir(root)):
 if blocking:
     print(json.dumps({"pin_gate": "blocked", "blocking": blocking}))
     raise SystemExit(46)
+ACTIVE = ("accepted", "running", "cancelling")
+registry = os.path.join(home, "runtime", "jobs", "registry.sqlite3")
+hold = None
+if os.path.exists(registry):
+    try:
+        hold = sqlite3.connect(registry, timeout=15, isolation_level=None,
+                               check_same_thread=False)
+        hold.execute("BEGIN IMMEDIATE")
+        rows = hold.execute(
+            "SELECT job_id, kind, lifecycle FROM jobs WHERE lifecycle IN (?,?,?) "
+            "ORDER BY accepted_at, job_id", ACTIVE).fetchall()
+    except sqlite3.Error:
+        print(json.dumps({"jobs_gate": "unavailable"}))
+        raise SystemExit(48)
+    rows = [row for row in rows if row[0] not in ignored]
+    if rows:
+        hold.rollback()
+        hold.close()
+        print(json.dumps({"jobs_gate": "blocked", "count": len(rows), "jobs": [
+            {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
+        raise SystemExit(47)
 signal.signal(signal.SIGHUP, signal.SIG_IGN)
-raise SystemExit(subprocess.run(["sh", "-c", inner], close_fds=True).returncode)
+gate_dir = tempfile.mkdtemp(prefix=".jobs-gate-", dir=root)
+release = os.path.join(gate_dir, "release")
+done = threading.Event()
+
+def watch():
+    while not os.path.exists(release) and not done.is_set():
+        time.sleep(0.05)
+    if hold is not None:
+        hold.rollback()
+        hold.close()
+    try:
+        os.unlink(release)
+    except OSError:
+        pass
+
+watcher = threading.Thread(target=watch, daemon=True)
+watcher.start()
+env = dict(os.environ, SANDBOX_JOBS_GATE_RELEASE=release)
+try:
+    status = subprocess.run(["sh", "-c", inner], close_fds=True, env=env).returncode
+finally:
+    done.set()
+    watcher.join()
+    shutil.rmtree(gate_dir, ignore_errors=True)
+raise SystemExit(1 if status in (45, 46, 47, 48) else status)
 '''
 INSTALL_BUSY_EXIT = 45
 INSTALL_BLOCKED_EXIT = 46
+JOBS_ACTIVE_EXIT = 47
+JOBS_GATE_UNAVAILABLE_EXIT = 48
+# The non-terminal members of sandbox.jobs.models.Lifecycle except queued
+# (tests/test_remote_runtime_pins.py); the remote programs carry literal copies.
+ACTIVE_JOB_LIFECYCLES = ("accepted", "running", "cancelling")
+MAX_LISTED_JOBS = 50
+JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
+_JOB_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+
+# Read-only listing for plans and the early confirm check. The authoritative
+# check is the one INSTALL_GATE makes under the admission lock.
+ACTIVE_JOBS_PROGRAM = r'''
+import json, os, sqlite3, sys, urllib.parse
+ACTIVE = ("accepted", "running", "cancelling")
+registry = os.path.join(sys.argv[1], "runtime", "jobs", "registry.sqlite3")
+if not os.path.exists(registry):
+    print(json.dumps({"count": 0, "jobs": []}))
+    raise SystemExit(0)
+connection = sqlite3.connect("file:" + urllib.parse.quote(registry) + "?mode=ro",
+                             uri=True, timeout=5)
+connection.execute("PRAGMA query_only=ON")
+rows = connection.execute(
+    "SELECT job_id, kind, lifecycle FROM jobs WHERE lifecycle IN (?,?,?) "
+    "ORDER BY accepted_at, job_id", ACTIVE).fetchall()
+print(json.dumps({"count": len(rows), "jobs": [
+    {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
+'''
+# Shell for the gated install: creates the release file and waits until the
+# gate removed it, i.e. released the job admission lock. The flag clears only
+# then, so a failed release is retried by rollback, which then fails closed.
+RELEASE_JOBS_GATE_SH = (
+    "jobs_gate_held=1; release_jobs_gate() { if test \"$jobs_gate_held\" = 1; then "
+    # printf, not ':': a failed redirection on a special builtin exits sh.
+    "printf '' > \"$SANDBOX_JOBS_GATE_RELEASE\" || return 1; n=0; "
+    "while test -e \"$SANDBOX_JOBS_GATE_RELEASE\"; do n=$((n+1)); "
+    "test \"$n\" -le 200 || return 1; sleep 0.05; done; jobs_gate_held=0; fi; }; ")
+JOBS_ACTIVE = "remote_jobs_active"
+JOBS_GATE_UNAVAILABLE = "remote_jobs_gate_unavailable"
+
+
+def parse_active_jobs(stdout, key=None):
+    """``(count, jobs)`` from one program line, or None when it is malformed.
+
+    ``key`` selects the gate's refusal line (``jobs_gate == "blocked"``).
+    """
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    for line in (stdout or "").splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(value, dict) or (key is not None and value.get("jobs_gate") != key):
+            continue
+        count, listed = value.get("count"), value.get("jobs")
+        if type(count) is not int or count < 0 or not isinstance(listed, list) \
+                or len(listed) > MAX_LISTED_JOBS or len(listed) > count:
+            return None
+        jobs = []
+        for job in listed:
+            if not isinstance(job, dict) or not JOB_ID_RE.fullmatch(str(job.get("job_id"))):
+                return None
+            words = {name: job.get(name) if isinstance(job.get(name), str)
+                     and _JOB_WORD_RE.fullmatch(job.get(name)) else "unknown"
+                     for name in ("kind", "lifecycle")}
+            jobs.append({"job_id": job["job_id"], **words})
+        return count, jobs
+    return None
+
+
+def jobs_active_error(count: int, jobs: list) -> PinError:
+    shown = ", ".join(f"{job['job_id']} ({job['kind']}, {job['lifecycle']})" for job in jobs)
+    more = f" and {count - len(jobs)} more" if count > len(jobs) else ""
+    error = PinError(JOBS_ACTIVE,
+                     f"{count} server-side job(s) have not finished on the remote: {shown}{more}; "
+                     "a migrate restarts the service and replaces the runtime under them. "
+                     "Wait for them to end (`sb job-list --remote NAME --active-only`) "
+                     "or cancel them, then rerun; for a job whose supervisor is gone and "
+                     "that cannot be cancelled, name it with --ignore-job JOB_ID")
+    error.jobs, error.job_count = jobs, count
+    return error
+
+
+def list_active_jobs(entry: dict, ssh_run: Callable | None = None):
+    """``(count, jobs)`` of unfinished jobs on the remote, read-only.
+
+    Raises PinError(JOBS_GATE_UNAVAILABLE) when they cannot be read.
+    """
+    if ssh_run is None:
+        from sandbox.core._remote import ssh_run as default_ssh_run
+        ssh_run = default_ssh_run
+    command = (f"python3 -c {shlex.quote(ACTIVE_JOBS_PROGRAM)} "
+               f"\"${{SANDBOX_HOME:-$HOME/sandbox}}\"")
+    try:
+        result = ssh_run(entry, command, timeout=TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - transport detail is never forwarded
+        raise PinError(JOBS_GATE_UNAVAILABLE, "remote jobs could not be listed") from exc
+    parsed = parse_active_jobs(result.stdout) if result.returncode == 0 else None
+    if parsed is None:
+        raise PinError(JOBS_GATE_UNAVAILABLE, "remote jobs could not be listed")
+    return parsed
 
 
 def install_gate_command(target: str, acknowledged, inner: str, *,
-                         wait_seconds: float = INSTALL_LOCK_WAIT_SECONDS) -> str:
+                         wait_seconds: float = INSTALL_LOCK_WAIT_SECONDS,
+                         ignored_jobs=()) -> str:
     """``inner`` wrapped so it runs only under the remote pin lock (FR-015)."""
     if not REVISION_RE.fullmatch(target or "") \
-            or not all(HOLDER_RE.fullmatch(h or "") for h in acknowledged or ()):
+            or not all(HOLDER_RE.fullmatch(h or "") for h in acknowledged or ()) \
+            or not all(JOB_ID_RE.fullmatch(j or "") for j in ignored_jobs or ()):
         raise PinError("pin_holder_invalid", "install gate request is invalid")
     acknowledged_b64 = base64.b64encode(
         json.dumps(sorted(set(acknowledged or ()))).encode()).decode()
+    ignored_b64 = base64.b64encode(json.dumps(sorted(set(ignored_jobs or ()))).encode()).decode()
     return (f"python3 -c {shlex.quote(INSTALL_GATE)} "
             f"\"${{SANDBOX_HOME:-$HOME/sandbox}}\" {shlex.quote(target)} "
-            f"{shlex.quote(acknowledged_b64)} {float(wait_seconds)!r} {shlex.quote(inner)}")
+            f"{shlex.quote(acknowledged_b64)} {float(wait_seconds)!r} {shlex.quote(inner)} "
+            f"{shlex.quote(ignored_b64)}")
 
 
 def install_gate_refusal(returncode: int, stdout) -> PinError | None:
     """The typed refusal for a gated install's exit status, else None."""
+    if returncode == JOBS_ACTIVE_EXIT:
+        parsed = parse_active_jobs(stdout, key="blocked")
+        if parsed is None:
+            return PinError(JOBS_GATE_UNAVAILABLE,
+                            "the remote refused over unfinished jobs it could not list")
+        return jobs_active_error(*parsed)
+    if returncode == JOBS_GATE_UNAVAILABLE_EXIT:
+        return PinError(JOBS_GATE_UNAVAILABLE,
+                        "the remote job registry's admission lock could not be taken; "
+                        "nothing was installed")
     if returncode == INSTALL_BUSY_EXIT:
         return PinError(REPLACEMENT_IN_PROGRESS,
                         "another install holds the remote runtime replacement lock")

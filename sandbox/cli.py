@@ -912,6 +912,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote pin list NAME [--json]\n"
             "  ./sb remote pin release NAME [--holder HOLDER] [--break-pin HOLDER] [--json]\n"
             "  ./sb remote service migrate NAME --confirm --break-pin HOLDER ...\n"
+            "  ./sb remote service migrate NAME --confirm --ignore-job JOB_ID ...\n"
             "\n"
             "Development ranges (spec 063):\n"
             "  ./sb remote network-range propose|list NAME [--json]\n"
@@ -1034,6 +1035,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="acknowledge breaking HOLDER's strict-mode pin: required by a confirmed "
              "`remote service migrate` for every unexpired pin it would break, and by "
              "`remote pin release` of another controller's pin (repeatable)")
+    remote_p.add_argument("--ignore-job", dest="ignore_jobs", action="append", default=[],
+        metavar="JOB_ID",
+        help="for a confirmed `remote service migrate`: proceed although job JOB_ID is "
+             "still recorded as unfinished (one whose supervisor is gone and that "
+             "cannot be cancelled); re-checked under the job admission lock (repeatable)")
     remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,
         default=300, metavar="SECONDS",
         help="SSH runtime-source upload timeout for provision, up, and confirmed "

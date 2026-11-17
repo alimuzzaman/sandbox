@@ -2902,6 +2902,55 @@ program is still honoured until it expires. `remote up` and
 `remote provision` take no `--break-pin`, so they refuse over any binding pin;
 migrate is the path that acknowledges pins.
 
+**Unfinished jobs.** An install restarts the service and replaces the runtime
+under every server-side job, and a running server-owner job (such as a nested
+`server-cli` host apply) then fails with its rollback withheld and its target
+lease kept. So every install path refuses with `remote_jobs_active` while any
+job on the remote is `accepted`, `running` or `cancelling`. Queued jobs do not
+block: they cannot start during the install and the new service starts them.
+The deciding check is in `pins.INSTALL_GATE`, after the pin check: it opens the
+job registry (`runtime/jobs/registry.sqlite3`) with `BEGIN IMMEDIATE`, the
+write lock every job admission takes, and keeps that lock from before the
+source swap until the old service is stopped, then releases it before any
+service starts. So no job can be admitted between the check and the restart.
+That window includes the install's virtualenv and `pip` steps, so it can last
+minutes; during it every submission fails, and so does anything that opens the
+registry anew (`JobRepository` writes its schema on open, for example
+`sb job-start`, `server-cli` dispatch and host-side `sb` job lookups). Only
+connections that were already open can still read. If the lock cannot be taken
+within 15 seconds the install refuses with `remote_jobs_gate_unavailable`; an
+install that fails with a status of 45 to 48 is reported as 1, so it is never
+mistaken for a gate refusal.
+
+Wait for the jobs to end (`sb job-list --remote NAME --active-only`) or cancel
+them, then rerun. A row can stay `running` after its supervisor died (only a
+service start reconciles it, and cancel refuses without a process): name each
+such job with `--ignore-job JOB_ID` (repeatable). The gate skips exactly those
+ids, re-checked under the lock; any other unfinished job still refuses. A
+refused `remote up` or `remote provision` leaves its uploaded runtime stage on
+the remote, as a pin refusal does.
+
+The gate covers registry jobs only. Controller-side host applies run over SSH
+with shipped programs and their target lease, not the service or `sb-src`, so
+a restart does not affect them. Host-side routines that run `sb-src/sb`
+directly (the resources routine timer, `stack reap --here`) are not checked.
+
+`--plan` reports `active_jobs` (`state` `observed` with `count` and up to 50
+`jobs`, or `remote_jobs_gate_unavailable` when the listing could not be read)
+and lists them under `blockers`; an unreadable listing is itself a blocker
+(`{"code": "remote_jobs_gate_unavailable"}`). A confirmed migrate makes the
+same read-only listing before it uploads anything, so it usually refuses before
+the upload. The refusal, from either check, looks like this:
+
+```json
+{"ok": false, "name": "vps", "status": "degraded", "data": {},
+ "error": {"code": "remote_jobs_active", "message": "1 server-side job(s) have not finished on the remote: <job id> (server-cli, running); ...",
+           "jobs": [{"job_id": "<job id>", "kind": "server-cli", "lifecycle": "running"}],
+           "job_count": 1}}
+```
+
+With `--json`, a failed `remote service migrate` (plan or confirm) exits 1.
+
 Remote workspace list, status, migration planning, creation, reset, and destroy all
 run the same read-only service preflight before sending a workspace request. The
 selected owned MCP service must report `ownership=proven` and an admitted

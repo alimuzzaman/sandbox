@@ -4116,7 +4116,8 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 # An unreadable job listing is reported, never a pass or a failure.
                 self.assertEqual(payload["data"]["active_jobs"]["state"],
                                  "remote_jobs_gate_unavailable")
-                self.assertEqual(payload["data"]["blockers"], [])
+                self.assertEqual(payload["data"]["blockers"],
+                                 [{"code": "remote_jobs_gate_unavailable"}])
                 self.assertNotIn("a" * 64, json.dumps(payload))
 
     def test_confirmed_service_migration_stages_runtime_before_handoff(self):

@@ -537,7 +537,17 @@ def _active_jobs_listing(entry: dict) -> dict:
     return {"state": "observed", "count": count, "jobs": jobs}
 
 
-def _migrate_jobs_precheck(entry: dict) -> None:
+def _ignore_job_args(args) -> list[str]:
+    values = getattr(args, "ignore_jobs", None) or []
+    if not isinstance(values, (list, tuple)):
+        return []
+    bad = [v for v in values if not (isinstance(v, str) and re.fullmatch(r"[0-9a-f]{32}", v))]
+    if bad:
+        raise ValueError("--ignore-job takes a 32-hex job id")
+    return sorted(set(values))
+
+
+def _migrate_jobs_precheck(entry: dict, ignored=()) -> None:
     """Refuse a confirmed migrate before any upload while jobs are unfinished.
 
     A listing that cannot be read does not refuse here: the install gate makes
@@ -548,8 +558,10 @@ def _migrate_jobs_precheck(entry: dict) -> None:
         count, jobs = list_active_jobs(entry)
     except PinError:
         return
+    remaining = [job for job in jobs if job["job_id"] not in set(ignored)]
+    count -= len(jobs) - len(remaining)
     if count:
-        raise jobs_active_error(count, jobs)
+        raise jobs_active_error(count, remaining)
 
 
 def _break_pin_args(args) -> list[str]:
@@ -970,13 +982,15 @@ def _cmd_service(args, as_json: bool) -> None:
             source_revision = None
             target_revision = observed.get("local_runtime_revision")
             acknowledged_pins: list[str] = []
+            ignored_jobs: list[str] = []
             if confirmed:
                 # Re-read pins at the moment of acting; refuse before any write.
                 _would_break, acknowledged_pins = _migrate_pin_gate(
                     entry, args, target_revision)
                 # Early, read-only: refuse before the upload. The install gate
                 # repeats this under the job admission lock, which decides.
-                _migrate_jobs_precheck(entry)
+                ignored_jobs = _ignore_job_args(args)
+                _migrate_jobs_precheck(entry, ignored_jobs)
                 source_revision = _local_git_revision()
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
                 _invalidate_readiness(name, before=True)
@@ -993,6 +1007,7 @@ def _cmd_service(args, as_json: bool) -> None:
                 staged_source=staged_source if confirmed else None,
                 acknowledged_pins=acknowledged_pins,
                 **({'preserve_credentials': True} if preserve_credentials else {}),
+                **({'ignored_jobs': ignored_jobs} if ignored_jobs else {}),
             )
             plan["observed"] = observed
             if owner_observation is not None:
@@ -1015,9 +1030,12 @@ def _cmd_service(args, as_json: bool) -> None:
                 from sandbox.hosting import login_reapply_plan
                 plan["login_reapply"] = login_reapply_plan.plan(entry, sr.ssh_run)
                 plan["active_jobs"] = _active_jobs_listing(entry)
-                plan["blockers"] = [] if not plan["active_jobs"]["count"] else [{
-                    "code": "remote_jobs_active", "count": plan["active_jobs"]["count"],
-                    "jobs": plan["active_jobs"]["jobs"]}]
+                if plan["active_jobs"]["count"] is None:
+                    plan["blockers"] = [{"code": "remote_jobs_gate_unavailable"}]
+                else:
+                    plan["blockers"] = [] if not plan["active_jobs"]["count"] else [{
+                        "code": "remote_jobs_active", "count": plan["active_jobs"]["count"],
+                        "jobs": plan["active_jobs"]["jobs"]}]
             if observed.get("runtime_revision_state") == "mismatch":
                 # One remote serves one runtime revision. Replacing it breaks
                 # any other checkout or deploy that requires the installed one.

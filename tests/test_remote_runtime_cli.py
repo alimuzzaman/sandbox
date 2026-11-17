@@ -140,7 +140,8 @@ class PinCommandTests(unittest.TestCase):
 
 
 class MigratePinTests(unittest.TestCase):
-    def _migrate(self, store, *, confirm, break_pins=(), jobs=(0, []), install_error=None):
+    def _migrate(self, store, *, confirm, break_pins=(), jobs=(0, []), install_error=None,
+                 ignore_jobs=()):
         with tempfile.TemporaryDirectory() as d:
             local = Path(d) / "sandbox.local.yml"
             import sandbox.core._config as config
@@ -152,6 +153,7 @@ class MigratePinTests(unittest.TestCase):
                               mcp_port=9174, bearer_token="t" * 64)
                 args = types.SimpleNamespace(name="migrate", ssh_url="vps", confirm=confirm,
                                              upload_timeout=300, break_pins=list(break_pins),
+                                             ignore_jobs=list(ignore_jobs),
                                              processes=False, ssh=False)
                 service = sr.remote_mcp_service_record("127.0.0.1", 9174,
                                                        "https://sandbox.example.test")
@@ -276,6 +278,27 @@ class MigratePinTests(unittest.TestCase):
         payload, *_ = self._migrate(_Store(), confirm=True, install_error=unavailable)
         self.assertEqual((payload["error"]["code"], self.exit_code),
                          ("remote_jobs_gate_unavailable", 1))
+
+    def test_ignore_job_names_exact_jobs_and_reaches_the_gate(self):
+        other = {**self.JOB, "job_id": "e" * 32}
+        payload, upload, migrate, _record = self._migrate(
+            _Store(), confirm=True, jobs=(2, [self.JOB, other]), ignore_jobs=["d" * 32])
+        self.assertEqual(payload["error"]["code"], "remote_jobs_active")
+        self.assertEqual(payload["error"]["jobs"], [other])
+        upload.assert_not_called()
+        payload, upload, migrate, _record = self._migrate(
+            _Store(), confirm=True, jobs=(1, [self.JOB]), ignore_jobs=["d" * 32])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(migrate.call_args.kwargs["ignored_jobs"], ["d" * 32])
+        bad, *_ = self._migrate(_Store(), confirm=True, ignore_jobs=["not-a-job"])
+        self.assertEqual((bad["ok"], self.exit_code), (False, 1))
+
+    def test_plan_with_an_unreadable_listing_reports_a_blocker(self):
+        with patch.object(remote_cmd, "_active_jobs_listing",
+                          return_value={"state": "remote_jobs_gate_unavailable",
+                                        "count": None, "jobs": None}):
+            payload, *_ = self._migrate(_Store(), confirm=False)
+        self.assertEqual(payload["data"]["blockers"], [{"code": "remote_jobs_gate_unavailable"}])
 
     def test_a_successful_confirm_exits_zero(self):
         payload, *_ = self._migrate(_Store(), confirm=True)

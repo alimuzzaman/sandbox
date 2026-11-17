@@ -363,12 +363,28 @@ class PinTests(unittest.TestCase):
                                          "lifecycle": "accepted"}])
         self.assertIn(row["job_id"], str(refusal))
         self.assertFalse(marker.exists())
-        for lifecycle in ("queued", "running", "cancelling"):
+        for lifecycle in ("running", "cancelling"):
             with self.subTest(lifecycle=lifecycle):
                 with repository.transaction(immediate=True) as connection:
                     connection.execute("UPDATE jobs SET lifecycle=? WHERE job_id=?",
                                        (lifecycle, row["job_id"]))
                 self.assertEqual(self._gated("true").returncode, pins.JOBS_ACTIVE_EXIT)
+        # A job named with --ignore-job (a dead supervisor's row) does not block,
+        # but only that exact job.
+        command = pins.install_gate_command(REV_B, (), f"touch {marker}", wait_seconds=0.5,
+                                            ignored_jobs=[row["job_id"]])
+        self.assertEqual(self.remote(None, command).returncode, 0)
+        self.assertTrue(marker.exists())
+        marker.unlink()
+        other, _ = repository.accept(self._submission("r-other"))
+        self.assertEqual(self.remote(None, command).returncode, pins.JOBS_ACTIVE_EXIT)
+        # A queued job does not block: it cannot start while the lock is held,
+        # and the new service starts it.
+        with repository.transaction(immediate=True) as connection:
+            connection.execute("UPDATE jobs SET lifecycle='queued' WHERE job_id=?",
+                               (other["job_id"],))
+        self.assertEqual(self.remote(None, command).returncode, 0)
+        marker.unlink()
         with repository.transaction(immediate=True) as connection:
             connection.execute("UPDATE jobs SET lifecycle='failed' WHERE job_id=?",
                                (row["job_id"],))
@@ -435,7 +451,8 @@ class PinTests(unittest.TestCase):
 
     def test_active_lifecycles_are_the_non_terminal_ones_in_every_copy(self):
         from sandbox.jobs.models import Lifecycle, TERMINAL_LIFECYCLES
-        expected = {item.value for item in Lifecycle} - {item.value for item in TERMINAL_LIFECYCLES}
+        expected = ({item.value for item in Lifecycle} - {item.value for item in TERMINAL_LIFECYCLES}
+                    - {Lifecycle.QUEUED.value})
         self.assertEqual(set(pins.ACTIVE_JOB_LIFECYCLES), expected)
         import ast
         for program in (pins.INSTALL_GATE, pins.ACTIVE_JOBS_PROGRAM):
@@ -443,6 +460,33 @@ class PinTests(unittest.TestCase):
                         if isinstance(node, ast.Assign)
                         and [getattr(t, "id", None) for t in node.targets] == ["ACTIVE"]]
             self.assertEqual(assigned, [pins.ACTIVE_JOB_LIFECYCLES])
+
+    def test_an_install_status_in_the_gate_range_is_never_read_as_a_refusal(self):
+        for status in (45, 46, 47, 48):
+            with self.subTest(status=status):
+                self.assertEqual(self._gated(f"exit {status}").returncode, 1)
+        self.assertEqual(self._gated("exit 44").returncode, 44)
+
+    def test_release_step_frees_admission_and_a_failed_release_stays_held(self):
+        """The install script's own release function under the real gate."""
+        from sandbox.jobs.registry import JobRepository
+        path, repository = self._registry()
+        released = self.remote_home / "released"
+        probe = (f"python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1], timeout=0.2); "
+                 f"c.execute(\"BEGIN IMMEDIATE\"); c.rollback()' {path}")
+        inner = (pins.RELEASE_JOBS_GATE_SH + "set -eu; "
+                 f"if {probe} 2>/dev/null; then exit 9; fi; "  # still held before release
+                 "release_jobs_gate; release_jobs_gate; "     # idempotent
+                 f"{probe}; touch {released}")
+        self.assertEqual(self._gated(inner).returncode, 0)
+        self.assertTrue(released.exists())
+        # A release file that cannot be written fails, and the flag stays set.
+        failing = (pins.RELEASE_JOBS_GATE_SH
+                   + 'SANDBOX_JOBS_GATE_RELEASE=/nonexistent/dir/release; '
+                   'if release_jobs_gate 2>/dev/null; then exit 9; fi; '
+                   'test "$jobs_gate_held" = 1')
+        self.assertEqual(self._gated(failing).returncode, 0)
+        JobRepository(path, busy_timeout_ms=200).close()
 
     def test_malformed_job_output_is_unavailable_never_a_pass(self):
         for stdout in ("", "{}", '{"jobs_gate": "blocked", "count": 1, "jobs": [{"job_id": "x"}]}',

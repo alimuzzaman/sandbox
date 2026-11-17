@@ -5449,7 +5449,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
                                legacy_pidfile: bool = False,
                                source_revision: str | None = None,
                                staged_source: dict | None = None,
-                               acknowledged_pins=(), preserve_credentials: bool = False) -> dict:
+                               acknowledged_pins=(), preserve_credentials: bool = False,
+                               ignored_jobs=()) -> dict:
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
@@ -5473,6 +5474,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         raise ValueError('preserving credentials requires the joined Tailnet owner path')
     if preserve_credentials and legacy_pidfile:
         raise RuntimeError('owner_service_credential_preservation_unavailable: legacy process requires a separate lifecycle repair')
+    from sandbox.remote_runtime.pins import RELEASE_JOBS_GATE_SH
     if not confirm:
         return remote_mcp_service_plan(
             remote, bind, port, public_url,
@@ -5618,10 +5620,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         # file exists (pins.INSTALL_GATE). Release it only once the old service
         # is stopped and before any service starts: a starting service writes
         # the registry, so it would wait on the lock.
-        "jobs_gate_held=1; release_jobs_gate() { if test \"$jobs_gate_held\" = 1; then "
-        "jobs_gate_held=0; : > \"$SANDBOX_JOBS_GATE_RELEASE\" || return 1; n=0; "
-        "while test -e \"$SANDBOX_JOBS_GATE_RELEASE\"; do n=$((n+1)); "
-        "test \"$n\" -le 200 || return 1; sleep 0.05; done; fi; }; "
+        + RELEASE_JOBS_GATE_SH +
         "rollback() { set +e; failed=0; "
         f"systemctl --user stop {REMOTE_MCP_SERVICE}; release_jobs_gate || failed=1; "
         f"if test \"$had_active\" = 0; then systemctl --user stop {REMOTE_MCP_SERVICE}; stop_rc=$?; "
@@ -5675,7 +5674,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         JOBS_ACTIVE, JOBS_GATE_UNAVAILABLE, PinError, install_gate_command, install_gate_refusal,
     )
     try:
-        gated = install_gate_command(record["runtime_revision"], acknowledged_pins, command)
+        gated = install_gate_command(record["runtime_revision"], acknowledged_pins, command,
+                                     ignored_jobs=ignored_jobs)
     except PinError as exc:
         raise RuntimeError(f"{exc.code}: {exc}") from None
     try:

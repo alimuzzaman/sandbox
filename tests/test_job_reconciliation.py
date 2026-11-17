@@ -135,6 +135,35 @@ class JobReconciliationTests(unittest.TestCase):
         self.assertNotIn(racing["job_id"], result["interrupted"])
         self.assertEqual(self.repository.get(racing["job_id"])["lifecycle"], "running")
 
+    def test_a_stdin_exec_waiting_for_a_slot_is_not_a_lost_launch_before_its_deadline(self):
+        """Fable [4]: _await_input_slot keeps the row accepted, no supervisor, for minutes."""
+        import json
+        from sandbox.application.job_service import SUPERVISOR_LAUNCH_GRACE_SECONDS
+
+        def waiting(label, deadline_offset):
+            row, _ = self.repository.accept(JobSubmission(
+                "test", self.temp.name, "project", "local", label, ("echo", "ok"), 60,
+                SourceIdentity("source")))
+            now = datetime.now(timezone.utc)
+            stamp = (now - timedelta(seconds=SUPERVISOR_LAUNCH_GRACE_SECONDS + 60)).isoformat().replace("+00:00", "Z")
+            deadline = (now + timedelta(seconds=deadline_offset)).isoformat().replace("+00:00", "Z")
+            provenance = json.dumps({"server_cli.stdin_sha256": "a" * 64, "server_cli.stdin_size": "3",
+                                     "server_cli.absolute_deadline_at": deadline})
+            self.repository.connection.execute(
+                "UPDATE jobs SET updated_at=?, execution_policy_provenance_json=? WHERE job_id=?",
+                (stamp, provenance, row["job_id"]))
+            self.repository.connection.commit()
+            return row
+
+        live = waiting("live", 600)
+        expired = waiting("expired", -30)
+        result = self.service.reconcile_startup()
+        self.assertNotIn(live["job_id"], result["interrupted"])
+        self.assertEqual(self.repository.get(live["job_id"])["lifecycle"], "accepted")
+        # Past its own deadline its admitting process is gone: a lost launch after all.
+        self.assertIn(expired["job_id"], result["interrupted"])
+        self.assertEqual(self.repository.get(expired["job_id"])["termination_reason"], "supervisor_launch_failed")
+
     def test_old_active_rows_beyond_the_newest_page_are_still_reconciled(self):
         stale = self._queued(age_seconds=60 + 25 * 3600)
         for _ in range(3):

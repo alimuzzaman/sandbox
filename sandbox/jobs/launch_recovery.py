@@ -28,10 +28,35 @@ def launch_lost(row: dict, snapshot, grace_seconds: int, *, now: datetime | None
         since = datetime.fromisoformat(str(row.get("updated_at", "")).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return False
-    if since.tzinfo is None or (now or datetime.now(timezone.utc)) - since <= timedelta(seconds=grace_seconds):
+    now = now or datetime.now(timezone.utc)
+    if since.tzinfo is None or now - since <= timedelta(seconds=grace_seconds):
+        return False
+    if _waiting_on_own_input(row, now):
         return False
     process = (snapshot(row["job_id"]) or {}).get("process") or {}
     return not process.get("supervisor_pid")
+
+
+def _waiting_on_own_input(row: dict, now: datetime) -> bool:
+    """A server exec holding its own stdin may wait for a slot until its deadline.
+
+    Its admitting process keeps the row accepted, with no supervisor, while it
+    polls for a slot (JobService._await_input_slot), and fails the row itself on
+    timeout or signal. Until ``server_cli.absolute_deadline_at`` has passed the
+    row is a live wait, not a lost launch; an unreadable deadline counts as live.
+    """
+    try:
+        provenance = json.loads(row.get("execution_policy_provenance_json") or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(provenance, dict) or "server_cli.stdin_sha256" not in provenance:
+        return False
+    try:
+        deadline = datetime.fromisoformat(
+            str(provenance.get("server_cli.absolute_deadline_at", "")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return True
+    return deadline.tzinfo is None or now <= deadline
 
 
 def lost_launch_result() -> str:

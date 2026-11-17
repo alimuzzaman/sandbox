@@ -1086,14 +1086,17 @@ class JobService:
                     # crash). Fail it loudly so a replay sees the outcome
                     # instead of "accepted" forever, and free its slot.
                     try:
+                        # Only while still accepted: a supervisor that recorded
+                        # itself and moved to running since the check wins.
                         self.repository.transition(row["job_id"], Lifecycle.FAILED,
                             termination_reason="supervisor_launch_failed", output_completeness="unknown",
-                            result_json=lost_launch_result())
+                            result_json=lost_launch_result(),
+                            expected_lifecycles=frozenset({Lifecycle.ACCEPTED.value}))
                         if self.scheduler is not None:
                             self.scheduler.release(row["job_id"])
                         self._finalize_terminal_workspace(row["job_id"])
                         interrupted.append(row["job_id"])
-                    except ValueError:
+                    except (ValueError, JobTransitionConflict):
                         pass
                     continue
                 if self._queue_expired(row):

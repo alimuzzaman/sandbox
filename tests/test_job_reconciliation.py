@@ -121,6 +121,19 @@ class JobReconciliationTests(unittest.TestCase):
         # A replay of the lost request sees its outcome, not "accepted".
         replay = self.service.get(lost["job_id"])
         self.assertEqual(replay["lifecycle"], "failed")
+        # A supervisor that moves the job to running after the check wins.
+        racing = accepted(SUPERVISOR_LAUNCH_GRACE_SECONDS + 60, "racing")
+        original = self.repository.snapshot
+
+        def snapshot_then_start(job_id):
+            view = original(job_id)
+            if job_id == racing["job_id"]:
+                self.repository.transition(job_id, "running")
+            return view
+        with patch.object(self.repository, "snapshot", side_effect=snapshot_then_start):
+            result = self.service.reconcile_startup()
+        self.assertNotIn(racing["job_id"], result["interrupted"])
+        self.assertEqual(self.repository.get(racing["job_id"])["lifecycle"], "running")
 
     def test_old_active_rows_beyond_the_newest_page_are_still_reconciled(self):
         stale = self._queued(age_seconds=60 + 25 * 3600)

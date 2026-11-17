@@ -144,6 +144,12 @@ keep serving.
 - A real config change to a shared service (a database image bump) still
   restarts it in step 6.
 - The apply takes longer: the colored services start twice.
+- Code that a shared service delivers into a shared volume (the xSpeed
+  `wp-setup` installer writing plugin zips into WordPress's docroot) is not
+  side-loaded: the side serves the old code, and the new code lands in the live
+  volume in step 6. Only code baked into colored images switches atomically.
+- Removing the revision stamp from a database changes its config once, so the
+  first apply after that change recreates it.
 - Mailpit and other port-publishing shared services carry the revision stamp, so
   step 6 recreates them each revision; the side reaches the new container once
   it rejoins the side network.

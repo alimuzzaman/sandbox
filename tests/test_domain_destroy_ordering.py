@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 class TestDomainDestroyOrdering(unittest.TestCase):
     def test_dns_cleanup_precedes_runtime_and_identity_deletion(self):
-        from sandbox.commands.instances_cmd import cmd_instance, _cleanup_instance_routes
+        from sandbox.commands.instances_cmd import _cmd_instance as cmd_instance, _cleanup_instance_routes
 
         helper = inspect.getsource(_cleanup_instance_routes)
         self.assertIn("domain_service(cfg).cleanup", helper)
@@ -30,7 +30,7 @@ class TestDomainDestroyOrdering(unittest.TestCase):
         self.assertIn("service.cleanup", source)
 
     def test_instance_delete_refreshes_caddy_after_registry_removal(self):
-        from sandbox.commands.instances_cmd import cmd_instance
+        from sandbox.commands.instances_cmd import _cmd_instance as cmd_instance  # body under the project lock (1a0c3da)
 
         source = inspect.getsource(cmd_instance)
         registry_removal = source.rindex("sc.registry_remove(owner[\"root\"]")

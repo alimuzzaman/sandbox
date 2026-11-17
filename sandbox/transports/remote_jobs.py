@@ -635,24 +635,29 @@ class RemoteJobTransport:
             remote = adopt_execution_capabilities(name, remote,
                 lambda argv: self.control(name, argv, timeout=15))
             capabilities = remote.get('capabilities')
-        if (not isinstance(capabilities, (list, tuple, set))
-                or any(not isinstance(value, str) for value in capabilities)
-                or not required.issubset(capabilities)):
-            raise RemoteJobTransportError(
-                "remote does not support the required execution-policy and retained acceptance contracts; "
-                "update the selected remote before submitting jobs")
-        if 'job.source-content.v1' not in capabilities:
+        recorded = (isinstance(capabilities, (list, tuple, set))
+                    and all(isinstance(value, str) for value in capabilities))
+        if not recorded or not (required | {'job.source-content.v1'}).issubset(capabilities):
+            # The recorded list is written only by provision: a remote provisioned
+            # before a contract existed, then migrated, serves it without listing
+            # it. Ask the installed runtime, bound to the recorded marker and
+            # revision, instead of refusing on the stale record.
             observed = self.control(name, ['job-capabilities'], timeout=15)
             service = remote.get('mcp_service') or {}
             if (not isinstance(observed, dict) or observed.get('ok') is not True
                     or type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
                     or not isinstance(observed.get('capabilities'), list)
                     or any(not isinstance(value, str) for value in observed.get('capabilities', ()))
-                    or 'job.source-content.v1' not in observed.get('capabilities', ())
                     or any(not isinstance(service.get(field), str)
                            or re.fullmatch(r'[0-9a-f]{24}', service[field]) is None
                            or observed.get(field) != service[field]
                            for field in ('ownership_marker', 'runtime_revision'))):
+                raise RemoteJobTransportError('installed measured-source capability is unavailable; no job submitted', retryable=False)
+            if not required.issubset(observed['capabilities']):
+                raise RemoteJobTransportError(
+                    "remote does not support the required execution-policy and retained acceptance contracts; "
+                    "update the selected remote before submitting jobs")
+            if 'job.source-content.v1' not in observed['capabilities']:
                 raise RemoteJobTransportError('installed measured-source capability is unavailable; no job submitted', retryable=False)
         return remote
 

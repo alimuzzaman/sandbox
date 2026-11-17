@@ -37,7 +37,7 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 SOURCE_CONTENT_VERSION = 1
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
-from sandbox.jobs.launch_recovery import launch_lost, lost_launch_result
+from sandbox.jobs.launch_recovery import launch_lost, lost_launch_result, slot_held
 
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
 # An accepted job's supervisor records its identity within seconds of launch;
@@ -1137,7 +1137,8 @@ class JobService:
                 interrupted.append(row["job_id"])
                 continue
             if row["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
-                if launch_lost(row, self.repository.snapshot, SUPERVISOR_LAUNCH_GRACE_SECONDS):
+                if launch_lost(row, self.repository.snapshot, SUPERVISOR_LAUNCH_GRACE_SECONDS,
+                               holds_slot=lambda job_id: slot_held(self.repository, job_id)):
                     # Accepted, a slot held, but no supervisor ever recorded
                     # itself: the launch died with its launcher (a service
                     # stopped while systemd-run was still in its cgroup, a

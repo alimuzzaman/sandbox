@@ -528,9 +528,12 @@ class RemoteJobTransportTests(unittest.TestCase):
         )
         submission = JobSubmission("test", "/p", "p", "remote", "w", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r")
-        with self.assertRaisesRegex(Exception, "required execution-policy and retained acceptance contracts"):
+        # Fable [3]: a short recorded list costs one live job-capabilities read,
+        # which fails here; either way nothing is deployed.
+        with self.assertRaises(RemoteJobTransportError):
             transport.submit(submission)
-        self.assertEqual(calls, [])
+        self.assertNotIn("deploy", calls)
+        self.assertLessEqual(len(calls), 1)
 
     def test_stale_controller_acknowledgement_cannot_drop_resolved_policy(self):
         calls = []

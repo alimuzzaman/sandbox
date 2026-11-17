@@ -1,5 +1,6 @@
 """Ensure C cleanup cannot reach A routes or shared packages."""
 
+import contextlib
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -11,7 +12,8 @@ class TestNativeCleanupBoundaries(unittest.TestCase):
         import sandbox.commands.instances_cmd as commands
 
         owner = {"root": "/project", "label": "default", "instance": "fixture"}
-        core = SimpleNamespace(registry_find_instance=lambda _name: owner, registry_remove=mock.Mock())
+        core = SimpleNamespace(registry_find_instance=lambda _name: owner, registry_remove=mock.Mock(),
+                               project_lock=lambda _root: contextlib.nullcontext())
         def failed_down(*_args, **kwargs):
             if kwargs.get("check"):
                 raise subprocess.CalledProcessError(1, "compose")
@@ -83,7 +85,8 @@ class TestNativeCleanupBoundaries(unittest.TestCase):
         from sandbox.runtimes.base import OperationResult
 
         owner = {"root": "/project", "label": "default", "runtime_mode": "managed_native"}
-        core = SimpleNamespace(registry_find_instance=lambda _name: owner, registry_remove=mock.Mock())
+        core = SimpleNamespace(registry_find_instance=lambda _name: owner, registry_remove=mock.Mock(),
+                               project_lock=lambda _root: contextlib.nullcontext())
         service = mock.Mock()
         service.invoke.return_value = OperationResult(
             False, "destroy", "/project", "wordpress",

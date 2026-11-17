@@ -780,7 +780,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         with mock.patch.object(
                 commands, "_core",
                 return_value=types.SimpleNamespace(
-                    registry_find_instance=lambda _name: owner)), \
+                    registry_find_instance=lambda _name: owner,
+                    project_lock=lambda _root: contextlib.nullcontext())), \
                 mock.patch.object(
                     commands, "runtime_service", return_value=service), \
                 mock.patch.object(

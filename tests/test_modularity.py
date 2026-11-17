@@ -152,7 +152,7 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/commands/ci.py", "cmd_ci"): 1,
                 ("sandbox/commands/instances_cmd.py", "cmd_ensure"): 1,
                 ("sandbox/commands/instances_cmd.py", "cmd_init"): 2,
-                ("sandbox/commands/instances_cmd.py", "cmd_instance"): 1,
+                ("sandbox/commands/instances_cmd.py", "_cmd_instance"): 1,
                 ("sandbox/commands/net.py", "cmd_secure"): 1,
                 ("sandbox/commands/wp.py", "_cmd_remote_wp"): 1,
                 ("sandbox/commands/activation.py", "invoke"): 1,

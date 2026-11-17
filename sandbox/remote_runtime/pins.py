@@ -431,7 +431,8 @@ print(json.dumps({"count": len(rows), "jobs": [
 # then, so a failed release is retried by rollback, which then fails closed.
 RELEASE_JOBS_GATE_SH = (
     "jobs_gate_held=1; release_jobs_gate() { if test \"$jobs_gate_held\" = 1; then "
-    ": > \"$SANDBOX_JOBS_GATE_RELEASE\" || return 1; n=0; "
+    # printf, not ':': a failed redirection on a special builtin exits sh.
+    "printf '' > \"$SANDBOX_JOBS_GATE_RELEASE\" || return 1; n=0; "
     "while test -e \"$SANDBOX_JOBS_GATE_RELEASE\"; do n=$((n+1)); "
     "test \"$n\" -le 200 || return 1; sleep 0.05; done; jobs_gate_held=0; fi; }; ")
 JOBS_ACTIVE = "remote_jobs_active"

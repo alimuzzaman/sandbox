@@ -1819,6 +1819,8 @@ class DeepAttributionCollector:
                                     "Sandbox deployment sources",
                                 str(self.sandbox_home / "sb-src"):
                                     "Sandbox tool source",
+                                str(self.sandbox_home / "releases"):
+                                    "Sandbox tool releases",
                             },
                         )
                     except Exception:
@@ -1972,6 +1974,7 @@ class DeepAttributionCollector:
                             str(self.sandbox_home / "runtime"),
                             str(self.sandbox_home / "deploy-src"),
                             str(self.sandbox_home / "sb-src"),
+                            str(self.sandbox_home / "releases"),
                             *tuple(
                                 str(_managed_path(item))
                                 for item in managed_roots

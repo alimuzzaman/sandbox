@@ -394,6 +394,46 @@ class PinTests(unittest.TestCase):
         self.assertEqual(self._gated("exit 3").returncode, 3)
         repository.accept(self._submission("r-2"))
 
+    def test_release_layout_admits_jobs_during_the_switch(self):
+        """With sb-src a symlink, a running scoped job neither blocks nor is held up."""
+        path, repository = self._registry()
+        row, _ = repository.accept(self._submission("r-scoped"))
+        os.symlink("current", self.remote_home / "sb-src")
+        marker = self.remote_home / "installed"
+        # The inner install admits a job itself: the admission lock is free.
+        admit = (f"{sys.executable} -c \"import sys; sys.path.insert(0, {str(ROOT)!r}); "
+                 "from sandbox.jobs.registry import JobRepository; "
+                 f"JobRepository({str(path)!r}, busy_timeout_ms=200).connection.execute('BEGIN IMMEDIATE')\" "
+                 f"&& touch {marker}")
+        result = self._gated(admit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(marker.exists())
+        # The plan's blocking listing agrees with the gate.
+        listing = pins.list_active_jobs(None, self.remote, blocking=True)
+        self.assertEqual(listing, (0, []))
+        self.assertEqual(pins.list_active_jobs(None, self.remote)[0], 1)
+        self.assertTrue(row["job_id"])
+
+    def test_prepare_runs_before_the_lock_and_its_failure_runs_nothing(self):
+        marker = self.remote_home / "installed"
+        built = self.remote_home / "built"
+        lock = self.remote_home / "runtime" / "remote-pins" / ".lock"
+        command = pins.install_gate_command(
+            REV_B, (), f"test -e {built} && touch {marker}", wait_seconds=0.5,
+            prepare=f"test ! -e {lock} || python3 -c 'import fcntl,os,sys; "
+                    f"fd=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)' {lock}; "
+                    f"touch {built}")
+        self.assertEqual(self.remote(None, command).returncode, 0)
+        self.assertTrue(marker.exists())
+        marker.unlink()
+        failing = pins.install_gate_command(REV_B, (), f"touch {marker}", wait_seconds=0.5,
+                                            prepare="exit 7")
+        self.assertEqual(self.remote(None, failing).returncode, 7)
+        self.assertFalse(marker.exists())
+        refused = pins.install_gate_command(REV_B, (), f"touch {marker}", wait_seconds=0.5,
+                                            prepare="exit 47")
+        self.assertEqual(self.remote(None, refused).returncode, 1)
+
     def test_no_job_is_admitted_between_the_check_and_the_release(self):
         from sandbox.jobs.registry import JobRepository
         path, repository = self._registry()

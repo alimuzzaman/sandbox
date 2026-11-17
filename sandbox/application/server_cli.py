@@ -89,6 +89,42 @@ def _installed_runtime_revision() -> str:
     return value
 
 
+def _retained_release_revision(home: Path, executable: Path) -> str | None:
+    """This CLI's revision when it is a complete retained side-by-side release."""
+    release = executable.parent
+    releases = (home / 'sandbox' / 'releases').resolve()
+    if executable.name != 'sb' or release.parent != releases:
+        return None
+    revision = _installed_runtime_revision()
+    if release.name != revision:
+        return None
+    try:
+        info = (release / '.release.json').lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077):
+            return None
+        value = json.loads((release / '.release.json').read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(value, dict) or value.get('state') != 'complete'
+            or value.get('name') != revision or value.get('runtime_revision') != revision):
+        return None
+    return revision
+
+
+def is_retained_release(owner: ServerCliOwner) -> bool:
+    """Whether ``owner`` is a retained release that ``current`` has moved past."""
+    release = Path(owner.executable).parent
+    home = Path(owner.home)
+    try:
+        current = (home / 'sandbox' / 'current').resolve(strict=True)
+    except OSError:
+        return False
+    return (release.parent == (home / 'sandbox' / 'releases').resolve()
+            and release.name == owner.runtime_revision and current != release
+            and _retained_release_revision(home, Path(owner.executable)) == owner.runtime_revision)
+
+
 def _current_owner() -> ServerCliOwner:
     """Read only the selected nonsecret unit metadata, never EnvironmentFile."""
     from sandbox.core._paths import ROOT, RUNTIME_DIR
@@ -118,11 +154,17 @@ def _current_owner() -> ServerCliOwner:
     executable = installed_cli()
     command = shlex.split(fields.get('ExecStart', '').replace('%h', str(home)))
     working = fields.get('WorkingDirectory', '').replace('%h', str(home))
-    if (not isinstance(marker, str) or not re.fullmatch('[0-9a-f]{24}', marker)
-            or revision != _installed_runtime_revision()
-            or not command or Path(command[0]).resolve() != executable
-            or Path(working).resolve() != Path(ROOT).resolve()):
+    if not isinstance(marker, str) or not re.fullmatch('[0-9a-f]{24}', marker) or not command:
         raise ServerCLIUnavailable('installed CLI and selected owner service identity do not agree')
+    if (revision != _installed_runtime_revision()
+            or Path(command[0]).resolve() != executable
+            or Path(working).resolve() != Path(ROOT).resolve()):
+        # A job keeps running from the release it was admitted with after an
+        # install moved ``current`` on (sandbox.remote_runtime.releases). Its
+        # owner is that retained release, identified by its own tree.
+        revision = _retained_release_revision(home, executable)
+        if revision is None or Path(command[0]).resolve().parent.parent != executable.parent.parent:
+            raise ServerCLIUnavailable('installed CLI and selected owner service identity do not agree')
     return ServerCliOwner(os.geteuid(), str(home), str(Path(RUNTIME_DIR).parent.resolve()),
         str(executable), machine_identity(), marker, revision)
 

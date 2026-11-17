@@ -281,6 +281,32 @@ print(json.dumps(result, sort_keys=True))
 '''
 
 
+# Shared by INSTALL_GATE and ACTIVE_JOBS_PROGRAM: in the side-by-side release
+# layout (``sb-src`` is a symlink, sandbox.remote_runtime.releases) a service
+# restart can only kill a job supervisor that sits in the service's cgroup.
+SERVICE_SUPERVISORS = r'''def service_supervisors():
+    """Job ids whose supervisor runs inside the control service's cgroup."""
+    found = set()
+    for pid in os.listdir("/proc") if os.path.isdir("/proc") else ():
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cgroup" % pid) as handle:
+                cgroup = handle.read()
+            with open("/proc/%s/cmdline" % pid, "rb") as handle:
+                args = handle.read().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        if "/sandbox-mcp-remote.service" not in cgroup or "sandbox.jobs.supervisor" not in args:
+            continue
+        for arg in args:
+            for part in arg.split("/"):
+                if re.fullmatch(r"[0-9a-f]{32}", part):
+                    found.add(part)
+    return found
+'''
+
+
 # Wraps one runtime install command (``sh -c``) on the remote. Exit 45: the
 # lock is held by another install (or a live legacy fence names another
 # target); exit 46: binding pins for another revision, listed as one JSON line
@@ -309,7 +335,15 @@ home, target = sys.argv[1], sys.argv[2]
 acknowledged = set(json.loads(base64.b64decode(sys.argv[3]).decode()))
 wait, inner = float(sys.argv[4]), sys.argv[5]
 ignored = set(json.loads(base64.b64decode(sys.argv[6]).decode())) if len(sys.argv) > 6 else set()
+prepare = sys.argv[7] if len(sys.argv) > 7 else ""
 HOLDER = re.compile(r"h-[0-9a-f]{16}")
+if prepare:
+    # Build the release before any lock: the old service keeps serving and
+    # submissions keep flowing while venvs are built.
+    built = subprocess.run(["sh", "-c", prepare], stdin=subprocess.DEVNULL,
+                           close_fds=True).returncode
+    if built != 0:
+        raise SystemExit(1 if built in (45, 46, 47, 48) else built)
 root = os.path.join(home, "runtime", "remote-pins")
 os.makedirs(root, mode=0o700, exist_ok=True)
 os.chmod(root, 0o700)
@@ -352,7 +386,8 @@ if blocking:
 ACTIVE = ("accepted", "running", "cancelling")
 registry = os.path.join(home, "runtime", "jobs", "registry.sqlite3")
 hold = None
-if os.path.exists(registry):
+
+%%SERVICE_SUPERVISORS%%if os.path.exists(registry):
     try:
         hold = sqlite3.connect(registry, timeout=15, isolation_level=None,
                                check_same_thread=False)
@@ -363,6 +398,13 @@ if os.path.exists(registry):
     except sqlite3.Error:
         print(json.dumps({"jobs_gate": "unavailable"}))
         raise SystemExit(48)
+    releases = os.path.islink(os.path.join(home, "sb-src"))
+    if releases:
+        # Release layout: supervisors run in their own scopes and from their
+        # own release directories, so a restart loses only a supervisor that
+        # still sits in the service's cgroup.
+        exposed = service_supervisors()
+        rows = [row for row in rows if row[0] in exposed]
     rows = [row for row in rows if row[0] not in ignored]
     if rows:
         hold.rollback()
@@ -370,6 +412,11 @@ if os.path.exists(registry):
         print(json.dumps({"jobs_gate": "blocked", "count": len(rows), "jobs": [
             {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
         raise SystemExit(47)
+    if releases:
+        # Nothing the restart can lose: admissions keep flowing.
+        hold.rollback()
+        hold.close()
+        hold = None
 signal.signal(signal.SIGHUP, signal.SIG_IGN)
 gate_dir = tempfile.mkdtemp(prefix=".jobs-gate-", dir=root)
 release = os.path.join(gate_dir, "release")
@@ -396,7 +443,7 @@ finally:
     watcher.join()
     shutil.rmtree(gate_dir, ignore_errors=True)
 raise SystemExit(1 if status in (45, 46, 47, 48) else status)
-'''
+'''.replace("%%SERVICE_SUPERVISORS%%", SERVICE_SUPERVISORS)
 INSTALL_BUSY_EXIT = 45
 INSTALL_BLOCKED_EXIT = 46
 JOBS_ACTIVE_EXIT = 47
@@ -411,9 +458,11 @@ _JOB_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 # Read-only listing for plans and the early confirm check. The authoritative
 # check is the one INSTALL_GATE makes under the admission lock.
 ACTIVE_JOBS_PROGRAM = r'''
-import json, os, sqlite3, sys, urllib.parse
+import json, os, re, sqlite3, sys, urllib.parse
 ACTIVE = ("accepted", "running", "cancelling")
 registry = os.path.join(sys.argv[1], "runtime", "jobs", "registry.sqlite3")
+blocking_only = len(sys.argv) > 2 and sys.argv[2] == "blocking"
+%%SERVICE_SUPERVISORS%%
 if not os.path.exists(registry):
     print(json.dumps({"count": 0, "jobs": []}))
     raise SystemExit(0)
@@ -423,9 +472,12 @@ connection.execute("PRAGMA query_only=ON")
 rows = connection.execute(
     "SELECT job_id, kind, lifecycle FROM jobs WHERE lifecycle IN (?,?,?) "
     "ORDER BY accepted_at, job_id", ACTIVE).fetchall()
+if blocking_only and os.path.islink(os.path.join(sys.argv[1], "sb-src")):
+    exposed = service_supervisors()
+    rows = [row for row in rows if row[0] in exposed]
 print(json.dumps({"count": len(rows), "jobs": [
     {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
-'''
+'''.replace("%%SERVICE_SUPERVISORS%%", SERVICE_SUPERVISORS)
 # Shell for the gated install: creates the release file and waits until the
 # gate removed it, i.e. released the job admission lock. The flag clears only
 # then, so a failed release is retried by rollback, which then fails closed.
@@ -482,16 +534,19 @@ def jobs_active_error(count: int, jobs: list) -> PinError:
     return error
 
 
-def list_active_jobs(entry: dict, ssh_run: Callable | None = None):
+def list_active_jobs(entry: dict, ssh_run: Callable | None = None, *, blocking: bool = False):
     """``(count, jobs)`` of unfinished jobs on the remote, read-only.
 
-    Raises PinError(JOBS_GATE_UNAVAILABLE) when they cannot be read.
+    ``blocking`` keeps only the jobs the install gate would refuse over (all
+    of them in the old layout; in the release layout only supervisors left in
+    the service's cgroup). Raises PinError(JOBS_GATE_UNAVAILABLE) when they
+    cannot be read.
     """
     if ssh_run is None:
         from sandbox.core._remote import ssh_run as default_ssh_run
         ssh_run = default_ssh_run
     command = (f"python3 -c {shlex.quote(ACTIVE_JOBS_PROGRAM)} "
-               f"\"${{SANDBOX_HOME:-$HOME/sandbox}}\"")
+               f"\"${{SANDBOX_HOME:-$HOME/sandbox}}\"" + (" blocking" if blocking else ""))
     try:
         result = ssh_run(entry, command, timeout=TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001 - transport detail is never forwarded
@@ -504,7 +559,7 @@ def list_active_jobs(entry: dict, ssh_run: Callable | None = None):
 
 def install_gate_command(target: str, acknowledged, inner: str, *,
                          wait_seconds: float = INSTALL_LOCK_WAIT_SECONDS,
-                         ignored_jobs=()) -> str:
+                         ignored_jobs=(), prepare: str = "") -> str:
     """``inner`` wrapped so it runs only under the remote pin lock (FR-015)."""
     if not REVISION_RE.fullmatch(target or "") \
             or not all(HOLDER_RE.fullmatch(h or "") for h in acknowledged or ()) \
@@ -516,7 +571,8 @@ def install_gate_command(target: str, acknowledged, inner: str, *,
     return (f"python3 -c {shlex.quote(INSTALL_GATE)} "
             f"\"${{SANDBOX_HOME:-$HOME/sandbox}}\" {shlex.quote(target)} "
             f"{shlex.quote(acknowledged_b64)} {float(wait_seconds)!r} {shlex.quote(inner)} "
-            f"{shlex.quote(ignored_b64)}")
+            f"{shlex.quote(ignored_b64)}"
+            + (f" {shlex.quote(prepare)}" if prepare else ""))
 
 
 def install_gate_refusal(returncode: int, stdout) -> PinError | None:

@@ -42,7 +42,7 @@ _RUNTIME_SOURCE_ARCHIVE_EXCLUDES = (
 
 _RUNTIME_SOURCE_EXTRACTION_PROGRAM = r'''import os,pathlib,posixpath,sys,tarfile
 archive=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]).resolve()
-with tarfile.open(archive,'r:gz') as bundle:
+with tarfile.open(archive,'r:*') as bundle:
  members=bundle.getmembers()
  if len(members)>100000: raise SystemExit(74)
  names={}; links=set()
@@ -527,11 +527,11 @@ def _pin_listing(entry: dict) -> dict:
     return {"pins": [pin.as_mapping() for pin in listed], "pins_state": "observed"}
 
 
-def _active_jobs_listing(entry: dict) -> dict:
+def _active_jobs_listing(entry: dict, *, blocking: bool = False) -> dict:
     """Unfinished server-side jobs for a migrate plan; never fails the plan."""
     from sandbox.remote_runtime.pins import JOBS_GATE_UNAVAILABLE, PinError, list_active_jobs
     try:
-        count, jobs = list_active_jobs(entry)
+        count, jobs = list_active_jobs(entry, blocking=blocking)
     except PinError:
         return {"state": JOBS_GATE_UNAVAILABLE, "count": None, "jobs": None}
     return {"state": "observed", "count": count, "jobs": jobs}
@@ -555,7 +555,7 @@ def _migrate_jobs_precheck(entry: dict, ignored=()) -> None:
     """
     from sandbox.remote_runtime.pins import PinError, jobs_active_error, list_active_jobs
     try:
-        count, jobs = list_active_jobs(entry)
+        count, jobs = list_active_jobs(entry, blocking=True)
     except PinError:
         return
     remaining = [job for job in jobs if job["job_id"] not in set(ignored)]
@@ -876,11 +876,13 @@ def _cmd_service(args, as_json: bool) -> None:
     # Mutating and diagnostic operations still require their explicit verb so
     # an incomplete command cannot silently change remote state.
     if name is None and operation not in {
-            None, "status", "diagnostics", "refresh", "migrate", "cleanup-broker", "stop", "capability"}:
+            None, "status", "diagnostics", "refresh", "migrate", "rollback", "releases",
+            "cleanup-broker", "stop", "capability"}:
         name = operation
         operation = "status"
-    if operation not in {"status", "diagnostics", "refresh", "migrate", "cleanup-broker", "stop", "capability"} or not name:
-        die("usage: ./sb remote service <status|diagnostics|refresh|migrate|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
+    if operation not in {"status", "diagnostics", "refresh", "migrate", "rollback", "releases",
+                         "cleanup-broker", "stop", "capability"} or not name:
+        die("usage: ./sb remote service <status|diagnostics|refresh|migrate|rollback|releases|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
     if operation == "diagnostics" and _arg_true(args, "ssh"):
         die("--ssh diagnostics are no longer supported; use the authenticated remote service")
     if _arg_true(args, "processes") and operation != "diagnostics":
@@ -1030,12 +1032,16 @@ def _cmd_service(args, as_json: bool) -> None:
                 from sandbox.hosting import login_reapply_plan
                 plan["login_reapply"] = login_reapply_plan.plan(entry, sr.ssh_run)
                 plan["active_jobs"] = _active_jobs_listing(entry)
-                if plan["active_jobs"]["count"] is None:
+                # Only jobs a restart would kill block: every one on a host
+                # still in the old layout, else supervisors left in the
+                # service's cgroup (sandbox.remote_runtime.releases).
+                blocking = _active_jobs_listing(entry, blocking=True)
+                if blocking["count"] is None:
                     plan["blockers"] = [{"code": "remote_jobs_gate_unavailable"}]
                 else:
-                    plan["blockers"] = [] if not plan["active_jobs"]["count"] else [{
-                        "code": "remote_jobs_active", "count": plan["active_jobs"]["count"],
-                        "jobs": plan["active_jobs"]["jobs"]}]
+                    plan["blockers"] = [] if not blocking["count"] else [{
+                        "code": "remote_jobs_active", "count": blocking["count"],
+                        "jobs": blocking["jobs"]}]
             if observed.get("runtime_revision_state") == "mismatch":
                 # One remote serves one runtime revision. Replacing it breaks
                 # any other checkout or deploy that requires the installed one.
@@ -1066,6 +1072,26 @@ def _cmd_service(args, as_json: bool) -> None:
                 plan["observed"] = sr.remote_mcp_service_status(
                     {**entry, "mcp_service": plan["service"]})
             payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}
+        elif operation == "releases":
+            payload = {"ok": True, "name": name, "status": "observed",
+                       "data": sr.remote_runtime_releases(entry), "error": None}
+        elif operation == "rollback":
+            # Flip current back to previous (sandbox.remote_runtime.releases).
+            if confirmed:
+                ignored_jobs = _ignore_job_args(args)
+                _would_break, acknowledged_pins = _migrate_pin_gate(
+                    entry, args, sr.rollback_remote_mcp_service(entry).get("target_runtime_revision"))
+                _invalidate_readiness(name, before=True)
+                plan = sr.rollback_remote_mcp_service(
+                    entry, confirm=True, acknowledged_pins=acknowledged_pins,
+                    ignored_jobs=ignored_jobs)
+                sr.put_remote(name, mcp_service=plan["service"])
+                _invalidate_readiness(name)
+                plan["observed"] = sr.remote_mcp_service_status(
+                    {**entry, "mcp_service": plan["service"]})
+            else:
+                plan = sr.rollback_remote_mcp_service(entry)
+            payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}
         elif operation == "cleanup-broker":
             observed = sr.remote_mcp_service_status(entry)
             plan = {
@@ -1087,7 +1113,9 @@ def _cmd_service(args, as_json: bool) -> None:
                         "remote runtime revision does not match; run "
                         f"`./sb remote service migrate {name} --confirm --json` first")
                 command = (
-                    "set -eu; runtime=$HOME/sandbox/sb-src; "
+                    # sb-src is the compatibility link to the current
+                    # release (sandbox.remote_runtime.releases).
+                    "set -eu; runtime=$(readlink -f \"$HOME/sandbox/sb-src\"); "
                     "test -d \"$runtime\" && test ! -L \"$runtime\"; "
                     "python3 \"$runtime/scripts/provision_ci_cleanup_broker.py\" "
                     "--confirm --json"
@@ -1878,7 +1906,75 @@ def _upload_runtime_source(
     # already bound to the immutable object, while this guard rejects a dirty
     # or moved controller checkout rather than mislabelling operator intent.
     _assert_clean_source_revision(source_revision)
-    archive_digest = hashlib.sha256(archive).hexdigest()
+    excludes = tuple(f":(exclude,top,literal){path}" for path in _RUNTIME_SOURCE_ARCHIVE_EXCLUDES)
+    fetch_url = _runtime_source_fetch_url()
+    if fetch_url is not None:
+        # The remote fetches the exact commit itself (read-only, anonymous
+        # HTTPS) and must produce the byte-identical uncompressed archive; a
+        # slow controller uplink then carries nothing. Any failure before
+        # publication falls back to the upload.
+        plain = subprocess.run(
+            ("git", "-C", str(ROOT), "archive", "--format=tar", source_revision, "--", ".",
+             *excludes), capture_output=True, timeout=_RUNTIME_SOURCE_PACKAGE_TIMEOUT,
+            check=False, env={key: value for key, value in os.environ.items()
+                              if not key.startswith("GIT_")})
+        if plain.returncode == 0 and plain.stdout:
+            print(f"asking the remote to fetch {source_revision} from {fetch_url} "
+                  "(bounded 300s)...", file=sys.stderr)
+            try:
+                return _stage_runtime_source(
+                    remote_or_target, source_revision=source_revision,
+                    runtime_revision=runtime_revision,
+                    digest=hashlib.sha256(plain.stdout).hexdigest(), archive=None,
+                    fetch=(fetch_url, excludes), timeout=300)
+            except RemoteRuntimeSourceIndeterminate:
+                raise
+            except (RuntimeError, RemoteRuntimeSourceTimeout) as exc:
+                print(f"remote fetch unavailable ({exc}); uploading instead", file=sys.stderr)
+    return _stage_runtime_source(
+        remote_or_target, source_revision=source_revision, runtime_revision=runtime_revision,
+        digest=hashlib.sha256(archive).hexdigest(), archive=archive, fetch=None,
+        timeout=upload_timeout)
+
+
+def _runtime_source_fetch_url() -> str | None:
+    """Anonymous HTTPS URL of this checkout's GitHub origin, or None."""
+    if os.environ.get("SANDBOX_RUNTIME_SOURCE_FETCH", "1") == "0":
+        return None
+    try:
+        result = subprocess.run(("git", "-C", str(ROOT), "remote", "get-url", "origin"),
+                                capture_output=True, text=True, timeout=10, check=False,
+                                env={key: value for key, value in os.environ.items()
+                                     if not key.startswith("GIT_")})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    url = (result.stdout or "").strip() if result.returncode == 0 else ""
+    match = (re.fullmatch(r"git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?", url)
+             or re.fullmatch(r"(?:ssh://git@|https://)github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?", url))
+    if match is None:
+        return None
+    return f"https://github.com/{match.group(1)}/{match.group(2)}.git"
+
+
+def _runtime_source_fetch_shell(url: str, source_revision: str, excludes) -> str:
+    """Remote shell writing the exact commit's plain tar archive to ``$archive``."""
+    git = ("GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false git -c credential.helper= "
+           "-c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null")
+    return (
+        "cache=\"$sandbox_home/runtime/sandbox-source.git\"; mkdir -p \"$sandbox_home/runtime\"; "
+        "test -d \"$cache\" || git init --quiet --bare \"$cache\"; "
+        f"{git} -C \"$cache\" fetch --quiet --no-tags --depth=1 {shlex.quote(url)} "
+        f"{source_revision} </dev/null; "
+        f"test \"$(git -C \"$cache\" rev-parse --verify {source_revision}^{{commit}})\" = {source_revision}; "
+        f"git -C \"$cache\" archive --format=tar {source_revision} -- . "
+        + " ".join(shlex.quote(item) for item in excludes) + " > \"$archive\"; "
+    )
+
+
+def _stage_runtime_source(remote_or_target, *, source_revision: str, runtime_revision: str,
+                          digest: str, archive: bytes | None, fetch, timeout: int) -> dict[str, str]:
+    """Publish one verified stage from uploaded bytes or a remote exact fetch."""
+    archive_digest = digest
     stage_name = f".sb-src-stage-{source_revision[:12]}-{uuid.uuid4().hex}"
     stage_receipt = json.dumps({"schema_version": 1, "source_revision": source_revision,
                                 "runtime_revision": runtime_revision,
@@ -1901,7 +1997,9 @@ def _upload_runtime_source(
         f"stage_name={shlex.quote(stage_name)}; expected_digest={archive_digest}; "
         "stage=$sandbox_home/$stage_name; test ! -e \"$stage\"; "
         "temporary=$(mktemp -d \"$sandbox_home/.sb-src-stage-tmp.XXXXXX\"); phase=receive; "
-        "archive=$temporary/archive.tar.gz; cat > \"$archive\"; "
+        "archive=$temporary/archive.tar.gz; "
+        + ("cat > \"$archive\"; " if fetch is None else _runtime_source_fetch_shell(
+            fetch[0], source_revision, fetch[1])) +
         "phase=digest; "
         "actual=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],\"rb\").read()).hexdigest())' \"$archive\"); "
         "test \"$actual\" = \"$expected_digest\"; mkdir -m 0700 \"$temporary/tree\"; "
@@ -1919,21 +2017,22 @@ def _upload_runtime_source(
         "python3 -c " + shlex.quote(_RUNTIME_SOURCE_PUBLISH_PROGRAM) + " \"$temporary\" \"$stage\"; "
         "temporary=; phase=complete; trap - EXIT; "
     )
-    print(
-        "runtime source archive ready "
-        f"({len(archive)} bytes); uploading to remote "
-        f"(bounded {upload_timeout}s)...",
-        file=sys.stderr,
-    )
+    if archive is not None:
+        print(
+            "runtime source archive ready "
+            f"({len(archive)} bytes); uploading to remote "
+            f"(bounded {timeout}s)...",
+            file=sys.stderr,
+        )
     try:
         ssh_res = sr.ssh_process(
-            remote_or_target, remote_cmd, input_data=archive,
-            timeout=upload_timeout,
+            remote_or_target, remote_cmd, input_data=archive if archive is not None else b"",
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise RemoteRuntimeSourceTimeout(
             "runtime source upload timed out after "
-            f"{upload_timeout}s; remote completion is unknown; "
+            f"{timeout}s; remote completion is unknown; "
             "inspect the remote before retrying"
         ) from exc
     if ssh_res.returncode != 0:

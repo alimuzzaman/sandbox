@@ -163,9 +163,18 @@ The controller requires a clean checkout, packages the exact validated Git objec
 (never live worktree bytes), and rechecks clean HEAD before first remote contact.
 The remote extracts into an owner-only same-filesystem staging directory, verifies
 the archive receipt's exact source SHA, archive digest, and precomputed runtime-record
-revision, then atomically exchanges that complete tree with
-`$HOME/sandbox/sb-src`. Failure rolls the prior tree back before the existing service
-is changed. A failed rollback, restored-service restart, or backup cleanup is reported
+revision, then builds that complete tree as `$HOME/sandbox/releases/<runtime-revision>`
+and flips `current` to it (see "Side-by-side releases" below). Failure flips `current`
+back before the existing service is changed.
+
+The controller first asks the remote to fetch the exact commit itself, read-only,
+over anonymous HTTPS from the checkout's GitHub `origin` into
+`runtime/sandbox-source.git` (no credential helper, no prompt, HTTPS only). The remote
+must produce the byte-identical uncompressed `git archive` the controller computed
+locally (same SHA, same digest; checked across git 2.43 and 2.47). If the fetch or
+the digest fails before publication, the controller uploads the archive as before.
+`SANDBOX_RUNTIME_SOURCE_FETCH=0` skips the fetch. A private repository needs a deploy
+key or token on the remote, which this does not configure; it then always uploads. A failed rollback, restored-service restart, or backup cleanup is reported
 as `remote_service_rollback_indeterminate`, never hidden as an ordinary install failure.
 Fresh provisioning uses the same handoff and never clones or activates a
 moving branch. The service unit and credential file are not changed until helper
@@ -2935,42 +2944,82 @@ program is still honoured until it expires. `remote up` and
 `remote provision` take no `--break-pin`, so they refuse over any binding pin;
 migrate is the path that acknowledges pins.
 
-**Unfinished jobs.** An install restarts the service and replaces the runtime
-under every server-side job, and a running server-owner job (such as a nested
-`server-cli` host apply) then fails with its rollback withheld and its target
-lease kept. So every install path refuses with `remote_jobs_active` while any
-job on the remote is `accepted`, `running` or `cancelling`. Queued jobs do not
-block: they cannot start during the install and the new service starts them.
-The deciding check is in `pins.INSTALL_GATE`, after the pin check: it opens the
-job registry (`runtime/jobs/registry.sqlite3`) with `BEGIN IMMEDIATE`, the
-write lock every job admission takes, and keeps that lock from before the
-source swap until the old service is stopped, then releases it before any
-service starts. So no job can be admitted between the check and the restart.
-That window includes the install's virtualenv and `pip` steps, so it can last
-minutes; during it every submission fails, and so does anything that opens the
-registry anew (`JobRepository` writes its schema on open, for example
-`sb job-start`, `server-cli` dispatch and host-side `sb` job lookups). Only
-connections that were already open can still read. If the lock cannot be taken
-within 15 seconds the install refuses with `remote_jobs_gate_unavailable`; an
-install that fails with a status of 45 to 48 is reported as 1, so it is never
-mistaken for a gate refusal.
+**Side-by-side releases.** Each runtime revision is installed into its own
+directory, `$HOME/sandbox/releases/<runtime-revision>/`, with its own virtual
+environments (`sandbox/remote_runtime/releases.py`). The install runs in two
+parts inside `pins.INSTALL_GATE`:
 
-Wait for the jobs to end (`sb job-list --remote NAME --active-only`) or cancel
-them, then rerun. A row can stay `running` after its supervisor died (only a
-service start reconciles it, and cancel refuses without a process): name each
-such job with `--ignore-job JOB_ID` (repeatable). The gate skips exactly those
-ids, re-checked under the lock; any other unfinished job still refuses. A
-refused `remote up` or `remote provision` leaves its uploaded runtime stage on
-the remote, as a pin refusal does.
+1. **Prepare, with no lock held.** The staged tree is verified (owner, modes,
+   receipt with exact source SHA, archive digest and runtime revision), moved
+   to `releases/<rev>` and built there: CLI venv, image staging helper, MCP
+   venv, tools venv. A venv bakes its absolute path, so a release is built in
+   place and marked complete (`.release.json`) last. A complete release of the
+   same revision is reused. The old service keeps serving and jobs keep being
+   admitted for the whole build.
+2. **Switch, under the locks, for seconds.** `current` is flipped to the new
+   release by a rename over the symlink (`previous` keeps the old target), the
+   unit and credential file are written, and the service is stopped and
+   started. `sb-src` stays as a compatibility symlink to `current`, so
+   routines, hosted helpers and SSH submissions that run `sb-src/sb` keep
+   working. A failure flips `current` back and restores the old unit.
 
-The gate covers registry jobs only. Controller-side host applies run over SSH
-with shipped programs and their target lease, not the service or `sb-src`, so
-a restart does not affect them. Host-side routines that run `sb-src/sb`
-directly (the resources routine timer, `stack reap --here`) are not checked.
+After a successful switch the release keeps a copy of its unit, source receipt
+and owner origin record, and releases beyond `current`, `previous` and the last
+3 activated are removed unless a live process runs from them (cwd or command
+line under the release directory).
+
+`sb remote service releases NAME` lists the layout, `current`, `previous` and
+every release. `sb remote service rollback NAME --plan|--confirm` flips
+`current` back to `previous` and restores that release's recorded unit and
+receipts; running it again flips forward. Rollback takes the same gate (pins,
+job check) and builds nothing.
+
+**Converting an existing host.** The first install onto a host whose `sb-src`
+is still a plain directory converts it: `current` is pointed at the new
+release, a symlink to `current` is exchanged with the old directory
+(`renameat2` `RENAME_EXCHANGE`, so `sb-src` is never missing), and the old tree
+is filed as `releases/<old-unit-revision>` with its unit and receipts, so
+`rollback` can return to it. A failed conversion exchanges the directory back
+into place.
+
+**Unfinished jobs.** Job supervisors start in their own transient
+`systemd --user` scope (`sandbox/jobs/scope.py`, the follow-attempt pattern:
+a probe first, `env -u` for any manager variable it had to add) and run from
+the resolved release directory they were admitted with. A service restart
+therefore no longer kills or swaps the runtime under them, and the new service
+needs nothing to adopt them: each supervisor already owns its registry row,
+lease, heartbeat and output. A job still running from a retained release keeps
+its own server-cli owner identity (`_retained_release_revision` in
+`sandbox/application/server_cli.py`), so its checks and nested submissions keep
+agreeing with the revision it was bound to. A launcher inside a service
+cgroup with no working scope refuses the launch rather than lose the job.
+
+So the gate refuses with `remote_jobs_active` only over jobs a restart could
+still kill:
+
+- **Release layout** (`sb-src` is a symlink): only a job whose supervisor
+  still sits in `sandbox-mcp-remote.service`'s cgroup. After that check the
+  gate releases the job admission lock at once, so submissions are never held
+  up during the switch.
+- **Old layout** (the one-time conversion): every job that is `accepted`,
+  `running` or `cancelling`, as before. Here the gate holds the registry's
+  write lock (`BEGIN IMMEDIATE`) until the old service is stopped, so no job
+  can be admitted between the check and the restart. The build already
+  happened outside the lock, so that window is seconds.
+
+Queued jobs never block. If the lock cannot be taken within 15 seconds the
+install refuses with `remote_jobs_gate_unavailable`; an install that fails with
+a status of 45 to 48 is reported as 1, so it is never mistaken for a gate
+refusal. A row can stay `running` after its supervisor died: name each such job
+with `--ignore-job JOB_ID` (repeatable), re-checked under the lock.
+
+`sb job-list --active-only` can look busier than the gate: it also counts
+`queued`, and a job that lives between two polls is never seen by the list
+(the gate may still catch it). Trust the plan's `blockers`.
 
 `--plan` reports `active_jobs` (`state` `observed` with `count` and up to 50
 `jobs`, or `remote_jobs_gate_unavailable` when the listing could not be read)
-and lists them under `blockers`; an unreadable listing is itself a blocker
+and lists the ones the gate would refuse over under `blockers`; an unreadable listing is itself a blocker
 (`{"code": "remote_jobs_gate_unavailable"}`). A confirmed migrate makes the
 same read-only listing before it uploads anything, so it usually refuses before
 the upload. The refusal, from either check, looks like this:

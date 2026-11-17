@@ -369,10 +369,18 @@ class JobService:
         # caller's cwd is not the staged Sandbox checkout.  The detached child
         # must start in the package root for ``-m sandbox.jobs.supervisor`` to
         # resolve reliably after the parent exits.
+        # ``package_root`` is the resolved release directory, so the job keeps
+        # running from the release it was admitted with after an install
+        # moves ``current``. Its own systemd scope lets it outlive a restart
+        # of the service that launched it (sandbox.jobs.scope).
         package_root = Path(__file__).resolve().parents[2]
-        process = subprocess.Popen([sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
+        from sandbox.jobs.scope import scoped_launch
+        argv, environment = scoped_launch(
+            [sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
+            job_id=Path(descriptor_path).parent.name)
+        process = subprocess.Popen(argv,
             stdin=subprocess.DEVNULL if anonymous_input is None else anonymous_input.fileno(),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
             cwd=package_root, start_new_session=True, close_fds=True)
         # This is intentionally a fire-and-forget control-plane process: its
         # durable descriptor and registry own lifecycle after acceptance. Avoid

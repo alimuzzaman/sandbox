@@ -2730,29 +2730,6 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
 
 
 class TestStartRemoteMcpServer(unittest.TestCase):
-    def test_post_exchange_fsync_failure_retains_mode_for_exact_source_rollback(self):
-        for existing, mode in ((True, 'exchanged'), (False, 'installed')):
-            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
-                parent = Path(directory); staged = parent / 'staged'; runtime = parent / 'runtime'
-                staged.mkdir(); (staged / 'identity').write_text('new')
-                if existing:
-                    runtime.mkdir(); (runtime / 'identity').write_text('old')
-                injected = ('import os\ndef fail_sync(fd): raise OSError("synthetic post-exchange fsync failure")\n'
-                            'os.fsync=fail_sync\n' + sr._REMOTE_SOURCE_ACTIVATE_PROGRAM)
-                activated = run_test_process((sys.executable, '-c', injected, str(staged), str(runtime)),
-                    capture_output=True, text=True, timeout=5)
-                self.assertNotEqual(activated.returncode, 0)
-                self.assertEqual(activated.stdout.strip(), mode)
-                restored = run_test_process((sys.executable, '-c', sr._REMOTE_SOURCE_ROLLBACK_PROGRAM,
-                    activated.stdout.strip(), str(staged), str(runtime)),
-                    capture_output=True, text=True, timeout=5)
-                self.assertEqual(restored.returncode, 0, restored.stderr)
-                if existing:
-                    self.assertEqual((runtime / 'identity').read_text(), 'old')
-                else:
-                    self.assertFalse(runtime.exists())
-                self.assertEqual((staged / 'identity').read_text(), 'new')
-
     @patch("sandbox.core._remote.ssh_run")
     def test_bound_runtime_record_is_rendered_once_and_returned_unchanged(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
@@ -2766,28 +2743,6 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertEqual(applied["service"]["runtime_revision"], revision)
         self.assertIn(f"SANDBOX_REMOTE_MCP_RUNTIME_REVISION={revision}",
                       mock_ssh_run.call_args.args[1])
-
-    def test_source_activation_and_rollback_execute_for_existing_and_absent_runtime(self):
-        for existing, expected_mode in ((True, "exchanged"), (False, "installed")):
-            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
-                parent = Path(directory); staged = parent / "staged"; runtime = parent / "runtime"
-                staged.mkdir(); (staged / "identity").write_text("new")
-                if existing:
-                    runtime.mkdir(); (runtime / "identity").write_text("old")
-                activated = run_test_process(
-                    (sys.executable, "-c", sr._REMOTE_SOURCE_ACTIVATE_PROGRAM,
-                     str(staged), str(runtime)), capture_output=True, text=True, check=False)
-                self.assertEqual(activated.returncode, 0, activated.stderr)
-                self.assertEqual(activated.stdout.strip(), expected_mode)
-                self.assertEqual((runtime / "identity").read_text(), "new")
-                rolled_back = run_test_process(
-                    (sys.executable, "-c", sr._REMOTE_SOURCE_ROLLBACK_PROGRAM,
-                     expected_mode, str(staged), str(runtime)),
-                    capture_output=True, text=True, check=False)
-                self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
-                self.assertFalse(runtime.exists()) if not existing else self.assertEqual(
-                    (runtime / "identity").read_text(), "old")
-                self.assertEqual((staged / "identity").read_text(), "new")
 
     @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_defaults_sandbox_home(self, mock_ssh_run):
@@ -2819,13 +2774,17 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn("kill \"$legacy_pid\"", command)
         self.assertNotIn("pathlib.Path('/proc')", command)
         self.assertIn("SANDBOX_REMOTE_MCP_TOKEN=\"$sandbox_remote_mcp_token\"", command)
-        self.assertIn("scripts/provision_image_stage_helper.py", command)
-        self.assertIn("--runtime-revision " + "f" * 40, command)
-        self.assertIn("./sb mcp-install", command)
-        self.assertLess(command.index("scripts/provision_image_stage_helper.py"),
-                        command.index("./sb mcp-install"))
-        self.assertLess(command.index("./sb mcp-install"), command.index("kill \"$legacy_pid\""))
-        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 300)
+        # The build runs as the gate's prepare step, before any lock.
+        import shlex as _shlex
+        from sandbox.remote_runtime import releases
+        prepare = _shlex.split(command)[-1]
+        self.assertIn("prepare", prepare)
+        self.assertIn("f" * 40, prepare)
+        self.assertIn(_shlex.quote(releases.PROGRAM), prepare)
+        self.assertNotIn("kill", prepare)
+        self.assertIn('"mcp-install"', releases.PROGRAM)
+        self.assertIn("provision_image_stage_helper.py", releases.PROGRAM)
+        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 1200)
         # Spec 060: migrate does not enable hosting coordination; enabling
         # ships with the state conversion (T028), so a migrated production
         # remote never becomes coordination-enabled before it.
@@ -2886,18 +2845,24 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn('test ! -e "$backup"', command)
 
     def test_failure_rollback_restores_active_runtime_and_cleans_sensitive_temps(self):
+        """The whole gated install runs for real on a private home in the old layout.
+
+        A failed start after the one-time conversion puts the plain sb-src
+        directory back; a rollback that cannot finish is indeterminate (44).
+        """
         with patch("sandbox.core._remote.ssh_run", return_value=_completed(returncode=0)) as remote:
             sr.migrate_remote_mcp_service(
                 {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
                 source_revision="f" * 40, staged_source=_staged_source())
-        command = remote.call_args.args[1]; record = sr.remote_mcp_service_record("127.0.0.1", 9174)
-        for fail_restart, fail_restore, lost_activation, expected_rc in (
-                (False, False, False, 1), (True, False, False, 44),
-                (False, True, False, 44), (False, False, True, 44)):
+        command = remote.call_args.args[1]
+        for fail_start, fail_restart, fail_restore, lost_activation, expected_rc in (
+                (False, False, False, False, 0), (True, False, False, False, 1),
+                (True, True, False, False, 44), (True, False, True, False, 44),
+                (False, False, False, True, 44)):
             # The migration deliberately refuses world-writable ancestors such
             # as /tmp. Model a private home, not an unsafe deployment root.
-            with self.subTest(fail_restart=fail_restart, fail_restore=fail_restore,
-                              lost_activation=lost_activation), \
+            with self.subTest(fail_start=fail_start, fail_restart=fail_restart,
+                              fail_restore=fail_restore, lost_activation=lost_activation), \
                  tempfile.TemporaryDirectory(dir=Path.home()) as directory:
                 home = Path(directory).resolve(); sandbox = home / "sandbox"
                 runtime = sandbox / "sb-src"; runtime.mkdir(parents=True)
@@ -2908,10 +2873,7 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                 (tree / "identity").write_text("new")
                 (tree / "sandbox/hermes/cron-catalog.json").write_text("{}")
                 (tree / "sb").write_text("#!/bin/sh\nexit 0\n"); (tree / "sb").chmod(0o700)
-                (tree / "scripts/provision_image_stage_helper.py").write_text(
-                    "raise SystemExit(1)\n")
-                (tree / ".cli-venv/bin").mkdir(parents=True)
-                (tree / ".cli-venv/bin/python").symlink_to(sys.executable)
+                (tree / "scripts/provision_image_stage_helper.py").write_text("")
                 stage.chmod(0o700); tree.chmod(0o700)
                 (stage / "receipt.json").write_text(_staged_source()["receipt"])
                 (stage / "receipt.json").chmod(0o600)
@@ -2923,22 +2885,22 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                 fake_bin = home / "bin"; fake_bin.mkdir(); log = home / "systemctl.log"
                 python = fake_bin / 'python3'
                 python.write_text('#!' + sys.executable + '\nimport os,sys,builtins\n'
+                    'if sys.argv[1:3]==["-m","venv"]:\n'
+                    ' os.makedirs(sys.argv[3]+"/bin");p=sys.argv[3]+"/bin/python"\n'
+                    ' open(p,"w").write("#!/bin/sh\\nexit 0\\n");os.chmod(p,0o700);raise SystemExit(0)\n'
                     'if len(sys.argv)>2 and sys.argv[1]=="-c":\n'
                     ' code=sys.argv[2];sys.argv=[sys.argv[0],*sys.argv[3:]]\n'
-                    ' if os.environ.get("LOST_ACTIVATION")=="1" and "source,target=sys.argv[1:]" in code:\n'
+                    ' if os.environ.get("LOST_ACTIVATION")=="1" and "sandbox-releases" in code and sys.argv[2:3]==["activate"]:\n'
                     '  def fail_print(*args,**kwargs):raise BrokenPipeError("synthetic activation output loss")\n'
                     '  builtins.print=fail_print\n'
                     ' exec(compile(code,"<synthetic-installer>","exec"))\n'
                     'else:os.execv(sys.executable,[sys.executable,*sys.argv[1:]])\n')
                 python.chmod(0o700)
-                stat_script = fake_bin / "stat"; stat_script.write_text(
-                    "#!/usr/bin/env python3\nimport os,stat,sys\ni=os.stat(sys.argv[3]);"
-                    " f=sys.argv[2]; print(f.replace('%u',str(i.st_uid)).replace('%a',oct(stat.S_IMODE(i.st_mode))[2:]))\n")
-                stat_script.chmod(0o700)
                 systemctl = fake_bin / "systemctl"; systemctl.write_text(
                     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"
                     "case \"$*\" in *'show --property=LoadState --property=ActiveState --value'*) "
-                    "printf 'loaded\\nactive\\n';; *'restart '*) test \"${FAIL_RESTART:-0}\" = 0;; *) exit 0;; esac\n")
+                    "printf 'loaded\\nactive\\n';; *'restart '*) test \"${FAIL_RESTART:-0}\" = 0;; "
+                    "*'--user start '*) test \"${FAIL_START:-0}\" = 0;; *) exit 0;; esac\n")
                 systemctl.chmod(0o700)
                 move = fake_bin / "mv"
                 move.write_text('#!/bin/sh\nif test "${FAIL_RESTORE:-0}" = 1; then '
@@ -2948,13 +2910,25 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                 result = run_test_process(("/bin/sh", "-c", command), input=b"d" * 64 + b"\n",
                     capture_output=True, env={"HOME": str(home), "USER": "tester",
                     "PATH": f"{fake_bin}:/usr/bin:/bin", "SYSTEMCTL_LOG": str(log),
+                    "FAIL_START": "1" if fail_start else "0",
                     "FAIL_RESTART": "1" if fail_restart else "0",
                     "FAIL_RESTORE": "1" if fail_restore else "0",
-                    "LOST_ACTIVATION": "1" if lost_activation else "0"}, timeout=30)
+                    "LOST_ACTIVATION": "1" if lost_activation else "0"}, timeout=60)
                 self.assertEqual(result.returncode, expected_rc, result.stderr.decode(errors="replace"))
-                self.assertEqual((runtime / "identity").read_text(), "new" if lost_activation else "old")
-                self.assertEqual(env_file.read_text(), "OLD=secret\n")
+                converted = expected_rc == 0 or lost_activation
+                self.assertEqual(runtime.is_symlink(), converted)
+                self.assertEqual((runtime / "identity").read_text(), "new" if converted else "old")
+                release = sandbox / "releases" / _staged_source()["runtime_revision"]
+                self.assertTrue((release / ".release.json").is_file())
+                self.assertFalse(stage.exists())
                 backups = list(secret_dir.glob("mcp-remote-backup-*"))
+                if expected_rc == 0:
+                    self.assertEqual(os.readlink(sandbox / "current"), "releases/" + release.name)
+                    self.assertTrue(os.readlink(sandbox / "previous").startswith("releases/legacy-"))
+                    self.assertEqual((release / ".service-unit").read_text(), unit.read_text())
+                    self.assertEqual(backups, [])
+                    continue
+                self.assertEqual(env_file.read_text(), "OLD=secret\n")
                 if expected_rc == 44:
                     self.assertEqual(len(backups), 1)
                     self.assertEqual((backups[0] / 'env').read_text(), 'OLD=secret\n')
@@ -2963,12 +2937,11 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                     self.assertEqual(backups[0].stat().st_mode & 0o777, 0o700)
                 else:
                     self.assertEqual(backups, [])
+                    self.assertFalse(os.path.lexists(sandbox / "current"))
                 self.assertEqual(list(unit_dir.glob("*.rollback.*")), [])
                 if fail_restore or lost_activation:
                     self.assertNotIn('restart sandbox-mcp-remote.service', log.read_text())
                     self.assertIn('stop sandbox-mcp-remote.service', log.read_text())
-                    if lost_activation:
-                        self.assertEqual((tree / 'identity').read_text(), 'old')
                 else:
                     self.assertIn("restart sandbox-mcp-remote.service", log.read_text())
 
@@ -2992,13 +2965,15 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                 source_revision="f" * 40,
                 staged_source=_staged_source(),
             )
-        command = mock_ssh_run.call_args.args[1]
-        self.assertIn("flag=2 if os.path.exists(target) else 1", command)
-        self.assertIn("source_mode=$(activate_source)", command)
-        self.assertIn('else test ! -L "$runtime"', command)
-        helper = command.index("scripts/provision_image_stage_helper.py")
-        self.assertLess(helper, command.index("unit_tmp="))
-        self.assertLess(helper, command.index("env_tmp="))
+        import shlex as _shlex
+        argv = _shlex.split(mock_ssh_run.call_args.args[1])
+        inner, prepare = argv[7], argv[-1]
+        # The helper and venvs are built in prepare; the switch only activates.
+        self.assertIn("prepare", prepare)
+        self.assertNotIn("unit_tmp=", prepare)
+        self.assertNotIn("env_tmp=", prepare)
+        self.assertIn("activate", inner)
+        self.assertLess(inner.index("activation=$("), inner.index("unit_tmp="))
 
     @patch("sandbox.core._remote.ssh_run")
     def test_migration_unit_preflight_requires_sandbox_marker_and_runtime_path(self, mock_ssh_run):

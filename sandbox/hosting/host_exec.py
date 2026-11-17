@@ -31,6 +31,9 @@ KILL_AFTER_SECONDS = 10
 # target lease and publishing the capture before the job deadline.
 SERVER_RELEASE_SECONDS = 15
 SERVER_POST_COMMAND_SECONDS = KILL_AFTER_SECONDS + SERVER_RELEASE_SECONDS
+# What a stdin exec keeps for its own run when it waited for a slot: at least
+# this, or a quarter of its deadline, so a late launch is not killed mid-effect.
+SERVER_MIN_RUN_SECONDS = 15
 LOCAL_GRACE_SECONDS = 30
 CAPTURE_LIMIT = 1 << 20
 # Joined-server exec input bounds, checked on the controller before anything is

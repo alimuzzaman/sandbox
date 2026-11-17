@@ -185,8 +185,8 @@ def receive_server_cli_exec(args, *, stdin_fd):
     if command[:1] == ['--']:
         command = command[1:]
     command = _exec_argv(command)
-    from sandbox.hosting.host_exec import (SERVER_POST_COMMAND_SECONDS, SERVER_STDIN_INTAKE_SECONDS,
-        TIMEOUT_MIN)
+    from sandbox.hosting.host_exec import (SERVER_MIN_RUN_SECONDS, SERVER_POST_COMMAND_SECONDS,
+        SERVER_STDIN_INTAKE_SECONDS)
     try:
         selector = _selector(getattr(args, 'server_cli_exec_selector', None))
     except ServerCLIDeadlineExpired:
@@ -237,7 +237,8 @@ def receive_server_cli_exec(args, *, stdin_fd):
         # keeps the only descriptor, so a busy slot is waited for (same job,
         # same request) rather than refused. Leave the command its minimum run
         # plus the kill grace and lease release inside the original deadline.
-        original_input.hold_for_admission(max(0, seconds - SERVER_POST_COMMAND_SECONDS - TIMEOUT_MIN))
+        original_input.hold_for_admission(max(0, seconds - SERVER_POST_COMMAND_SECONDS
+                                              - max(SERVER_MIN_RUN_SECONDS, seconds // 4)))
         root = snapshot['source_dir']
         # These identities name the receiver's measured child root. The original
         # source commit and retained target selector remain separate bindings.
@@ -363,7 +364,15 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
             if attempt > 1:
                 # The explicit refusal proved nothing was accepted. Observe the
                 # target again; it must still be the same target and service.
-                snapshot = reobserve()
+                try:
+                    snapshot = reobserve(budget_seconds=max(1, min(45, remaining() - 5)))
+                except ServerCLIExecRefused:
+                    raise
+                except Exception:
+                    # The last send was refused and nothing was sent since, so a
+                    # failed re-observation is still "not accepted".
+                    raise ServerCLIExecRefused('server_cli_exec_target_unavailable',
+                                               'server exec target could not be observed again') from None
                 validate_target_snapshot(snapshot, owner=owner, origin_remote_name=remote_name)
                 if snapshot['project'] + '/' + snapshot['environment'] != label:
                     raise ServerCLIExecRefused(TARGET_CHANGED, 'server exec target selection changed')

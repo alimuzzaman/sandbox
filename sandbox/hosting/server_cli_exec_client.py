@@ -246,10 +246,11 @@ def dispatch_exec_if_selected(args) -> bool:
     from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
     receipt = None
 
-    def reobserve():
+    def reobserve(budget_seconds=45):
         # Only after the server's explicit "target changed" refusal (no job).
         return observe_server_cli_target(args.remote, target=target, name=name,
-                                         environment=getattr(args, "environment", None))
+                                         environment=getattr(args, "environment", None),
+                                         budget_seconds=budget_seconds)
     try:
         with _original_stdin() as descriptor:
             receipt = submit_server_cli_exec(args.remote, snapshot=snapshot, service=service,

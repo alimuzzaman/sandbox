@@ -75,8 +75,8 @@ def _parse_retention_timestamp(ts: Any) -> datetime | None:
         return None
 
 
-
-
+class InputSlotWaitInterrupted(Exception):
+    """The admitting process was told to stop while a stdin job waited for a slot."""
 
 
 class JobServiceProtocol(Protocol):
@@ -297,17 +297,32 @@ class JobService:
         refusal of kind ``admitted`` means the job moved on (cancelled) and
         ends the wait.
         """
-        while busy.kind != "admitted":
-            remaining = anonymous_input.admission_wait_remaining()
-            if remaining <= 0:
-                return busy
-            time.sleep(min(INPUT_SLOT_POLL_SECONDS, remaining))
-            try:
-                self.scheduler.acquire(row, parallel_safe=parallel_safe)
-                return None
-            except WorkspaceBusy as refused:
-                busy = refused
-        return busy
+        import signal
+        import threading
+        previous = {}
+        if threading.current_thread() is threading.main_thread():
+            # A dropped SSH session sends SIGHUP; its default would end this
+            # process without marking the row, leaving it "accepted" with no
+            # supervisor. Raise instead, so submit() marks it failed.
+            def interrupted(signum, _frame):
+                raise InputSlotWaitInterrupted(signal.Signals(signum).name)
+            for signum in (signal.SIGHUP, signal.SIGTERM):
+                previous[signum] = signal.signal(signum, interrupted)
+        try:
+            while busy.kind != "admitted":
+                remaining = anonymous_input.admission_wait_remaining()
+                if remaining <= 0:
+                    return busy
+                time.sleep(min(INPUT_SLOT_POLL_SECONDS, remaining))
+                try:
+                    self.scheduler.acquire(row, parallel_safe=parallel_safe)
+                    return None
+                except WorkspaceBusy as refused:
+                    busy = refused
+            return busy
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
     def _dependency_state(self, row: dict) -> tuple[str, str | None]:
         """Resolve label-based edges within a parent without touching child pipes."""

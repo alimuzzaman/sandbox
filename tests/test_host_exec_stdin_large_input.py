@@ -151,7 +151,9 @@ class PipedStdinReachesTheServer(SyntheticServer):
         fresh = {**snapshot(), 'selector_digest': 'sha256:' + 'c' * 64}
         reobserve = mock.Mock(return_value=fresh)
         receipt = self.submit(b'original bytes', reobserve=reobserve)
-        reobserve.assert_called_once_with()
+        reobserve.assert_called_once()
+        # Re-observation is bounded by what is left of the original deadline.
+        self.assertLessEqual(reobserve.call_args.kwargs['budget_seconds'], 45)
         self.assertEqual([item['stdin'] for item in self.sent], [b'original bytes', b'original bytes'])
         self.assertEqual({item['request_id'] for item in self.sent}, {'original-exec'})
         self.assertEqual(self.sent[1]['selector']['selector_digest'], fresh['selector_digest'])
@@ -168,6 +170,14 @@ class PipedStdinReachesTheServer(SyntheticServer):
         self.responses = [refusal]
         with self.assertRaises(execute.ServerCLIExecRefused):
             self.submit(b'x')
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_failed_reobservation_is_still_not_accepted(self):
+        refusal = {'ok': False, 'code': execute.TARGET_CHANGED, 'status': 'refused', 'error': 'fixed'}
+        self.responses = [refusal]
+        with self.assertRaises(execute.ServerCLIExecRefused) as failure:
+            self.submit(b'x', reobserve=mock.Mock(side_effect=RuntimeError('network blip')))
+        self.assertEqual(failure.exception.code, 'server_cli_exec_target_unavailable')
         self.assertEqual(len(self.sent), 1)
 
     def test_other_named_refusals_are_never_resent(self):
@@ -412,6 +422,29 @@ class BusySlotWaitsInsteadOfRefusing(unittest.TestCase):
         row = repository.get(receipt['job_id'])
         self.assertEqual((row['lifecycle'], row['termination_reason']),
                          ('failed', 'anonymous_stdin_capacity_unavailable'))
+        self.launch.assert_not_called()
+
+    def test_a_hangup_during_the_wait_marks_the_job_failed(self):
+        import signal
+        calls = []
+        def acquire(row, **_kwargs):
+            calls.append(row['job_id'])
+            if len(calls) == 2:
+                # The SSH session drops while the job waits for a slot.
+                os.kill(os.getpid(), signal.SIGHUP)
+            raise WorkspaceBusy('host capacity is busy', kind='capacity')
+        original_service = self.service
+        def keep(acquire_, temporary):
+            service, repository, scheduler = original_service(acquire_, temporary)
+            self.repository = repository
+            return service, repository, scheduler
+        self.service = keep
+        previous = signal.getsignal(signal.SIGHUP)
+        with self.assertRaises(RuntimeError):
+            self.submit(acquire, wait=30)
+        self.assertIs(signal.getsignal(signal.SIGHUP), previous)
+        row = self.repository.get(calls[0])
+        self.assertEqual((row['lifecycle'], row['termination_reason']), ('failed', 'supervisor_launch_failed'))
         self.launch.assert_not_called()
 
     def test_cancel_during_the_wait_ends_it_without_dispatch(self):

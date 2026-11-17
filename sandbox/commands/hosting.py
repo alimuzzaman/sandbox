@@ -1923,8 +1923,12 @@ def _preflight_login_service(entry: dict, prefix: str, validated: dict,
             "login_service_preflight_failed: the Compose topology could not be read") from None
 
 
-def _host_port_observation(entry, remote_name):
-    """Observe through the selected bounded channel before any target effects."""
+def _host_port_observation(entry, remote_name, compose_project):
+    """Observe through the selected bounded channel before any target effects.
+
+    Only compose_project's containers are scanned strictly; other targets'
+    containers only claim ports, so their concurrent applies cannot fail it.
+    """
     from sandbox.hosting import ports
     home = remote.resolve_sandbox_home(entry)
     machine = _authenticated_machine_identity(remote_name)
@@ -1939,7 +1943,7 @@ def _host_port_observation(entry, remote_name):
     try:
         snapshot = ports.observe_ports(
             lambda command, **kwargs: remote.ssh_run_bounded(entry, command, **kwargs),
-            identity=identity, runtime_dir=f"{home}/runtime")
+            identity=identity, runtime_dir=f"{home}/runtime", own_projects=[compose_project])
     except ports.PortObservationError as exc:
         raise hosting.HostingError(f"hosting_port_observation_failed: {exc}") from None
     return snapshot
@@ -2049,7 +2053,11 @@ def _port_reallocation(args, validated, entry, state, observation):
         refuse()
     owner = {"project": summary["compose_project"], "service": validated["compose"]["service"],
              "container_port": validated["compose"]["container_port"]}
-    if (ports.primary_ports(observation, owner)
+    try:
+        live_primary = ports.primary_ports(observation, owner)
+    except ports.PortObservationError:
+        refuse()  # An ambiguous own primary is never relocation evidence.
+    if (live_primary
             or any(row["project"] == summary["compose_project"] and row["port"] == old
                    for row in observation["publications"])):
         refuse()  # Never relocate a live primary, even if another bind conflicts.
@@ -9264,7 +9272,8 @@ def cmd_host(cfg, args) -> None:
                 current_zone = decision.get("zone") if decision.get("mode") == "shared" else None
                 if current_zone and not any(claim["zone"] == current_zone for claim in claims):
                     claims.append({"mode": "shared", "zone": current_zone})
-                observation = _host_port_observation(current_entry, args.remote)
+                observation = _host_port_observation(
+                    current_entry, args.remote, hosting.compose_project_name(validated))
                 allocation_state, reallocation = _port_reallocation(
                     args, validated, current_entry, state, observation)
                 replay = bool(reallocation and "new_port" in reallocation)

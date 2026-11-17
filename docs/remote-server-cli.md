@@ -314,10 +314,17 @@ descriptor records only those fields plus device/inode. The detached supervisor
 receives the actual file as descriptor0 and verifies owner, private mode, zero
 links, device/inode, size and bytes before giving it to the fixed child. A
 descriptor number or serialized binding cannot substitute for the held file.
-An occupied scheduler slot produces a retained terminal
-`anonymous_stdin_capacity_unavailable` receipt and no dispatch, rather than
-queuing a job whose anonymous input would disappear. Ordinary jobs retain
-DEVNULL. The dedicated no-source adapter composes this handoff; it does not
+The job is never queued, because its anonymous input exists only in the
+admitting process. When every scheduler slot is taken (the host's
+`jobs.scheduler` `max_parallel`, the `server-exec` workspace or an older queued
+job), admission waits for a slot inside that same process and job row,
+polling every 0.5 seconds. No effect is dispatched while it waits. The wait is bounded by
+`AnonymousJobInput.hold_for_admission`; the exec receiver sets it to the
+original deadline less the kill grace, lease release and a one-second minimum
+run. A queued job that a finishing job starts can take the freed slot first.
+A cancel during the wait ends it. Only when no slot frees in time does the job end
+with a retained terminal `anonymous_stdin_capacity_unavailable` receipt and no
+dispatch. Ordinary jobs retain DEVNULL. The dedicated no-source adapter composes this handoff; it does not
 enable generic project argv forwarding or an interactive TTY.
 
 `ServerCLIContext.target_selector_digest` is optional retained selection context.
@@ -330,11 +337,16 @@ provenance.
 
 `sandbox.application.server_cli_exec.submit_server_cli_exec(remote_name, *,
 snapshot, service, argv, stdin_fd, request_id, timeout_seconds=300,
-output_mode='artifact')` implements
+output_mode='artifact', reobserve=None)` implements
 the source contract for a fixed historical host-exec job. It needs no controller
 checkout. The client captures original stdin once into a bounded anonymous file
 and sends only its size/hash in the nonsecret selector envelope, with the actual
-bytes through the keyless SSH stdin FD. It makes exactly one submission. An
+bytes through the keyless SSH stdin FD. It submits once. The only repeat
+follows an explicit receiver refusal coded `server_cli_exec_target_changed`
+(`ok: false`, `status: refused`, no `job_id`). That refusal proves nothing was
+accepted, so with `reobserve` the client reads the target again and resends the
+same request ID and the same held stdin from its first byte, at most three sends
+within the original deadline. An
 incomplete, timed-out or malformed acceptance is
 `ServerCLIExecAcceptanceUnknown` with the original request ID, never a new
 request or an implicit retry.
@@ -361,7 +373,16 @@ the matching retained job with `job-status` and bounded `job-output` before any
 replay. Unknown acceptance does not authorize a second request identity.
 
 The dedicated intake is bounded to 1 MiB stdin, 256 argv entries / 64 KiB argv,
-30 seconds stdin intake and an original request deadline of at most 3600 seconds.
+30 seconds stdin intake and an original request deadline of at most 3600 seconds
+(`SERVER_*` constants in `sandbox/hosting/host_exec.py`). The quoted remote command
+line must also stay under 124 KiB, because Linux takes one exec argument of at most
+128 KiB. The controller checks the argv before any metadata read and stdin while
+taking it in, so an oversized request is refused before submission. Each refusal
+before acceptance names its cause. The receiver puts one closed code in the
+refusal's existing `code` field (`sandbox.application.server_cli_exec.REFUSAL_CODES`,
+fixed text, never stdin, argv values or paths), so the payload shape and control
+protocol are unchanged. A receiver older than this sends `server_cli_exec_unavailable`,
+which the controller reports as `server_cli_exec_refused`.
 It captures batch stdin before admission; it does not provide an interactive
 TTY or claim live streaming. The generic v1 forwarding adapter still refuses
 `host exec`; normal controller integration must explicitly use this dedicated

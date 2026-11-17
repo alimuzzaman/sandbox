@@ -454,8 +454,11 @@ def cmd_job_start(_cfg, args) -> None:
         from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
         try:
             accepted = receive_server_cli_exec(args, stdin_fd=__import__('sys').stdin.fileno())
-        except (ServerCLIUnavailable, AnonymousInputUnavailable):
-            _emit_json_line({'ok': False, 'code': 'server_cli_exec_unavailable',
+        except (ServerCLIUnavailable, AnonymousInputUnavailable) as error:
+            from sandbox.application.server_cli_exec import refusal_code
+            # One closed code names the cause; the text stays fixed so no
+            # stdin, argv or path detail reaches the controller.
+            _emit_json_line({'ok': False, 'code': refusal_code(error),
                 'status': 'refused', 'error': 'fixed server exec could not be admitted; no job was accepted'})
             raise SystemExit(1)
         _emit_json_line(accepted)

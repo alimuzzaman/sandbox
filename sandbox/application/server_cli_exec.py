@@ -20,6 +20,47 @@ from sandbox.jobs.models import JobSubmission, SourceIdentity, validate_argv
 CONTRACT = 'job.server-cli.exec-stdin.v1'
 
 
+class ServerCLIExecRefused(ServerCLIUnavailable):
+    """A named refusal before acceptance: no job was accepted and nothing ran."""
+
+    def __init__(self, code, message):
+        if code not in REFUSAL_CODES:
+            raise ValueError('unknown server exec refusal code')
+        super().__init__(message)
+        self.code = code
+
+
+# Closed set: the server names one of these in its refusal (the receipt's
+# existing ``code`` field), the controller shows it. Fixed text only, never
+# stdin bytes, argv values or server paths.
+TARGET_CHANGED = 'server_cli_exec_target_changed'
+REFUSAL_CODES = frozenset({
+    'host_exec_argv_invalid', 'host_exec_argv_too_large', 'host_exec_argv_unsafe',
+    'host_exec_stdin_too_large', 'host_exec_stdin_timeout', 'host_exec_stdin_unavailable',
+    'host_exec_stdin_mismatch', 'host_exec_unknown_service',
+    'server_cli_exec_request_invalid', 'server_cli_exec_capability_unavailable',
+    'server_cli_exec_identity_changed', 'server_cli_exec_deadline_expired',
+    'server_cli_exec_target_unavailable', TARGET_CHANGED, 'server_cli_exec_refused',
+    'host_server_target_evidence_unavailable', 'host_target_busy', 'host_target_invalid',
+    'host_target_unverified'})
+TARGET_CHANGE_ATTEMPTS = 3
+
+
+def refusal_code(error):
+    """The closed refusal code for a pre-acceptance failure, else the catch-all."""
+    from sandbox.application.server_cli import ServerCLIDeadlineExpired
+    from sandbox.application.server_cli_targets import ServerTargetRefused
+    from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
+    if type(error) in (ServerCLIExecRefused, ServerTargetRefused) and error.code in REFUSAL_CODES:
+        return error.code
+    if isinstance(error, ServerCLIDeadlineExpired):
+        return 'server_cli_exec_deadline_expired'
+    if isinstance(error, AnonymousInputUnavailable):
+        code = getattr(type(error), 'code', None)
+        return code if code in REFUSAL_CODES else 'host_exec_stdin_unavailable'
+    return 'server_cli_exec_unavailable'
+
+
 def capture_contract_available():
     try:
         from sandbox.commands.host_exec import SERVER_CLI_EXEC_CAPTURE_VERSION
@@ -57,14 +98,19 @@ def exec_contract_available():
 
 def _exec_argv(argv):
     from sandbox.services.redaction import require_safe_argv, RedactionError
+    from sandbox.hosting.host_exec import SERVER_ARGV_MAX_BYTES, SERVER_ARGV_MAX_ITEMS
     try:
         values = validate_argv(tuple(argv))
-        if len(values) > 256 or sum(len(value.encode()) + 1 for value in values) > 65536:
-            raise ValueError()
+    except (ValueError, TypeError):
+        raise ServerCLIExecRefused('host_exec_argv_invalid', 'server exec command is not a valid argv') from None
+    if (len(values) > SERVER_ARGV_MAX_ITEMS
+            or sum(len(value.encode()) + 1 for value in values) > SERVER_ARGV_MAX_BYTES):
+        raise ServerCLIExecRefused('host_exec_argv_too_large', 'server exec command exceeds its bounded argv')
+    try:
         require_safe_argv(values)
-        return values
-    except (ValueError, TypeError, RedactionError):
-        raise ServerCLIUnavailable('server exec command is invalid or exceeds its bounded argv contract') from None
+    except RedactionError:
+        raise ServerCLIExecRefused('host_exec_argv_unsafe', 'server exec command carries a secret-shaped value') from None
+    return values
 
 
 def remaining_deadline(value):
@@ -126,47 +172,72 @@ def receive_server_cli_exec(args, *, stdin_fd):
     from sandbox.config.runtime import resolve_execution_policy
     from sandbox.remote_runtime.verdict import strict_requested
     if not exec_contract_available():
-        raise ServerCLIUnavailable('installed fixed server exec handlers are not assembled')
+        raise ServerCLIExecRefused('server_cli_exec_capability_unavailable',
+                                   'installed fixed server exec handlers are not assembled')
     if (getattr(args, 'server_cli', False) is not True or not getattr(args, 'local', False)
             or getattr(args, 'remote', None) is not None
             or not isinstance(getattr(args, 'request_id', None), str)
             or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', args.request_id) is None
             or getattr(args, 'parent_job_id', None) is not None):
-        raise ServerCLIUnavailable('server exec requires the original fixed local job request')
+        raise ServerCLIExecRefused('server_cli_exec_request_invalid',
+                                   'server exec requires the original fixed local job request')
     command = list(getattr(args, 'command', ()) or ())
     if command[:1] == ['--']:
         command = command[1:]
     command = _exec_argv(command)
-    selector = _selector(getattr(args, 'server_cli_exec_selector', None))
+    from sandbox.hosting.host_exec import (SERVER_POST_COMMAND_SECONDS, SERVER_STDIN_INTAKE_SECONDS,
+        TIMEOUT_MIN)
+    try:
+        selector = _selector(getattr(args, 'server_cli_exec_selector', None))
+    except ServerCLIDeadlineExpired:
+        raise
+    except ServerCLIUnavailable:
+        raise ServerCLIExecRefused('server_cli_exec_request_invalid', 'server exec selector is invalid') from None
     if selector['output_contract'] == 'artifact.v1' and not capture_contract_available():
-        raise ServerCLIUnavailable('installed binary exec capture is not assembled')
+        raise ServerCLIExecRefused('server_cli_exec_capability_unavailable',
+                                   'installed binary exec capture is not assembled')
     owner = read_current_server_owner()
     for field in ('target_identity', 'ownership_marker', 'runtime_revision'):
         if selector[field] != getattr(owner, field):
-            raise ServerCLIUnavailable('server exec receiver identity changed')
+            raise ServerCLIExecRefused('server_cli_exec_identity_changed', 'server exec receiver identity changed')
     def observe():
         from sandbox.hosting.target_resolution import TargetRefusal
         try:
             value = inspect_current_server_target(origin_remote_name=selector['origin_remote_name'],
                 target=selector['target'], name=selector['name'], environment=selector['environment'])
-        except TargetRefusal:
-            raise ServerCLIUnavailable('server exec target evidence is unavailable or busy') from None
+        except TargetRefusal as refusal:
+            code = getattr(refusal, 'code', None)
+            raise ServerCLIExecRefused(code if code in {'host_server_target_evidence_unavailable',
+                'host_target_busy', 'host_target_invalid', 'host_target_unverified'}
+                else 'server_cli_exec_target_unavailable',
+                'server exec target evidence is unavailable or busy') from None
+        if any(value[field] != getattr(owner, field) for field in
+               ('target_identity', 'ownership_marker', 'runtime_revision')):
+            raise ServerCLIExecRefused('server_cli_exec_identity_changed', 'server exec receiver identity changed')
         if (value['selector_digest'] != selector['selector_digest']
-                or any(value[field] != getattr(owner, field) for field in
-                       ('target_identity', 'ownership_marker', 'runtime_revision'))
                 or not any(item['name'] == selector['service'] and item['index'] == 1 for item in value['services'])):
-            raise ServerCLIUnavailable('server exec target changed before acceptance')
+            raise ServerCLIExecRefused(TARGET_CHANGED, 'server exec target changed before acceptance')
         return value
     snapshot = observe()
-    with capture_input(stdin_fd, timeout_seconds=min(30, remaining_deadline(selector['deadline_at']))) as original_input:
+    with capture_input(stdin_fd, timeout_seconds=min(SERVER_STDIN_INTAKE_SECONDS,
+                                                     remaining_deadline(selector['deadline_at']))) as original_input:
         if (original_input.binding['sha256'] != selector['stdin_sha256']
                 or original_input.binding['size'] != selector['stdin_size']):
-            raise ServerCLIUnavailable('original stdin was incomplete or changed in transit')
-        if observe() != snapshot or read_current_server_owner() != owner:
-            raise ServerCLIUnavailable('server exec source changed during original stdin intake')
+            raise ServerCLIExecRefused('host_exec_stdin_mismatch',
+                                       'original stdin was incomplete or changed in transit')
+        if read_current_server_owner() != owner:
+            raise ServerCLIExecRefused('server_cli_exec_identity_changed', 'server exec receiver identity changed')
+        if observe() != snapshot:
+            raise ServerCLIExecRefused(TARGET_CHANGED, 'server exec target changed during original stdin intake')
         seconds = int(remaining_deadline(selector['deadline_at']))
         if seconds < 1:
-            raise ServerCLIUnavailable('original server exec deadline expired before acceptance')
+            raise ServerCLIExecRefused('server_cli_exec_deadline_expired',
+                                       'original server exec deadline expired before acceptance')
+        # No job effect is dispatched while admission waits, and this process
+        # keeps the only descriptor, so a busy slot is waited for (same job,
+        # same request) rather than refused. Leave the command its minimum run
+        # plus the kill grace and lease release inside the original deadline.
+        original_input.hold_for_admission(max(0, seconds - SERVER_POST_COMMAND_SECONDS - TIMEOUT_MIN))
         root = snapshot['source_dir']
         # These identities name the receiver's measured child root. The original
         # source commit and retained target selector remain separate bindings.
@@ -224,8 +295,15 @@ class ServerCLIExecObservationUnavailable(RuntimeError):
 
 
 def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, request_id,
-                           timeout_seconds=300, output_mode='artifact'):
-    """Send original stdin by FD, without a controller checkout or secret source."""
+                           timeout_seconds=300, output_mode='artifact', reobserve=None):
+    """Send original stdin by FD, without a controller checkout or secret source.
+
+    ``reobserve`` (optional) returns a fresh target snapshot. It is used only
+    after the server explicitly refused with ``server_cli_exec_target_changed``:
+    that refusal proves no job was accepted, so the same request id is sent
+    again with the same retained stdin, bounded by the original deadline.
+    """
+    import os
     from sandbox.core import _remote
     from sandbox.resources.context import authenticated_target_identity
     from sandbox.application.server_cli_targets import validate_target_snapshot
@@ -233,15 +311,17 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
     from sandbox.remote_runtime.verdict import strict_requested
     from types import SimpleNamespace
     from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
+    from sandbox.hosting.host_exec import (SERVER_POST_COMMAND_SECONDS, SERVER_STDIN_INTAKE_SECONDS,
+        SERVER_WIRE_MAX_BYTES, TIMEOUT_MIN, named_refusal)
     if (not isinstance(output_mode, str) or output_mode not in {'artifact', 'utf8'} or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
             or not isinstance(request_id, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', request_id) is None
-            or not isinstance(service, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', service) is None):
-        raise ServerCLIUnavailable('server exec request is invalid')
+            or not isinstance(service, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', service) is None
+            or (reobserve is not None and not callable(reobserve))):
+        raise ServerCLIExecRefused('server_cli_exec_request_invalid', 'server exec request is invalid')
     values = _exec_argv(argv)
     # The server clamps the command to what is left after its kill grace and
     # lease release, so reserve those here: the command keeps the requested
     # timeout less only the time spent before acceptance.
-    from sandbox.hosting.host_exec import SERVER_POST_COMMAND_SECONDS
     deadline = datetime.now(timezone.utc) + timedelta(
         seconds=min(timeout_seconds + SERVER_POST_COMMAND_SECONDS, 3600))
     def remaining():
@@ -260,74 +340,105 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
     try:
         installed = transport.control(remote_name, ['job-capabilities'], timeout=min(15, remaining()))
     except RemoteJobTransportError:
-        raise ServerCLIUnavailable('installed server exec capability could not be observed; no job was submitted') from None
+        raise ServerCLIExecRefused('server_cli_exec_capability_unavailable',
+            'installed server exec capability could not be observed; no job was submitted') from None
     if (not isinstance(installed, dict) or installed.get('ok') is not True
             or any(installed.get(field) != getattr(owner, field) for field in
                    ('target_identity', 'ownership_marker', 'runtime_revision'))
             or not isinstance(installed.get('server_exec_capabilities'), list)
             or installed['server_exec_capabilities'] != [CONTRACT]):
-        raise ServerCLIUnavailable('installed server exec contract is unavailable or changed')
+        raise ServerCLIExecRefused('server_cli_exec_capability_unavailable',
+                                   'installed server exec contract is unavailable or changed')
     if output_mode == 'artifact':
         from sandbox.application.server_cli_capture import CONTRACT as CAPTURE_CONTRACT
         if installed.get('server_exec_capture_capabilities') != [CAPTURE_CONTRACT]:
-            raise ServerCLIUnavailable('installed binary capture contract is unavailable; no job was submitted')
+            raise ServerCLIExecRefused('server_cli_exec_capability_unavailable',
+                                       'installed binary capture contract is unavailable; no job was submitted')
     if not any(item['name'] == service and item['index'] == 1 for item in snapshot['services']):
-        raise ServerCLIUnavailable('selected owner service has no unique running first container')
-    with capture_input(stdin_fd, timeout_seconds=min(30, remaining())) as original_input:
-        selector = {'schema_version': 1, 'origin_remote_name': remote_name,
-            'target': snapshot['project'] + '/' + snapshot['environment'], 'name': None,
-            'environment': snapshot['environment'], 'selector_digest': snapshot['selector_digest'],
-            'service': service, 'target_identity': owner.target_identity,
-            'ownership_marker': owner.ownership_marker, 'runtime_revision': owner.runtime_revision,
-            'deadline_at': deadline.isoformat(),
-            'output_contract': 'artifact.v1' if output_mode == 'artifact' else 'utf8.v1',
-            'target_metadata': validate_target_metadata({key: record[key] for key in
-                ('origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port') if key in record}),
-            'stdin_sha256': original_input.binding['sha256'], 'stdin_size': original_input.binding['size']}
-        expected = {'server_cli.target_identity': owner.target_identity,
-            'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
-            'server_cli.remote_name': remote_name, 'server_cli.target_selector_digest': snapshot['selector_digest'],
-            'server_cli.exec_service': service, 'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
-            'server_cli.output_contract': selector['output_contract'],
-            'server_cli.stdin_sha256': original_input.binding['sha256'],
-            'server_cli.stdin_size': str(original_input.binding['size']),
-            'server_cli.absolute_deadline_at': deadline.isoformat()}
-        expected_source = {'commit': snapshot['source_commit'],
-            'identity': 'sha256:' + hashlib.sha256(snapshot['source_dir'].encode()).hexdigest()}
-        def unknown():
-            return ServerCLIExecAcceptanceUnknown(request_id, expected={'remote_name': remote_name,
-                'selector_digest': snapshot['selector_digest'], 'provenance': dict(expected),
-                'source': dict(expected_source)})
-        command = (['--strict-runtime'] if strict_requested() else []) + [
-            'job-start', '--local', '--server-cli', '--request-id', request_id,
-            '--server-cli-exec-selector', json.dumps(selector, sort_keys=True, separators=(',', ':')),
-            '--', *values]
-        wire = shlex.join([_remote.remote_sb_path(record), *command])
-        ssh = _remote.ssh_command_args(record, wire, multiplex=False)
-        result = BoundedProcessRunner(max_output=65536, terminate_on_output_limit=True).run(tuple(ssh),
-            env={'HOME': str(Path.home()), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LANG': 'C.UTF-8'},
-            stdin=original_input.fileno(), timeout=remaining())
-    if result.termination_reason is not None or result.stdout_truncated or result.stderr_truncated:
-        raise unknown()
-    try:
-        receipt = json.loads(result.stdout)
-    except (ValueError, TypeError):
-        raise unknown() from None
-    if (isinstance(receipt, dict) and receipt.get('ok') is False
-            and receipt.get('status') == 'refused' and 'job_id' not in receipt):
-        raise ServerCLIUnavailable('installed server exec refused before job acceptance')
-    if (result.returncode or not isinstance(receipt, dict) or receipt.get('ok') is not True
-            or receipt.get('request_id') != request_id or receipt.get('selector_digest') != snapshot['selector_digest']
-            or not isinstance(receipt.get('job_id'), str) or re.fullmatch(r'[0-9a-f]{32}', receipt['job_id']) is None):
-        raise unknown()
-    retained_policy = receipt.get('execution_policy')
-    proof = retained_policy.get('provenance') if isinstance(retained_policy, dict) else None
-    source = receipt.get('source')
-    if (not isinstance(proof, dict) or any(proof.get(key) != value for key, value in expected.items())
-            or not isinstance(source, dict) or source.get('commit') != expected_source['commit']
-            or source.get('identity') != expected_source['identity']):
-        raise unknown()
-    return receipt
+        raise ServerCLIExecRefused('host_exec_unknown_service',
+                                   'selected owner service has no unique running first container')
+    label = snapshot['project'] + '/' + snapshot['environment']
+    with capture_input(stdin_fd, timeout_seconds=min(SERVER_STDIN_INTAKE_SECONDS, remaining())) as original_input:
+        for attempt in range(1, TARGET_CHANGE_ATTEMPTS + 1):
+            if attempt > 1:
+                # The explicit refusal proved nothing was accepted. Observe the
+                # target again; it must still be the same target and service.
+                snapshot = reobserve()
+                validate_target_snapshot(snapshot, owner=owner, origin_remote_name=remote_name)
+                if snapshot['project'] + '/' + snapshot['environment'] != label:
+                    raise ServerCLIExecRefused(TARGET_CHANGED, 'server exec target selection changed')
+                if not any(item['name'] == service and item['index'] == 1 for item in snapshot['services']):
+                    raise ServerCLIExecRefused('host_exec_unknown_service',
+                                               'selected owner service has no unique running first container')
+            selector = {'schema_version': 1, 'origin_remote_name': remote_name,
+                'target': snapshot['project'] + '/' + snapshot['environment'], 'name': None,
+                'environment': snapshot['environment'], 'selector_digest': snapshot['selector_digest'],
+                'service': service, 'target_identity': owner.target_identity,
+                'ownership_marker': owner.ownership_marker, 'runtime_revision': owner.runtime_revision,
+                'deadline_at': deadline.isoformat(),
+                'output_contract': 'artifact.v1' if output_mode == 'artifact' else 'utf8.v1',
+                'target_metadata': validate_target_metadata({key: record[key] for key in
+                    ('origin_ipv4', 'origin_ipv6', 'front_door', 'mcp_port') if key in record}),
+                'stdin_sha256': original_input.binding['sha256'], 'stdin_size': original_input.binding['size']}
+            expected = {'server_cli.target_identity': owner.target_identity,
+                'server_cli.ownership_marker': owner.ownership_marker, 'server_cli.runtime_revision': owner.runtime_revision,
+                'server_cli.remote_name': remote_name, 'server_cli.target_selector_digest': snapshot['selector_digest'],
+                'server_cli.exec_service': service, 'server_cli.exec_target': snapshot['project'] + '/' + snapshot['environment'],
+                'server_cli.output_contract': selector['output_contract'],
+                'server_cli.stdin_sha256': original_input.binding['sha256'],
+                'server_cli.stdin_size': str(original_input.binding['size']),
+                'server_cli.absolute_deadline_at': deadline.isoformat()}
+            expected_source = {'commit': snapshot['source_commit'],
+                'identity': 'sha256:' + hashlib.sha256(snapshot['source_dir'].encode()).hexdigest()}
+            def unknown():
+                return ServerCLIExecAcceptanceUnknown(request_id, expected={'remote_name': remote_name,
+                    'selector_digest': snapshot['selector_digest'], 'provenance': dict(expected),
+                    'source': dict(expected_source)})
+            command = (['--strict-runtime'] if strict_requested() else []) + [
+                'job-start', '--local', '--server-cli', '--request-id', request_id,
+                '--server-cli-exec-selector', json.dumps(selector, sort_keys=True, separators=(',', ':')),
+                '--', *values]
+            wire = shlex.join([_remote.remote_sb_path(record), *command])
+            if len(wire.encode()) > SERVER_WIRE_MAX_BYTES:
+                # Quoting can grow a command under the argv bound past what the
+                # remote shell takes as one argument. Nothing was sent.
+                raise ServerCLIExecRefused('host_exec_argv_too_large',
+                                           'quoted server exec command exceeds the remote command-line bound')
+            ssh = _remote.ssh_command_args(record, wire, multiplex=False)
+            # Every send starts at the first retained byte: an earlier refused
+            # send left the shared offset at the end of input.
+            os.lseek(original_input.fileno(), 0, os.SEEK_SET)
+            result = BoundedProcessRunner(max_output=65536, terminate_on_output_limit=True).run(tuple(ssh),
+                env={'HOME': str(Path.home()), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LANG': 'C.UTF-8'},
+                stdin=original_input.fileno(), timeout=remaining())
+            if result.termination_reason is not None or result.stdout_truncated or result.stderr_truncated:
+                raise unknown()
+            try:
+                receipt = json.loads(result.stdout)
+            except (ValueError, TypeError):
+                raise unknown() from None
+            if (isinstance(receipt, dict) and receipt.get('ok') is False
+                    and receipt.get('status') == 'refused' and 'job_id' not in receipt):
+                # An explicit refusal: the server accepted nothing. A server
+                # older than named refusals sends only the catch-all.
+                refused = named_refusal(receipt, REFUSAL_CODES)
+                if (refused != TARGET_CHANGED or reobserve is None or attempt == TARGET_CHANGE_ATTEMPTS
+                        or remaining() < SERVER_POST_COMMAND_SECONDS + TIMEOUT_MIN + 15):
+                    raise ServerCLIExecRefused(refused, 'installed server exec refused before job acceptance')
+                continue
+            if (result.returncode or not isinstance(receipt, dict) or receipt.get('ok') is not True
+                    or receipt.get('request_id') != request_id or receipt.get('selector_digest') != snapshot['selector_digest']
+                    or not isinstance(receipt.get('job_id'), str) or re.fullmatch(r'[0-9a-f]{32}', receipt['job_id']) is None):
+                raise unknown()
+            retained_policy = receipt.get('execution_policy')
+            proof = retained_policy.get('provenance') if isinstance(retained_policy, dict) else None
+            source = receipt.get('source')
+            if (not isinstance(proof, dict) or any(proof.get(key) != value for key, value in expected.items())
+                    or not isinstance(source, dict) or source.get('commit') != expected_source['commit']
+                    or source.get('identity') != expected_source['identity']):
+                raise unknown()
+            return receipt
+    raise ServerCLIExecRefused(TARGET_CHANGED, 'server exec target kept changing before acceptance')
 
 
 ACCEPTANCE_LOOKUP_SECONDS = 15
@@ -460,7 +571,8 @@ def read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15):
             return result
         if state.get('termination_reason') == 'anonymous_stdin_capacity_unavailable':
             return {**result, 'result': {'ok': False, 'code': 'anonymous_stdin_capacity_unavailable',
-                'exit_code': 1, 'error': 'no job effect was dispatched because the server slot was occupied'}}
+                'exit_code': 1, 'error': 'no job effect was dispatched: no server job slot became free '
+                'before the deadline, so nothing ran; retry when running jobs finish or raise --timeout'}}
         chunks, cursor, seen, total = [], None, set(), 0
         for _page in range(256):
             argv = ['job-output', receipt['job_id'], '--stream', 'stdout', '--encoding', 'base64', '--max-bytes', '65536']

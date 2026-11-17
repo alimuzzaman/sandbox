@@ -33,6 +33,16 @@ SERVER_RELEASE_SECONDS = 15
 SERVER_POST_COMMAND_SECONDS = KILL_AFTER_SECONDS + SERVER_RELEASE_SECONDS
 LOCAL_GRACE_SECONDS = 30
 CAPTURE_LIMIT = 1 << 20
+# Joined-server exec input bounds, checked on the controller before anything is
+# submitted and again by the server (docs/remote-hosting.md, `host exec`). The
+# argv travels on the SSH command line, so large input belongs on stdin.
+SERVER_ARGV_MAX_ITEMS = 256
+SERVER_ARGV_MAX_BYTES = 64 * 1024
+SERVER_STDIN_MAX_BYTES = 1 << 20
+SERVER_STDIN_INTAKE_SECONDS = 30
+# Linux refuses one exec argument over 128 KiB (MAX_ARG_STRLEN); the remote
+# shell receives the whole quoted command line as one argument.
+SERVER_WIRE_MAX_BYTES = 128 * 1024 - 4096
 
 OK = "ok"
 FAILED = "host_exec_failed"
@@ -112,6 +122,22 @@ class ExecOutcome:
                 "stderr_truncated": self.stderr_truncated,
             })
         return payload
+
+
+def named_refusal(receipt: object, codes: frozenset) -> str | None:
+    """The cause a joined server's explicit ``job-start`` refusal names, else None.
+
+    A refusal is ``ok: false, status: refused`` with no ``job_id``: the server
+    accepted no job. Its ``code`` field has always been part of that refusal
+    (``sandbox/commands/jobs_runtime.py``); a runtime that predates named
+    refusals sends only ``server_cli_exec_unavailable``, reported as
+    ``server_cli_exec_refused``. Only a code in ``codes`` is trusted.
+    """
+    if (not isinstance(receipt, dict) or receipt.get("ok") is not False
+            or receipt.get("status") != "refused" or "job_id" in receipt):
+        return None
+    code = receipt.get("code")
+    return code if isinstance(code, str) and code in codes else "server_cli_exec_refused"
 
 
 def parse_timeout(value: object) -> int:

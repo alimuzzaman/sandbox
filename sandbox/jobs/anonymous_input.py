@@ -17,6 +17,16 @@ class AnonymousInputUnavailable(ValueError):
     code = 'server_cli_stdin_unavailable'
 
 
+class AnonymousInputTooLarge(AnonymousInputUnavailable):
+    """Original stdin is over MAX_INPUT_BYTES; nothing was submitted."""
+    code = 'host_exec_stdin_too_large'
+
+
+class AnonymousInputTimeout(AnonymousInputUnavailable):
+    """Original stdin did not reach end of input within the intake bound."""
+    code = 'host_exec_stdin_timeout'
+
+
 def validate_inherited_input(fd, binding):
     """Metadata alone cannot replace the anonymous file held by the kernel."""
     if (type(fd) is not int or fd < 0 or not isinstance(binding, dict)
@@ -54,6 +64,9 @@ class AnonymousJobInput:
     _file: object = field(repr=False, compare=False)
     binding: dict = field(repr=False)
     _seal: object = field(repr=False, compare=False)
+    # Monotonic time until which job admission may wait for a free slot while
+    # this process still holds the descriptor. None: refuse at once.
+    _admission_until: object = field(default=None, repr=False, compare=False)
 
     def fileno(self):
         if type(self) is not AnonymousJobInput or self._seal is not _ISSUER:
@@ -62,6 +75,20 @@ class AnonymousJobInput:
 
     def close(self):
         self._file.close()
+
+    def hold_for_admission(self, seconds):
+        """Let admission wait up to ``seconds`` for a slot; the input stays held."""
+        import math
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or not 0 <= seconds <= 3600):
+            raise AnonymousInputUnavailable('anonymous input admission wait is invalid')
+        object.__setattr__(self, '_admission_until', time.monotonic() + seconds)
+
+    def admission_wait_remaining(self):
+        """Seconds admission may still wait for a slot; 0 when it must refuse."""
+        if self._admission_until is None:
+            return 0
+        return max(0.0, self._admission_until - time.monotonic())
 
     def __enter__(self):
         self.fileno()
@@ -85,13 +112,13 @@ def capture_input(fd, *, timeout_seconds=30):
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
-                raise AnonymousInputUnavailable('anonymous input intake deadline expired')
+                raise AnonymousInputTimeout('original stdin did not reach end of input in time')
             chunk = os.read(fd, min(65536, MAX_INPUT_BYTES + 1 - size))
             if not chunk:
                 break
             size += len(chunk)
             if size > MAX_INPUT_BYTES:
-                raise AnonymousInputUnavailable('original stdin exceeds the bounded input contract')
+                raise AnonymousInputTooLarge('original stdin exceeds the bounded input contract')
             digest.update(chunk)
             stream.write(chunk)
         stream.flush()

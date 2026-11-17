@@ -56,19 +56,11 @@ class FakeHost:
         self.reload_accepted = True  # False: reload acknowledged, old config kept
         self.loaded = {}  # fqdn -> (block bytes | None, chain bytes | None) nginx serves
         self.paths = None
-        self.jobs = []
-        self.jobs_seq = None  # per-query answers, to admit a job mid-commit
-        self.jobs_rc = 0
         self.addresses = f"2: tailscale0    inet {IP}/32 scope global tailscale0\n"
         self.calls = []
 
     def __call__(self, argv, *, timeout=30, input=None):
         self.calls.append(list(argv))
-        if "job-list" in argv:
-            if self.jobs_rc:
-                return 1, b"", b"failed"
-            jobs = self.jobs_seq.pop(0) if self.jobs_seq else self.jobs
-            return 0, (json.dumps({"ok": True, "jobs": jobs}) + "\n").encode(), b""
         tool = os.path.basename(argv[0])
         if tool == "nginx":
             return (0, b"ok", b"") if self.nginx_ok else (1, b"", b"emerg: bad cert")
@@ -128,9 +120,6 @@ class Base(unittest.TestCase):
         os.mkdir(self.paths["conf_dir"], 0o755)
         os.chmod(self.paths["conf_dir"], 0o755)
         self.home = self.base / "home"
-        (self.home / "runtime" / "jobs").mkdir(parents=True)
-        (self.home / "runtime" / "jobs" / "registry.sqlite3").write_bytes(b"")
-        self.probe = {"home": str(self.home)}
         self.host = FakeHost()
         self.host.paths = self.paths
         self.paths["served"] = self.host.served
@@ -151,6 +140,18 @@ class Base(unittest.TestCase):
     @property
     def conf(self) -> Path:
         return Path(self.paths["conf_dir"]) / f"sandbox-tailnet-{FQDN}.conf"
+
+    def busy_on(self, check):
+        """A host lock is held at exactly the ``check``-th gate check (1-based), then released."""
+        real = rp._check_locks
+        count = [0]
+
+        def checks(paths, *, holding_edge):
+            count[0] += 1
+            if count[0] == check:
+                raise rp.Refusal("busy", "a Sandbox host transaction holds sandbox-docker-pool.lock")
+            return real(paths, holding_edge=holding_edge)
+        return mock.patch.object(rp, "_check_locks", side_effect=checks)
 
     def call(self, action, lock_wait=2, **payload):
         if action in ("commit", "remove"):
@@ -185,7 +186,6 @@ class Base(unittest.TestCase):
         return (d / "c.pem").read_text()
 
     def commit(self, token=TOKEN, **payload):
-        payload.setdefault("jobs_probe", self.probe)
         return self.call("commit", fqdn=FQDN, token=token, **payload)
 
     def publish(self, port=8025):
@@ -319,7 +319,7 @@ class OwnershipTests(Base):
         (self.name_dir / "privkey.pem").write_text("someone else's")
         os.chmod(self.name_dir / "privkey.pem", 0o600)
         for result in (self.call("csr", fqdn=FQDN, token=TOKEN),
-                       self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)):
+                       self.call("remove", fqdn=FQDN, token=TOKEN)):
             self.assertEqual((result["ok"], result["code"]), (False, "unmanaged"))
         self.assertEqual((self.name_dir / "privkey.pem").read_text(), "someone else's")
 
@@ -333,20 +333,20 @@ class OwnershipTests(Base):
                 os.chmod(self.conf, mode)
                 result = self.commit(block=block(port=9000), chain=chain)
                 self.assertEqual((result["ok"], result["code"]), (False, "unmanaged"))
-                result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+                result = self.call("remove", fqdn=FQDN, token=TOKEN)
                 self.assertEqual((result["ok"], result["code"]), (False, "unmanaged"))
                 self.assertEqual(self.conf.read_text(), content)
 
     def test_remove_refuses_unknown_files_in_the_directory(self):
         self.publish()
         (self.name_dir / "notes.txt").write_text("operator's")
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertEqual((result["ok"], result["code"]), (False, "unmanaged"))
         self.assertTrue((self.name_dir / "notes.txt").exists())
 
     def test_remove_takes_the_block_down_then_the_directory(self):
         self.publish()
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertTrue(result["ok"], result)
         self.assertEqual((result["block_removed"], result["directory_removed"]), (True, True))
         self.assertFalse(self.conf.exists())
@@ -355,7 +355,7 @@ class OwnershipTests(Base):
 
     def test_remove_keep_directory_only_takes_the_block_down(self):
         self.publish()
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe,
+        result = self.call("remove", fqdn=FQDN, token=TOKEN,
                            keep_directory=True)
         self.assertTrue(result["ok"], result)
         self.assertFalse(self.conf.exists())
@@ -406,56 +406,32 @@ class LeaseAndGateTests(Base):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             result = self.call("commit", lock_wait=0.2, fqdn=FQDN, token=TOKEN, block=block(),
-                               chain=chain, jobs_probe=self.probe)
+                               chain=chain)
         finally:
             os.close(fd)
         self.assertEqual((result["ok"], result["code"]), (False, "lock_busy"))
         self.assertFalse(self.conf.exists())
 
-    def test_commit_rechecks_durable_jobs_and_fails_closed(self):
+    def test_commit_ignores_durable_jobs(self):
+        """Unrelated durable jobs never block a name; only host locks do."""
         self.reserve()
         chain = self.sign(self.csr())
-        self.host.jobs = [{"id": "j1"}]
-        result = self.commit(block=block(), chain=chain)
+        result = self.commit(block=block(), chain=chain, jobs_probe={"home": "/nonexistent"})
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(any("job-list" in argv for argv in self.host.calls))
+
+    def test_commit_refuses_while_a_host_lock_is_held(self):
+        self.reserve()
+        chain = self.sign(self.csr())
+        fd = os.open(self.paths["locks"][0], os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            result = self.commit(block=block(), chain=chain)
+        finally:
+            os.close(fd)
         self.assertEqual((result["ok"], result["code"]), (False, "busy"))
-        self.host.jobs, self.host.jobs_rc = [], 1
-        result = self.commit(block=block(), chain=chain)
-        self.assertEqual((result["ok"], result["code"]), (False, "gate_unavailable"))
-        self.host.jobs_rc = 0
-        result = self.commit(block=block(), chain=chain, jobs_probe=None)
-        self.assertEqual((result["ok"], result["code"]), (False, "request_invalid"))
-        (self.home / "runtime" / "jobs" / "registry.sqlite3").unlink()
-        result = self.commit(block=block(), chain=chain)
-        self.assertEqual((result["ok"], result["code"]), (False, "gate_unavailable"))
         self.assertFalse(self.conf.exists())
         self.assertFalse(self.host.ran("nginx"))
-
-    def test_job_probe_runs_as_the_invoking_user_with_an_explicit_home(self):
-        calls = []
-
-        def runner(argv, *, timeout=30, input=None):
-            calls.append(argv)
-            return 0, b'{"ok": true, "jobs": []}\n', b""
-
-        mine = mock.Mock(pw_uid=os.getuid())
-        self.assertFalse(rp._jobs_active(self.probe, runner, environ={"SUDO_USER": "tester"},
-                                         getpwnam=lambda user: mine))
-        argv = calls[-1]
-        self.assertEqual(argv[:4], ["runuser", "-u", "tester", "--"])
-        self.assertIn("SANDBOX_HOME=" + str(self.home), argv)
-        self.assertIn(str(self.home) + "/sb-src/sb", argv)
-        # Run directly as root (no sudo): no runuser.
-        self.assertFalse(rp._jobs_active(self.probe, runner, environ={},
-                                         getpwnam=lambda user: mine))
-        self.assertEqual(calls[-1][0], "env")
-        other = mock.Mock(pw_uid=os.getuid() + 1)
-        with self.assertRaises(rp.Refusal) as caught:
-            rp._jobs_active(self.probe, runner, getpwnam=lambda user: other)
-        self.assertEqual(caught.exception.code, "gate_unavailable")
-        for home in ("relative/home", "/x/../etc", "/x//y", None):
-            with self.assertRaises(rp.Refusal) as caught:
-                rp._jobs_active({"home": home}, runner)
-            self.assertEqual(caught.exception.code, "request_invalid")
 
 
 class ActivationTests(Base):
@@ -526,7 +502,7 @@ class ActivationTests(Base):
             return real(argv, **kwargs)
 
         result = rp.main({"action": "commit", "fqdn": FQDN, "token": TOKEN, "block": block(),
-                          "chain": chain, "jobs_probe": self.probe, "tailnet_ip": IP},
+                          "chain": chain, "tailnet_ip": IP},
                          paths=self.paths, runner=nginx_fails_once)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["settled"], "restored")
@@ -610,7 +586,7 @@ class RemovalAndCrashTests(Base):
 
     def test_remove_keeps_the_lease_for_the_controller_to_release(self):
         self.publish()
-        self.assertTrue(self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)["ok"])
+        self.assertTrue(self.call("remove", fqdn=FQDN, token=TOKEN)["ok"])
         result = self.reserve(token=OTHER)
         self.assertEqual((result["ok"], result["code"]), (False, "busy"))
         self.assertTrue(self.call("release", fqdn=FQDN, token=TOKEN)["released"])
@@ -622,7 +598,7 @@ class RemovalAndCrashTests(Base):
         fcntl.flock(fd, fcntl.LOCK_EX)
         out = {}
         worker = threading.Thread(target=lambda: out.update(self.call(
-            "remove", lock_wait=10, fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)))
+            "remove", lock_wait=10, fqdn=FQDN, token=TOKEN)))
         worker.start()
         try:
             time.sleep(0.5)  # remove is now waiting for the edge lock
@@ -640,13 +616,13 @@ class RemovalAndCrashTests(Base):
                         ".other.pem.tmp-0123456789abcdef"):
             with self.subTest(foreign=foreign):
                 (self.name_dir / foreign).write_text("operator's")
-                result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+                result = self.call("remove", fqdn=FQDN, token=TOKEN)
                 self.assertEqual((result["ok"], result["code"]), (False, "unmanaged"))
                 self.assertEqual((self.name_dir / foreign).read_text(), "operator's")
                 self.assertTrue(self.conf.exists(), "nothing was taken down")
                 (self.name_dir / foreign).unlink()
         (self.name_dir / ".fullchain.pem.tmp-0123456789abcdef").write_text("partial")
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertTrue(result["ok"], result)
         self.assertFalse(self.name_dir.exists())
 
@@ -691,7 +667,7 @@ class RemovalAndCrashTests(Base):
             calls.append(path)
             raise OSError("simulated crash")
         with mock.patch.object(rp.os, "rmdir", side_effect=crash):
-            result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+            result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertFalse(result["ok"])
         self.assertTrue(calls and ".removed-" in calls[0], calls)
         self.assertFalse(self.name_dir.exists(), "the name itself is free")
@@ -738,7 +714,7 @@ class RoundThreeTests(Base):
         (self.name_dir / "activation.json").write_text(json.dumps({"state": state}))
 
     def remove(self, **extra):
-        return self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe, **extra)
+        return self.call("remove", fqdn=FQDN, token=TOKEN, **extra)
 
     def test_a_block_gone_from_disk_is_not_proof_of_unload(self):
         self.publish()
@@ -781,14 +757,14 @@ class RoundThreeTests(Base):
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertEqual(self.conf.read_text(), block())
 
-    def test_a_job_admitted_after_the_first_query_stops_the_commit(self):
+    def test_a_lock_taken_after_the_first_check_stops_the_commit(self):
         old = self.publish()
         before = len(self.host.ran("systemctl", "reload", "nginx"))
-        for answers, tested in (([[], [{"id": "j"}]], False), ([[], [], [{"id": "j"}]], True)):
+        for checks, tested in ((2, False), (3, True)):
             with self.subTest(tested=tested):
                 tests = len(self.host.ran("nginx", "-t"))
-                self.host.jobs_seq = [list(a) for a in answers]
-                result = self.commit(block=block(port=9000), chain=old)
+                with self.busy_on(checks):
+                    result = self.commit(block=block(port=9000), chain=old)
                 self.assertEqual((result["ok"], result["code"]), (False, "busy"))
                 self.assertEqual(self.conf.read_text(), block(), "the previous block is back")
                 self.assertEqual(len(self.host.ran("nginx", "-t")) > tests, tested)
@@ -796,10 +772,10 @@ class RoundThreeTests(Base):
                 self.assertEqual(json.loads((self.name_dir / "activation.json").read_text())["state"],
                                  "loaded")
 
-    def test_a_job_admitted_mid_remove_stops_it_with_the_block_back(self):
+    def test_a_lock_taken_mid_remove_stops_it_with_the_block_back(self):
         self.publish()
-        self.host.jobs_seq = [[], [{"id": "j"}]]
-        result = self.remove()
+        with self.busy_on(2):
+            result = self.remove()
         self.assertEqual((result["ok"], result["code"]), (False, "busy"))
         self.assertEqual(self.conf.read_text(), block())
         self.assertTrue(self.name_dir.exists())
@@ -840,7 +816,7 @@ class RoundFourTests(Base):
     def test_remove_never_cleans_up_after_an_unaccepted_reload(self):
         self.publish()
         self.host.reload_accepted = False
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists())
         self.assertEqual(self.conf.read_text(), block())
@@ -927,11 +903,11 @@ class RoundFourTests(Base):
         before = len(self.host.ran("systemctl", "reload", "nginx"))
         self.host.reload_ok = False
         # gate, before test, before reload, rollback before test, rollback before reload
-        self.host.jobs_seq = [[], [], [], [], [{"id": "j"}]]
-        result = self.commit(block=block(port=9000), chain=chain)
+        with self.busy_on(5):
+            result = self.commit(block=block(port=9000), chain=chain)
         self.assertEqual(result["code"], "reload_failed")
         self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), before + 1,
-                         "no rollback reload while a job is active")
+                         "no rollback reload while a host lock is held")
         self.assertEqual(self.journal()["state"], "restored")
 
     def test_settling_a_crash_rechecks_the_gate_before_its_test(self):
@@ -941,8 +917,8 @@ class RoundFourTests(Base):
             {"state": "written", "generation": "0" * 64, "had_block": True, "had_chain": True,
              "chain_changed": False}))
         tests = len(self.host.ran("nginx", "-t"))
-        self.host.jobs_seq = [[], [{"id": "j"}]]
-        result = self.commit(block=block(), chain=chain)
+        with self.busy_on(2):
+            result = self.commit(block=block(), chain=chain)
         self.assertEqual((result["ok"], result["code"]), (False, "busy"))
         self.assertEqual(len(self.host.ran("nginx", "-t")), tests)
         self.assertEqual(self.journal()["state"], "written")
@@ -964,11 +940,11 @@ class RoundFiveTests(Base):
             {"state": "written", "generation": "0" * 64, "had_block": True, "had_chain": True,
              "chain_changed": True}))
         self.host.reload_accepted = False
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists(), "the key and certificates stay")
         self.host.reload_accepted = True
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertTrue(result["ok"], result)
         self.assertFalse(self.name_dir.exists())
 
@@ -1023,7 +999,7 @@ class RoundFiveTests(Base):
         chain = self.publish()
         ours = rp._leaf_sha(chain.encode())
         self.paths["served"] = lambda ip, fqdn: ("handshake", ours, b"0123")
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists())
 
@@ -1055,7 +1031,7 @@ class RoundFiveTests(Base):
             return real_rename(src, dst, **kwargs)
         with mock.patch.object(rp, "_unlink", unlink), \
                 mock.patch.object(rp.os, "fsync", fsync), mock.patch.object(rp.os, "rename", rename):
-            result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+            result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertTrue(result["ok"], result)
         block_unlink = events.index(("unlink", f"sandbox-tailnet-{FQDN}.conf"))
         conf_sync = events.index(("fsync", conf_ino), block_unlink)
@@ -1069,7 +1045,7 @@ class RoundFiveTests(Base):
         self.reserve()
         self.csr()  # issuance then failed: key and CSR only
         reloads = len(self.host.ran("systemctl", "reload", "nginx"))
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertTrue(result["ok"], result)
         self.assertFalse(self.name_dir.exists())
         self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), reloads)
@@ -1082,7 +1058,7 @@ class RoundFiveTests(Base):
         os.chmod(self.name_dir / "leaves.json", 0o600)
         self.host.reload_accepted = False
         self.paths["served"] = lambda ip, fqdn: ("handshake", "e" * 64, b"")
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists())
 
@@ -1130,13 +1106,13 @@ class RoundSixTests(Base):
     def test_remove_cleans_up_after_a_crash_before_the_first_install(self):
         self.crash_after_first_journal()
         self.host.reload_ok = False
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertEqual((result["ok"], result.get("code")), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists())
         # The other site's certificate is not one this name ever recorded, so
         # it proves the unload once nginx reloads.
         self.host.reload_ok = True
-        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        result = self.call("remove", fqdn=FQDN, token=TOKEN)
         self.assertTrue(result["ok"], result)
         self.assertFalse(self.name_dir.exists())
 
@@ -1232,7 +1208,7 @@ class RoundSevenTests(Base):
 
 class RoundEightTests(Base):
     def settle(self, token=TOKEN):
-        return self.call("settle", fqdn=FQDN, token=token, tailnet_ip=IP, jobs_probe=self.probe)
+        return self.call("settle", fqdn=FQDN, token=token, tailnet_ip=IP)
 
     def test_settle_restores_a_candidate_that_fails_nginx_test(self):
         """Re-review 12 NEW-1: a crash left this name's new block on disk,

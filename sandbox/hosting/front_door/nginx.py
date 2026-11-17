@@ -1040,7 +1040,7 @@ def public_certificate_present(entry: dict, name: str, hostnames: list[str]) -> 
 def certbot_command(name: str, hostnames: list[str]) -> str:
     domains = " ".join(f"-d {shlex.quote(h)}" for h in hostnames)
     hook = ("#!/bin/sh\n# Managed by Sandbox: reload the host nginx after renewal.\n"
-            "nginx -t && systemctl reload nginx\n")
+            f"flock -w {LOCK_WAIT_SECONDS} {LOCK_PATH} sh -c 'nginx -t && systemctl reload nginx'\n")
     return (
         _ensure_edge_dirs_command() + "; "
         "if ! command -v certbot >/dev/null 2>&1; then "

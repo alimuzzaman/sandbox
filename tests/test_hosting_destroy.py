@@ -423,6 +423,8 @@ class Execution(unittest.TestCase):
         client = FakeClient()
         _, commands, _ = self._run(_record(), [self.PROBE, "", "removed\n"], client)
         self.assertIn("systemctl reload nginx", commands[1])
+        self.assertIn("flock -w 60 /run/lock/sandbox-edge-nginx.lock sh -c", commands[1],
+                      "the cleanup reload holds the edge lock")
 
     def test_failed_certificate_cleanup_keeps_state(self):
         client = FakeClient()

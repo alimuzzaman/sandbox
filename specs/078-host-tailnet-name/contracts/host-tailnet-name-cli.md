@@ -87,8 +87,7 @@ any result is not ok.
 | `tailnet_name_remote_path_unsafe` | A remote path is a symlink, not a regular file/directory, or has an untrusted owner or mode (including a private key that is not root 0600). |
 | `tailnet_name_state_corrupt` | The controller state file does not parse; nothing is changed. |
 | `tailnet_name_public_probe_inconclusive` | The public check timed out, could not route, failed DNS or errored, or presented an undecodable certificate. |
-| `tailnet_name_busy` | A durable job is active on the remote or a host transaction lock is held (checked again inside the edge lock, before `nginx -t` and before the reload), this controller is already working on the remote, or another run holds the name's remote lease (or this run lost it, checked again before every DNS or ACME call). |
-| `tailnet_name_gate_unavailable` | The job query could not answer, or the remote Sandbox home or job registry could not be verified (fails closed). A lock that cannot be probed counts as held and is reported as `tailnet_name_busy`. |
+| `tailnet_name_busy` | A host transaction lock is held (durable jobs are not a conflict since 2026-11-17; a lock that cannot be probed counts as held) (checked again inside the edge lock, before `nginx -t` and before the reload), this controller is already working on the remote, or another run holds the name's remote lease (or this run lost it, checked again before every DNS or ACME call). |
 | `tailnet_name_secret_unavailable` | The broker refused or could not provide the token. |
 | `tailnet_name_dns_conflict` | The name's complete record set is not empty and not exactly one identical DNS-only A record. |
 | `tailnet_name_dns_failed` | The DNS provider call failed. |

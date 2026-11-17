@@ -24,7 +24,6 @@ from sandbox.hosting.tailnet_names.models import (
     DNS_CONFLICT,
     DNS_FAILED,
     DNS_NOT_OWNED,
-    GATE_UNAVAILABLE,
     INSTALL_FAILED,
     NGINX_REJECTED,
     NOT_DUE,
@@ -36,6 +35,7 @@ from sandbox.hosting.tailnet_names.models import (
     REMOTE_PATH_UNSAFE,
     RENEWAL_WINDOW_DAYS,
     SECRET_UNAVAILABLE,
+    STACK_CONFLICT,
     TAILNET_ADDRESS_UNBOUND,
     UNMANAGED,
     UPSTREAM_DIFFERS,
@@ -55,11 +55,11 @@ from sandbox.hosting.tailnet_names.verify import ProbeResult, public_outcome, ta
 
 LEASE_SECONDS = 1800
 TAILNET_ATTEMPTS = 5
-_REFUSALS = frozenset({BUSY, GATE_UNAVAILABLE, SECRET_UNAVAILABLE, UNMANAGED, REMOTE_PATH_UNSAFE,
+_REFUSALS = frozenset({BUSY, STACK_CONFLICT, SECRET_UNAVAILABLE, UNMANAGED, REMOTE_PATH_UNSAFE,
                        ZONE_NOT_ALLOWED, "tailnet_name_acme_client_untrusted",
                        "tailnet_name_acme_client_missing", "tailnet_name_state_corrupt"})
 _REMOTE_CODES = {
-    "busy": BUSY, "lease_lost": BUSY, "lock_busy": BUSY, "gate_unavailable": GATE_UNAVAILABLE,
+    "busy": BUSY, "lease_lost": BUSY, "lock_busy": BUSY,
     "unmanaged": UNMANAGED, "path_unsafe": REMOTE_PATH_UNSAFE,
     "nginx_rejected": NGINX_REJECTED, "reload_failed": RELOAD_FAILED,
     "recovery_failed": RELOAD_FAILED, "restore_failed": RELOAD_FAILED,
@@ -77,8 +77,6 @@ class Deps:
     issue: Callable[[TailnetNameConfig, str, str, str], str]
     cached_chain: Callable[[str], str | None]
     find_lego: Callable[[TailnetNameConfig], str]
-    active_jobs: Callable[[str], bool]
-    jobs_probe: Callable[[Mapping], dict]
     probe: Callable[..., ProbeResult]
     store: Callable[[str], StateStore]
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc)
@@ -286,14 +284,6 @@ def _gate(ctx: Context, deps: Deps, run: _Run, locks: tuple[str, ...]) -> None:
     if locks:
         run.stop("gate", BUSY, "a Sandbox host transaction holds "
                  + ", ".join(path.rsplit("/", 1)[-1] for path in locks), "refused")
-    try:
-        active = deps.active_jobs(ctx.target.name)
-    except Exception:
-        run.stop("gate", GATE_UNAVAILABLE,
-                 "could not list the remote's durable jobs; nothing was changed", "refused")
-    if active:
-        run.stop("gate", BUSY, "a durable job is active on the remote; retry when it ends",
-                 "refused")
     run.done("gate")
 
 
@@ -332,14 +322,6 @@ def _hold(run: _Run, step: str, deps: Deps, ctx: Context, fqdn: str, token: str)
     instead of acting on the name."""
     _remote(run, step, deps, ctx, "extend", {"fqdn": fqdn, "token": token,
                                               "seconds": LEASE_SECONDS})
-
-
-def _jobs(run: _Run, deps: Deps, ctx: Context) -> dict:
-    try:
-        return deps.jobs_probe(ctx.target.entry)
-    except Exception:
-        run.stop("gate", GATE_UNAVAILABLE,
-                 "could not resolve the remote's Sandbox home for the job check", "refused")
 
 
 class _Recorder:
@@ -429,7 +411,7 @@ def _verified(run: _Run, rec: _Recorder, data: dict) -> None:
 
 
 def _verify(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: TailnetName,
-            token: str, jobs: dict, expected_sha: str | None) -> None:
+            token: str, expected_sha: str | None) -> None:
     target = ctx.target
     outcome = None
     for attempt in range(TAILNET_ATTEMPTS):
@@ -454,7 +436,7 @@ def _verify(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: TailnetNa
     removal = "remove_failed"
     try:
         data = deps.remote_call(target.entry, "remove", {
-            "fqdn": name.fqdn, "token": token, "keep_directory": True, "jobs_probe": jobs,
+            "fqdn": name.fqdn, "token": token, "keep_directory": True,
             "tailnet_ip": target.tailnet_ip})
         if data.get("ok"):
             removal = "removed"
@@ -492,11 +474,9 @@ def _recover_then_preflight(ctx: Context, deps: Deps, run: _Run, name: TailnetNa
     _ownership(run, row)
     _gate(ctx, deps, run, info.locks)
     token = existing.lease_token if existing and existing.lease_token else deps.new_token()
-    jobs = _jobs(run, deps, ctx)
     with _lease(run, deps, ctx, name.fqdn, token):
         _remote(run, "preflight", deps, ctx, "settle",
-                {"fqdn": name.fqdn, "token": token, "tailnet_ip": ctx.target.tailnet_ip,
-                 "jobs_probe": jobs})
+                {"fqdn": name.fqdn, "token": token, "tailnet_ip": ctx.target.tailnet_ip})
     try:
         return deps.preflight(ctx.target.entry, [name.fqdn], nginx.route_file(name.route_name))
     except FrontDoorError as exc:
@@ -504,7 +484,11 @@ def _recover_then_preflight(ctx: Context, deps: Deps, run: _Run, name: TailnetNa
 
 
 def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
-        replace_upstream: bool = False) -> Result:
+        replace_upstream: bool = False, stack: str | None = None) -> Result:
+    """``stack`` is stack mode (``stack.mail_hostname``), decided under the store lock:
+    a name tagged for another stack is refused, the upstream is replaced only on
+    a name already tagged for this stack, a new record is tagged, and a name
+    added by hand keeps its tag (none) and its upstream."""
     run = _Run("add", name.fqdn)
     target = ctx.target
     entry = target.entry
@@ -518,6 +502,11 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
         store = deps.store(target.name)
         with store.lock():
             existing = run.call("preflight", store.get, name.fqdn)
+            if stack is not None:
+                if existing is not None and existing.stack not in (None, stack):
+                    run.stop("preflight", STACK_CONFLICT,
+                             f"{name.fqdn} belongs to stack {existing.stack}", "refused")
+                replace_upstream = existing is not None and existing.stack == stack
             run.call("preflight", _zone_check, ctx, name, existing)
             try:
                 facts = deps.preflight(entry, [name.fqdn], nginx.route_file(name.route_name))
@@ -530,19 +519,28 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                          "refused")
             row = info.rows.get(name.fqdn)
             _ownership(run, row)
+            if row and row.block_present and row.upstream and row.upstream != str(upstream) \
+                    and not replace_upstream:
+                # Refused before anything is recorded: a stack must never come
+                # to own (and later remove) a name published by someone else.
+                run.stop("preflight", UPSTREAM_DIFFERS,
+                         f"already published with upstream {row.upstream}; "
+                         "pass --replace-upstream to change it", "refused")
             run.done("preflight")
             _gate(ctx, deps, run, info.locks)
             token = (existing.lease_token if existing and existing.lease_token
                      else deps.new_token())
             rec = _Recorder(store, replace(
-                existing or TailnetNameRecord(name.fqdn, name.zone, str(upstream), target.tailnet_ip),
+                existing or TailnetNameRecord(name.fqdn, name.zone, str(upstream), target.tailnet_ip,
+                                              stack=stack),
                 state="publishing", tailnet_ip=target.tailnet_ip, lease_token=token), deps.now)
             rec.save()
-            jobs = _jobs(run, deps, ctx)
             with _lease(run, deps, ctx, name.fqdn, token):
                 row = _fresh(run, ctx, deps, name.fqdn, "gate", require_bound=True)
                 if row and row.block_present and row.upstream and row.upstream != str(upstream) \
                         and not replace_upstream:
+                    if existing is None:
+                        store.drop(name.fqdn)  # recorded by this run only
                     run.stop("activate", UPSTREAM_DIFFERS,
                              f"already published with upstream {row.upstream}; "
                              "pass --replace-upstream to change it", "refused")
@@ -582,12 +580,12 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                     name, upstream, target.tailnet_ip,
                     http2_directive=nginx.features(facts)["http2_directive"])
                 payload = {"fqdn": name.fqdn, "token": token, "block": block, "chain": chain,
-                           "jobs_probe": jobs, "tailnet_ip": target.tailnet_ip}
+                           "tailnet_ip": target.tailnet_ip}
                 data = _activate(ctx, deps, run, rec, name, lego, token, payload, cached)
                 rec.save(upstream=str(upstream))
 
                 # Verification (FR-017, FR-018)
-                _verify(ctx, deps, run, rec, name, token, jobs, data.get("sha256"))
+                _verify(ctx, deps, run, rec, name, token, data.get("sha256"))
                 _verified(run, rec, data)
                 run.result.record = _record_view(rec.record)
     except _Stop:
@@ -672,7 +670,6 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, store: StateStore, l
                 name.fqdn, name.zone, row.upstream or "127.0.0.1:1", ctx.target.tailnet_ip,
                 state="published"), lease_token=token), deps.now)
             rec.save()
-            jobs = _jobs(run, deps, ctx)
             if current:
                 # The certificate is fine but its activation or verification
                 # is not proven: reconcile and verify without issuing.
@@ -683,9 +680,9 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, store: StateStore, l
                 chain, cached = _obtain_chain(ctx, deps, run, rec, name, lego, token,
                                               allow_cached=not force)
             payload = {"fqdn": name.fqdn, "token": token, "block": None, "chain": chain,
-                       "jobs_probe": jobs, "tailnet_ip": ctx.target.tailnet_ip}
+                       "tailnet_ip": ctx.target.tailnet_ip}
             data = _activate(ctx, deps, run, rec, name, lego, token, payload, cached)
-            _verify(ctx, deps, run, rec, name, token, jobs, data.get("sha256"))
+            _verify(ctx, deps, run, rec, name, token, data.get("sha256"))
             _verified(run, rec, data)
             run.result.record = _record_view(rec.record)
     except _Stop:
@@ -728,13 +725,21 @@ def renew(ctx: Context, deps: Deps, name: TailnetName | None, *, all_names: bool
         return RenewResult([failed])
 
 
-def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
+def remove(ctx: Context, deps: Deps, name: TailnetName, *, expect_stack: str | None = None,
+           expect_upstream: str | None = None) -> Result:
+    """``expect_stack`` (and ``expect_upstream``) are re-checked under the store
+    lock: a stack removes only its own name, as it was when the caller looked."""
     run = _Run("remove", name.fqdn)
     target = ctx.target
     try:
         store = deps.store(target.name)
         with store.lock():
             existing = run.call("preflight", store.get, name.fqdn)
+            if expect_stack is not None and (
+                    existing is None or existing.stack != expect_stack
+                    or (expect_upstream is not None and existing.upstream != expect_upstream)):
+                run.stop("preflight", STACK_CONFLICT,
+                         f"{name.fqdn} is no longer stack {expect_stack}'s as seen", "refused")
             run.call("preflight", _zone_check, ctx, name, existing)
             info = run.call("preflight", _inspect, ctx, deps, name.fqdn)
             row = info.rows.get(name.fqdn)
@@ -750,7 +755,6 @@ def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
             rec = _Recorder(store, replace(existing, state="removing", lease_token=token)
                             if existing else None, deps.now)
             rec.save()
-            jobs = _jobs(run, deps, ctx)
             # The lease spans the remote removal AND the DNS delete, so no
             # other controller can publish the name in between.
             with _lease(run, deps, ctx, name.fqdn, token):
@@ -758,7 +762,7 @@ def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
                 present = bool(row and (row.block_present or row.dir_present))
                 if present:
                     data = _remote(run, "remove_block", deps, ctx, "remove",
-                                   {"fqdn": name.fqdn, "token": token, "jobs_probe": jobs,
+                                   {"fqdn": name.fqdn, "token": token,
                                     "tailnet_ip": target.tailnet_ip},
                                    on_fail=rec.failing("remove_block"))
                     rec.save("remove_block", "done")

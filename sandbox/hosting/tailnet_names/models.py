@@ -33,7 +33,7 @@ TAILNET_ADDRESS_UNBOUND = "tailnet_name_tailnet_address_unbound"
 PUBLIC_ADDRESS_INVALID = "tailnet_name_public_address_invalid"
 ACME_CLIENT_MISSING = "tailnet_name_acme_client_missing"
 BUSY = "tailnet_name_busy"
-GATE_UNAVAILABLE = "tailnet_name_gate_unavailable"
+STACK_CONFLICT = "tailnet_name_stack_conflict"
 SECRET_UNAVAILABLE = "tailnet_name_secret_unavailable"
 DNS_CONFLICT = "tailnet_name_dns_conflict"
 DNS_FAILED = "tailnet_name_dns_failed"
@@ -74,6 +74,7 @@ _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _ISO_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+_STACK_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,189}")
 
@@ -424,9 +425,13 @@ class TailnetNameRecord:
     updated_at: str = ""
     lease_token: str | None = None
     verified_generation: str | None = None  # the activation both probes last passed
+    # The stack whose apply created this name (``stack.mail_hostname``); only
+    # such names are removed with their stack. None: added by hand.
+    stack: str | None = None
 
     def as_dict(self) -> dict:
-        return {"fqdn": self.fqdn, "zone": self.zone, "upstream": self.upstream,
+        extra = {"stack": self.stack} if self.stack else {}
+        return {**extra, "fqdn": self.fqdn, "zone": self.zone, "upstream": self.upstream,
                 "tailnet_ip": self.tailnet_ip, "state": self.state,
                 "dns_record_id": self.dns_record_id, "dns_adopted": self.dns_adopted,
                 "cert_not_after": self.cert_not_after, "cert_sha256": self.cert_sha256,
@@ -466,6 +471,9 @@ class TailnetNameRecord:
         if not isinstance(steps, Mapping) or not all(
                 isinstance(k, str) and isinstance(v, str) for k, v in steps.items()):
             raise corrupt("steps")
+        stack = row.get("stack")
+        if stack is not None and not (isinstance(stack, str) and _STACK_SLUG.fullmatch(stack)):
+            raise corrupt("stack")
         updated = row.get("updated_at", "")
         if not isinstance(updated, str) or (updated and not _ISO_TIME.fullmatch(updated)):
             raise corrupt("updated_at")
@@ -474,5 +482,5 @@ class TailnetNameRecord:
             dns_record_id=row.get("dns_record_id"), dns_adopted=row.get("dns_adopted") is True,
             cert_not_after=row.get("cert_not_after"), cert_sha256=row.get("cert_sha256"),
             steps=dict(steps), updated_at=updated, lease_token=row.get("lease_token"),
-            verified_generation=row.get("verified_generation"),
+            verified_generation=row.get("verified_generation"), stack=stack,
         )

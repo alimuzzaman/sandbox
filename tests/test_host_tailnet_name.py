@@ -772,7 +772,7 @@ class FakeRemote:
         if action == "extend":
             return {"ok": True}
         if action == "settle":
-            assert payload.get("jobs_probe") == {"home": "/home/u/sandbox"}, payload
+            assert "jobs_probe" not in payload, payload
             if self.activation.get(fqdn) not in (None, "loaded"):
                 # The interrupted candidate is restored away; nginx -t passes again.
                 self.activation[fqdn] = "loaded"
@@ -786,7 +786,7 @@ class FakeRemote:
             self.keys.add(fqdn)
             return {"ok": True, "csr": "-----BEGIN CERTIFICATE REQUEST-----\n"}
         if action == "commit":
-            assert payload.get("jobs_probe") == {"home": "/home/u/sandbox"}, payload
+            assert "jobs_probe" not in payload, payload
             if self.commit_error:
                 return {"ok": False, "code": self.commit_error, "detail": "refused"}
             chain = payload.get("chain") or (self.chains.get(fqdn) or {}).get("pem")
@@ -892,8 +892,6 @@ class ServiceTestCase(unittest.TestCase):
         self.dns = FakeDns()
         self.issued: list[tuple] = []
         self.cached: str | None = None
-        self.jobs_active = False
-        self.jobs_error = False
         self.public: verify.ProbeResult | None = verify.ProbeResult("refused")
         self.public_after_removal: verify.ProbeResult | None = None
         self.tailnet_status = 200
@@ -904,7 +902,6 @@ class ServiceTestCase(unittest.TestCase):
         self.deps = service.Deps(
             remote_call=self.remote.call, preflight=self.remote.preflight, dns=self.dns,
             issue=self._issue, cached_chain=lambda fqdn: self.cached, find_lego=self._lego,
-            active_jobs=self._jobs, jobs_probe=lambda entry: {"home": "/home/u/sandbox"},
             probe=self._probe, store=lambda remote: self.store, now=lambda: NOW,
             new_token=lambda: next(self.tokens), sleep=self.sleeps.append)
         self.ctx = service.Context(config(), target())
@@ -922,11 +919,6 @@ class ServiceTestCase(unittest.TestCase):
     def _issue(self, cfg, fqdn, csr, lego):
         self.issued.append((fqdn, lego))
         return CHAIN.replace("leaf", f"leaf{len(self.issued)}")
-
-    def _jobs(self, remote):
-        if self.jobs_error:
-            raise RuntimeError("unreachable")
-        return self.jobs_active
 
     def _probe(self, address, fqdn, *, send_request):
         if address == TAILNET_IP:
@@ -1024,7 +1016,7 @@ class AddTests(ServiceTestCase):
         self.assertNotIn(FQDN, self.remote.blocks)
 
     def test_remote_gate_and_nginx_refusals_map_to_codes(self):
-        for remote_code, code in (("gate_unavailable", m.GATE_UNAVAILABLE), ("busy", m.BUSY),
+        for remote_code, code in (("busy", m.BUSY),
                                   ("nginx_rejected", m.NGINX_REJECTED),
                                   ("reload_failed", m.RELOAD_FAILED),
                                   ("unmanaged", m.UNMANAGED),
@@ -1040,12 +1032,11 @@ class AddTests(ServiceTestCase):
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.BUSY))
         self.assertEqual(self.dns.requests, [])
-        self.remote.locks = []
-        self.jobs_active = True
-        self.assertEqual(self.add().code, m.BUSY)
-        self.jobs_active, self.jobs_error = False, True
-        self.assertEqual(self.add().code, m.GATE_UNAVAILABLE)
         self.assertEqual(self.remote.actions("reserve"), [])
+        # Unrelated durable jobs are not a conflict: once the lock is free,
+        # add proceeds (Deps has no job lister at all).
+        self.remote.locks = []
+        self.assertTrue(self.add().ok)
 
     def test_foreign_or_unsafe_remote_paths_refuse_before_dns(self):
         """F4: Sandbox never adopts a block or directory it did not write."""
@@ -1313,8 +1304,7 @@ class ListRenewRemoveTests(ServiceTestCase):
         self.assertEqual(self.steps(result), [
             ("preflight", "done"), ("gate", "done"), ("remove_block", "done"),
             ("remove_certificate", "done"), ("remove_dns", "done")])
-        self.assertEqual(self.remote.payloads("remove")[-1]["jobs_probe"],
-                         {"home": "/home/u/sandbox"})
+        self.assertNotIn("jobs_probe", self.remote.payloads("remove")[-1])
         self.assertNotIn(FQDN, self.dns.records)
         self.assertEqual(self.store.load(), {})
         self.assertEqual(service.remove(self.ctx, self.deps, self.name).code, m.NOT_FOUND)
@@ -1430,6 +1420,23 @@ class ListRenewRemoveTests(ServiceTestCase):
         self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
         self.assertEqual(self.remote.blocks[FQDN], theirs)
         self.assertEqual(self.remote.leases, {})
+
+    def test_a_first_add_refused_under_the_lease_leaves_no_record(self):
+        """A stack must never come to own a name another run published meanwhile."""
+        call = self.remote.call
+        theirs = render.render_block(self.name, m.Upstream("127.0.0.1", 9000), TAILNET_IP,
+                                     http2_directive=True)
+
+        def racing(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks[FQDN] = theirs
+                self.remote.keys.add(FQDN)
+            return call(entry, action, payload)
+        self.deps.remote_call = racing
+        result = service.add(self.ctx, self.deps, self.name, self.upstream, stack="demo")
+        self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
+        self.assertNotIn(FQDN, self.store.load())
+        self.assertEqual(self.dns.requests, [])
 
 
     def test_a_run_whose_lease_was_taken_over_does_not_touch_dns(self):

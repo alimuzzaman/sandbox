@@ -37,7 +37,12 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 SOURCE_CONTENT_VERSION = 1
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
+from sandbox.jobs.launch_recovery import launch_lost, lost_launch_result
+
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
+# An accepted job's supervisor records its identity within seconds of launch;
+# one that has not after this long was lost with its launcher.
+SUPERVISOR_LAUNCH_GRACE_SECONDS = 120
 
 
 def _require_measured_materialization(submission):
@@ -1132,6 +1137,26 @@ class JobService:
                 interrupted.append(row["job_id"])
                 continue
             if row["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
+                if launch_lost(row, self.repository.snapshot, SUPERVISOR_LAUNCH_GRACE_SECONDS):
+                    # Accepted, a slot held, but no supervisor ever recorded
+                    # itself: the launch died with its launcher (a service
+                    # stopped while systemd-run was still in its cgroup, a
+                    # crash). Fail it loudly so a replay sees the outcome
+                    # instead of "accepted" forever, and free its slot.
+                    try:
+                        # Only while still accepted: a supervisor that recorded
+                        # itself and moved to running since the check wins.
+                        self.repository.transition(row["job_id"], Lifecycle.FAILED,
+                            termination_reason="supervisor_launch_failed", output_completeness="unknown",
+                            result_json=lost_launch_result(),
+                            expected_lifecycles=frozenset({Lifecycle.ACCEPTED.value}))
+                        if self.scheduler is not None:
+                            self.scheduler.release(row["job_id"])
+                        self._finalize_terminal_workspace(row["job_id"])
+                        interrupted.append(row["job_id"])
+                    except (ValueError, JobTransitionConflict):
+                        pass
+                    continue
                 if self._queue_expired(row):
                     try:
                         self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,

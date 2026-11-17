@@ -101,11 +101,26 @@ def scoped_launch(argv: list[str], *, job_id: str) -> tuple[list[str], dict | No
             *(["env", *strip] if strip else []), *argv], None
 
 
+def _complete_release(root: Path) -> bool:
+    """A complete release directory (sandbox.remote_runtime.releases): under a
+    ``releases/`` directory, with its completion marker naming it."""
+    if root.parent.name != "releases" or root.is_symlink():
+        return False
+    try:
+        value = json.loads((root / ".release.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return (isinstance(value, dict) and value.get("state") == "complete"
+            and value.get("name") == root.name
+            and (root / "sandbox" / "jobs" / "supervisor.py").is_file())
+
+
 def admitted_release(descriptor_path, own_root: Path, interpreter: str) -> tuple[Path, str]:
     """``(release_root, interpreter)`` for the release that admitted a job.
 
     ``release.json`` beside the descriptor (written at admission) wins when it is
-    another complete release directory; the interpreter maps to the same
+    another complete release directory (marker present, so never a tree the
+    release GC is removing); the interpreter maps to the same
     relative path inside it when it lives in this release (a venv), else it
     is kept (the system Python the ``sb`` launcher picked).
     """
@@ -116,7 +131,7 @@ def admitted_release(descriptor_path, own_root: Path, interpreter: str) -> tuple
     if not isinstance(named, str) or not named.startswith("/"):
         return own_root, interpreter
     root = Path(named)
-    if root == own_root or not (root / "sandbox" / "jobs" / "supervisor.py").is_file():
+    if root == own_root or not _complete_release(root):
         return own_root, interpreter
     own = str(own_root).rstrip("/") + "/"
     if interpreter.startswith(own):

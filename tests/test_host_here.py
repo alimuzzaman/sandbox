@@ -23,6 +23,7 @@ import sandbox.core._remote as sr  # noqa: E402
 from sandbox.application.server_cli import ServerCliOwner  # noqa: E402
 from sandbox.hosting import owner_origin, server_cli_dispatch  # noqa: E402
 from sandbox.hosting import server_cli_here as here  # noqa: E402
+from tests.subprocess_support import synthetic_environment  # noqa: E402
 from tests.test_controller_update_remote import SOURCE, _completed, _staged_source  # noqa: E402
 
 MARKER, REVISION, TARGET = "b" * 24, "c" * 24, "a" * 24
@@ -117,7 +118,7 @@ class MigrateWritesTheRecordTests(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(home)], check=False))
         record = sr.remote_mcp_service_record("127.0.0.1", 9174, None)
         command = sr._owner_origin_command({"_remote_name": "xspeed-dev", "front_door": "nginx"}, record)
-        subprocess.run(["sh", "-c", "set -eu; " + command], env={**os.environ, "HOME": str(home)}, check=True)
+        subprocess.run(["sh", "-c", "set -eu; " + command], env=synthetic_environment({"HOME": str(home)}), check=True)
         from dataclasses import replace
         owner = replace(_owner(home), ownership_marker=record["ownership_marker"],
                         runtime_revision=record["runtime_revision"])
@@ -132,7 +133,7 @@ class MigrateWritesTheRecordTests(unittest.TestCase):
         record = sr.remote_mcp_service_record("127.0.0.1", 9174, None)
         joined_unproven = {"_remote_name": "xspeed-dev", "joined": True, "control_access": "tailnet"}
         command = sr._owner_origin_command(joined_unproven, record)
-        subprocess.run(["sh", "-c", "set -eu; " + command], env={**os.environ, "HOME": str(home)}, check=True)
+        subprocess.run(["sh", "-c", "set -eu; " + command], env=synthetic_environment({"HOME": str(home)}), check=True)
         self.assertFalse(owner_origin.path_for(home).exists())
 
 
@@ -264,8 +265,8 @@ class HereSubmissionTests(unittest.TestCase):
 
 def _git(root: Path, *argv: str) -> str:
     return subprocess.run(["git", "-C", str(root), *argv], check=True, capture_output=True, text=True,
-                          env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
-                               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test"}).stdout.strip()
+                          env=synthetic_environment({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
+                                                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test"})).stdout.strip()
 
 
 class SourceSnapshotTests(unittest.TestCase):

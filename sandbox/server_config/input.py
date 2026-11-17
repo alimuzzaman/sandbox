@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import os
 from pathlib import Path
 import stat
@@ -39,9 +38,9 @@ def read_fragment_file(path: str | os.PathLike[str], *, maximum: int = MAX_FRAGM
     )
     try:
         descriptor = os.open(os.fspath(path), flags)
-    except OSError as error:
-        if error.errno in {errno.ELOOP, errno.EFTYPE, errno.EISDIR, errno.ENOENT}:
-            _raise("fragment_source_unsafe")
+    except OSError:
+        # Any open failure (a final symlink, a directory, a missing file) is
+        # one refusal. Never name errno.EFTYPE here: it exists only on BSD.
         _raise("fragment_source_unsafe")
 
     try:

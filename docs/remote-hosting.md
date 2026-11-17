@@ -3092,7 +3092,10 @@ parts inside `pins.INSTALL_GATE`:
 After a successful switch the release keeps a copy of its unit, source receipt
 and owner origin record, and releases beyond `current`, `previous` and the last
 3 activated are removed unless a live process runs from them (cwd, command
-line or a mapped file under the release directory). The same cleanup removes
+line or a mapped file under the release directory) or an unfinished job was
+admitted with them (its `release.json`; with the job registry unreadable,
+every named release is kept). A release is renamed to `releases/.gc-<name>`
+before it is deleted, so nothing ever starts from a half-deleted tree. The same cleanup removes
 upload staging directories (`$HOME/sandbox/.sb-src-stage-*`) older than three
 hours (above the longest allowed upload) that no live process uses; prepare
 renames the stage it builds, so these are left only by interrupted or
@@ -3139,9 +3142,15 @@ still kill:
   `running` or `cancelling`, as before.
 
 The gate makes its check under the registry's write lock (`BEGIN IMMEDIATE`).
-In the release layout, when the serving release launches supervisors in scopes
-(`sandbox/jobs/scope.py` exists), it releases the lock right after the check:
-nothing admitted later can die with the restart, so admission never pauses.
+In the release layout, when both `sb-src` and the running service's own release
+(its working directory) launch supervisors in scopes (`sandbox/jobs/scope.py`
+exists), it releases the lock right after the check, so admission never pauses.
+A job accepted in the moment before the old service stops can still lose its
+launch (`systemd-run` has not yet left the service's cgroup); any process
+running a job command then fails it as `supervisor_launch_failed` once it has
+had no supervisor for 120 s, freeing its slot, so a replay reports that
+outcome instead of `accepted`. The unit's `TimeoutStopSec=30` bounds the hold
+on hosts that still take it.
 Otherwise (the old layout, or a retained pre-scope release) it holds the lock
 until the old service is stopped, so no job is admitted between the check and
 the restart; a submission then waits on the lock (`JobRepository`'s 5-second
@@ -3153,8 +3162,10 @@ running supervisor's registry write with `database is locked` (xspeed-dev,
 
 A queued job runs from the release that admitted it, even when another
 release's supervisor starts it on freeing a slot: the admitting release is
-recorded beside its descriptor (`release.json`). A release removed by cleanup
-falls back to the launcher's own.
+recorded beside its descriptor (`release.json`). Only a complete release
+under `releases/` (its `.release.json` marker present) is used; otherwise the
+job falls back to the launcher's own release. Cleanup keeps every release an
+unfinished job names, so the fallback is for a release removed by hand.
 
 Queued jobs never block. If the lock cannot be taken within 15 seconds the
 install refuses with `remote_jobs_gate_unavailable`; an install that fails with

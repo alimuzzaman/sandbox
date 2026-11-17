@@ -93,6 +93,48 @@ class JobReconciliationTests(unittest.TestCase):
         self.assertEqual(self.repository.get(stale["job_id"])["termination_reason"], "queue_expired")
         self.assertEqual(self.repository.get(fresh["job_id"])["lifecycle"], "queued")
 
+    def test_an_accepted_job_whose_supervisor_never_started_fails_after_the_launch_grace(self):
+        """A launch lost with its launcher (service stopped mid systemd-run) is not accepted forever."""
+        from sandbox.application.job_service import SUPERVISOR_LAUNCH_GRACE_SECONDS
+
+        def accepted(age_seconds, label):
+            row, _ = self.repository.accept(JobSubmission(
+                "test", self.temp.name, "project", "local", label, ("echo", "ok"), 60,
+                SourceIdentity("source")))
+            stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat().replace("+00:00", "Z")
+            self.repository.connection.execute(
+                "UPDATE jobs SET updated_at=? WHERE job_id=?", (stamp, row["job_id"]))
+            self.repository.connection.commit()
+            return row
+
+        lost = accepted(SUPERVISOR_LAUNCH_GRACE_SECONDS + 60, "lost")
+        launching = accepted(5, "launching")
+        started = accepted(SUPERVISOR_LAUNCH_GRACE_SECONDS + 60, "started")
+        self.repository.put_process_identity(started["job_id"], host_boot_id=BOOT, supervisor_pid=101,
+            supervisor_start_identity="start", supervisor_nonce_hash="nonce")
+        result = self.service.reconcile_startup()
+        self.assertIn(lost["job_id"], result["interrupted"])
+        row = self.repository.get(lost["job_id"])
+        self.assertEqual((row["lifecycle"], row["termination_reason"]), ("failed", "supervisor_launch_failed"))
+        self.assertEqual(self.repository.get(launching["job_id"])["lifecycle"], "accepted")
+        self.assertEqual(self.repository.get(started["job_id"])["lifecycle"], "accepted")
+        # A replay of the lost request sees its outcome, not "accepted".
+        replay = self.service.get(lost["job_id"])
+        self.assertEqual(replay["lifecycle"], "failed")
+        # A supervisor that moves the job to running after the check wins.
+        racing = accepted(SUPERVISOR_LAUNCH_GRACE_SECONDS + 60, "racing")
+        original = self.repository.snapshot
+
+        def snapshot_then_start(job_id):
+            view = original(job_id)
+            if job_id == racing["job_id"]:
+                self.repository.transition(job_id, "running")
+            return view
+        with patch.object(self.repository, "snapshot", side_effect=snapshot_then_start):
+            result = self.service.reconcile_startup()
+        self.assertNotIn(racing["job_id"], result["interrupted"])
+        self.assertEqual(self.repository.get(racing["job_id"])["lifecycle"], "running")
+
     def test_old_active_rows_beyond_the_newest_page_are_still_reconciled(self):
         stale = self._queued(age_seconds=60 + 25 * 3600)
         for _ in range(3):

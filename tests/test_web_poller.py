@@ -26,9 +26,11 @@ class WebPollerTests(unittest.TestCase):
 
     def test_vendored_bundle_contains_the_polling_fix(self):
         bundle = (ROOT / "config" / "sandbox-web.js").read_text(encoding="utf-8")
-        self.assertIn("Lost contact with this job", bundle)
-        self.assertIn("Lost contact with this command", bundle)
-        self.assertIn("is busy:", bundle)
+        # The operation console (src/web/src/ui/console.ts, actions.ts) names a
+        # lost observation and a guarded instance without resubmitting.
+        self.assertIn("Observation stopped; the job may still be running", bundle)
+        self.assertIn("Observation stopped; completion is unconfirmed", bundle)
+        self.assertIn("Action still guarded: ", bundle)
 
     def test_vendored_bundle_resolves_a_stack_by_its_remote_name(self):
         bundle = (ROOT / "config" / "sandbox-web.js").read_text(encoding="utf-8")

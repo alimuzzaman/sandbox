@@ -156,6 +156,7 @@ class StackUpKeepsSitesTest(unittest.TestCase):
     # Reuse the stack command harness (a real template checkout) without its tests.
     setUp = ths.StackCommandTests.setUp
     args = ths.StackCommandTests.args
+    _store_runner = ths.StackCommandTests._store_runner
 
     def test_up_again_keeps_linked_sites(self):
         site = {"hostname": "wp-demo.example.test", "instance": "sandbox-wp-demo", "label": "default",
@@ -166,7 +167,9 @@ class StackUpKeepsSitesTest(unittest.TestCase):
                 record = registry.get("r", "demo")
                 record["sites"] = [site]
                 registry.put(record)
-            ths.host_stack._up(self.args("up", confirm=True, request_id="second"))
+            # The first apply finished, so a second up may run.
+            with mock.patch.object(ths.host_stack, "job_view", return_value={"lifecycle": "succeeded"}):
+                ths.host_stack._up(self.args("up", confirm=True, request_id="second"))
         self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["sites"], [site])
 
     def test_first_up_has_no_sites_key(self):

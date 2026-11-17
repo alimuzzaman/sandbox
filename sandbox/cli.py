@@ -186,6 +186,48 @@ def _dispatch_remote_transport_error(exc: RemoteJobTransportError, args) -> None
     raise SystemExit(1)
 
 
+# Read-only job commands: a timeout there changed nothing, so it is safe to retry.
+_READ_ONLY_JOB_COMMANDS = frozenset({
+    "job-status", "job-list", "job-output", "job-artifacts", "job-artifact-get", "job-metrics",
+})
+
+
+def _transient_remote_error(exc: BaseException, args) -> RemoteJobTransportError | None:
+    """A typed transport error for a known remote failure raised below the
+    transport boundary, else None (the exception propagates unchanged).
+
+    These used to reach the user as a traceback with nothing a caller could
+    parse. ``retryable`` is true only for failures that a retry can clear.
+    """
+    try:
+        from sandbox.core._remote import RemoteHomeResolutionTimeout
+        from sandbox.core.remote_materialization import RemoteMaterializationBusy
+        from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+    except ImportError:
+        return None
+    if isinstance(exc, RemoteHomeResolutionTimeout):
+        code, message, retryable = "remote_home_resolution_timeout", str(exc), True
+    elif isinstance(exc, RemoteMaterializationBusy):
+        # Names an unsettled operation to inspect; a plain retry does not clear it.
+        code, message, retryable = "remote_materialization_busy", str(exc), False
+    elif isinstance(exc, ExecutionCapabilityUnavailable):
+        # Only discovery can be transient; malformed or changed identities
+        # need `remote service refresh`.
+        message = str(exc)
+        code = ExecutionCapabilityUnavailable.code
+        retryable = message.startswith("installed job capability discovery is unavailable")
+    elif (isinstance(exc, subprocess.TimeoutExpired) and getattr(args, "remote", None)
+          and getattr(args, "cmd", None) in _READ_ONLY_JOB_COMMANDS):
+        # The expired command line can name private paths: never echo it.
+        code, retryable = "remote_control_timeout", True
+        message = f"a remote control call timed out after {int(exc.timeout or 0)} seconds"
+    else:
+        return None
+    mapped = RemoteJobTransportError(message, retryable=retryable)
+    mapped.code = code
+    return mapped
+
+
 def _explicit_global_label(argv: list[str]) -> str | None:
     """Return a parser-level label supplied before passthrough arguments.
 
@@ -2196,6 +2238,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         _dispatch_remote_admission_error(exc, args)
     except RemoteJobTransportError as exc:
         _dispatch_remote_transport_error(exc, args)
+    except Exception as exc:  # noqa: BLE001 - only known transient remote failures are mapped
+        mapped = _transient_remote_error(exc, args)
+        if mapped is None:
+            raise
+        _dispatch_remote_transport_error(mapped, args)
 
 
 

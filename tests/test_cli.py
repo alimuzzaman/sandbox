@@ -1689,6 +1689,41 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
         self.assertEqual(payload["target"], {"kind": "remote", "remote": "vps"})
         self.assertNotIn("Traceback", output.getvalue())
 
+    def test_transient_remote_failures_become_retryable_envelopes(self):
+        import subprocess
+        import sandbox.cli as cli
+        from sandbox.core._remote import RemoteHomeResolutionTimeout
+        from sandbox.core.remote_materialization import RemoteMaterializationBusy
+        from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+
+        private = "/Users/someone/private/checkout"
+        start = SimpleNamespace(json=True, remote="vps", cmd="job-start")
+        listing = SimpleNamespace(json=True, remote="vps", cmd="job-list")
+        for error, args, code, retryable in (
+                (RemoteHomeResolutionTimeout(15), start, "remote_home_resolution_timeout", True),
+                (RemoteMaterializationBusy("remote source materialization lock is busy"), start,
+                 "remote_materialization_busy", False),
+                (ExecutionCapabilityUnavailable("installed job capability discovery is unavailable"),
+                 start, "remote_execution_capability_unavailable", True),
+                (ExecutionCapabilityUnavailable("installed job service identity changed"), start,
+                 "remote_execution_capability_unavailable", False),
+                (subprocess.TimeoutExpired(["ssh", private], 15), listing, "remote_control_timeout", True)):
+            with self.subTest(code=code, retryable=retryable):
+                mapped = cli._transient_remote_error(error, args)
+                output = StringIO()
+                with redirect_stdout(output), redirect_stderr(StringIO()):
+                    with self.assertRaises(SystemExit):
+                        cli._dispatch_remote_transport_error(mapped, args)
+                payload = json.loads(output.getvalue())
+                self.assertEqual((payload["code"], payload["retryable"], payload["ok"]), (code, retryable, False))
+                self.assertNotIn(private, output.getvalue())
+        # Anything else is not mapped, nor a timeout outside a read-only job
+        # command (it may have fired mid-mutation, e.g. host apply).
+        self.assertIsNone(cli._transient_remote_error(RuntimeError("x"), start))
+        for args in (start, SimpleNamespace(json=True, remote="vps", cmd="host"),
+                     SimpleNamespace(json=True, remote=None, cmd="job-list")):
+            self.assertIsNone(cli._transient_remote_error(subprocess.TimeoutExpired(["x"], 1), args))
+
     def test_human_transport_error_is_bounded_and_does_not_claim_a_job(self):
         import sandbox.cli as cli
         from sandbox.transports.remote_jobs import RemoteJobTransportError

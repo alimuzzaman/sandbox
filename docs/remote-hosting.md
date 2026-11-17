@@ -2198,10 +2198,14 @@ published name changes nothing.
    that one transaction (the same gate, lease, edge lock and proofs as an
    activation), then runs the nginx checks again. Any other failure is
    refused as before.
-2. **Gate**: no durable job is active on the remote and none of
+2. **Gate**: none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
    A busy remote is refused (`tailnet_name_busy`), never waited for. A lock
-   that cannot be probed counts as held. The run then takes a per-name lease
+   that cannot be probed counts as held. Durable jobs are not a conflict:
+   tests, CI, attach and exec jobs never touch the edge, and every Sandbox
+   nginx write (host apply, route removal) holds the edge lock. The unlocked
+   reloads (certbot's deploy hook, `host destroy`'s certificate cleanup) run
+   `nginx -t` first and load only what is on disk. The run then takes a per-name lease
    on the remote (token and expiry, under a per-name lock), so a second
    controller working on the same name is refused (`tailnet_name_busy`) until
    the lease is released or expires. Under the lease the name is inspected
@@ -2220,7 +2224,7 @@ published name changes nothing.
    while it has more than 30 days left and the remote accepts it.
 5. **Activate**: the chain and the block are installed together by the remote
    program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
-   lease, re-checks the gate (locks and durable jobs, failing closed, and
+   lease, re-checks the gate (the locks, failing closed, and
    again right before `nginx -t` and right before the reload, including
    recovery reloads),
    writes an activation journal (`written`, `tested`, `loaded`), installs
@@ -2317,8 +2321,8 @@ proxy). Otherwise it leaves the records in place
 (`tailnet_name_dns_not_owned`). The provider has no compare-and-delete, so a
 change made between that read and the delete is not excluded.
 
-Limits: the host gate is a set of checks, not a reservation. A durable job or
-host lock taken between the last check and the reload is not excluded, and a
+Limits: the host gate is a set of checks, not a reservation. A host lock taken
+between the last check and the reload is not excluded, and a
 run suspended between re-proving its lease and the provider call it guards is
 not fenced. The public check probes one IPv4 address from this controller; it
 says nothing about IPv6 or other vantage points.

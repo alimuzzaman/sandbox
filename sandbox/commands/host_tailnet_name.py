@@ -116,48 +116,11 @@ def secret_service_factory(project_dir: str | None):
 
 
 def default_deps(project_dir: str | None):
-    from sandbox.core import _remote
     from sandbox.hosting.front_door import nginx
     from sandbox.hosting.tailnet_names import remote_program, service, state, verify
     from sandbox.hosting.tailnet_names.broker import Broker
-    from sandbox.hosting.server_cli_target import selected_owner_target
 
     broker = Broker(secret_service_factory(project_dir), acme_root=state.default_root() / "acme")
-
-    def active_jobs(remote: str) -> bool:
-        owner = selected_owner_target(remote)
-        if owner is not None:
-            from sandbox.core import _paths
-            from sandbox.jobs.registry import JobRepository
-            context = owner.require_current()
-            repository = JobRepository(_paths.RUNTIME_DIR / "jobs" / "registry.sqlite3")
-            try:
-                jobs = repository.list(active_only=True, limit=2)
-            finally:
-                repository.close()
-            owner.require_current()
-            if not isinstance(jobs, list) or any(not isinstance(row, dict) for row in jobs):
-                raise RuntimeError("job list unavailable")
-            if not any(row.get("job_id") == context.job_id for row in jobs):
-                return True  # Missing own row or other jobs filling the page keeps the gate shut.
-            return any(row.get("job_id") != context.job_id for row in jobs)
-        from sandbox.transports.remote_jobs import RemoteJobTransport
-        transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                                       ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                                       remote_sb_path=_remote.remote_sb_path)
-        page = transport.list(remote, active_only=True, limit=1)
-        jobs = page.get("jobs") if isinstance(page, dict) else None
-        if not isinstance(jobs, list):
-            raise RuntimeError("job list unavailable")
-        return bool(jobs)
-
-    def jobs_probe(entry) -> dict:
-        # The remote program re-checks jobs as the SSH user against this home.
-        from sandbox.hosting.server_cli_target import is_owner_target
-        if is_owner_target(entry):
-            context = entry.require_current()
-            return {"home": entry.sandbox_home(), "exclude_job_id": context.job_id}
-        return {"home": _remote.resolve_sandbox_home(entry)}
 
     return service.Deps(
         remote_call=lambda entry, action, payload: remote_program.call(entry, action, payload),
@@ -167,8 +130,6 @@ def default_deps(project_dir: str | None):
         issue=broker.issue,
         cached_chain=broker.cached_chain,
         find_lego=broker.find_lego,
-        active_jobs=active_jobs,
-        jobs_probe=jobs_probe,
         probe=verify.probe,
         store=lambda remote: state.StateStore(state.default_root(), remote),
     )

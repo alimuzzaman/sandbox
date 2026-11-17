@@ -53,6 +53,12 @@ class TraverseOnlyAncestorTests(unittest.TestCase):
         finally:
             os.close(descriptor)
 
+    def test_workspace_service_never_returns_a_traverse_only_final_directory(self):
+        # Callers fsync and fchmod under the returned descriptor (Opus re-check).
+        from sandbox.application.workspace_service import _open_absolute_directory_nofollow
+        with self.assertRaises(PermissionError):
+            _open_absolute_directory_nofollow(self.home.parent)
+
     def test_tailnet_name_remote_program_directory_walk(self):
         source = ROOT / "sandbox" / "hosting" / "tailnet_names" / "_remote_main.py"
         spec = importlib.util.spec_from_file_location("tailnet_remote_main_under_test", source)

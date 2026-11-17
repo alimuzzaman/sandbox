@@ -237,14 +237,17 @@ def _open_absolute_directory_nofollow(path: Path) -> int:
         raise OSError("directory locator is not absolute")
     descriptor = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        for part in path.parts[1:]:
+        parts = path.parts[1:]
+        for index, part in enumerate(parts):
             flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
             try:
                 child = os.open(part, os.O_RDONLY | flags, dir_fd=descriptor)
             except PermissionError:
                 # A traverse-only ancestor (e.g. /home at 0711) refuses
-                # O_RDONLY; O_PATH can still fstat it and open children.
-                if not hasattr(os, "O_PATH"):
+                # O_RDONLY; O_PATH can still fstat it and open children. The
+                # returned directory itself is fsynced by callers, so it
+                # must open O_RDONLY.
+                if index == len(parts) - 1 or not hasattr(os, "O_PATH"):
                     raise
                 child = os.open(part, os.O_PATH | flags, dir_fd=descriptor)
             os.close(descriptor)

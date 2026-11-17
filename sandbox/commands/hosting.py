@@ -6475,7 +6475,7 @@ def _ensure_stack_mail_name(validated: dict, remote_name: str, delivery: dict | 
         return None
     from sandbox.hosting.tailnet_names import stack_mail
     report = stack_mail.ensure(remote_name, stack["slug"], fqdn, port)
-    if report.get("status") != "ready":
+    if report.get("status") not in ("ready", "unconfigured"):
         print(f"warning: inbox name {fqdn} not published ({report.get('code')}): "
               f"{remote.redact_text(str(report.get('error') or ''))[:200]}; the next apply retries it",
               file=sys.stderr)

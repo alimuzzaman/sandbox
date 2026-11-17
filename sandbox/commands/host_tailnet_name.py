@@ -190,7 +190,17 @@ def cmd_host_tailnet_name(args) -> None:
                 upstream = models.Upstream.parse(args.upstream)
         ctx = resolve_context(args.remote, config, public=action in ("add", "renew"),
                               public_address=getattr(args, "public_address", None))
-        deps = default_deps(getattr(args, "project_dir", None))
+        server_held = bool(getattr(args, "server_held", False))
+        from sandbox.hosting.server_cli_target import is_owner_target
+        if server_held != is_owner_target(ctx.target.entry):
+            # --server-held reaches only a joined remote's server (it runs there
+            # as a server job); without it, the controller's own names.
+            raise TailnetNameError(USAGE, "--server-held needs a joined remote and runs only as its "
+                                   "server job" if server_held else
+                                   "this server job acts only with --server-held")
+        from sandbox.hosting.tailnet_names import state
+        deps = default_deps(str(state.default_root()) if server_held
+                            else getattr(args, "project_dir", None))
         if action == "add":
             result = service.add(ctx, deps, name, upstream,
                                  replace_upstream=bool(getattr(args, "replace_upstream", False)))

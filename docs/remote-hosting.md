@@ -1754,31 +1754,67 @@ port in Compose through the value, for example
 private `environment.env` file apply passes with `--env-file`.
 
 **Inbox name (`stack.mail_hostname`).** A hostname with exactly one `{slug}`,
-allowed only when `stack.ports` declares `mailpit`. After every completed apply of
-the stack, Sandbox publishes the rendered name as a
+allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
+equals one of the stack's routes or a hostname another target holds. After every
+completed apply of the stack, Sandbox publishes the rendered name as a
 [tailnet-only name](#tailnet-only-hostnames-sb-host-tailnet-name-spec-078) at
 `127.0.0.1:<mailpit port>`, through the same `add` flow (lease, edge lock, DNS
 ownership, both probes). It is never a public route: the inbox holds every
 account's sign-in links. A rerun is a no-op and a changed port replaces the
-upstream. The record is tagged with the stack (`stack` in the name's state), and
-`stack down` and `stack reap --remote` remove the names tagged for the stack. A
-name added by hand is never re-pointed or removed (`tailnet_name_upstream_differs`
-when its upstream differs), and a name tagged for another stack is refused
-(`tailnet_name_stack_conflict`). A tagged name of another stack on the same port
-outlived its stack (live stacks never share a port; the reap timer has no tailnet
-context), so the next apply on that port removes it first. Each apply also renews
-the other stack names within 30 days of expiry, so stack inbox certificates stay
-current while the host sees an apply at least once a month; a stack-tagged name is
-also covered by `renew --all` from the machine that holds its record.
+upstream.
+
+Ownership is decided under the name store's lock. The record is tagged with the
+stack (`stack` in the name's state). A name already published with another
+upstream and no record for this stack (for example one added by hand) is refused
+(`tailnet_name_upstream_differs`) and left alone; one with the same upstream is
+adopted and tagged. A name tagged for another stack is refused
+(`tailnet_name_stack_conflict`). `stack down` and `stack reap --remote` remove the
+names tagged for the stack, each removal re-checking under the lock that the name
+is still that stack's at the same upstream.
+
+Every apply first sweeps tagged names whose stack is gone: one on its own Mailpit
+port (live stacks never share a port), or one whose stack's lifetime record is
+`reaped` with no live copy, or that has neither a lifetime record nor a stack
+record on that machine. Without the lifetime listing nothing is swept. This is how
+names left by the reap timer (which has no tailnet-name context) or by a removal
+refused during `stack down` go away. Until that next apply, such a name keeps
+serving its old port; a target that is given that loopback port in between is
+reachable at the old name over the tailnet. Orphans and names not `published`
+are never renewed.
+
+Each apply renews at most one other live stack name within 30 days of expiry, the
+earliest first, so an apply stays bounded. A host with too few applies needs
+`sb host tailnet-name renew --all --remote R` (with `--server-held` for a joined
+remote, below).
 
 The name is published by the machine that runs the apply: the controller for a
 registered remote, the server itself for a joined remote, a this-server stack or a
 follow attempt. That machine needs the `tailnet_names` configuration, the
-Cloudflare token reference and `lego` described below; without them the apply still
-succeeds and reports `mail_name: {"status": "unconfigured"}`. Any other refusal
-(a host lock still held after four tries 20 seconds apart, a DNS conflict) is
-reported in `mail_name` and on stderr, never as an apply failure, and the next apply
-retries. The panel shows the stack's Open inbox link once the name is published.
+Cloudflare token reference (only the machine-level reference; a project's secret
+profiles are not used here) and `lego` described below. Without the block the
+apply still succeeds and reports `mail_name: {"status": "unconfigured"}`, with no
+warning. Any other refusal (a host lock still held after four tries 20 seconds
+apart, a DNS conflict) is reported in `mail_name` and on stderr, never as an apply
+failure, and the next apply retries. On a server whose only interface address is
+private, `add` cannot pick a public address for the exposure check and every
+apply reports `tailnet_name_public_address_invalid`. The panel shows the stack's
+Open inbox link once the name is published.
+
+A joined remote's server holds these names in its own
+`$SANDBOX_HOME/runtime/tailnet-names/`. Reach them with
+`sb host tailnet-name list|add|renew|remove ... --remote R --server-held`, which runs
+as a server job with the server's authority; without `--server-held` the command
+acts on the controller's names as before. After a rollback to a release without
+this feature, a rewrite of the record by that release drops its `stack` tag, and
+`stack down` then leaves the name in place.
+
+**Security.** On a joined remote this puts the Cloudflare token (DNS:Edit on every
+zone in `tailnet_names.zones`) and the ACME account on the server that runs PR
+stacks, readable by the Sandbox user there. Anything that runs as that user (a
+build step, a container escape) can then edit any record in those zones or pass a
+DNS-01 challenge for any name in them. Prefer a token scoped to a zone used only
+for tailnet names. This needs human security review before it is enabled on a
+server.
 
 Runtime text publication sends bytes only on the selected owner's process stdin
 or the registered remote's SSH stdin. A fixed eight-byte length header travels
@@ -2367,10 +2403,11 @@ contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
 `host tailnet-name` runs on the controller; only its fixed nginx runner uses the
 registered remote transport, and the command is never dispatched to a server job.
-The one exception is `stack.mail_hostname`: a stack apply that runs on the server
-(joined remote, this-server stack, follow attempt) publishes its inbox name with
-the server's own `tailnet_names` block, token reference, `lego`, ACME account and
-records under the server's `$SANDBOX_HOME/runtime/tailnet-names/`. When the
+The exceptions are `stack.mail_hostname` and `--server-held`: a stack apply that
+runs on the server (joined remote, this-server stack, follow attempt), and an
+explicit `--server-held` command, use the server's own `tailnet_names` block,
+token reference, `lego`, ACME account and records under the server's
+`$SANDBOX_HOME/runtime/tailnet-names/`. When the
 server adopts a name the controller published earlier (same block, same DNS-only
 record), the controller's record stays behind: do not run `remove` for that name from
 the controller, which still holds the DNS record id and would take the name down.

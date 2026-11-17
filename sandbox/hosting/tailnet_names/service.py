@@ -35,6 +35,7 @@ from sandbox.hosting.tailnet_names.models import (
     REMOTE_PATH_UNSAFE,
     RENEWAL_WINDOW_DAYS,
     SECRET_UNAVAILABLE,
+    STACK_CONFLICT,
     TAILNET_ADDRESS_UNBOUND,
     UNMANAGED,
     UPSTREAM_DIFFERS,
@@ -54,7 +55,7 @@ from sandbox.hosting.tailnet_names.verify import ProbeResult, public_outcome, ta
 
 LEASE_SECONDS = 1800
 TAILNET_ATTEMPTS = 5
-_REFUSALS = frozenset({BUSY, SECRET_UNAVAILABLE, UNMANAGED, REMOTE_PATH_UNSAFE,
+_REFUSALS = frozenset({BUSY, STACK_CONFLICT, SECRET_UNAVAILABLE, UNMANAGED, REMOTE_PATH_UNSAFE,
                        ZONE_NOT_ALLOWED, "tailnet_name_acme_client_untrusted",
                        "tailnet_name_acme_client_missing", "tailnet_name_state_corrupt"})
 _REMOTE_CODES = {
@@ -484,8 +485,10 @@ def _recover_then_preflight(ctx: Context, deps: Deps, run: _Run, name: TailnetNa
 
 def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
         replace_upstream: bool = False, stack: str | None = None) -> Result:
-    """``stack`` tags a new record with the stack that owns it; an existing
-    record keeps its tag (the caller decides whether a stack may take a name)."""
+    """``stack`` is stack mode (``stack.mail_hostname``), decided under the store lock:
+    a name tagged for another stack is refused, the upstream is replaced only on
+    a name already tagged for this stack, a new record is tagged, and a name
+    added by hand keeps its tag (none) and its upstream."""
     run = _Run("add", name.fqdn)
     target = ctx.target
     entry = target.entry
@@ -499,6 +502,11 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
         store = deps.store(target.name)
         with store.lock():
             existing = run.call("preflight", store.get, name.fqdn)
+            if stack is not None:
+                if existing is not None and existing.stack not in (None, stack):
+                    run.stop("preflight", STACK_CONFLICT,
+                             f"{name.fqdn} belongs to stack {existing.stack}", "refused")
+                replace_upstream = existing is not None and existing.stack == stack
             run.call("preflight", _zone_check, ctx, name, existing)
             try:
                 facts = deps.preflight(entry, [name.fqdn], nginx.route_file(name.route_name))
@@ -708,13 +716,21 @@ def renew(ctx: Context, deps: Deps, name: TailnetName | None, *, all_names: bool
         return RenewResult([failed])
 
 
-def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
+def remove(ctx: Context, deps: Deps, name: TailnetName, *, expect_stack: str | None = None,
+           expect_upstream: str | None = None) -> Result:
+    """``expect_stack`` (and ``expect_upstream``) are re-checked under the store
+    lock: a stack removes only its own name, as it was when the caller looked."""
     run = _Run("remove", name.fqdn)
     target = ctx.target
     try:
         store = deps.store(target.name)
         with store.lock():
             existing = run.call("preflight", store.get, name.fqdn)
+            if expect_stack is not None and (
+                    existing is None or existing.stack != expect_stack
+                    or (expect_upstream is not None and existing.upstream != expect_upstream)):
+                run.stop("preflight", STACK_CONFLICT,
+                         f"{name.fqdn} is no longer stack {expect_stack}'s as seen", "refused")
             run.call("preflight", _zone_check, ctx, name, existing)
             info = run.call("preflight", _inspect, ctx, deps, name.fqdn)
             row = info.rows.get(name.fqdn)

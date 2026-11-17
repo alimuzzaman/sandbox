@@ -659,6 +659,14 @@ def _up(args) -> dict:
                   if item.get("slug") != slug]
         others += _remote_holdings(remote_records, remote_name)
         hostname_ownership.assert_available(state, remote_name, project, hostnames, others)
+        mail = (validated.get("stack") or {}).get("mail_hostname")
+        if mail:
+            # The inbox name gets an exact tailnet DNS record: on a route's
+            # hostname it would take that public route offline.
+            if mail in hostnames:
+                raise StackCommandError(stack_template.TEMPLATE_INVALID,
+                                        f"stack.mail_hostname {mail} is also a route of this stack")
+            hostname_ownership.assert_available(state, remote_name, project, [mail], others)
         return hostnames
 
     def lifetime_request(previous: dict | None, ports: dict, hostnames: list[str]) -> dict:

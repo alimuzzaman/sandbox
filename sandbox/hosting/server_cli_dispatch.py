@@ -240,7 +240,10 @@ def _dispatch_host_if_selected(args) -> bool:
     stack_action = getattr(args, "image_action", None)
     # Tailnet names retain controller-owned DNS records, ACME state and broker
     # authority; their fixed remote runner already uses the registered transport.
-    selected = (action in {"plan", "status", "recover", "retire-delivery",
+    # Only an explicit --server-held reaches the names a server published for
+    # its own stacks (stack.mail_hostname), with the server's own authority.
+    selected = ((action == "tailnet-name" and bool(getattr(args, "server_held", False))) or
+                action in {"plan", "status", "recover", "retire-delivery",
                            "refresh-front-door", "destroy"} or
                 (action == "apply" and getattr(args, "confirm", False)) or
                 (action == "stack" and stack_action in {

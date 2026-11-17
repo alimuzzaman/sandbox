@@ -4025,13 +4025,24 @@ refuse. Valid exact primary publications retain their port, including saved
 aliases proven by retained physical machine evidence. Unknown owners reserve ports.
 Interface-qualified addresses are normalized while reserving the same TCP number.
 The Docker scan lists running containers twice and takes publications from every
-container in either list. Any listed container removed outright (Docker's own
-"no such object" reply for that id) restarts the scan from a fresh list, and churn
-that does not settle within eight scans refuses. One that leaves the list but
-still exists (a restart loop) keeps its host ports only as an unknown-owner
-reservation without container addresses, so its stale facts can refuse a port but
-never prove socket ownership. Any other Docker failure still
-refuses. The exec-target snapshot restarts its project's list/inspect/re-list the
+container in either list, reading each list's containers in one batched
+`docker inspect`. Only the applied target's own Compose project is scanned
+strictly: one of its containers removed outright (Docker's own "no such object"
+reply for that id) restarts the scan from a fresh list, and own churn that does not
+settle within eight scans refuses. Every other container (other targets, CI jobs,
+test stacks) only claims ports: one removed mid-scan is dropped, never retried, so
+container churn elsewhere on the host cannot fail an apply. A container that
+leaves the list but still exists (a restart loop) keeps its host ports only as an
+unknown-owner reservation without container addresses, so its stale facts can
+refuse a port but never prove socket ownership. Two containers claiming one TCP
+number make only that number unusable. Any other Docker failure still refuses.
+
+A refused probe prints one fixed line, `sandbox-port-probe: <stage>/<kind>` (for
+example `own_containers/unsettled`, `socket_probe/exit`, or `port_check/TCP port
+20001 has an unknown listener`), and the apply error carries it as
+`hosting_port_observation_failed: host port probe failed (<stage>/<kind>; other
+output withheld)`. Only a line of exactly that shape is relayed; Docker output,
+paths and exception text never are. The exec-target snapshot restarts its project's list/inspect/re-list the
 same way whenever a container vanishes or the re-list differs.
 For IPv6, both `[address%interface]` and the `[address]%interface` form emitted
 by `ss` are accepted. Unmatched brackets and duplicate scopes still refuse.

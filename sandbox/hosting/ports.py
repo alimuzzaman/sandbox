@@ -4,7 +4,8 @@ API: observe_ports(runner, *, identity, runtime_dir) invokes a selected bounded
 runner and returns a validated version-1 snapshot. identity is {target, uid, home}
 from the caller's current physical target, never a remote alias. validate_snapshot
 also accepts serialized snapshots. primary_ports/check_pair consume exact
-{project, service, container_port} owners. recheck_command builds a read-only
+{project, service, container_port} owners. own_projects scopes the strict
+container scan to the applied target; other targets only claim ports. recheck_command builds a read-only
 remote check for use INSIDE root's ingress flocks, followed by && Compose up.
 None is never an observation. Offline allocation remains explicitly provisional.
 Unknown listeners reserve their entire TCP number. A listener exception requires
@@ -148,25 +149,36 @@ def validate_snapshot(value, *, identity=None, now=None):
             seen.add(encoded)
     if total > MAX_ROWS or len(json.dumps(value).encode()) > MAX_BYTES:
         _fail("port observation exceeds limits")
-    # Two containers claiming one bind is ambiguous even when their labels agree.
-    claims = {}
-    containers = {}
-    for row in value["publications"]:
-        claim = (row["port"], row["address"])
-        if claim in claims:
-            _fail("duplicate Docker bind owner")
-        claims[claim] = row["container"]
-        if row["port"] in containers and containers[row["port"]] != row["container"]:
-            _fail("multiple containers own one TCP port number")
-        containers[row["port"]] = row["container"]
     return value
+
+
+def _single_owner(snapshot, port):
+    """Two containers claiming one TCP number make that number ambiguous.
+
+    Scoped to the number being decided: another target's mid-recreate
+    claims must not refuse an unrelated port.
+    """
+    claims = set()
+    containers = set()
+    for row in snapshot["publications"]:
+        if row["port"] != port:
+            continue
+        if row["address"] in claims:
+            _fail("duplicate Docker bind owner")
+        claims.add(row["address"])
+        containers.add(row["container"])
+    if len(containers) > 1:
+        _fail("multiple containers own one TCP port number")
 
 
 def primary_ports(snapshot, owner):
     snapshot = validate_snapshot(snapshot)
     _owner(owner)
-    return {row["port"] for row in snapshot["publications"]
-            if all(row[key] == value for key, value in owner.items())}
+    found = {row["port"] for row in snapshot["publications"]
+             if all(row[key] == value for key, value in owner.items())}
+    for port in found:
+        _single_owner(snapshot, port)
+    return found
 
 
 def check_pair(snapshot, port, owner, *, gate_owner=None, gate_offset=0):
@@ -183,6 +195,7 @@ def check_pair(snapshot, port, owner, *, gate_owner=None, gate_offset=0):
         pairs.append((port + gate_offset, gate_owner))
     for selected, expected in pairs:
         _port(selected)
+        _single_owner(snapshot, selected)
         own = [row for row in snapshot["publications"]
                if row["port"] == selected and row["address"] == "127.0.0.1"
                and all(row[key] == value for key, value in expected.items())]
@@ -306,9 +319,13 @@ def strict_pairs(items):
         if key in result: fail()
         result[key]=value
     return result
-def fail(): raise RuntimeError("port observation refused")
+# Failures name a fixed stage and kind only, never Docker output, so the
+# controller can relay them (STAGE is set by collect/scan as they progress).
+STAGE=['start']
+class Refused(RuntimeError): pass
+def fail(kind='invalid'): raise Refused('port observation refused: '+STAGE[0]+'/'+kind)
 def attempt(args, payload=None):
-    if time.monotonic()>DEADLINE: fail()
+    if time.monotonic()>DEADLINE: fail('deadline')
     import tempfile
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, tempfile.TemporaryFile() as source:
         if payload is not None: source.write(payload.encode()); source.seek(0)
@@ -316,14 +333,14 @@ def attempt(args, payload=None):
         deadline=min(DEADLINE,time.monotonic()+15)
         while p.poll() is None:
             if time.monotonic()>deadline or os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT:
-                p.kill(); p.wait(); fail()
+                p.kill(); p.wait(); fail('deadline' if time.monotonic()>DEADLINE else 'timeout' if time.monotonic()>deadline else 'output_limit')
             time.sleep(.02)
-        if os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT: fail()
+        if os.fstat(out.fileno()).st_size>LIMIT or os.fstat(err.fileno()).st_size>LIMIT: fail('output_limit')
         out.seek(0); err.seek(0)
         return p.returncode, out.read(LIMIT+1).decode("utf-8", "strict"), err.read(LIMIT+1).decode("utf-8", "strict")
 def run(args, payload=None):
     code,out,_=attempt(args, payload)
-    if code: fail()
+    if code: fail('exit')
     return out
 def vanished(cid, code, err):
     # Only Docker's own not-found reply for this exact id counts as removal.
@@ -333,18 +350,20 @@ def vanished(cid, code, err):
 class Churn(Exception): pass
 SCANS=8
 FORMAT='{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .NetworkSettings.Ports}},"addresses":"{{range .NetworkSettings.Networks}}{{.IPAddress}},{{.GlobalIPv6Address}},{{end}}"}'
+LIST_FORMAT='[{{json .ID}},{{json (.Label "com.docker.compose.project")}}]'
 def listed():
-    ids=run(['docker','ps','--no-trunc','--quiet']).splitlines()
-    if len(ids)>ROWS or len(set(ids))!=len(ids) or any(not re.fullmatch('[0-9a-f]{64}',cid) for cid in ids): fail()
-    return ids
-def inspect_one(cid):
-    """Publication rows of one container, or None when Docker says it is gone."""
-    # Allow-listed projections only. Never collect Config.Env or raw inspect.
-    code,out,err=attempt(['docker','inspect','--format',FORMAT,cid])
-    if code:
-        if vanished(cid,code,err): return None
-        fail()
-    item=json.loads(out,object_pairs_hook=strict_pairs)
+    """Running container id -> its Compose project label ('' when unlabeled)."""
+    lines=run(['docker','ps','--no-trunc','--format',LIST_FORMAT]).splitlines()
+    if len(lines)>ROWS: fail()
+    found={}
+    for line in lines:
+        item=json.loads(line,object_pairs_hook=strict_pairs)
+        if type(item) is not list or len(item)!=2 or type(item[1]) is not str: fail()
+        cid=item[0]
+        if type(cid) is not str or not re.fullmatch('[0-9a-f]{64}',cid) or cid in found: fail()
+        found[cid]=item[1]
+    return found
+def publication_rows(item, cid):
     if item['ports'] is None: item['ports']={}
     if item['id']!=cid or type(item['ports']) is not dict: fail()
     rows=[]
@@ -360,56 +379,93 @@ def inspect_one(cid):
             rows.append(dict(address=bind['HostIp'],port=int(bind['HostPort']),container=cid,project=item['project'] or 'unknown:'+cid,service=item['service'] or 'unknown',container_port=int(match[1]),container_addresses=addresses))
             if len(rows)>ROWS: fail()
     return rows
-def scan():
-    # Facts cover every container running in the first list OR the re-list, so
-    # nothing that ran during the scan is silently left out. Any listed
-    # container removed outright (a recreate may hand its port to a new id)
-    # restarts the scan. One that leaves the running list but still exists (a
-    # restart loop drops in and out every few seconds) keeps its host ports
-    # only as an unknown-owner reservation with no container addresses: its
+def inspect_many(ids, form=None):
+    """One Docker call for every id: {id: item or None when Docker says it is gone}.
+
+    Allow-listed projections only. Never collect Config.Env or raw inspect.
+    Only Docker's own per-id not-found lines may accompany a failed exit.
+    """
+    if not ids: return {}
+    code,out,err=attempt(['docker','inspect','--format',form or FORMAT,*ids])
+    items={}
+    for line in out.splitlines():
+        if not line.strip(): continue
+        item=json.loads(line,object_pairs_hook=strict_pairs)
+        cid=item['id'] if type(item) is dict else item
+        if type(cid) is not str or cid not in ids or cid in items: fail()
+        items[cid]=item
+    gone=[cid for cid in ids if cid not in items]
+    lines=[line.strip() for line in err.splitlines() if line.strip()]
+    if code==0:
+        if gone or lines: fail()
+        return items
+    if not gone or len(lines)!=len(gone) or not all(vanished(cid,1,line) for cid,line in zip(gone,lines)): fail('docker_error')
+    return dict(items,**{cid:None for cid in gone})
+def scan(own):
+    # Spec: an apply observes only its own target strictly. Containers of the
+    # own Compose projects follow the full rule below; any churn among them
+    # restarts the scan. Every other container is read in ONE batched inspect
+    # and only claims ports: one removed mid-scan (another target's recreate)
+    # is dropped instead of restarting, so foreign applies cannot exhaust the
+    # scan budget. Facts cover every container running in the first list OR
+    # the re-list. An own container removed outright restarts the scan; one
+    # that leaves the running list but still exists (a restart loop) keeps its
+    # host ports only as an unknown-owner claim with no container addresses:
     # stale facts can refuse a port but never prove socket ownership.
+    STAGE[0]='container_list'
     first=listed()
     rows={}
-    for cid in first:
-        found=inspect_one(cid)
-        if found is None: raise Churn()
-        rows[cid]=found
+    STAGE[0]='container_inspect'
+    def take(ids):
+        for cid,item in inspect_many(ids).items():
+            if item is None:
+                if mine.get(cid): raise Churn()
+                continue
+            rows[cid]=publication_rows(item,cid)
+    mine={cid:(project in own) for cid,project in first.items()}
+    take(list(first))
+    STAGE[0]='container_relist'
     second=listed()
-    for cid in second:
-        if cid in rows: continue
-        found=inspect_one(cid)
-        if found is None: raise Churn()
-        rows[cid]=found
-    for cid in first:
-        if cid in second: continue
-        code,_,err=attempt(['docker','inspect','--format','{{json .Id}}',cid])
-        if code:
-            if vanished(cid,code,err): raise Churn()
-            fail()
+    STAGE[0]='container_inspect'
+    entered=[cid for cid in second if cid not in first]
+    mine.update({cid:(second[cid] in own) for cid in entered})
+    take(entered)
+    departed=[cid for cid in first if cid not in second and cid in rows]
+    for cid,item in inspect_many(departed,'{"id":{{json .Id}}}').items():
+        if item is None:
+            if mine[cid]: raise Churn()
+            del rows[cid]
+            continue
         rows[cid]=[dict(row,project='unknown:'+cid,service='unknown',container_addresses=[]) for row in rows[cid]]
     publications=[row for cid in rows for row in rows[cid]]
     if len(publications)>ROWS: fail()
     return publications
-def settled_scan():
-    # A container removed between list and inspect (another session's
-    # `docker run --rm`) restarts the whole scan from a fresh list. Facts come
-    # only from one scan whose every inspect succeeded and whose re-list
-    # matched; churn that never settles within SCANS refuses.
+def settled_scan(own):
+    # Facts come only from one scan whose own inspects all succeeded; own
+    # churn that never settles within SCANS refuses.
+    if type(own) is not list or not own or any(type(p) is not str or not p for p in own): fail()
+    own=set(own)
     for _ in range(SCANS):
         try:
-            return scan()
+            return scan(own)
         except Churn:
             continue
-    fail()
-def collect(identity, runtime):
+    STAGE[0]='own_containers'
+    fail('unsettled')
+def collect(identity, runtime, own):
+    STAGE[0]='identity'
     if os.getuid()!=identity['uid'] or not pathlib.Path(identity['home']).is_dir(): fail()
+    STAGE[0]='docker_info'
     engine=json.loads(run(['docker','info','--format','{{json .ID}}']))
     if type(engine) is not str or not engine or len(engine)>512: fail()
-    publications=settled_scan()
+    publications=settled_scan(own)
+    STAGE[0]='socket_probe'
     socket_args=['python3','-I','-S','-c',SOCKET_PROGRAM]
     if os.geteuid()!=0: socket_args=['sudo','-n',*socket_args]
     listeners=json.loads(run(socket_args,json.dumps(publications)),object_pairs_hook=strict_pairs)
-    if json.loads(run(['docker','info','--format','{{json .ID}}']))!=engine: fail()
+    STAGE[0]='docker_info'
+    if json.loads(run(['docker','info','--format','{{json .ID}}']))!=engine: fail('engine_changed')
+    STAGE[0]='host_summaries'
     root=pathlib.Path(runtime)
     if not root.is_dir(): fail()
     reservations=[]
@@ -461,23 +517,69 @@ def collect(identity, runtime):
 '''
 
 
-def probe_command(*, identity, runtime_dir):
+# Remote failure line: the probe's own fixed reason, or a port-check refusal
+# (fixed text plus a TCP number), or a stage plus an exception class name.
+# The controller relays only a line matching REASON exactly.
+REASON_PREFIX = "sandbox-port-probe: "
+REASON = re.compile(r"sandbox-port-probe: ([a-z_]{1,32})/([A-Za-z0-9_ ]{1,80})")
+_REPORT = (
+    "except Exception as exc:\n"
+    "    if isinstance(exc,Refused): kind=str(exc).rsplit('/',1)[1]\n"
+    "    elif type(exc).__name__=='PortObservationError': kind=str(exc)\n"
+    "    else: kind=type(exc).__name__\n"
+    "    if not re.fullmatch('[A-Za-z0-9_ ]{1,80}',kind): kind='invalid'\n"
+    "    sys.stderr.write('" + REASON_PREFIX + "'+STAGE[0]+'/'+kind+'\\n'); sys.exit(3)\n")
+
+
+def refusal_reason(stderr) -> str | None:
+    """The probe's fixed failure line, or None; never other remote output."""
+    if type(stderr) is not str:
+        return None
+    for line in reversed(stderr.splitlines()[-20:]):
+        match = REASON.fullmatch(line.strip())
+        if match:
+            return f"{match[1]}/{match[2]}"
+    return None
+
+
+def _own_projects(projects):
+    if (type(projects) not in (list, tuple) or not projects or len(projects) > 8
+            or len(set(projects)) != len(projects)):
+        _fail("invalid own Compose projects")
+    for project in projects:
+        _text(project)
+    return list(projects)
+
+
+def probe_command(*, identity, runtime_dir, own_projects):
     _identity(identity)
+    own_projects = _own_projects(own_projects)
     _text(runtime_dir)
     if not runtime_dir.startswith("/"):
         _fail("runtime directory must be absolute")
-    invocation = "\nresult=collect(json.loads(sys.argv[1]),sys.argv[2])\nencoded=json.dumps(result,separators=(',',':'))\nif len(encoded.encode())>LIMIT: fail()\nprint(encoded)\n"
-    return shlex.join(["python3", "-c", _PROBE + invocation, json.dumps(identity), runtime_dir])
+    invocation = ("\ntry:\n    result=collect(json.loads(sys.argv[1]),sys.argv[2],json.loads(sys.argv[3]))\n"
+                  + _REPORT + "encoded=json.dumps(result,separators=(',',':'))\n"
+                  "if len(encoded.encode())>LIMIT: fail('output_limit')\nprint(encoded)\n")
+    return shlex.join(["python3", "-c", _PROBE + invocation, json.dumps(identity), runtime_dir,
+                       json.dumps(own_projects)])
 
 
-def observe_ports(runner: Callable, *, identity, runtime_dir):
-    """runner(command, timeout=..., max_output=..., terminate_on_output_limit=True)."""
-    result = runner(probe_command(identity=identity, runtime_dir=runtime_dir), timeout=90,
+def observe_ports(runner: Callable, *, identity, runtime_dir, own_projects):
+    """runner(command, timeout=..., max_output=..., terminate_on_output_limit=True).
+
+    own_projects: the Compose projects of the target being applied; only
+    their containers are scanned strictly (see the probe's scan()).
+    """
+    result = runner(probe_command(identity=identity, runtime_dir=runtime_dir,
+                                  own_projects=own_projects), timeout=90,
                     max_output=MAX_BYTES, terminate_on_output_limit=True)
     if (result.returncode != 0 or getattr(result, "termination_reason", None)
             or getattr(result, "stdout_truncated", False)
             or getattr(result, "stderr_truncated", False)):
-        _fail("host port probe failed (underlying output withheld)")
+        reason = refusal_reason(getattr(result, "stderr", None))
+        if reason is None and getattr(result, "termination_reason", None) == "timeout":
+            reason = "transport/timeout"
+        _fail("host port probe failed (" + (reason or "reason unavailable") + "; other output withheld)")
     return validate_snapshot(result.stdout, identity=identity)
 
 
@@ -500,14 +602,17 @@ def recheck_command(*, identity, runtime_dir, port, owner, engine_id, gate_owner
     # Build from the actual validation functions to keep remote checks identical.
     validators = '\n'.join(inspect.getsource(fn) for fn in
                            (_fail, _port, _text, _identity, _address, _owner,
-                            validate_snapshot, check_pair))
+                            validate_snapshot, _single_owner, check_pair))
     config = dict(identity=identity, engine_id=engine_id, runtime=runtime_dir, port=port, owner=owner,
                   gate_owner=gate_owner, gate_offset=gate_offset)
     program = (_PROBE + '\nMAX_BYTES=LIMIT\nMAX_ROWS=ROWS\nMAX_AGE=120\n'
                'class PortObservationError(ValueError): pass\n' + validators +
-               '\nc=json.loads(sys.argv[1])\ns=collect(c["identity"],c["runtime"])\n'
-               'if s["engine_id"]!=c["engine_id"]: _fail("Docker daemon changed")\n'
-               'check_pair(s,c["port"],c["owner"],gate_owner=c["gate_owner"],gate_offset=c["gate_offset"])\n')
+               '\nc=json.loads(sys.argv[1])\ntry:\n'
+               '    s=collect(c["identity"],c["runtime"],[c["owner"]["project"]])\n'
+               '    if s["engine_id"]!=c["engine_id"]: _fail("Docker daemon changed")\n'
+               '    STAGE[0]="port_check"\n'
+               '    check_pair(s,c["port"],c["owner"],gate_owner=c["gate_owner"],gate_offset=c["gate_offset"])\n'
+               + _REPORT)
     return shlex.join(["python3", "-c", program, json.dumps(config)])
 
 

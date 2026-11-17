@@ -771,10 +771,18 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     min_free_disk_mb = deploy.get("min_free_disk_mb", 1024)
     if isinstance(min_free_disk_mb, bool) or not isinstance(min_free_disk_mb, int) or not 1 <= min_free_disk_mb <= 1_048_576:
         raise HostingError("deploy.min_free_disk_mb must be an integer between 1 and 1048576")
+    from sandbox.hosting import blue_green
+    try:
+        blue_green_plan = blue_green.validate(deploy, {
+            "service": str(compose["service"]), "init_services": init_services,
+            "background_services": background_services})
+    except ValueError as exc:
+        raise HostingError(str(exc)) from None
     deploy = {
         **deploy,
         "min_free_disk_mb": min_free_disk_mb,
         "derived_environment": _derived_environment(deploy, secrets),
+        "blue_green_plan": blue_green_plan,
     }
     cf = env.get("cloudflare") or {}
     proxied_origin_ca = (

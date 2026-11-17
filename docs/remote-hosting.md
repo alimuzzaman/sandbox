@@ -945,6 +945,22 @@ of silently using a fixed 15-minute cutoff. Optional `healthcheck.deadline_secon
 durable job covers the whole apply including build and later phases, a slow build plus
 a long deadline needs a larger job timeout.
 
+Zero-downtime applies (`deploy.strategy`, default `auto`). When the target is
+already serving, apply starts the new revision's stateless services beside the
+running one as the side project `sandbox-hostside-<project>-<env>` on loopback port
+P + 1000, health-checks it, moves the route's `127.0.0.1:P` upstream there through
+the front-door adapter, recreates the base project while the side serves, moves the
+route back, and removes the side. A side that fails its health check is removed and
+the apply fails with `blue_green_side_unhealthy` while the old revision keeps
+serving, untouched. List every database and other stateful server in
+`deploy.blue_green.shared` (they stay single, in the base project, and skip the
+pushed-revision check); services publishing their own host port (Mailpit) and the
+login gate are shared automatically. `deploy.strategy: in-place` restores the
+plain recreate; `blue-green` refuses an ineligible apply instead of falling back.
+Init services, a private target, a first apply, or an undeclared stateful service
+mean `auto` recreates in place and prints why. Design, limits and phases:
+`docs/research/blue-green-stack-apply.md`.
+
 Build context size. `host apply` ships the Git commit plus a capped overlay of
 untracked, not-ignored files (4096 files / 64 MiB; over the cap the apply refuses), so
 gitignored local directories such as `.pnpm-store`, `node_modules`, or `.next/cache`

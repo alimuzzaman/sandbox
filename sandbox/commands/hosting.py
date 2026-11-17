@@ -2108,11 +2108,181 @@ def _locked_host_compose_up(validated, runtime, command):
                                       locks=(_CADDY_LOCK_PATH, nginx.LOCK_PATH))
 
 
+class _SideLoad:
+    """Blue-green apply by side-loading (docs/research/blue-green-stack-apply.md).
+
+    start() runs the new revision's colored services as the side project on
+    P + 1000, health-checks them and moves the route there, so the base can be
+    recreated while the side serves. A failure before the route moves leaves
+    the base and route untouched. Once ``serving``, ``route`` is the rollback
+    baseline and the side stays up until teardown().
+    """
+
+    def __init__(self, entry: dict, validated: dict, runtime: dict, *, edge, caddy_name: str,
+                 previous_route: str | None, previous_entry: dict):
+        from sandbox.hosting import blue_green
+        self.bg = blue_green
+        self.entry = entry
+        self.validated = validated
+        self.runtime = runtime
+        self.edge = edge
+        self.caddy_name = caddy_name
+        self.previous_route = previous_route
+        self.previous_entry = previous_entry or {}
+        self.port = runtime["loopback_port"]
+        self.side_port = blue_green.side_port(self.port)
+        self.project = blue_green.side_project(validated)
+        self.network = blue_green.side_network(validated)
+        self.strategy = validated["deploy"]["blue_green_plan"]["strategy"]
+        self.serving = False
+        self.route = None
+        self.colored: list[str] = []
+        self.shared: list[str] = []
+        self.skipped: str | None = None
+
+    def _ineligible(self, reason: str, progress) -> bool:
+        if self.strategy == "blue-green":
+            raise hosting.HostingError(f"blue_green_ineligible: {reason}")
+        self.skipped = reason
+        if progress is not None:
+            progress(f"Blue-green skipped ({reason}); recreating in place")
+        return False
+
+    def _side_prefix(self, env_file: str, side_file: str) -> str:
+        return " ".join(shlex.quote(part) for part in (
+            f"SANDBOX_HOST_ENV_FILE={env_file}", "docker", "compose", "--env-file", env_file,
+            "-p", self.project, "-f", side_file))
+
+    def _running_side(self) -> bool:
+        label = shlex.quote(f"label=com.docker.compose.project={self.project}")
+        return bool(_remote_checked(self.entry, f"docker ps -aq --filter {label}", timeout=30).strip())
+
+    def start(self, prefix: str, runtime_dir: str, env_file: str, progress=None,
+              apply_log: str | None = None) -> bool:
+        """Steps 2-5. True when the side serves; False to recreate in place."""
+        from sandbox.hosting import login_service
+        if self.strategy == "in-place":
+            return False
+        if login_service.is_private(self.validated.get("login_service")):
+            return self._ineligible("a private target closes its route first", progress)
+        # Live facts decide (the route and a running base primary below); a failed
+        # earlier apply leaves its record pending while the old revision serves.
+        if self.previous_entry.get("loopback_port") != self.port:
+            return self._ineligible("no earlier apply on this loopback port", progress)
+        route = self.edge.read_previous(self.caddy_name)
+        if self.bg.serves_port(route, self.side_port) and self._running_side():
+            # A previous apply failed after its switch: that side still serves.
+            self.serving, self.route = True, route
+            if progress is not None:
+                progress(f"Blue-green: the side project already serves on {self.side_port}")
+            return True
+        if self._running_side():
+            self.teardown(progress)
+        if not self.bg.serves_port(route, self.port):
+            return self._ineligible(f"the installed route does not serve 127.0.0.1:{self.port}", progress)
+        primary = shlex.quote(self.validated["compose"]["service"])
+        if not _remote_checked(self.entry, f"{prefix} ps -q --status running {primary}",
+                               timeout=60).strip():
+            return self._ineligible("the base primary service is not running", progress)
+        raw = remote.ssh_run_bounded(self.entry, f"{prefix} config --format json",
+                                     timeout=120, max_output=4 * 1024 * 1024,
+                                     terminate_on_output_limit=True)
+        if (raw.returncode or getattr(raw, "termination_reason", None)
+                or getattr(raw, "stdout_truncated", False)):
+            return self._ineligible("the resolved Compose model is unavailable", progress)
+        try:
+            model = json.loads(raw.stdout)
+            split = self.bg.split(model, self.validated, gate_service=login_service.SERVICE_NAME)
+            self.colored, self.shared = split["colored"], split["shared"]
+            side = self.bg.render_side(
+                model, self.validated, base_project=self.runtime["compose_project"],
+                colored=self.colored, shared=self.shared, port=self.side_port)
+        except (ValueError, TypeError, KeyError) as exc:
+            reason = str(exc) if isinstance(exc, self.bg.Ineligible) else "the resolved Compose model is unusable"
+            return self._ineligible(reason, progress)
+        side_file = f"{runtime_dir}/side.compose.json"
+        # The resolved model carries interpolated secrets: 0600, never logged.
+        _write_remote_text(self.entry, side_file, json.dumps(side, sort_keys=True), "0600")
+        side_prefix = self._side_prefix(env_file, side_file)
+        base = shlex.quote(self.runtime["compose_project"])
+        connect = " ".join(
+            f"for c in $(docker ps -q --filter label=com.docker.compose.project={base} "
+            f"--filter label=com.docker.compose.service={shlex.quote(name)}); do "
+            f"docker network connect --alias {shlex.quote(name)} {shlex.quote(self.network)} \"$c\" "
+            "2>/dev/null || docker network inspect -f '{{json .Containers}}' "
+            f"{shlex.quote(self.network)} | grep -q \"$c\" || exit 9; done;"
+            for name in self.shared)
+        up = (f"(docker network inspect {shlex.quote(self.network)} >/dev/null 2>&1 || "
+              f"docker network create --label sandbox.hostside={base} {shlex.quote(self.network)} "
+              f">/dev/null) && {connect} {side_prefix} up -d --no-build --pull never --no-deps "
+              + " ".join(shlex.quote(name) for name in self.colored))
+        side_runtime = {**self.runtime, "compose_project": self.project,
+                        "loopback_port": self.side_port}
+        command = _locked_host_compose_up({**self.validated, "login_service": None},
+                                          side_runtime, up)
+        if progress is not None:
+            progress(f"Blue-green: starting {', '.join(self.colored)} beside the running "
+                     f"revision on 127.0.0.1:{self.side_port} (shared: {', '.join(self.shared) or 'none'})")
+        try:
+            _remote_checked(self.entry, command, timeout=max(300, int(
+                self.validated["compose"].get("build_timeout_seconds", 900))),
+                progress=progress, log_path=apply_log, log_phase="blue_green_side_start")
+            _verify_remote_health(self.entry, side_runtime, progress)
+        except Exception as exc:
+            self._cleanup_quietly(progress)
+            raise hosting.HostingError(
+                "blue_green_side_unhealthy: the new revision did not become healthy beside the "
+                f"running one; the running revision keeps serving untouched ({exc})") from exc
+        try:
+            current = self.edge.read_previous(self.caddy_name)
+            switched = self.bg.swap_upstream(current, self.port, self.side_port)
+            self.edge.configure(self.caddy_name, switched, current, log_path=apply_log)
+        except Exception as exc:
+            self._cleanup_quietly(progress)
+            raise hosting.HostingError(
+                f"blue_green_switch_failed: the route stayed on the running revision ({exc})") from exc
+        self.serving, self.route = True, switched
+        if progress is not None:
+            progress(f"Blue-green: route switched to the new revision on {self.side_port}")
+        return True
+
+    def base_up_command(self, prefix: str, pull_flag: str) -> str:
+        """Step 6: shared services converge, colored ones are recreated."""
+        shared = " ".join(shlex.quote(name) for name in self.shared)
+        colored = " ".join(shlex.quote(name) for name in self.colored)
+        first = (f"{prefix} up -d{pull_flag} --no-build --no-deps --remove-orphans {shared} && "
+                 if shared else "")
+        return (first + f"{prefix} up -d{pull_flag} --no-build --no-deps --force-recreate "
+                f"--renew-anon-volumes {colored}")
+
+    def teardown(self, progress=None) -> None:
+        """Step 8 (also a stale side): never touches the base's volumes."""
+        label = shlex.quote(f"label=com.docker.compose.project={self.project}")
+        network = shlex.quote(self.network)
+        _remote_checked(self.entry, (
+            f"docker ps -aq --filter {label} | xargs -r docker rm -f >/dev/null && "
+            f"if docker network inspect {network} >/dev/null 2>&1; then "
+            f"for c in $(docker network inspect -f '{{{{range $k, $v := .Containers}}}}{{{{$k}}}} {{{{end}}}}' {network}); do "
+            f"docker network disconnect -f {network} \"$c\" >/dev/null 2>&1 || true; done; "
+            f"docker network rm {network} >/dev/null; fi"), timeout=120)
+        self.serving = False
+        if progress is not None:
+            progress("Blue-green: side project removed")
+
+    def _cleanup_quietly(self, progress) -> None:
+        try:
+            self.teardown(progress)
+        except Exception as exc:  # The base still serves; destroy also removes it.
+            if progress is not None:
+                progress(f"Blue-green: side cleanup incomplete ({remote.redact_text(str(exc))[:200]})")
+
+
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
                  runtime_convergence_proof: dict | None = None,
-                 local_images_verified: bool = False) -> None:
+                 local_images_verified: bool = False,
+                 side_load: "_SideLoad | None" = None) -> None:
     _assert_login_service_applicable(validated)
     proof = runtime_convergence_proof or {}
     revisions = [proof.get(key) for key in (
@@ -2213,6 +2383,11 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         converge_flags = " --no-build --force-recreate --always-recreate-deps --renew-anon-volumes"
     pull_flag = " --pull never" if local_images_verified else ""
     command = f"{prefix} up -d{pull_flag}{converge_flags} --remove-orphans {service_args}"
+    if (side_load is not None and force_recreate and not init_services
+            and side_load.start(prefix, runtime_dir, env_file, progress, apply_log)):
+        command = side_load.base_up_command(prefix, pull_flag)
+    elif side_load is not None and init_services:
+        side_load._ineligible("init services run as Compose dependencies of the recreate", progress)
     command = _locked_host_compose_up(validated, runtime, command)
     _remote_checked(
         entry, command, timeout=build_timeout,
@@ -2634,9 +2809,13 @@ def _classify_host_observation(validated: dict, observation: dict,
     else:
         health = {"state": "ready"}
     checks = []
+    # Shared blue-green services keep their container across revisions
+    # (docs/research/blue-green-stack-apply.md); only colored ones must carry it.
+    from sandbox.hosting.blue_green import revision_exempt
+    exempt = revision_exempt(validated)
     for raw in check_values[
             :_HOST_OBSERVATION_MAX_SERVICES * _HOST_OBSERVATION_MAX_KEYS]:
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or raw.get("service") in exempt:
             continue
         observed_revision = raw.get("observed")
         state = ("match" if expected_revision and observed_revision == expected_revision
@@ -2651,7 +2830,7 @@ def _classify_host_observation(validated: dict, observation: dict,
         checks.append(item)
     expected_pairs = {
         (service, key)
-        for service in services
+        for service in services if service not in exempt
         for key, provider in validated["deploy"].get("derived_environment", {}).items()
         if provider == "pushed_commit_sha"
     }
@@ -6058,6 +6237,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     edge_cache_receipt = None
     # Set once this apply's own route is live, so a private rollback can keep it.
     edge_live = {"new": False}
+    side_load = (_SideLoad(entry, validated, runtime, edge=edge, caddy_name=caddy_name,
+                           previous_route=previous_caddy, previous_entry=previous_entry)
+                 if private_closure is None else None)
 
     def rollback() -> None:
         nonlocal reservation
@@ -6084,9 +6266,12 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                     client.ssl_mode(zone_id, mode)
             except Exception as exc:
                 failures.append(f"SSL mode restore for {zone_id}: {exc}")
+        # A serving side is the healthy new revision: keep the route on it.
+        baseline = (side_load.route if side_load is not None and side_load.serving
+                    else previous_caddy)
         try:
             outcome = _restore_edge_fail_closed(
-                edge, caddy_name, previous_caddy, validated=validated,
+                edge, caddy_name, baseline, validated=validated,
                 new_edge_live=edge_live["new"], log_path=apply_log)
             if outcome != "restored" and stream_progress is not None:
                 stream_progress(f"rollback kept the target private: front door route {outcome}")
@@ -6189,6 +6374,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                 stream_progress, apply_log,
                 force_recreate=True,
                 local_images_verified=local_image_evidence is not None,
+                side_load=side_load,
             )
             if active_image_lease is not None:
                 active_image_lease.require()
@@ -6396,6 +6582,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                     raise RuntimeError(f"edge-cache purge failed ({exc.code})") from None
                 state["hosts"][key]["edge_cache_purge"] = edge_cache_receipt
                 durable_save(state)
+        if side_load is not None and side_load.serving:
+            # Step 8: the route is back on the base and verified.
+            side_load._cleanup_quietly(stream_progress)
         _release_host_apply_reservation(entry, reservation)
         reservation = None
         edge_state = {"state": "ready"}

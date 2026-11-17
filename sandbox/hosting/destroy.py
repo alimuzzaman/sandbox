@@ -330,9 +330,16 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
     tags, own = _image_tag_filter(name)
     removals = [paths["runtime"]]
     quoted = " ".join(shlex.quote(path) for path in removals)
+    # A blue-green side project a failed apply left serving (sandbox/hosting/blue_green.py):
+    # its containers and its Sandbox-labelled network; it owns no volumes.
+    side = shlex.quote("label=com.docker.compose.project=sandbox-hostside-"
+                       + name.removeprefix("sandbox-host-"))
+    side_net = shlex.quote(f"label=sandbox.hostside={name}")
     return (
         "set -u; docker info >/dev/null 2>&1 || exit 3; "
+        f"docker ps -aq --filter {side} | xargs -r docker rm -f >/dev/null || exit 4; "
         f"docker ps -aq --filter {label} | xargs -r docker rm -f >/dev/null || exit 4; "
+        f"docker network ls -q --filter {side_net} | xargs -r docker network rm >/dev/null || exit 4; "
         f"docker volume ls -q --filter {label} | xargs -r docker volume rm >/dev/null || exit 4; "
         f"docker network ls -q --filter {label} | xargs -r docker network rm >/dev/null || exit 4; "
         f"t=$({tags}) || exit 3; "
@@ -340,7 +347,7 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
         f"rm -rf {quoted} || exit 6; "
         f"rmdir {shlex.quote(paths['project_runtime'])} 2>/dev/null || true; "
         f"for path in {quoted}; do [ ! -e \"$path\" ] || exit 6; done; "
-        f"c=$(docker ps -aq --filter {label}) || exit 3; "
+        f"c=$(docker ps -aq --filter {label}; docker ps -aq --filter {side}) || exit 3; "
         f"v=$(docker volume ls -q --filter {label}) || exit 3; "
         f"n=$(docker network ls -q --filter {label}) || exit 3; "
         f"t=$({tags}) || exit 3; "

@@ -112,6 +112,31 @@ class StackViewTest(unittest.TestCase):
         self.assertEqual(stack["source"], "this-server")
         self.assertEqual(stack["last_apply"]["status"], "succeeded")
 
+    def test_every_row_carries_the_page_path_the_panel_links_to(self):
+        """key is an identity; a this-server stack's page lives under /hosting/this-server/."""
+        plain = summary("marketing", "production", slug=None, routes=[
+            {"hostname": "www.example.test", "mode": "serve", "primary": True}])
+        view = pv.build_view([server([summary(), plain],
+                                     legacy=[{"project": "legacy", "environment": "production"}])])
+        (stack,) = view["stacks"]
+        self.assertEqual(stack["key"], "xspeed-dev/demo")
+        self.assertEqual(stack["page_path"], "/hosting/this-server/demo")
+        self.assertEqual([target["page_path"] for target in view["targets"]],
+                         ["/hosting#hosting-this-server%2Fmarketing%2Fproduction",
+                          "/hosting#hosting-this-server%2Flegacy%2Fproduction"])
+        controller = {"source": "controller", "targets": [summary(remote="other-box")], "links": [],
+                      "legacy": [], "partial_reasons": []}
+        (other,) = pv.build_view([controller])["stacks"]
+        self.assertEqual((other["key"], other["page_path"]), ("other-box/demo", "/hosting/other-box/demo"))
+        self.assertEqual(pv.stack_page_path("controller", "a b/c", "x"), "/hosting/a%20b%2Fc/x")
+        carded = [row for row in view["lifetimes"] if row["card"]]
+        self.assertTrue(carded)
+        for row in carded:
+            self.assertEqual(row["page_path"], pv.target_page_path(
+                row["source"], row["remote"], row["project"], row["environment"]))
+        self.assertIn("/hosting#hosting-this-server%2Fxspeed-hub-demo%2Fstaging",
+                      [row["page_path"] for row in carded])
+
     def test_health_is_applied_to_rows(self):
         def lookup(targets):
             return {host: {"status": "up", "http_status": 200, "checked_at": 5} for host, _ in targets}

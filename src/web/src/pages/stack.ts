@@ -5,15 +5,23 @@ import { theme } from "../theme";
 import { hostingPath, stackPath } from "../router";
 import { stackCard } from "./hosting";
 import type { HostingStack } from "../types";
+import { resolveStack, stackSegment } from "../ui/stack-route";
 export { signInStack } from "../ui/stack-signin";
 
-function findStack(remote: string, slug: string): HostingStack | undefined {
-  return store.hosting?.stacks.find(stack => stack.slug === slug &&
-    (stack.source === "this-server" ? remote === "this-server" : stack.remote === remote));
+// A shared stack is looked up by its exact segment only: the remote-name alias
+// is for addresses built from /api/hosting, never for mixing record sources.
+function findShared(remote: string, slug: string): HostingStack | undefined {
+  return store.hosting?.stacks.find(stack => stack.slug === slug && stackSegment(stack) === remote);
 }
 
 export function stackView(remote: string, slug: string): string {
-  const stack = findStack(remote, slug);
+  const match = store.hosting ? resolveStack(store.hosting.stacks, remote, slug) : undefined;
+  if (match && match.remote !== remote) {
+    // A link built from /api/hosting names this server's remote; show the canonical URL.
+    history.replaceState(history.state, "", stackPath(match.remote, slug) + location.search + location.hash);
+    remote = match.remote;
+  }
+  const stack = match?.stack;
   const back = `<a data-link href="${hostingPath()}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">All stacks and hosted sites</a>`;
   const head = `<header>${back}<h1 class="mt-3 break-words text-[26px] font-semibold tracking-tight">Stack ${esc(slug)}</h1><div class="mt-2 flex flex-wrap items-center justify-between gap-3"><p class="text-[13px] ${theme.quiet}">${esc(remote === "this-server" ? "This server" : remote)}</p><button type="button" class="${theme.button}" onclick="sb.refreshHosting()">Refresh stack</button></div></header>`;
   const warning = store.hostingError && store.hosting
@@ -25,10 +33,10 @@ export function stackView(remote: string, slug: string): string {
   else if (!stack) content = `<p role="status">Stack ${esc(slug)} is not in the loaded records for this host. Refresh or return to all stacks to check its current location.</p>`;
   else {
     const shared = (stack.page_access?.uses || []).map(name => {
-      const used = findStack(remote, name);
+      const used = findShared(remote, name);
       const title = `<h2 class="text-[16px] font-semibold">Shared · ${esc(name)}</h2>`;
       return `<section class="space-y-3">${title}${used ?
-        `<a data-link href="${esc(stackPath(remote, name))}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">Open shared stack</a>${stackCard(used)}` :
+        `<a data-link href="${esc(stackPath(stackSegment(used), name))}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">Open shared stack</a>${stackCard(used)}` :
         `<p class="text-[13px] ${theme.quiet}">Shared stack ${esc(name)} is missing from this controller's records.</p>`}</section>`;
     }).join("");
     content = `${stackCard(stack)}${shared}`;

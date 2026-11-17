@@ -166,6 +166,29 @@ class DispatchTests(unittest.TestCase):
                 self.assertTrue(payload["source_busy"])
                 self.assertIn("sb remote materialization inspect box", payload["error"])
 
+    def test_a_failed_source_deployment_is_not_accepted_for_a_fresh_request(self):
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+        marker = "untrusted-deploy-detail"
+        capacity = RemoteJobAdmissionError({"code": "docker_network_capacity_exhausted"})
+        for error, code in ((RuntimeError(marker), "server_cli_source_unavailable"),
+                            (capacity, capacity.to_payload()["code"])):
+            error.server_cli_not_submitted = True
+            for request_id, expected in ((None, (code, "not_accepted")),
+                                         ("original", ("server_cli_acceptance_unknown", "unknown"))):
+                with self.subTest(error=type(error).__name__, request_id=request_id):
+                    args = Namespace(**{**vars(self.args), "request_id": request_id})
+                    with patch.object(sdk, "dispatch_server_cli", side_effect=error):
+                        output = io.StringIO()
+                        with redirect_stdout(output), self.assertRaises(SystemExit):
+                            dispatch.dispatch_host_if_selected(args)
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual((payload["code"], payload["acceptance"]), expected)
+                    self.assertNotIn(marker, output.getvalue())
+                    if request_id is None:
+                        self.assertIn(type(error).__name__, payload["error"])
+                        if error is capacity:
+                            self.assertEqual(payload["detail"]["side_effects"]["staging_started"], False)
+
     def test_unknown_receipt_retains_only_original_handle_and_refuses_replay(self):
         self.submit.return_value = {"status": "acceptance_unknown", "job_id": "d" * 32,
             "request_id": "original", "error": "untrusted raw response"}

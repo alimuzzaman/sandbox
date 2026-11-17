@@ -186,6 +186,16 @@ def dispatch_host_if_selected(args) -> bool:
             # The source lock refused before this request's job submission,
             # and no earlier attempt can have used this fresh request id.
             _failure(args, "server_cli_source_busy", unknown=False, busy=busy)
+        if getattr(error, "server_cli_not_submitted", False) and generated_request_id:
+            # Source deployment failed before the job submission, and no
+            # earlier attempt can have used this fresh request id.
+            detail = error.to_payload() if callable(getattr(error, "to_payload", None)) else None
+            own = detail.get("code") if isinstance(detail, dict) else code
+            if not isinstance(own, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", own) is None:
+                own = "server_cli_source_unavailable"
+            _failure(args, own, unknown=False, detail=detail,
+                     error="Not submitted: source deployment failed before the job submission ("
+                           + type(error).__name__ + ").")
         _failure(args, "server_cli_acceptance_unknown" if unknown else
                  "server_cli_execution_unavailable", unknown=unknown, busy=busy)
 
@@ -202,7 +212,7 @@ def _source_busy(error):
     return None
 
 
-def _failure(args, code, *, unknown, receipt=None, busy=None):
+def _failure(args, code, *, unknown, receipt=None, busy=None, error=None, detail=None):
     request_id = getattr(args, "_server_cli_request_id", None) or getattr(args, "request_id", None)
     if not isinstance(request_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", request_id) is None:
         request_id = None
@@ -210,6 +220,11 @@ def _failure(args, code, *, unknown, receipt=None, busy=None):
         "acceptance": "unknown" if unknown else "not_accepted",
         "error": ("Inspect the original request/job; execution is not safe to replay."
                   if unknown else "Server execution is unavailable; no controller fallback was attempted.")}
+    if error is not None:
+        payload["error"] = error
+    if isinstance(detail, dict):
+        # A typed refusal's own redacted envelope (to_payload), e.g. capacity.
+        payload["detail"] = detail
     if busy is not None:
         # Fixed text from sandbox/core/_remote.py: names an operation id and the
         # inspect command, nothing from the remote.

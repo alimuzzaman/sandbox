@@ -89,12 +89,15 @@ class LockPathParityCase(unittest.TestCase):
         )
         self.assertIn(literal, host_guard.APPLY_TRANSACTION_LOCKS)
 
-    def test_exactly_four_apply_locks(self):
-        self.assertEqual(len(host_guard.APPLY_TRANSACTION_LOCKS), 4)
+    def test_exactly_three_apply_locks(self):
+        self.assertEqual(len(host_guard.APPLY_TRANSACTION_LOCKS), 3)
 
-    def test_a_recreate_holding_the_compose_publish_lock_counts_as_an_apply(self):
+    def test_reclaim_also_waits_for_a_recreate(self):
         from sandbox.commands import hosting as hosting_cmd
-        self.assertIn(hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH, host_guard.APPLY_TRANSACTION_LOCKS)
+        self.assertEqual(host_guard.RECLAIM_BLOCKING_LOCKS,
+                         host_guard.APPLY_TRANSACTION_LOCKS + (hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH,))
+        from sandbox.resources.remote import _REMOTE_PROGRAM
+        self.assertIn(f'"{hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH}"', _REMOTE_PROGRAM)
 
     def test_probe_program_uses_the_same_literals(self):
         from sandbox.resources.remote import _REMOTE_PROGRAM

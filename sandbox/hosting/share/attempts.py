@@ -350,9 +350,25 @@ class AttemptRepository:
         self._local = threading.local()
         self._mutex = threading.RLock()
 
+    @staticmethod
+    def _open_walk_dir(name: str, dir_fd: int | None) -> tuple[int, bool]:
+        """(descriptor, readable) for one directory of the walk.
+
+        A host may make an ancestor traverse-only (xspeed-dev /home is root
+        0711), which refuses O_RDONLY. Such a directory is opened O_PATH: enough
+        to create and open children, as in images/activation/private_inputs.py.
+        """
+        flags = os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            return os.open(name, os.O_RDONLY | flags, dir_fd=dir_fd), True
+        except PermissionError:
+            o_path = getattr(os, "O_PATH", None)
+            if o_path is None:
+                raise
+            return os.open(name, o_path | flags, dir_fd=dir_fd), False
+
     def _directory(self) -> int:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        descriptor = os.open(self.root.anchor, flags)
+        descriptor, readable = self._open_walk_dir(self.root.anchor, None)
         try:
             for part in self.root.parts[1:]:
                 try:
@@ -360,10 +376,14 @@ class AttemptRepository:
                 except FileExistsError:
                     pass
                 # Also sync entries created by a process that died before fsync.
-                os.fsync(descriptor)
-                child = os.open(part, flags, dir_fd=descriptor)
+                # An unreadable ancestor is not ours to have created entries in.
+                if readable:
+                    os.fsync(descriptor)
+                child, readable = self._open_walk_dir(part, descriptor)
                 os.close(descriptor)
                 descriptor = child
+            # The ledger directory itself is owner-only, so it is never O_PATH.
+            _require(readable)
             info = os.fstat(descriptor)
             _require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700)
             return descriptor

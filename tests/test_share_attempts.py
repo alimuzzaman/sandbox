@@ -306,6 +306,21 @@ class AttemptRepositoryTests(unittest.TestCase):
         self.assertTrue(str(raised.exception).startswith("share attempt ledger is full"), raised.exception)
         self.assertEqual(len(self.restart().list()), 256)
 
+    @unittest.skipUnless(hasattr(os, "O_PATH") and os.geteuid() != 0,
+                         "O_PATH walk; root ignores directory modes")
+    def test_a_traverse_only_ancestor_does_not_block_the_ledger(self):
+        # Like xspeed-dev /home (0711): the walk may traverse but not read it.
+        ancestor = Path(self.temporary.name).resolve() / "traverse-only"
+        (ancestor / "inner").mkdir(parents=True)
+        ancestor.chmod(0o100)
+        self.addCleanup(ancestor.chmod, 0o700)
+        with self.assertRaises(PermissionError):
+            os.open(ancestor, os.O_RDONLY | os.O_DIRECTORY)
+        repo = AttemptRepository(ancestor / "inner" / "attempts", self.parent)
+        self.assertEqual(repo.prepare(self.plan), self.plan)
+        self.assertEqual(AttemptRepository(ancestor / "inner" / "attempts", self.parent).list(), (self.plan,))
+        self.assertEqual(len(AttemptRepository.list_recorded(ancestor / "inner" / "attempts")), 1)
+
     def test_expiry_keeps_terminal_records_and_grant_ids(self):
         self.repo.prepare(self.plan)
         self.repo.begin_mint(self.plan.id, self.plan.grants[1].id)

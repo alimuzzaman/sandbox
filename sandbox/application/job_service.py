@@ -383,12 +383,12 @@ class JobService:
         # frees a slot (drain_after_release); it still runs from the release
         # that admitted it, which its descriptor names.
         package_root, interpreter = admitted_release(descriptor_path, package_root, sys.executable)
-        argv, environment = scoped_launch(
+        argv, _environment = scoped_launch(
             [interpreter, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
             job_id=Path(descriptor_path).parent.name)
         process = subprocess.Popen(argv,
             stdin=subprocess.DEVNULL if anonymous_input is None else anonymous_input.fileno(),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             cwd=package_root, start_new_session=True, close_fds=True)
         # This is intentionally a fire-and-forget control-plane process: its
         # durable descriptor and registry own lifecycle after acceptance. Avoid

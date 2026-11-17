@@ -35,6 +35,7 @@ from tests.server_config_fixtures import (
     FakeClock,
     fragment,
 )
+from tests.server_config_support import private_base
 
 
 INCARNATION_B = "inc_" + "2" * 32
@@ -44,7 +45,7 @@ class TestServerConfigConcurrency(unittest.TestCase):
     """T059: Per-incarnation locking, re-read-after-wait, and deadline bounds."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.clock = FakeClock()
         self.descriptor = AdapterDescriptor(
             server_type="nginx",

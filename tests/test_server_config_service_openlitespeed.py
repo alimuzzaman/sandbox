@@ -14,6 +14,7 @@ from sandbox.server_config.models import (
 from sandbox.server_config.repository import ServerConfigRepository
 from sandbox.server_config.adapters.base import AdapterDescriptor, RenderedGeneration
 from sandbox.server_config.service import ServerConfigService
+from tests.server_config_support import private_base
 
 try:
     from sandbox.server_config.adapters.openlitespeed import OpenLiteSpeedAdapter
@@ -27,7 +28,7 @@ class TestServerConfigServiceOpenLiteSpeed(unittest.TestCase):
     def setUp(self):
         if OpenLiteSpeedAdapter is None:
             self.fail("sandbox.server_config.adapters.openlitespeed not implemented yet")
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.repository = ServerConfigRepository(self.temp_dir, FIXED_INCARNATION)
         self.clock = FakeClock()
         

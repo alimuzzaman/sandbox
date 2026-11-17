@@ -7,7 +7,8 @@ from sandbox.core import _remote as remote
 
 class JoinedMigrationPlanTests(unittest.TestCase):
     def test_joined_owner_plan_preserves_existing_credentials_without_remote_effects(self):
-        record = {"joined": True, "control_transport": "tailscale", "control_access": "tailnet"}
+        record = {"joined": True, "control_transport": "tailscale", "control_access": "tailnet",
+                  "tailscale_host": "100.64.1.2"}
         with patch.object(remote, "ssh_run", side_effect=AssertionError("plan executed SSH")):
             plan = remote.migrate_remote_mcp_service(record, "100.64.1.2", 9174,
                 None, confirm=False, preserve_credentials=True)

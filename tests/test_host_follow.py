@@ -185,6 +185,17 @@ class OwnerCommandTests(FollowCase):
         self.assertEqual(self.installs, [])
         self.assertEqual(self.audit_events(), [])
 
+    def test_add_refuses_a_name_whose_apply_request_id_would_be_invalid(self):
+        # Fable review 9: "follow-<name>-<16 hex>-apply" must be a valid job request id.
+        from sandbox.jobs.models import _SAFE_NAME
+        longest = "a" * 34
+        self.assertRegex(f"follow-{longest}-{'0' * 16}-apply", _SAFE_NAME)
+        with self.assertRaises(FollowError) as raised:
+            self.add(name="a" * 35)
+        self.assertEqual(raised.exception.code, "follow_name_invalid")
+        self.assertEqual(self.store.names(), [])
+        self.assertTrue(self.add(name=longest)["ok"])
+
     def test_the_prepare_limit_accepts_the_spec_maximum_of_7200_seconds(self):
         self.assertTrue(self.add(prepare_timeout=7200)["ok"])
         record = self.store.read("dev")

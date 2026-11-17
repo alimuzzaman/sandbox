@@ -23,6 +23,9 @@ PREPARE_TIMEOUT_MIN = 60
 PREPARE_TIMEOUT_MAX = 7200
 # Room for the stack apply (its own deadline is at least 1500 s) and the wait.
 APPLY_ALLOWANCE_SECONDS = 3000
+# The nested apply's request id is "follow-<name>-<16 hex>-apply" (apply.py) and a
+# job request id is at most 64 characters (sandbox/jobs/models.py _SAFE_NAME).
+MAX_ADD_NAME = 64 - len("follow--") - 16 - len("-apply")
 
 
 class FollowError(Exception):
@@ -117,6 +120,11 @@ def substitute(text: str, *, work_dir: Path, name: str, repo_dirs: dict[str, Pat
 def build(args, *, origin: str, routing: dict) -> dict:
     """The stored declaration from ``host follow add`` arguments."""
     name = validate_name(getattr(args, "name", None))
+    if len(name) > MAX_ADD_NAME:
+        # Longer names stay valid for list/remove of existing follows, but such a
+        # follow's apply request id would be refused, so it could never apply.
+        raise FollowError("follow_name_invalid",
+                          f"--name must be at most {MAX_ADD_NAME} characters for a follow to apply")
     raw_repos = getattr(args, "follow_repo", None) or []
     if not raw_repos:
         raise FollowError("follow_repo_missing", "add needs at least one --repo NAME=OWNER/REPO@BRANCH")

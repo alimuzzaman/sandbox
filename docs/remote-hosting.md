@@ -2067,8 +2067,11 @@ cgroup: it runs `job-start` under `systemd-run --user --scope` as a transient
 `sandbox-follow-<attempt>-<suffix>.scope`, which ends when the attempt's supervisor and
 the apply job it starts have exited. That also keeps attempts out of the remote
 service's cgroup, so a service restart does not stop them. A host without
-`systemd-run` refuses the submission (`submission_refused`) instead of starting the
-attempt inside the poll. `run-now` starts the same poll unit and takes the same path.
+`systemd-run`, or where it cannot start a user scope (checked with a no-op scope first),
+refuses the submission (`submission_refused`) instead of starting the attempt inside the
+poll. `run-now` starts the same poll unit and takes the same path. Stopping the poll or
+removing the follow does not stop a running attempt; cancel its job with
+`sb job-cancel <job_id>` (`follow status` shows the ids).
 
 ### Running a command in a hosted service (`sb host exec`, spec 074)
 

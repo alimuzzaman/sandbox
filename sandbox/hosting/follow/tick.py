@@ -186,9 +186,12 @@ def scoped_argv(argv: list[str]) -> list[str]:
     """
     attempt = argv[argv.index("--attempt") + 1] if "--attempt" in argv[:-1] else ""
     label = attempt if _ATTEMPT_RE.fullmatch(attempt) else "submission"
+    # The two variables only let systemd-run reach the user manager; the
+    # attempt itself runs with the same stripped environment as before.
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
             f"--unit=sandbox-follow-{label}-{secrets.token_hex(4)}",
-            "--description=Sandbox follow attempt job", "--", *argv]
+            "--description=Sandbox follow attempt job", "--",
+            "env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", *argv]
 
 
 def user_manager_environment() -> dict:
@@ -202,11 +205,30 @@ def user_manager_environment() -> dict:
 
 def default_submit(argv: list[str]) -> str:
     from sandbox.commands.host_stack import _submit, StackCommandError, SUBMISSION_FAILED
+    environment = user_manager_environment()
     if shutil.which("systemd-run") is None:
         # Never fall back to the poll's own cgroup: the attempt would die with it.
         raise StackCommandError(SUBMISSION_FAILED,
                                 "systemd-run is unavailable; a follow attempt needs its own scope")
-    return _submit(scoped_argv(argv), environment=user_manager_environment())
+    # A systemd-run that cannot create a scope fails before job-start runs, but
+    # without a receipt that reads as an unknown submission, replayed forever.
+    # Probe it first: a failure here is a refusal, since nothing was submitted.
+    if not scope_available(environment):
+        raise StackCommandError(SUBMISSION_FAILED,
+                                "systemd-run could not start a user scope for the follow attempt")
+    return _submit(scoped_argv(argv), environment=environment)
+
+
+def scope_available(environment: dict) -> bool:
+    from sandbox.services.environment import compatible_subprocess_environment
+    import subprocess
+    try:
+        return subprocess.run(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"],
+            capture_output=True, timeout=30, check=False, stdin=subprocess.DEVNULL,
+            env=compatible_subprocess_environment(environment)).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def default_capability() -> dict:

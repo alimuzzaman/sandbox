@@ -8,7 +8,9 @@ import contextlib
 import io
 import json
 import os
+import secrets
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1053,13 +1055,16 @@ class AttemptScopeTests(unittest.TestCase):
             return "a" * 32
 
         with patch.object(follow_tick.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                patch.object(follow_tick, "scope_available", return_value=True), \
                 patch.object(host_stack, "_submit", submit), \
                 patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1001"}):
             self.assertEqual(follow_tick.default_submit(list(self.ARGV)), "a" * 32)
         argv = seen["argv"]
         self.assertEqual(argv[:5], ["systemd-run", "--user", "--scope", "--quiet", "--collect"])
         self.assertRegex(argv[5], r"^--unit=sandbox-follow-0123456789abcdef-[0-9a-f]{8}$")
-        self.assertEqual(argv[argv.index("--") + 1:], self.ARGV)
+        # The manager variables reach systemd-run only, never the attempt.
+        self.assertEqual(argv[argv.index("--") + 1:],
+                         ["env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", *self.ARGV])
         self.assertEqual(seen["environment"]["XDG_RUNTIME_DIR"], "/run/user/1001")
         # Each submission gets its own scope, so a replay never collides with a live one.
         self.assertNotEqual(follow_tick.scoped_argv(self.ARGV)[5], follow_tick.scoped_argv(self.ARGV)[5])
@@ -1072,11 +1077,19 @@ class AttemptScopeTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, host_stack.SUBMISSION_FAILED)
         submit.assert_not_called()
 
+    def test_a_scope_that_cannot_start_is_a_refusal_not_an_endless_replay(self):
+        with patch.object(follow_tick.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                patch.object(follow_tick.subprocess if hasattr(follow_tick, "subprocess") else subprocess,
+                             "run", return_value=SimpleNamespace(returncode=1)), \
+                patch.object(host_stack, "_submit") as submit:
+            with self.assertRaises(host_stack.StackCommandError) as raised:
+                follow_tick.default_submit(list(self.ARGV))
+        self.assertEqual(raised.exception.code, host_stack.SUBMISSION_FAILED)
+        submit.assert_not_called()
+
     def test_the_attempt_survives_its_oneshot_poll_unit(self):
         """A real oneshot user unit (like sandbox-stack-follow.service) starts a
         detached process the way job-start starts its supervisor, then exits."""
-        import shutil
-        import secrets
         environment = {**os.environ, **follow_tick.user_manager_environment()}
         if shutil.which("systemd-run") is None or subprocess.run(
                 ["systemctl", "--user", "show-environment"], capture_output=True,

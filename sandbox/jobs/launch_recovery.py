@@ -17,10 +17,12 @@ import json
 from datetime import datetime, timedelta, timezone
 
 
-def launch_lost(row: dict, snapshot, grace_seconds: int, *, now: datetime | None = None) -> bool:
+def launch_lost(row: dict, snapshot, grace_seconds: int, *, now: datetime | None = None,
+                holds_slot=lambda _job_id: True) -> bool:
     """Whether ``row`` is an accepted local job with no supervisor after ``grace_seconds``.
 
-    ``snapshot(job_id)`` is the repository's snapshot reader.
+    ``snapshot(job_id)`` is the repository's snapshot reader; ``holds_slot(job_id)``
+    says whether the job already holds a host capacity slot (see ``slot_held``).
     """
     if row.get("lifecycle") != "accepted" or row.get("target_kind") != "local":
         return False
@@ -31,7 +33,7 @@ def launch_lost(row: dict, snapshot, grace_seconds: int, *, now: datetime | None
     now = now or datetime.now(timezone.utc)
     if since.tzinfo is None or now - since <= timedelta(seconds=grace_seconds):
         return False
-    if _waiting_on_own_input(row, now):
+    if not holds_slot(row["job_id"]) and _waiting_on_own_input(row, now):
         return False
     process = (snapshot(row["job_id"]) or {}).get("process") or {}
     return not process.get("supervisor_pid")
@@ -40,10 +42,12 @@ def launch_lost(row: dict, snapshot, grace_seconds: int, *, now: datetime | None
 def _waiting_on_own_input(row: dict, now: datetime) -> bool:
     """A server exec holding its own stdin may wait for a slot until its deadline.
 
-    Its admitting process keeps the row accepted, with no supervisor, while it
-    polls for a slot (JobService._await_input_slot), and fails the row itself on
-    timeout or signal. Until ``server_cli.absolute_deadline_at`` has passed the
-    row is a live wait, not a lost launch; an unreadable deadline counts as live.
+    Its admitting process keeps the row accepted, with no supervisor and no
+    slot, while it polls for one (JobService._await_input_slot), and fails the
+    row itself on timeout or signal. Until ``server_cli.absolute_deadline_at``
+    has passed such a row is a live wait, not a lost launch. Callers check that
+    it holds no slot: a row that got its slot and then lost its launch falls
+    back to the grace rule. A missing or unreadable deadline is not a wait.
     """
     try:
         provenance = json.loads(row.get("execution_policy_provenance_json") or "{}")
@@ -55,8 +59,14 @@ def _waiting_on_own_input(row: dict, now: datetime) -> bool:
         deadline = datetime.fromisoformat(
             str(provenance.get("server_cli.absolute_deadline_at", "")).replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        return True
-    return deadline.tzinfo is None or now <= deadline
+        return False
+    return deadline.tzinfo is not None and now <= deadline
+
+
+def slot_held(repository, job_id: str) -> bool:
+    """Whether ``job_id`` holds a host capacity slot (sandbox.jobs.scheduler)."""
+    return repository.connection.execute(
+        "SELECT 1 FROM host_capacity_leases WHERE job_id=?", (job_id,)).fetchone() is not None
 
 
 def lost_launch_result() -> str:

@@ -140,13 +140,13 @@ class JobReconciliationTests(unittest.TestCase):
         import json
         from sandbox.application.job_service import SUPERVISOR_LAUNCH_GRACE_SECONDS
 
-        def waiting(label, deadline_offset):
+        def waiting(label, deadline_offset, deadline_text=None):
             row, _ = self.repository.accept(JobSubmission(
                 "test", self.temp.name, "project", "local", label, ("echo", "ok"), 60,
                 SourceIdentity("source")))
             now = datetime.now(timezone.utc)
             stamp = (now - timedelta(seconds=SUPERVISOR_LAUNCH_GRACE_SECONDS + 60)).isoformat().replace("+00:00", "Z")
-            deadline = (now + timedelta(seconds=deadline_offset)).isoformat().replace("+00:00", "Z")
+            deadline = deadline_text or (now + timedelta(seconds=deadline_offset)).isoformat().replace("+00:00", "Z")
             provenance = json.dumps({"server_cli.stdin_sha256": "a" * 64, "server_cli.stdin_size": "3",
                                      "server_cli.absolute_deadline_at": deadline})
             self.repository.connection.execute(
@@ -157,7 +157,16 @@ class JobReconciliationTests(unittest.TestCase):
 
         live = waiting("live", 600)
         expired = waiting("expired", -30)
+        # Got its slot, then lost its launch: the grace rule, not the exec deadline.
+        slotted = waiting("slotted", 600)
+        self.repository.connection.execute(
+            "INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) VALUES(?,?,?,?)",
+            (1, slotted["job_id"], "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
+        self.repository.connection.commit()
+        unreadable = waiting("unreadable", 0, deadline_text="not a time")
         result = self.service.reconcile_startup()
+        self.assertIn(slotted["job_id"], result["interrupted"])
+        self.assertIn(unreadable["job_id"], result["interrupted"])
         self.assertNotIn(live["job_id"], result["interrupted"])
         self.assertEqual(self.repository.get(live["job_id"])["lifecycle"], "accepted")
         # Past its own deadline its admitting process is gone: a lost launch after all.

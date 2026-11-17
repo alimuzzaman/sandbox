@@ -181,5 +181,37 @@ class LifecycleLockScopeTests(unittest.TestCase):
             worker.join(10)
 
 
+    def test_a_blocked_same_project_writer_says_it_is_waiting(self):
+        """Re-check of Fable [6]: same-project serialization is announced, not silent."""
+        from sandbox.project_registry.lifecycle import PROJECT_WAIT_MESSAGE, project_writer
+        root = str(Path(self.tmp.name) / "project-a")
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with project_writer(root):
+                held.set()
+                release.wait(10)
+
+        worker = threading.Thread(target=holder, daemon=True)
+        worker.start()
+        captured = io.StringIO()
+        try:
+            self.assertTrue(held.wait(5))
+
+            def same_project():
+                with project_writer(root):
+                    pass
+            with contextlib.redirect_stderr(captured):
+                waiter = threading.Thread(target=same_project, daemon=True)
+                waiter.start()
+                waiter.join(0.5)
+                self.assertTrue(waiter.is_alive())
+                release.set()
+                waiter.join(10)
+        finally:
+            release.set()
+            worker.join(10)
+        self.assertEqual(captured.getvalue(), PROJECT_WAIT_MESSAGE + "\n")
+
 if __name__ == "__main__":
     unittest.main()

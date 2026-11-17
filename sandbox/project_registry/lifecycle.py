@@ -20,6 +20,7 @@ _state = threading.local()
 _roots = threading.local()
 
 WAIT_MESSAGE = 'waiting for another instance operation'
+PROJECT_WAIT_MESSAGE = 'waiting for another instance operation on this project'
 DEFAULT_WAIT_SECONDS = 120.0
 
 
@@ -111,7 +112,13 @@ def project_writer(root, directory=None):
     directory.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(canonical.encode()).hexdigest()[:16]
     with (directory / f'{digest}.lock').open('w') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Same-project operations serialize by design and may take as long
+            # as a Compose up; say so instead of waiting silently.
+            print(PROJECT_WAIT_MESSAGE, file=sys.stderr, flush=True)
+            fcntl.flock(handle, fcntl.LOCK_EX)
         held.add(canonical)
         try:
             yield

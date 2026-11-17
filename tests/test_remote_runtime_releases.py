@@ -134,6 +134,50 @@ class ReleaseLayoutTest(unittest.TestCase):
         self.assertEqual(left, sorted(names[-3:]))
         self.assertEqual(os.readlink(self.home / "current"), f"releases/{names[-1]}")
 
+    def test_gc_keeps_a_release_an_unfinished_job_was_admitted_with(self):
+        import sqlite3
+        self._legacy()
+        names = [format(i, "x") * 24 for i in range(1, 7)]
+        for index, name in enumerate(names):
+            _complete(self.home, name)
+            self._activate(name)
+            os.utime(self.home / "releases" / name / ".release.json", (1000 + index, 1000 + index))
+        os.utime(self.home / "releases" / OLD / ".release.json", (1, 1))
+        jobs = self.home / "runtime" / "jobs"
+        jobs.mkdir(parents=True)
+        db = sqlite3.connect(jobs / "registry.sqlite3")
+        db.execute("CREATE TABLE jobs (job_id TEXT PRIMARY KEY, lifecycle TEXT)")
+        releases_root = os.path.realpath(self.home / "releases")
+        for job, name, lifecycle in (("a" * 32, names[0], "queued"), ("b" * 32, names[1], "succeeded")):
+            db.execute("INSERT INTO jobs VALUES (?, ?)", (job, lifecycle))
+            (jobs / job).mkdir()
+            (jobs / job / "release.json").write_text(json.dumps(f"{releases_root}/{name}"))
+        db.commit(); db.close()
+        (self.home / "releases" / (".gc-" + "9" * 24)).mkdir()
+        result = _run(self.home, "gc")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        left = sorted(p.name for p in (self.home / "releases").iterdir() if not p.name.startswith("."))
+        # The queued job's release stays; the finished job's does not.
+        self.assertEqual(left, sorted([names[0], *names[-3:]]))
+        self.assertEqual([p.name for p in (self.home / "releases").iterdir() if p.name.startswith(".gc-")], [])
+        # An unreadable registry keeps every named release.
+        (jobs / "registry.sqlite3").write_bytes(b"not a database")
+        (jobs / ("b" * 32) / "release.json").write_text(json.dumps(f"{releases_root}/{names[-3]}"))
+        _complete(self.home, "8" * 24)
+        self._activate("8" * 24)
+        result = _run(self.home, "gc")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.home / "releases" / names[0]).exists())
+        self.assertTrue((self.home / "releases" / names[-3]).exists())
+
+    def test_gc_terminal_lifecycles_match_the_job_model(self):
+        import ast
+        from sandbox.jobs.models import TERMINAL_LIFECYCLES
+        assigned = [ast.literal_eval(node.value) for node in ast.parse(releases.PROGRAM).body
+                    if isinstance(node, ast.Assign)
+                    and [getattr(t, "id", None) for t in node.targets] == ["TERMINAL"]]
+        self.assertEqual([set(value) for value in assigned], [{item.value for item in TERMINAL_LIFECYCLES}])
+
     def test_gc_removes_only_old_unused_upload_stages(self):
         self._legacy()
         old = self.home / (".sb-src-stage-" + "a" * 12 + "-" + "b" * 32)

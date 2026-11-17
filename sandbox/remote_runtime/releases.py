@@ -365,6 +365,46 @@ def referenced(base=None):
                 found.add(text[len(prefix):].split("/", 1)[0])
     return found
 
+TERMINAL = ("succeeded", "failed", "timed_out", "cancelled", "interrupted")
+
+def admitted():
+    """Releases named by an unfinished job's release.json (written at admission).
+
+    A queued job has no process yet, so referenced() cannot see the release it
+    must start from. With the registry unreadable, every named release is kept.
+    """
+    jobs = os.path.join(home, "runtime", "jobs")
+    prefix = os.path.realpath(REL) + "/"
+    named = {}
+    try:
+        entries = os.listdir(jobs)
+    except OSError:
+        return set()
+    for job in entries:
+        if not re.fullmatch(r"[0-9a-f]{32}", job):
+            continue
+        try:
+            with open(os.path.join(jobs, job, "release.json")) as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if isinstance(value, str) and value.startswith(prefix):
+            named[job] = value[len(prefix):].split("/", 1)[0]
+    if not named:
+        return set()
+    try:
+        import sqlite3, urllib.parse
+        db = sqlite3.connect("file:" + urllib.parse.quote(os.path.join(jobs, "registry.sqlite3"))
+                             + "?mode=ro", uri=True, timeout=10)
+        try:
+            open_jobs = {row[0] for row in db.execute(
+                "SELECT job_id FROM jobs WHERE lifecycle NOT IN (?,?,?,?,?)", TERMINAL)}
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - unreadable registry: keep them all
+        return set(named.values())
+    return {name for job, name in named.items() if job in open_jobs}
+
 def listing():
     names = []
     if os.path.isdir(REL):
@@ -384,12 +424,24 @@ def gc():
     keep = {target_name(CURRENT), target_name(PREVIOUS)}
     complete = [name for _stamp, name, ok, _rev in listing() if ok]
     keep.update(complete[:KEEP])
-    live = referenced()
+    live = referenced() | admitted()
+    for name in os.listdir(REL):
+        if name.startswith(".gc-"):
+            # A tombstone an interrupted earlier cleanup left behind.
+            shutil.rmtree(os.path.join(REL, name), ignore_errors=True)
     removed = []
     for _stamp, name, ok, _rev in listing():
         if name in keep or name in live:
             continue
-        shutil.rmtree(os.path.join(REL, name), ignore_errors=True)
+        # Rename first: a job starting now never sees a half-deleted tree,
+        # only a missing release (admitted_release requires the marker).
+        tomb = os.path.join(REL, ".gc-" + name)
+        try:
+            os.rename(os.path.join(REL, name), tomb)
+        except OSError:
+            continue
+        fsync_dir(REL)
+        shutil.rmtree(tomb, ignore_errors=True)
         removed.append(name)
     stages = gc_stages()
     os.close(held)

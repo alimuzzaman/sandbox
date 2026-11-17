@@ -767,6 +767,7 @@ class JobServiceTests(unittest.TestCase):
                 (root / "venv" / "bin").mkdir(parents=True)
                 (root / "venv" / "bin" / "python").write_text("")
                 (root / "venv" / "bin" / "python").chmod(0o700)
+                (root / ".release.json").write_text(json.dumps({"name": root.name, "state": "complete"}))
             job = Path(temp) / "jobs" / ("a" * 32)
             job.mkdir(parents=True)
             (job / "release.json").write_text(json.dumps(str(admitted)))
@@ -775,6 +776,25 @@ class JobServiceTests(unittest.TestCase):
                              (admitted, f"{admitted}/venv/bin/python"))
             self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
                              (admitted, "/usr/bin/python3"))
+            # No completion marker (a release the GC is removing, or never
+            # finished): the launcher's own release.
+            marker = admitted / ".release.json"
+            marker.write_text(json.dumps({"name": admitted.name, "state": "building"}))
+            self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
+                             (own, "/usr/bin/python3"))
+            marker.unlink()
+            self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
+                             (own, "/usr/bin/python3"))
+            marker.write_text(json.dumps({"name": admitted.name, "state": "complete"}))
+            # Only a directory under releases/ counts.
+            elsewhere = Path(temp) / "other" / "admitted"
+            (elsewhere / "sandbox" / "jobs").mkdir(parents=True)
+            (elsewhere / "sandbox" / "jobs" / "supervisor.py").write_text("")
+            (elsewhere / ".release.json").write_text(json.dumps({"name": "admitted", "state": "complete"}))
+            (job / "release.json").write_text(json.dumps(str(elsewhere)))
+            self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
+                             (own, "/usr/bin/python3"))
+            (job / "release.json").write_text(json.dumps(str(admitted)))
             (admitted / "sandbox" / "jobs" / "supervisor.py").unlink()
             self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
                              (own, "/usr/bin/python3"))

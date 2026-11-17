@@ -3062,7 +3062,10 @@ parts inside `pins.INSTALL_GATE`:
 After a successful switch the release keeps a copy of its unit, source receipt
 and owner origin record, and releases beyond `current`, `previous` and the last
 3 activated are removed unless a live process runs from them (cwd, command
-line or a mapped file under the release directory). The same cleanup removes
+line or a mapped file under the release directory) or an unfinished job was
+admitted with them (its `release.json`; with the job registry unreadable,
+every named release is kept). A release is renamed to `releases/.gc-<name>`
+before it is deleted, so nothing ever starts from a half-deleted tree. The same cleanup removes
 upload staging directories (`$HOME/sandbox/.sb-src-stage-*`) older than three
 hours (above the longest allowed upload) that no live process uses; prepare
 renames the stage it builds, so these are left only by interrupted or
@@ -3123,8 +3126,10 @@ running supervisor's registry write with `database is locked` (xspeed-dev,
 
 A queued job runs from the release that admitted it, even when another
 release's supervisor starts it on freeing a slot: the admitting release is
-recorded beside its descriptor (`release.json`). A release removed by cleanup
-falls back to the launcher's own.
+recorded beside its descriptor (`release.json`). Only a complete release
+under `releases/` (its `.release.json` marker present) is used; otherwise the
+job falls back to the launcher's own release. Cleanup keeps every release an
+unfinished job names, so the fallback is for a release removed by hand.
 
 Queued jobs never block. If the lock cannot be taken within 15 seconds the
 install refuses with `remote_jobs_gate_unavailable`; an install that fails with

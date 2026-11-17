@@ -3002,29 +3002,6 @@ if rfd is not None:
  os.fchmod(rfd,mode&~0o022); os.fsync(rfd); os.close(rfd)
 os.close(fd)'''
 
-_REMOTE_SOURCE_ACTIVATE_PROGRAM = r'''import ctypes,os,sys
-source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
-flag=2 if os.path.exists(target) else 1
-if hasattr(libc,'renameat2'):
- result=libc.renameat2(-100,os.fsencode(source),-100,os.fsencode(target),flag)
-else:
- result=libc.renamex_np(os.fsencode(source),os.fsencode(target),2 if flag==2 else 4)
-if result:
- error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
-print('exchanged' if flag==2 else 'installed',flush=True)
-fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
-'''
-_REMOTE_SOURCE_ROLLBACK_PROGRAM = r'''import ctypes,os,sys
-mode,source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
-flag=2 if mode=='exchanged' else 1
-if hasattr(libc,'renameat2'):
- result=libc.renameat2(-100,os.fsencode(target),-100,os.fsencode(source),flag)
-else:
- result=libc.renamex_np(os.fsencode(target),os.fsencode(source),2 if flag==2 else 4)
-if result:
- error=ctypes.get_errno(); raise OSError(error,os.strerror(error),source)
-fd=os.open(os.path.dirname(source),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)'''
-
 
 class RemoteWpControlError(RuntimeError):
     """Stable typed base for remote WP control failures."""
@@ -5460,9 +5437,14 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     held by the remote install process itself until it exits. Every installer
     path (migrate, ``remote up``, provision) comes through here.
 
-    The gate also refuses (``remote_jobs_active``, a PinError carrying
-    ``jobs``) while any server-side job is unfinished, checked under the job
-    registry's admission lock, which it holds until the old service is stopped.
+    The runtime is installed side by side (``sandbox.remote_runtime.releases``):
+    the gate first builds ``releases/<runtime-rev>`` with no lock held, then,
+    under the locks, only flips ``current`` and restarts the service. Jobs run
+    in their own systemd scopes from their own release directory, so they
+    survive the restart. The gate refuses (``remote_jobs_active``, a PinError
+    carrying ``jobs``) only over jobs a restart would still kill: every
+    unfinished job on a host still in the old layout (its one-time
+    conversion), else only a supervisor left in the service's cgroup.
     """
     if remote.get('joined') is True:
         if (remote.get('control_transport') != 'tailscale' or remote.get('control_access') != 'tailnet'
@@ -5551,24 +5533,18 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         f"grep -Fq -- {shlex.quote('--bind ' + bind + ' --port ' + str(port))} \"$unit_path\" && "
         "grep -Fqx 'WorkingDirectory=%h/sandbox/sb-src' \"$unit_path\" || exit 43; fi; "
     )
-    runtime_preflight = (
-        "runtime=$HOME/sandbox/sb-src; test -x \"$runtime/sb\"; "
-        "test -f \"$runtime/sandbox/hermes/cron-catalog.json\"; "
-        "if test ! -x \"$runtime/.cli-venv/bin/python\"; then python3 -m venv \"$runtime/.cli-venv\" </dev/null; "
-        "\"$runtime/.cli-venv/bin/python\" -m pip install --quiet --disable-pip-version-check pyyaml </dev/null; fi; "
-        "python3 \"$runtime/scripts/provision_image_stage_helper.py\" "
-        "--sandbox-home \"$HOME/sandbox\" --runtime-revision "
-        + shlex.quote(source_revision) + " </dev/null; "
-        "( cd \"$runtime\" && ./sb mcp-install </dev/null >/dev/null ); "
-        "( cd \"$runtime\" && \"$runtime/.cli-venv/bin/python\" -c "
-        + shlex.quote("from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()")
-        + " </dev/null ); "
-        # Spec 060: coordination is not enabled here. Enabling ships with the
-        # state conversion (T028); no production remote may be marked
-        # coordination-enabled before it.
-    )
     normalize_program = _REMOTE_HOME_NORMALIZE_PROGRAM
+    from sandbox.remote_runtime import releases
     stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
+    origin_path = "$HOME/sandbox/runtime/owner-origin.json"
+    # Built and verified with no lock held, while the old service serves
+    # (pins.INSTALL_GATE runs it before taking the pin lock).
+    prepare = (
+        "set -eu; umask 077; "
+        "python3 -c " + shlex.quote(normalize_program) + " \"$HOME/sandbox\" </dev/null; "
+        + releases.shell("prepare", staged_source["stage_name"], expected_receipt,
+                         record["runtime_revision"], source_revision) + " </dev/null"
+    )
     credential_preflight = (
         'grep -Fqx ' + shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + observed_revision)
         + ' "$unit_path"; '
@@ -5597,22 +5573,10 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "case \"$unit_state\" in loaded:active:) had_active=1;; "
         "loaded:inactive:|not-found:inactive:) :;; *) exit 1;; esac; "
         + legacy_preflight +
-        f"stage_root={stage_root}; source_stage=\"$stage_root/tree\"; runtime=$HOME/sandbox/sb-src; "
-        "test -d \"$stage_root\" && test ! -L \"$stage_root\" && test -d \"$source_stage\" && test ! -L \"$source_stage\" || exit 1; "
-        "test \"$(stat -c '%u:%a' \"$stage_root\")\" = \"$(id -u):700\"; "
-        "test \"$(stat -c '%u:%a' \"$source_stage\")\" = \"$(id -u):700\"; "
-        "test -f \"$source_stage/sb\" && test ! -L \"$source_stage/sb\" || exit 1; "
-        "test -f \"$source_stage/scripts/provision_image_stage_helper.py\" && "
-        "test ! -L \"$source_stage/scripts/provision_image_stage_helper.py\" || exit 1; "
-        "if test -e \"$runtime\"; then test -d \"$runtime\" && test ! -L \"$runtime\" && "
-        "test \"$(stat -c '%u' \"$runtime\")\" = \"$(id -u)\" || exit 1; "
-        "else test ! -L \"$runtime\"; fi; "
-        "test ! -L \"$stage_root/receipt.json\"; "
-        "test \"$(stat -c '%u:%a' \"$stage_root/receipt.json\")\" = \"$(id -u):600\"; "
-        "test \"$(cat -- \"$stage_root/receipt.json\")\" = " + shlex.quote(expected_receipt) + "; "
-        "activate_source() { python3 -c " + shlex.quote(_REMOTE_SOURCE_ACTIVATE_PROGRAM)
-        + " \"$source_stage\" \"$runtime\" </dev/null; }; "
-        "source_mode=''; source_attempted=0; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
+        f"stage_root={stage_root}; runtime=$HOME/sandbox/sb-src; origin_path={origin_path}; "
+        + releases.define()
+        + releases.call("check", record["runtime_revision"]) + " </dev/null; " +
+        "activation=''; activation_attempted=0; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
         "restore_file() { saved=$1; target=$2; tmp=$(mktemp \"$target.rollback.XXXXXX\") || return 1; "
         "cp \"$saved\" \"$tmp\" && chmod 600 \"$tmp\" && mv \"$tmp\" \"$target\" || "
         "{ rm -f -- \"$tmp\"; return 1; }; }; "
@@ -5628,9 +5592,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "if test \"$had_unit\" = 1; then restore_file \"$backup/unit\" \"$unit_path\" || failed=1; else rm -f \"$unit_path\" || failed=1; fi; "
         "if test \"$had_env\" = 1; then restore_file \"$backup/env\" \"$env_path\" || failed=1; else rm -f \"$env_path\" || failed=1; fi; "
         "systemctl --user daemon-reload || failed=1; "
-        "case \"$source_mode\" in exchanged|installed) python3 -c " + shlex.quote(_REMOTE_SOURCE_ROLLBACK_PROGRAM)
-        + " \"$source_mode\" \"$source_stage\" \"$runtime\" </dev/null || failed=1;; "
-        "'') if test \"$source_attempted\" = 1; then failed=1; fi;; *) failed=1;; esac; "
+        "if test -n \"$activation\"; then " + releases.call("revert", "$activation")
+        + " </dev/null || failed=1; elif test \"$activation_attempted\" = 1; then failed=1; fi; "
         f"if test \"$failed\" = 0 && test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
         "if test \"$failed\" = 0 && test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
         f"if test \"$failed\" != 0; then systemctl --user stop {REMOTE_MCP_SERVICE} || failed=1; fi; "
@@ -5639,9 +5602,10 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "if test \"$failed\" = 0; then rm -rf -- \"$backup\" || failed=1; test ! -e \"$backup\" || failed=1; fi; "
         "test \"$failed\" = 0; }; "
         "on_exit() { status=$?; trap - EXIT; rollback || exit 44; exit \"$status\"; }; "
-        "trap on_exit EXIT; source_attempted=1; source_mode=$(activate_source); "
-        "case \"$source_mode\" in exchanged|installed) :;; *) exit 1;; esac; "
-        + runtime_preflight +
+        "trap on_exit EXIT; activation_attempted=1; "
+        "activation=$(" + releases.call("activate", record["runtime_revision"], "$unit_path", "$origin_path")
+        + " </dev/null) || { activated_rc=$?; if test \"$activated_rc\" = 3; then activation_attempted=0; fi; exit 1; }; "
+        "test -n \"$activation\" || exit 1; "
         "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
         + unit + "UNIT\n"
         "chmod 600 \"$unit_tmp\"; mv \"$unit_tmp\" \"$unit_path\"; unit_tmp=''; "
@@ -5661,12 +5625,17 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         f"if ! systemctl --user enable {REMOTE_MCP_SERVICE} || ! systemctl --user stop {REMOTE_MCP_SERVICE} "
         "|| ! release_jobs_gate; then exit 1; fi; "
         f"if ! systemctl --user start {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
-        "exit 1; fi; trap - EXIT; source_mode=''; "
+        "exit 1; fi; trap - EXIT; activation=''; "
         # Spec 072: leave the installed git source revision where the status
         # probe can read it. The service is already live, so this is best
         # effort and can never fail the install.
         + _source_receipt_command(source_revision)
         + _owner_origin_command(remote, record) +
+        # Best effort: the service is live. Keep what this release ran with
+        # for a later rollback, then drop old releases no job references.
+        "{ " + releases.call("record", record["runtime_revision"], "$unit_path",
+                             "$HOME/sandbox/runtime/source-revision.json", "$origin_path")
+        + " </dev/null; " + releases.call("gc") + " </dev/null >/dev/null; } || true; "
         "rm -rf -- \"$stage_root\" \"$backup\"; "
         "test ! -e \"$backup\""
     )
@@ -5675,11 +5644,11 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
     )
     try:
         gated = install_gate_command(record["runtime_revision"], acknowledged_pins, command,
-                                     ignored_jobs=ignored_jobs)
+                                     ignored_jobs=ignored_jobs, prepare=prepare)
     except PinError as exc:
         raise RuntimeError(f"{exc.code}: {exc}") from None
     try:
-        res = ssh_run(remote, gated, timeout=300,
+        res = ssh_run(remote, gated, timeout=1200,
                       input_data=None if preserve_credentials else token + "\n")
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("timed out installing the remote MCP service") from exc
@@ -5699,6 +5668,108 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         raise RuntimeError("could not install the remote MCP service")
     _record_controller_hint(remote, source_revision, "install")
     return {**plan, "status": "applied", "service": record}
+
+
+def remote_runtime_releases(remote: dict) -> dict:
+    """Read-only side-by-side release listing (sandbox.remote_runtime.releases)."""
+    from sandbox.remote_runtime import releases
+    try:
+        res = ssh_run(remote, releases.shell("list"), timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("timed out listing remote runtime releases") from exc
+    try:
+        listing = json.loads((res.stdout or "").strip().splitlines()[-1]) if res.returncode == 0 else None
+    except (ValueError, IndexError):
+        listing = None
+    if not isinstance(listing, dict) or listing.get("layout") not in {"releases", "legacy", "absent"}:
+        raise RuntimeError("remote runtime releases could not be listed")
+    return listing
+
+
+def rollback_remote_mcp_service(remote: dict, *, confirm: bool = False,
+                                acknowledged_pins=(), ignored_jobs=()) -> dict:
+    """Flip ``current`` back to ``previous`` and restart onto it.
+
+    The release's own recorded unit, source receipt and owner origin record go
+    back with it, so the service runs exactly what that release ran with.
+    Runs under the same install gate as a migrate (pins, job admission), for
+    seconds: nothing is built.
+    """
+    from sandbox.remote_runtime import releases
+    from sandbox.remote_runtime.pins import (
+        JOBS_ACTIVE, JOBS_GATE_UNAVAILABLE, PinError, RELEASE_JOBS_GATE_SH,
+        install_gate_command, install_gate_refusal,
+    )
+    listing = remote_runtime_releases(remote)
+    previous = listing.get("previous")
+    by_name = {item.get("name"): item for item in listing.get("releases") or ()}
+    target = (by_name.get(previous) or {}).get("runtime_revision")
+    plan = {"status": "planned", "requires_confirm": True, "layout": listing["layout"],
+            "current": listing.get("current"), "previous": previous,
+            "target_runtime_revision": target, "releases": listing.get("releases")}
+    usable = (listing["layout"] == "releases" and previous and previous != listing.get("current")
+              and (by_name.get(previous) or {}).get("complete") is True
+              and isinstance(target, str) and _REMOTE_MCP_REVISION_RE.fullmatch(target))
+    if not usable:
+        plan["blockers"] = [{"code": "remote_runtime_rollback_unavailable"}]
+    if not confirm:
+        return plan
+    if not usable:
+        raise RuntimeError("remote_runtime_rollback_unavailable: no complete previous release")
+    unit_path = f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}"
+    receipt, origin = "$HOME/sandbox/runtime/source-revision.json", "$HOME/sandbox/runtime/owner-origin.json"
+    service = REMOTE_MCP_SERVICE
+    command = (
+        "set -eu; umask 077; " + releases.define() +
+        f"unit_path={unit_path}; receipt={receipt}; origin_path={origin}; "
+        "name=$(" + releases.call("rollback-target") + " </dev/null); "
+        f"test \"$name\" = {shlex.quote(previous)}; "
+        "mkdir -p \"$HOME/.sandbox\"; backup=$(mktemp -d \"$HOME/.sandbox/mcp-rollback-XXXXXX\"); "
+        "for f in unit_path receipt origin_path; do eval p=\\$$f; "
+        "if test -f \"$p\"; then cp -p \"$p\" \"$backup/$f\"; fi; done; "
+        + RELEASE_JOBS_GATE_SH +
+        "activation=''; activation_attempted=0; "
+        "undo() { set +e; failed=0; systemctl --user stop " + service + "; release_jobs_gate || failed=1; "
+        "for f in unit_path receipt origin_path; do eval p=\\$$f; "
+        "if test -f \"$backup/$f\"; then cp -p \"$backup/$f\" \"$p\" || failed=1; else rm -f -- \"$p\"; fi; done; "
+        "systemctl --user daemon-reload || failed=1; "
+        "if test -n \"$activation\"; then " + releases.call("revert", "$activation") + " </dev/null || failed=1; "
+        "elif test \"$activation_attempted\" = 1; then failed=1; fi; "
+        "if test \"$failed\" = 0; then systemctl --user start " + service + " || failed=1; fi; "
+        "test \"$failed\" = 0; }; "
+        # The backup is the only recovery copy: keep it when undo failed.
+        "on_exit() { rc=$?; trap - EXIT; if test \"$rc\" != 0; then undo || rc=44; fi; "
+        "if test \"$rc\" != 44; then rm -rf -- \"$backup\"; fi; exit \"$rc\"; }; trap on_exit EXIT; "
+        + releases.call("restore", "$name", "$unit_path", "$receipt", "$origin_path") + " </dev/null; "
+        "activation_attempted=1; "
+        "activation=$(" + releases.call("activate", "$name", "$unit_path", "$origin_path") + " </dev/null) "
+        "|| { activated_rc=$?; if test \"$activated_rc\" = 3; then activation_attempted=0; fi; exit 1; }; "
+        "test -n \"$activation\"; systemctl --user daemon-reload; "
+        f"systemctl --user stop {service}; release_jobs_gate; "
+        f"systemctl --user start {service}; systemctl --user is-active --quiet {service}"
+    )
+    try:
+        gated = install_gate_command(target, acknowledged_pins, command, ignored_jobs=ignored_jobs)
+    except PinError as exc:
+        raise RuntimeError(f"{exc.code}: {exc}") from None
+    try:
+        res = ssh_run(remote, gated, timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("timed out rolling back the remote runtime") from exc
+    if res.returncode != 0:
+        refusal = install_gate_refusal(res.returncode, res.stdout)
+        if refusal is not None and refusal.code in {JOBS_ACTIVE, JOBS_GATE_UNAVAILABLE}:
+            raise refusal
+        if refusal is not None:
+            raise RuntimeError(f"{refusal.code}: {refusal}")
+        if res.returncode == 44:
+            raise RuntimeError("remote_service_rollback_indeterminate")
+        detail = _safe_remote_diagnostic(res, remote, limit=500)
+        raise RuntimeError("could not roll back the remote runtime" + (f": {detail}" if detail else ""))
+    # The restored unit carries this release's revision. Bind, port and
+    # marker are this remote's registration, which a rollback never changes.
+    service_record = {**(remote.get("mcp_service") or {}), "runtime_revision": target}
+    return {**plan, "status": "rolled_back", "service": service_record}
 
 
 def resolve_tailscale_ip(remote: dict) -> str:

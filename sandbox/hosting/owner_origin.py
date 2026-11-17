@@ -90,11 +90,22 @@ def _read_private(path: Path) -> dict:
         raise OwnerOriginUnavailable("this host's owner origin record is invalid") from None
 
 
+def _retained(owner) -> bool:
+    from sandbox.application.server_cli import is_retained_release
+    try:
+        return is_retained_release(owner)
+    except Exception:  # noqa: BLE001 - any doubt keeps the strict check
+        return False
+
+
 def read_for_owner(owner) -> dict:
     """The record, only when it belongs to the installed owner unit ``owner``."""
     record = _read_private(path_for(owner.home))
+    # A job still running from a retained release (an install has moved
+    # ``current`` on since) reads the record the newer install wrote.
     if (record["ownership_marker"] != owner.ownership_marker
-            or record["runtime_revision"] != owner.runtime_revision):
+            or (record["runtime_revision"] != owner.runtime_revision
+                and not _retained(owner))):
         raise OwnerOriginUnavailable(
             "this host's owner origin record belongs to another install; run "
             "`sb remote service migrate` for it from its controller")

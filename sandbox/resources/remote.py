@@ -1341,6 +1341,7 @@ def deep_attribution(capacity, managed_roots=()):
                         str(HOME / "deploy-src"):
                             "Sandbox deployment sources",
                         str(HOME / "sb-src"): "Sandbox tool source",
+                        str(HOME / "releases"): "Sandbox tool releases",
                         **({
                             str(docker_root): "Docker data root",
                             str(docker_root / "overlay2"):

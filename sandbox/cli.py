@@ -905,6 +905,8 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
             "  ./sb remote service refresh NAME [--json]  # adopt joined service identity locally\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
+            "  ./sb remote service releases NAME [--json]  # side-by-side runtime releases\n"
+            "  ./sb remote service rollback NAME --plan|--confirm [--json]  # current -> previous\n"
             "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]\n"
             "\n"

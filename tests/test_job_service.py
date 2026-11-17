@@ -748,6 +748,7 @@ class JobServiceTests(unittest.TestCase):
 
     def test_default_launcher_uses_package_root_when_cli_was_called_by_absolute_path(self):
         with tempfile.TemporaryDirectory() as temp, \
+                patch("sandbox.jobs.scope.scoped_launch", side_effect=lambda argv, job_id: (argv, None)), \
                 patch("sandbox.application.job_service.subprocess.Popen", return_value=MagicMock(poll=lambda: None)) as launch:
             repository = JobRepository(Path(temp) / "registry.sqlite")
             service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None)
@@ -755,6 +756,31 @@ class JobServiceTests(unittest.TestCase):
             package_root = Path(__file__).resolve().parents[1]
             self.assertEqual(Path(launch.call_args.kwargs["cwd"]).resolve(), package_root)
             repository.close()
+
+    def test_launch_runs_a_queued_job_from_the_release_that_admitted_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            own = Path(temp) / "releases" / "own"
+            admitted = Path(temp) / "releases" / "admitted"
+            for root in (own, admitted):
+                (root / "sandbox" / "jobs").mkdir(parents=True)
+                (root / "sandbox" / "jobs" / "supervisor.py").write_text("")
+                (root / "venv" / "bin").mkdir(parents=True)
+                (root / "venv" / "bin" / "python").write_text("")
+                (root / "venv" / "bin" / "python").chmod(0o700)
+            job = Path(temp) / "jobs" / ("a" * 32)
+            job.mkdir(parents=True)
+            (job / "release.json").write_text(json.dumps(str(admitted)))
+            from sandbox.jobs.scope import admitted_release
+            self.assertEqual(admitted_release(job / "descriptor.json", own, f"{own}/venv/bin/python"),
+                             (admitted, f"{admitted}/venv/bin/python"))
+            self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
+                             (admitted, "/usr/bin/python3"))
+            (admitted / "sandbox" / "jobs" / "supervisor.py").unlink()
+            self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
+                             (own, "/usr/bin/python3"))
+            (job / "release.json").unlink()
+            self.assertEqual(admitted_release(job / "descriptor.json", own, "/usr/bin/python3"),
+                             (own, "/usr/bin/python3"))
 
     def test_acceptance_precedes_launcher_and_idempotency_replays(self):
         with tempfile.TemporaryDirectory() as temp:

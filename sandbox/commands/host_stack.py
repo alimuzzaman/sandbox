@@ -281,12 +281,13 @@ def _submission_timeout(validated: dict) -> int:
     return max(900, int(validated["compose"].get("build_timeout_seconds", 900)) + 600)
 
 
-def _submit(argv: list[str]) -> str:
+def _submit(argv: list[str], *, environment: dict | None = None) -> str:
     from sandbox.core._paths import BASE
     from sandbox.services.environment import compatible_subprocess_environment
     try:
         result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=180,
-                                env=compatible_subprocess_environment({"SANDBOX_HOME": str(BASE)}))
+                                env=compatible_subprocess_environment(
+                                    {**(environment or {}), "SANDBOX_HOME": str(BASE)}))
     except subprocess.TimeoutExpired:
         raise StackCommandError(SUBMISSION_UNKNOWN,
             "job-start acceptance is unknown after its response deadline; inspect the original request") from None

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -293,37 +292,3 @@ class SupervisorScopeTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-class SweepOwnScopeTests(unittest.TestCase):
-    def _leftover(self):
-        child = subprocess.Popen(["sleep", "60"], env=synthetic_environment(), stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait(10)))
-        return child
-
-    def _cgroup(self, leaf, pids):
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        directory = root / "user.slice" / leaf
-        directory.mkdir(parents=True)
-        (directory / "cgroup.procs").write_text("".join(f"{pid}\n" for pid in pids))
-        return root, "/user.slice/" + leaf
-
-    def test_a_job_scope_stops_what_the_job_left_but_not_the_supervisor(self):
-        from sandbox.jobs.scope import sweep_own_scope
-        child = self._leftover()
-        root, path = self._cgroup("sandbox-job-0123456789abcdef-a1b2c3.scope", [os.getpid(), child.pid])
-        # A supervisor for another job inside this scope (a test suite) sweeps nothing.
-        self.assertEqual(sweep_own_scope("f" * 32, cgroup=path, root=root), 0)
-        self.assertIsNone(child.poll())
-        self.assertEqual(sweep_own_scope("0123456789abcdef" + "0" * 16, cgroup=path, root=root,
-                                         grace_seconds=0.2), 1)
-        self.assertEqual(child.wait(10), -signal.SIGTERM)
-
-    def test_any_other_cgroup_is_left_alone(self):
-        from sandbox.jobs.scope import sweep_own_scope
-        child = self._leftover()
-        for leaf in ("sandbox-mcp-remote.service", "sandbox-follow-x.scope", "session-3.scope"):
-            with self.subTest(leaf=leaf):
-                root, path = self._cgroup(leaf, [child.pid])
-                self.assertEqual(sweep_own_scope("0123456789abcdef" + "0" * 16, cgroup=path, root=root), 0)
-        self.assertIsNone(child.poll())

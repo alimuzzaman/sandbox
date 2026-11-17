@@ -189,7 +189,10 @@ def dispatch_host_if_selected(args) -> bool:
         if getattr(error, "server_cli_not_submitted", False) and generated_request_id:
             # Source deployment failed before the job submission, and no
             # earlier attempt can have used this fresh request id.
-            detail = error.to_payload() if callable(getattr(error, "to_payload", None)) else None
+            from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+            # Only an admission refusal's envelope describes this refusal; a
+            # generic transport envelope would say "unknown".
+            detail = error.to_payload() if isinstance(error, RemoteJobAdmissionError) else None
             own = detail.get("code") if isinstance(detail, dict) else code
             if not isinstance(own, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", own) is None:
                 own = "server_cli_source_unavailable"

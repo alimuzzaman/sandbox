@@ -38,7 +38,7 @@ imports it. Actions:
 ``gc HOME``
     Keep ``current``, ``previous`` and the last ``KEEP`` activated releases;
     remove older ones that no live process references. Also remove upload
-    staging directories (``.sb-src-stage-*``) older than an hour that no
+    staging directories (``.sb-src-stage-*``) older than three hours that no
     live process uses: prepare renames a stage it builds, so these are left
     by interrupted or pre-release installs.
 ``list HOME``
@@ -65,7 +65,7 @@ MARKER = ".release.json"
 KEEP = 3
 NAME = re.compile(r"[0-9a-f]{24}|legacy-[0-9]{10,12}")
 STAGE = re.compile(r"\.sb-src-stage-(?:[0-9a-f]{12}-[0-9a-f]{32}|tmp\.[A-Za-z0-9]{6,})")
-STAGE_AGE = 3600
+STAGE_AGE = 3 * 3600  # above the longest upload (remote._RUNTIME_SOURCE_UPLOAD_TIMEOUT_MAX)
 uid = os.geteuid()
 
 def fail(code, message):
@@ -179,6 +179,8 @@ def prepare(stage_name, receipt, rev, source):
         fail(2, "invalid prepare request")
     stage = os.path.join(home, stage_name); tree = os.path.join(stage, "tree")
     owner_dir(stage, 0o700); owner_dir(tree, 0o700)
+    # Fresh again for gc_stages, which may hold the lock this waits on.
+    os.utime(stage)
     for relative in ("sb", "scripts/provision_image_stage_helper.py"):
         info = os.lstat(os.path.join(tree, relative))
         if not stat.S_ISREG(info.st_mode):

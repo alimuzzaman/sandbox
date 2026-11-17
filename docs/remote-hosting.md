@@ -1609,6 +1609,7 @@ project: xspeed-hub-{slug}
 stack:
   slug: '^[a-z0-9][a-z0-9-]{1,30}$'   # the stack name must fully match
   ports: [mailpit]                     # named ports, allocated per stack
+  mail_hostname: mail-{slug}.example.test   # optional tailnet-only inbox name
 environments:
   sandbox:
     host:
@@ -1644,8 +1645,8 @@ Direct cycles are accepted; no transitive expansion occurs.
 The relationship is stored on the controller. `stack list` includes `uses` in JSON
 and text; older records default to empty. Delivery preserves relationships and reapply
 replaces them. `stack down` reports `used_by` without refusing teardown. A relationship
-creates no routes, inbox names, stacks or access grants. Continue provisioning inbox
-names through `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
+creates no routes, inbox names, stacks or access grants. A stack's own inbox name
+comes from `stack.mail_hostname`, or from `sb host tailnet-name add`. The panel opens each stack at `/hosting/<remote>/<slug>` and shows direct Shared
 sections, recorded inbox links and delivered revision evidence. A controller without
 recorded inbox names shows the supported setup command. One-link teammate access
 and per-click sign-in are separate spec 088 work; this declaration alone does not
@@ -1761,6 +1762,69 @@ loopback allocations skip 18100-18199; ports already recorded are untouched. Use
 port in Compose through the value, for example
 `"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
 private `environment.env` file apply passes with `--env-file`.
+
+**Inbox name (`stack.mail_hostname`).** A hostname with exactly one `{slug}`,
+allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
+equals one of the stack's routes or a hostname another target holds. After every
+completed apply of the stack, Sandbox publishes the rendered name as a
+[tailnet-only name](#tailnet-only-hostnames-sb-host-tailnet-name-spec-078) at
+`127.0.0.1:<mailpit port>`, through the same `add` flow (lease, edge lock, DNS
+ownership, both probes). It is never a public route: the inbox holds every
+account's sign-in links. A rerun is a no-op and a changed port replaces the
+upstream.
+
+Ownership is decided under the name store's lock. The record is tagged with the
+stack (`stack` in the name's state). A name already published with another
+upstream and no record for this stack (for example one added by hand) is refused
+(`tailnet_name_upstream_differs`) and left alone; one with the same upstream is
+adopted and tagged. A name tagged for another stack is refused
+(`tailnet_name_stack_conflict`). `stack down` and `stack reap --remote` remove the
+names tagged for the stack, each removal re-checking under the lock that the name
+is still that stack's at the same upstream.
+
+Every apply first sweeps tagged names whose stack is gone: one on its own Mailpit
+port (live stacks never share a port), or one whose stack's lifetime record is
+`reaped` with no live copy, or that has neither a lifetime record nor a stack
+record on that machine. Without the lifetime listing nothing is swept. This is how
+names left by the reap timer (which has no tailnet-name context) or by a removal
+refused during `stack down` go away. Until that next apply, such a name keeps
+serving its old port; a target that is given that loopback port in between is
+reachable at the old name over the tailnet. Orphans and names not `published`
+are never renewed.
+
+Each apply renews at most one other live stack name within 30 days of expiry, the
+earliest first, so an apply stays bounded. A host with too few applies needs
+`sb host tailnet-name renew --all --remote R` (with `--server-held` for a joined
+remote, below).
+
+The name is published by the machine that runs the apply: the controller for a
+registered remote, the server itself for a joined remote, a this-server stack or a
+follow attempt. That machine needs the `tailnet_names` configuration, the
+Cloudflare token reference (only the machine-level reference; a project's secret
+profiles are not used here) and `lego` described below. Without the block the
+apply still succeeds and reports `mail_name: {"status": "unconfigured"}`, with no
+warning. Any other refusal (a host lock still held after four tries 20 seconds
+apart, a DNS conflict) is reported in `mail_name` and on stderr, never as an apply
+failure, and the next apply retries. On a server whose only interface address is
+private, `add` cannot pick a public address for the exposure check and every
+apply reports `tailnet_name_public_address_invalid`. The panel shows the stack's
+Open inbox link once the name is published.
+
+A joined remote's server holds these names in its own
+`$SANDBOX_HOME/runtime/tailnet-names/`. Reach them with
+`sb host tailnet-name list|add|renew|remove ... --remote R --server-held`, which runs
+as a server job with the server's authority; without `--server-held` the command
+acts on the controller's names as before. After a rollback to a release without
+this feature, a rewrite of the record by that release drops its `stack` tag, and
+`stack down` then leaves the name in place.
+
+**Security.** On a joined remote this puts the Cloudflare token (DNS:Edit on every
+zone in `tailnet_names.zones`) and the ACME account on the server that runs PR
+stacks, readable by the Sandbox user there. Anything that runs as that user (a
+build step, a container escape) can then edit any record in those zones or pass a
+DNS-01 challenge for any name in them. Prefer a token scoped to a zone used only
+for tailnet names. This needs human security review before it is enabled on a
+server.
 
 Runtime text publication sends bytes only on the selected owner's process stdin
 or the registered remote's SSH stdin. A fixed eight-byte length header travels
@@ -2208,10 +2272,15 @@ published name changes nothing.
    that one transaction (the same gate, lease, edge lock and proofs as an
    activation), then runs the nginx checks again. Any other failure is
    refused as before.
-2. **Gate**: no durable job is active on the remote and none of
+2. **Gate**: none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
    A busy remote is refused (`tailnet_name_busy`), never waited for. A lock
-   that cannot be probed counts as held. The run then takes a per-name lease
+   that cannot be probed counts as held. Durable jobs are not a conflict:
+   tests, CI, attach and exec jobs never touch the edge, and every Sandbox
+   nginx write or reload (host apply, route removal, `host destroy`'s
+   certificate cleanup, certbot's deploy hook) holds the edge lock. A deploy
+   hook written before 2026-11-17 reloads without it until the next public
+   certificate issue rewrites the hook. The run then takes a per-name lease
    on the remote (token and expiry, under a per-name lock), so a second
    controller working on the same name is refused (`tailnet_name_busy`) until
    the lease is released or expires. Under the lease the name is inspected
@@ -2230,7 +2299,7 @@ published name changes nothing.
    while it has more than 30 days left and the remote accepts it.
 5. **Activate**: the chain and the block are installed together by the remote
    program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
-   lease, re-checks the gate (locks and durable jobs, failing closed, and
+   lease, re-checks the gate (the locks, failing closed, and
    again right before `nginx -t` and right before the reload, including
    recovery reloads),
    writes an activation journal (`written`, `tested`, `loaded`), installs
@@ -2327,8 +2396,8 @@ proxy). Otherwise it leaves the records in place
 (`tailnet_name_dns_not_owned`). The provider has no compare-and-delete, so a
 change made between that read and the delete is not excluded.
 
-Limits: the host gate is a set of checks, not a reservation. A durable job or
-host lock taken between the last check and the reload is not excluded, and a
+Limits: the host gate is a set of checks, not a reservation. A host lock taken
+between the last check and the reload is not excluded, and a
 run suspended between re-proving its lease and the provider call it guards is
 not fenced. The public check probes one IPv4 address from this controller; it
 says nothing about IPv6 or other vantage points.
@@ -2342,9 +2411,16 @@ with `zone_not_allowed`. A controller state file that does not parse is
 **Configuration and the token.** The zones, the token reference and the ACME
 contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
-These are controller-owned even for a joined Tailnet remote. `host tailnet-name`
-runs on the controller; only its fixed nginx runner uses the registered remote
-transport. Do not move its broker, name records, or ACME account onto the server.
+`host tailnet-name` runs on the controller; only its fixed nginx runner uses the
+registered remote transport, and the command is never dispatched to a server job.
+The exceptions are `stack.mail_hostname` and `--server-held`: a stack apply that
+runs on the server (joined remote, this-server stack, follow attempt), and an
+explicit `--server-held` command, use the server's own `tailnet_names` block,
+token reference, `lego`, ACME account and records under the server's
+`$SANDBOX_HOME/runtime/tailnet-names/`. When the
+server adopts a name the controller published earlier (same block, same DNS-only
+record), the controller's record stays behind: do not run `remove` for that name from
+the controller, which still holds the DNS record id and would take the name down.
 The Cloudflare token (Zone:Read and DNS:Edit on those zones) is read through
 the secrets broker. It reaches only two programs, each run through a use
 profile that Sandbox defines in-process (`sandbox-tailnet-name-dns` and
@@ -4089,13 +4165,24 @@ refuse. Valid exact primary publications retain their port, including saved
 aliases proven by retained physical machine evidence. Unknown owners reserve ports.
 Interface-qualified addresses are normalized while reserving the same TCP number.
 The Docker scan lists running containers twice and takes publications from every
-container in either list. Any listed container removed outright (Docker's own
-"no such object" reply for that id) restarts the scan from a fresh list, and churn
-that does not settle within eight scans refuses. One that leaves the list but
-still exists (a restart loop) keeps its host ports only as an unknown-owner
-reservation without container addresses, so its stale facts can refuse a port but
-never prove socket ownership. Any other Docker failure still
-refuses. The exec-target snapshot restarts its project's list/inspect/re-list the
+container in either list, reading each list's containers in one batched
+`docker inspect`. Only the applied target's own Compose project is scanned
+strictly: one of its containers removed outright (Docker's own "no such object"
+reply for that id) restarts the scan from a fresh list, and own churn that does not
+settle within eight scans refuses. Every other container (other targets, CI jobs,
+test stacks) only claims ports: one removed mid-scan is dropped, never retried, so
+container churn elsewhere on the host cannot fail an apply. A container that
+leaves the list but still exists (a restart loop) keeps its host ports only as an
+unknown-owner reservation without container addresses, so its stale facts can
+refuse a port but never prove socket ownership. Two containers claiming one TCP
+number make only that number unusable. Any other Docker failure still refuses.
+
+A refused probe prints one fixed line, `sandbox-port-probe: <stage>/<kind>` (for
+example `own_containers/unsettled`, `socket_probe/exit`, or `port_check/TCP port
+20001 has an unknown listener`), and the apply error carries it as
+`hosting_port_observation_failed: host port probe failed (<stage>/<kind>; other
+output withheld)`. Only a line of exactly that shape is relayed; Docker output,
+paths and exception text never are. The exec-target snapshot restarts its project's list/inspect/re-list the
 same way whenever a container vanishes or the re-list differs.
 For IPv6, both `[address%interface]` and the `[address]%interface` form emitted
 by `ss` are accepted. Unmatched brackets and duplicate scopes still refuse.

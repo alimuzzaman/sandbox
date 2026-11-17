@@ -1110,6 +1110,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host tailnet-name add/renew: ACME directory for this call (default: tailnet_names.acme_server)")
     host_p.add_argument("--force", action="store_true",
         help="host tailnet-name renew: reissue even when the certificate is not due")
+    host_p.add_argument("--server-held", dest="server_held", action="store_true",
+        help="host tailnet-name: act on the names a joined remote's server holds itself "
+             "(stack.mail_hostname), as a server job")
     host_p.add_argument('--repair-source', choices=['deployed'], help='repair-source: explicitly use recorded deployed Git objects')
     host_p.add_argument('--repair-plan-digest', help='repair-source: exact plan digest required for confirmation')
     host_p.add_argument('--installed-source-repair', help=argparse.SUPPRESS)

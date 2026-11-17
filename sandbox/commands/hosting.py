@@ -1923,8 +1923,12 @@ def _preflight_login_service(entry: dict, prefix: str, validated: dict,
             "login_service_preflight_failed: the Compose topology could not be read") from None
 
 
-def _host_port_observation(entry, remote_name):
-    """Observe through the selected bounded channel before any target effects."""
+def _host_port_observation(entry, remote_name, compose_project):
+    """Observe through the selected bounded channel before any target effects.
+
+    Only compose_project's containers are scanned strictly; other targets'
+    containers only claim ports, so their concurrent applies cannot fail it.
+    """
     from sandbox.hosting import ports
     home = remote.resolve_sandbox_home(entry)
     machine = _authenticated_machine_identity(remote_name)
@@ -1939,7 +1943,7 @@ def _host_port_observation(entry, remote_name):
     try:
         snapshot = ports.observe_ports(
             lambda command, **kwargs: remote.ssh_run_bounded(entry, command, **kwargs),
-            identity=identity, runtime_dir=f"{home}/runtime")
+            identity=identity, runtime_dir=f"{home}/runtime", own_projects=[compose_project])
     except ports.PortObservationError as exc:
         raise hosting.HostingError(f"hosting_port_observation_failed: {exc}") from None
     return snapshot
@@ -2049,7 +2053,11 @@ def _port_reallocation(args, validated, entry, state, observation):
         refuse()
     owner = {"project": summary["compose_project"], "service": validated["compose"]["service"],
              "container_port": validated["compose"]["container_port"]}
-    if (ports.primary_ports(observation, owner)
+    try:
+        live_primary = ports.primary_ports(observation, owner)
+    except ports.PortObservationError:
+        refuse()  # An ambiguous own primary is never relocation evidence.
+    if (live_primary
             or any(row["project"] == summary["compose_project"] and row["port"] == old
                    for row in observation["publications"])):
         refuse()  # Never relocate a live primary, even if another bind conflicts.
@@ -6452,7 +6460,34 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     if summary_recorder is not None:
         summary_recorder.finished((delivery or {}).get("delivery_succeeded") is not False)
     _record_stack_delivery(validated, remote_name, delivery)
+    mail_name = _ensure_stack_mail_name(validated, remote_name, delivery)
+    if mail_name is not None:
+        result["mail_name"] = mail_name
     return result
+
+
+def _ensure_stack_mail_name(validated: dict, remote_name: str, delivery: dict | None) -> dict | None:
+    """Keep a stack's ``stack.mail_hostname`` pointed at its Mailpit port.
+
+    Runs where the apply completed (controller applies, this-server stacks and
+    follow attempts all end here), through the ordinary tailnet-name ``add``:
+    a rerun is a no-op and a changed port replaces the upstream. The apply has
+    already succeeded, so a refusal is reported (``mail_name`` and stderr),
+    never raised.
+    """
+    stack = validated.get("stack") or {}
+    fqdn = stack.get("mail_hostname")
+    port = (stack.get("ports") or {}).get("mailpit")
+    if (not fqdn or not isinstance(port, int)
+            or (delivery or {}).get("delivery_state") not in {"succeeded", "incomplete"}):
+        return None
+    from sandbox.hosting.tailnet_names import stack_mail
+    report = stack_mail.ensure(remote_name, stack["slug"], fqdn, port)
+    if report.get("status") not in ("ready", "unconfigured"):
+        print(f"warning: inbox name {fqdn} not published ({report.get('code')}): "
+              f"{remote.redact_text(str(report.get('error') or ''))[:200]}; the next apply retries it",
+              file=sys.stderr)
+    return report
 
 
 def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | None) -> None:
@@ -9264,7 +9299,8 @@ def cmd_host(cfg, args) -> None:
                 current_zone = decision.get("zone") if decision.get("mode") == "shared" else None
                 if current_zone and not any(claim["zone"] == current_zone for claim in claims):
                     claims.append({"mode": "shared", "zone": current_zone})
-                observation = _host_port_observation(current_entry, args.remote)
+                observation = _host_port_observation(
+                    current_entry, args.remote, hosting.compose_project_name(validated))
                 allocation_state, reallocation = _port_reallocation(
                     args, validated, current_entry, state, observation)
                 replay = bool(reallocation and "new_port" in reallocation)

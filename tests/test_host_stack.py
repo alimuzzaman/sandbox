@@ -1109,8 +1109,13 @@ class StackCommandTests(unittest.TestCase):
             host_stack._down(self.args("down", confirm=True))
         self.assertEqual(caught.exception.code, "stack_destroy_failed")
         self.assertIn("r/demo", stack_registry.read()["stacks"])
-        with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute:
+        from sandbox.hosting.tailnet_names import stack_mail
+        removed = [{"fqdn": "mail-demo.example.test", "status": "removed"}]
+        with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute, \
+                patch.object(stack_mail, "release", return_value=removed) as release:
             down = host_stack._down(self.args("down", confirm=True))
+        release.assert_called_once_with("r", "demo")
+        self.assertEqual(down["mail_names"], removed)
         execute.assert_called_once()
         self.assertEqual(execute.call_args.args[2:4], ("xspeed-hub-demo", "sandbox"))
         self.assertEqual(down["released_ports"], created["ports"])

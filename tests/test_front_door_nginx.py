@@ -448,6 +448,8 @@ class NginxTransactionTests(unittest.TestCase):
         self.assertIn("--cert-name sandbox-host-demo-production", command)
         self.assertIn(nginx.DEPLOY_HOOK, command)
         self.assertIn("nginx -t && systemctl reload nginx", command)
+        self.assertIn(f"flock -w {nginx.LOCK_WAIT_SECONDS} {nginx.LOCK_PATH} sh -c", command,
+                      "the deploy hook reloads under the edge lock")
         with self.assertRaises(front_door.FrontDoorError):
             nginx.ensure_public_certificate({}, "x", ["*.example.com"])
 

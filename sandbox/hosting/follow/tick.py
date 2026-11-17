@@ -8,7 +8,10 @@ contract, the same contract a controller's dispatch uses.
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Callable
@@ -167,9 +170,65 @@ def job_argv(record: dict, capability: dict, *, attempt_id: str, request_id: str
             "--attempt", attempt_id, "--json"]
 
 
+_ATTEMPT_RE = re.compile(r"[0-9a-f]{16}")
+
+
+def scoped_argv(argv: list[str]) -> list[str]:
+    """``argv`` run in its own transient ``systemd --user`` scope.
+
+    The poll runs as the oneshot ``sandbox-stack-follow.service``; when it
+    exits, systemd stops that unit's whole cgroup, including the attempt's
+    detached job supervisor and the apply job it starts. A scope is its own
+    cgroup under the user manager and ends only when its last process exits,
+    so the attempt outlives the poll and stays tracked by systemd. The name is
+    unique per submission: a replayed request only returns its receipt, and its
+    scope ends with that ``job-start``.
+    """
+    attempt = argv[argv.index("--attempt") + 1] if "--attempt" in argv[:-1] else ""
+    label = attempt if _ATTEMPT_RE.fullmatch(attempt) else "submission"
+    # The two variables only let systemd-run reach the user manager; the
+    # attempt itself runs with the same stripped environment as before.
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+            f"--unit=sandbox-follow-{label}-{secrets.token_hex(4)}",
+            "--description=Sandbox follow attempt job", "--",
+            "env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", *argv]
+
+
+def user_manager_environment() -> dict:
+    """What ``systemd-run --user`` needs to reach the user manager."""
+    environment = {key: os.environ[key] for key in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+                   if os.environ.get(key)}
+    if "XDG_RUNTIME_DIR" not in environment and os.path.isdir(f"/run/user/{os.getuid()}"):
+        environment["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    return environment
+
+
 def default_submit(argv: list[str]) -> str:
-    from sandbox.commands.host_stack import _submit
-    return _submit(argv)
+    from sandbox.commands.host_stack import _submit, StackCommandError, SUBMISSION_FAILED
+    environment = user_manager_environment()
+    if shutil.which("systemd-run") is None:
+        # Never fall back to the poll's own cgroup: the attempt would die with it.
+        raise StackCommandError(SUBMISSION_FAILED,
+                                "systemd-run is unavailable; a follow attempt needs its own scope")
+    # A systemd-run that cannot create a scope fails before job-start runs, but
+    # without a receipt that reads as an unknown submission, replayed forever.
+    # Probe it first: a failure here is a refusal, since nothing was submitted.
+    if not scope_available(environment):
+        raise StackCommandError(SUBMISSION_FAILED,
+                                "systemd-run could not start a user scope for the follow attempt")
+    return _submit(scoped_argv(argv), environment=environment)
+
+
+def scope_available(environment: dict) -> bool:
+    from sandbox.services.environment import compatible_subprocess_environment
+    import subprocess
+    try:
+        return subprocess.run(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"],
+            capture_output=True, timeout=30, check=False, stdin=subprocess.DEVNULL,
+            env=compatible_subprocess_environment(environment)).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def default_capability() -> dict:

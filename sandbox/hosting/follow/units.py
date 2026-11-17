@@ -18,7 +18,8 @@ TIMER = f"{UNIT}.timer"
 UNIT_MODE = 0o644
 INTERVAL = "5min"
 # A poll starts no new follow after this budget; systemd's limit adds room for
-# the follow in progress.
+# the poll's last check. Attempts run in their own scopes (tick.scoped_argv), so
+# the limit never stops one.
 TICK_BUDGET_SECONDS = 600
 _SAFE_PATH = re.compile(r"^/[A-Za-z0-9._/-]+$")
 

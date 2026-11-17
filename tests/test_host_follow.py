@@ -8,7 +8,9 @@ import contextlib
 import io
 import json
 import os
+import secrets
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1036,6 +1038,105 @@ class ApexTests(unittest.TestCase):
         for name in ("dev.xspeedcdn.online", "dev.example.co.uk", "a.b.example.com", "co.example.io"):
             with self.subTest(name=name):
                 self.assertFalse(is_apex(name))
+
+
+class AttemptScopeTests(unittest.TestCase):
+    """feedback 642bc505: the attempt job must not live in the poll unit's cgroup."""
+
+    ARGV = ["/home/u/sandbox/sb-src/sb", "job-start", "--local", "--server-cli", "--json", "--",
+            "host", "follow", "apply", "--remote", "vps", "--name", "pr-1",
+            "--attempt", "0123456789abcdef", "--json"]
+
+    def test_submission_runs_job_start_in_its_own_user_scope(self):
+        seen = {}
+
+        def submit(argv, *, environment=None):
+            seen.update(argv=argv, environment=environment)
+            return "a" * 32
+
+        with patch.object(follow_tick.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                patch.object(follow_tick, "scope_available", return_value=True), \
+                patch.object(host_stack, "_submit", submit), \
+                patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1001"}):
+            self.assertEqual(follow_tick.default_submit(list(self.ARGV)), "a" * 32)
+        argv = seen["argv"]
+        self.assertEqual(argv[:5], ["systemd-run", "--user", "--scope", "--quiet", "--collect"])
+        self.assertRegex(argv[5], r"^--unit=sandbox-follow-0123456789abcdef-[0-9a-f]{8}$")
+        # The manager variables reach systemd-run only, never the attempt.
+        self.assertEqual(argv[argv.index("--") + 1:],
+                         ["env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", *self.ARGV])
+        self.assertEqual(seen["environment"]["XDG_RUNTIME_DIR"], "/run/user/1001")
+        # Each submission gets its own scope, so a replay never collides with a live one.
+        self.assertNotEqual(follow_tick.scoped_argv(self.ARGV)[5], follow_tick.scoped_argv(self.ARGV)[5])
+
+    def test_without_systemd_run_it_refuses_instead_of_staying_in_the_poll(self):
+        with patch.object(follow_tick.shutil, "which", return_value=None), \
+                patch.object(host_stack, "_submit") as submit:
+            with self.assertRaises(host_stack.StackCommandError) as raised:
+                follow_tick.default_submit(list(self.ARGV))
+        self.assertEqual(raised.exception.code, host_stack.SUBMISSION_FAILED)
+        submit.assert_not_called()
+
+    def test_a_scope_that_cannot_start_is_a_refusal_not_an_endless_replay(self):
+        with patch.object(follow_tick.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                patch.object(follow_tick.subprocess if hasattr(follow_tick, "subprocess") else subprocess,
+                             "run", return_value=SimpleNamespace(returncode=1)), \
+                patch.object(host_stack, "_submit") as submit:
+            with self.assertRaises(host_stack.StackCommandError) as raised:
+                follow_tick.default_submit(list(self.ARGV))
+        self.assertEqual(raised.exception.code, host_stack.SUBMISSION_FAILED)
+        submit.assert_not_called()
+
+    def test_the_attempt_survives_its_oneshot_poll_unit(self):
+        """A real oneshot user unit (like sandbox-stack-follow.service) starts a
+        detached process the way job-start starts its supervisor, then exits."""
+        environment = {**os.environ, **follow_tick.user_manager_environment()}
+        if shutil.which("systemd-run") is None or subprocess.run(
+                ["systemctl", "--user", "show-environment"], capture_output=True,
+                env=environment, timeout=10).returncode != 0:
+            self.skipTest("no systemd user manager")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spawn = root / "spawn.py"
+            # What job-start does: launch a detached supervisor, print, exit.
+            spawn.write_text(
+                "import subprocess, sys\n"
+                "p = subprocess.Popen(['sleep', '120'], start_new_session=True,\n"
+                "                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)\n"
+                "open(sys.argv[1], 'w').write(str(p.pid))\n")
+            poll = root / "poll.py"
+            poll.write_text(
+                "import json, subprocess, sys\n"
+                "argv = json.loads(sys.argv[1])\n"
+                "raise SystemExit(subprocess.run(argv).returncode)\n")
+            results = {}
+            for variant in ("scoped", "unscoped"):
+                pidfile = root / f"{variant}.pid"
+                inner = [sys.executable, str(spawn), str(pidfile), "--attempt", "0123456789abcdef"]
+                argv = follow_tick.scoped_argv(inner) if variant == "scoped" else inner
+                unit = f"sandbox-test-follow-poll-{secrets.token_hex(4)}"
+                completed = subprocess.run(
+                    ["systemd-run", "--user", "--wait", "--quiet", "--collect", f"--unit={unit}",
+                     "-p", "Type=oneshot", "-p", "KillMode=control-group",
+                     "--setenv=XDG_RUNTIME_DIR=" + environment["XDG_RUNTIME_DIR"],
+                     "--", sys.executable, str(poll), json.dumps(argv)],
+                    capture_output=True, text=True, env=environment, timeout=60)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                pid = int(pidfile.read_text())
+                time.sleep(1)
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                if alive:
+                    def stop(pid=pid):
+                        with contextlib.suppress(ProcessLookupError):
+                            os.kill(pid, signal.SIGKILL)
+                    self.addCleanup(stop)
+                results[variant] = alive
+        # The unscoped control reproduces the bug; the scoped attempt survives.
+        self.assertEqual(results, {"scoped": True, "unscoped": False})
 
 
 if __name__ == "__main__":

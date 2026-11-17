@@ -104,6 +104,13 @@ def _owned_directory(path: Path, *, create: bool) -> None:
                      | getattr(os, "O_NOFOLLOW", 0))
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
+            except PermissionError:
+                # A traverse-only ancestor (e.g. /home at 0711) refuses O_RDONLY;
+                # O_PATH is enough to fstat it and open its children.
+                if not hasattr(os, "O_PATH"):
+                    raise
+                child = os.open(component, (flags & ~os.O_RDONLY) | os.O_PATH,
+                                dir_fd=descriptor)
             except FileNotFoundError:
                 if not create:
                     raise ProvisioningError("path_unsafe") from None

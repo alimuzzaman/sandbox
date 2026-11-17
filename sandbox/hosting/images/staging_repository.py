@@ -225,6 +225,13 @@ class StageRepository:
                 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
                 try:
                     child = os.open(component, flags, dir_fd=descriptor)
+                except PermissionError:
+                    # A traverse-only ancestor (e.g. /home at 0711) refuses
+                    # O_RDONLY; O_PATH can still fstat it and open children.
+                    if index >= owned_index or not hasattr(os, "O_PATH"):
+                        raise
+                    child = os.open(component, (flags & ~os.O_RDONLY) | os.O_PATH,
+                                    dir_fd=descriptor)
                 except FileNotFoundError:
                     if index < owned_index:
                         raise StageRepositoryError("ledger_invalid") from None

@@ -411,6 +411,23 @@ class PinTests(unittest.TestCase):
         os.unlink(self.remote_home / "sb-src")
         self.assertEqual(self._gated("true").returncode, pins.JOBS_ACTIVE_EXIT)
 
+    def test_scoped_release_frees_admission_right_after_the_check(self):
+        """A serving release with scoped supervisors does not hold the lock through the install."""
+        path, repository = self._registry()
+        os.symlink("current", self.remote_home / "sb-src")
+        probe = (f"python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1], timeout=0.2); "
+                 f"c.execute(\"BEGIN IMMEDIATE\"); c.rollback()' {path}")
+        # A legacy release in the release layout (no scope.py) keeps it held.
+        (self.remote_home / "current").mkdir()
+        self.assertEqual(self._gated(f"if {probe} 2>/dev/null; then exit 9; fi").returncode, 0)
+        scope = self.remote_home / "current" / "sandbox" / "jobs" / "scope.py"
+        scope.parent.mkdir(parents=True)
+        scope.write_text("")
+        # Admission and running supervisors' writes go through during the install.
+        self.assertEqual(self._gated(probe).returncode, 0)
+        os.unlink(self.remote_home / "sb-src")
+        self.assertEqual(self._gated(f"if {probe} 2>/dev/null; then exit 9; fi").returncode, 0)
+
     def test_prepare_runs_before_the_lock_and_its_failure_runs_nothing(self):
         marker = self.remote_home / "installed"
         built = self.remote_home / "built"

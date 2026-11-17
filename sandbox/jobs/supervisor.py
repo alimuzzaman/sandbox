@@ -22,6 +22,9 @@ from .artifacts import collect as collect_artifacts
 from .metrics import append as append_metric, sample as sample_metric
 from sandbox.services.redaction import redact_structure, redact_text
 
+# Longer than any install holds the job admission lock (pins.INSTALL_GATE).
+SUPERVISOR_BUSY_TIMEOUT_MS = 60_000
+
 
 def _server_cli_parent_reason(descriptor, repository):
     parent = descriptor.get('server_cli_parent')
@@ -155,7 +158,9 @@ def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
     job_id = descriptor["job_id"]
-    repository = JobRepository(descriptor["registry_path"])
+    # A supervisor outlives installs and other short registry writers: wait
+    # out a held write lock rather than fail the job with "database is locked".
+    repository = JobRepository(descriptor["registry_path"], busy_timeout_ms=SUPERVISOR_BUSY_TIMEOUT_MS)
     storage = JobStorage(descriptor["runtime_dir"], free_disk_reserve=descriptor.get("free_disk_reserve", 0))
     command = None
     selector = None

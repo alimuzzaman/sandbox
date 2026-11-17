@@ -3086,12 +3086,18 @@ still kill:
 - **Old layout** (the one-time conversion): every job that is `accepted`,
   `running` or `cancelling`, as before.
 
-In both, the gate then holds the registry's write lock (`BEGIN IMMEDIATE`)
-until the old service is stopped, so no job can be admitted between the check
-and the restart. The build already happened outside the lock, so that window
-is the flip, unit write and stop: seconds. A submission arriving then waits on
-the lock (`JobRepository`'s 5-second busy timeout) and is admitted once the old
-service stops.
+The gate makes its check under the registry's write lock (`BEGIN IMMEDIATE`).
+In the release layout, when the serving release launches supervisors in scopes
+(`sandbox/jobs/scope.py` exists), it releases the lock right after the check:
+nothing admitted later can die with the restart, so admission never pauses.
+Otherwise (the old layout, or a retained pre-scope release) it holds the lock
+until the old service is stopped, so no job is admitted between the check and
+the restart; a submission then waits on the lock (`JobRepository`'s 5-second
+busy timeout) and can fail as `server_cli_acceptance_unknown`, safe to replay
+with the same request id. Holding the lock through the stop once failed a
+running supervisor's registry write with `database is locked` (xspeed-dev,
+2026-11-17); supervisors now wait up to 60 s on a busy registry
+(`SUPERVISOR_BUSY_TIMEOUT_MS` in `sandbox/jobs/supervisor.py`).
 
 A queued job runs from the release that admitted it, even when another
 release's supervisor starts it on freeing a slot: the admitting release is

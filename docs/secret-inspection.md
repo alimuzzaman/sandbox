@@ -1051,6 +1051,11 @@ domain separation is valid, and entries are unambiguous:
 ./sb secrets ownership classify --profile office --check-destination
 ```
 
+The destination check sends one value-free GET per mapped name. The
+destination's `timeoutSeconds` caps each request. The whole check has its
+own deadline, `--timeout-seconds` (default 300, range 1..3600), the same as
+`migrate`. Changing it does not change the profile's authority.
+
 #### 2. Validate storage admission evidence
 Verify compliance evidence for remote storage before migration approval:
 

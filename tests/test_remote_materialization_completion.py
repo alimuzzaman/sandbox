@@ -172,8 +172,11 @@ class RemoteMaterializationCompletionTest(unittest.TestCase):
                 overlay_snapshot={"deleted": ["old.txt"], "archive": payload, "files": 1},
             ), 2)
         self.assertEqual(transport.calls, ["acquire", "run", "run", "run", "release"])
-        archive_call = next(item for item in calls if item[1].get("input_data"))
+        archive_call = next(item for item in calls if "tar -xf" in item[0][1])
         self.assertEqual(archive_call[1]["input_data"], payload)
+        delete_call = next(item for item in calls if "xargs -0 rm" in item[0][1])
+        self.assertEqual(delete_call[1]["input_data"], b"/srv/source/old.txt")
+        self.assertNotIn("old.txt", delete_call[0][1])
         self.assertNotIn(payload.decode(), archive_call[0][1])
 
 

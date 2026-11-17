@@ -1,4 +1,4 @@
-"""A failed measure releases the source lock.
+"""A failed measure releases the source lock; large delete sets fit the wire.
 
 No real SSH. Linux cases run the standalone coordinator locally through
 `/bin/sh -c <one argument>`, the shape a remote login shell receives.
@@ -83,6 +83,44 @@ class RealCoordinatorFailuresTest(unittest.TestCase):
             lease = RemoteMaterializationLease({}, str(target), shell_transport).acquire()
             self.assertRegex(lease.measure(str(target)), r"^sha256:[0-9a-f]{64}$")
             lease.release()
+
+    def test_deleting_more_paths_than_one_argument_holds(self):
+        count = 1600
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "source"
+            vendor = target / "vendor" / "package"
+            vendor.mkdir(parents=True)
+            deleted = []
+            for index in range(count):
+                name = f"-{index:04d}-" + "f" * 80 + ".php"  # leading dash: no option injection
+                (vendor / name).write_text("x")
+                deleted.append(f"vendor/package/{name}")
+            (target / "kept.txt").write_text("kept")
+            argv_bytes = sum(len(f"rm -f -- {target}/{path} && ") for path in deleted)
+            self.assertGreater(argv_bytes, 128 * 1024)
+            with patch.object(_remote, "RUNTIME_DIR", Path(directory) / "runtime"), \
+                    patch.object(_remote, "ssh_run", side_effect=shell_transport):
+                with _remote._remote_materialization_lock({}, str(target)) as lease:
+                    applied = _remote._apply_uncommitted_unlocked(
+                        {}, str(target), directory, "", [],
+                        overlay_snapshot={"deleted": deleted, "archive": b"", "files": 0},
+                        lease=lease)
+            self.assertEqual(applied, count)
+            self.assertEqual(os.listdir(vendor), [])
+            self.assertTrue((target / "kept.txt").exists())
+
+    def test_unsafe_deleted_path_refuses_before_any_remote_call(self):
+        for path in ("a\0/etc/passwd", "../outside", "/etc/passwd", ""):
+            with self.subTest(path=path):
+                calls = []
+                lease = RemoteMaterializationLease({}, "/srv/source",
+                                                   lambda *a, **k: calls.append(a))
+                with self.assertRaises(ValueError):
+                    _remote._apply_uncommitted_unlocked(
+                        {}, "/srv/source", "/unused", "", [],
+                        overlay_snapshot={"deleted": [path], "archive": b"", "files": 0},
+                        lease=lease)
+                self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -129,6 +129,13 @@ class StackViewTest(unittest.TestCase):
         (other,) = pv.build_view([controller])["stacks"]
         self.assertEqual((other["key"], other["page_path"]), ("other-box/demo", "/hosting/other-box/demo"))
         self.assertEqual(pv.stack_page_path("controller", "a b/c", "x"), "/hosting/a%20b%2Fc/x")
+        carded = [row for row in view["lifetimes"] if row["card"]]
+        self.assertTrue(carded)
+        for row in carded:
+            self.assertEqual(row["page_path"], pv.target_page_path(
+                row["source"], row["remote"], row["project"], row["environment"]))
+        self.assertIn("/hosting#hosting-this-server%2Fxspeed-hub-demo%2Fstaging",
+                      [row["page_path"] for row in carded])
 
     def test_health_is_applied_to_rows(self):
         def lookup(targets):

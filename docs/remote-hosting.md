@@ -2609,13 +2609,14 @@ machine.
 The **Stacks & sites** page (`/hosting`, data at `GET /api/hosting`) is read-only. It lists
 every `sb host stack` with one row per server created for it, plus the projects hosted with
 `sb host apply` without a stack. Each row is a link, with its state, its health and the
-ref it was built from. In `GET /api/hosting`, each stack and target row carries
-`page_path`, the panel path to link to (`/hosting/<segment>/<slug>` for a stack, the
-`/hosting#...` card anchor for a target). `key` is an identity, not a path: a stack this
+ref it was built from. In `GET /api/hosting`, each stack and target row, and each lifetime row that has a card,
+carries `page_path`, the panel path to link to (`/hosting/<segment>/<slug>` for a stack,
+the `/hosting#...` card anchor otherwise). `key` is an identity, not a path: a stack this
 server records itself has `key` `<remote>/<slug>` but lives at `/hosting/this-server/<slug>`.
 The stack page also accepts the row's `remote` name in place of `this-server`, but only
 when that name matches exactly one such stack; it then replaces the address with the
-`this-server` path. A stack also shows its slug, project, branch, commit, template
+`this-server` path. A controller record of a remote with that same name takes
+precedence. Shared stacks shown on a stack page are looked up by exact segment only. A stack also shows its slug, project, branch, commit, template
 path, last apply (status, time and request id), its Mailpit upstream and named
 ports, and its created time. **Open inbox** appears only when this server has one
 managed tailnet HTTPS name for that exact `127.0.0.1:<mailpit-port>` upstream. The

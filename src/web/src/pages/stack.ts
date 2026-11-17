@@ -5,11 +5,13 @@ import { theme } from "../theme";
 import { hostingPath, stackPath } from "../router";
 import { stackCard } from "./hosting";
 import type { HostingStack } from "../types";
-import { resolveStack } from "../ui/stack-route";
+import { resolveStack, stackSegment } from "../ui/stack-route";
 export { signInStack } from "../ui/stack-signin";
 
-function findStack(remote: string, slug: string): HostingStack | undefined {
-  return store.hosting ? resolveStack(store.hosting.stacks, remote, slug)?.stack : undefined;
+// A shared stack is looked up by its exact segment only: the remote-name alias
+// is for addresses built from /api/hosting, never for mixing record sources.
+function findShared(remote: string, slug: string): HostingStack | undefined {
+  return store.hosting?.stacks.find(stack => stack.slug === slug && stackSegment(stack) === remote);
 }
 
 export function stackView(remote: string, slug: string): string {
@@ -31,10 +33,10 @@ export function stackView(remote: string, slug: string): string {
   else if (!stack) content = `<p role="status">Stack ${esc(slug)} is not in the loaded records for this host. Refresh or return to all stacks to check its current location.</p>`;
   else {
     const shared = (stack.page_access?.uses || []).map(name => {
-      const used = findStack(remote, name);
+      const used = findShared(remote, name);
       const title = `<h2 class="text-[16px] font-semibold">Shared · ${esc(name)}</h2>`;
       return `<section class="space-y-3">${title}${used ?
-        `<a data-link href="${esc(stackPath(remote, name))}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">Open shared stack</a>${stackCard(used)}` :
+        `<a data-link href="${esc(stackPath(stackSegment(used), name))}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">Open shared stack</a>${stackCard(used)}` :
         `<p class="text-[13px] ${theme.quiet}">Shared stack ${esc(name)} is missing from this controller's records.</p>`}</section>`;
     }).join("");
     content = `${stackCard(stack)}${shared}`;

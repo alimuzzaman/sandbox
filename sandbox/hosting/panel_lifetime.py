@@ -72,6 +72,7 @@ class LifetimeView(TypedDict):
 
 
 class LifetimeRow(LifetimeView):
+    page_path: NotRequired[str]  # only when ``card``: the hosting page at its card
     remote: str
     source: Literal["this-server", "controller"]
     project: str

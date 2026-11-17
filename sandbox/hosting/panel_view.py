@@ -42,6 +42,8 @@ def _page_segment(source: str, remote: str) -> str:
     return "this-server" if source == "this-server" else remote
 
 
+# Parity with encodeURIComponent holds only because slugs, remote names, projects
+# and environments never contain ! * ' ( ), which quote(safe='') would encode.
 def stack_page_path(source: str, remote: str, slug: str) -> str:
     """The panel path of a stack's page, as the panel's own links build it (router.stackPath)."""
     from urllib.parse import quote
@@ -425,7 +427,8 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             carded.add(key)
             lifetime_rows.append({**view, "remote": remote, "source": source, "project": project,  # type: ignore[typeddict-item]
                                   "environment": environment, "compose_project": compose_project,
-                                  "name": name, "card": True})
+                                  "name": name, "card": True,
+                                  "page_path": target_page_path(source, remote, project, environment)})
         return view
 
     known_instances = {site["instance"] for site in known if site["instance"]}

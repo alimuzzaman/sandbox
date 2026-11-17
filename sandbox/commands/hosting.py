@@ -3781,10 +3781,15 @@ def _mark_hosting_init_complete(state: dict, key: str, *, entry: dict,
 
 def _source_revision_evidence_ready(validated: dict, classified: dict,
                                     revision: str) -> bool:
+    # The same exemption as _classify_host_observation: a shared blue-green
+    # service keeps its container, so it carries no revision check.
+    from sandbox.hosting.blue_green import revision_exempt
+    exempt = revision_exempt(validated)
     expected = {
         (service, key)
         for service in [validated["compose"]["service"],
                         *validated["compose"].get("background_services", [])]
+        if service not in exempt
         for key, provider in validated["deploy"].get("derived_environment", {}).items()
         if provider == "pushed_commit_sha"
     }

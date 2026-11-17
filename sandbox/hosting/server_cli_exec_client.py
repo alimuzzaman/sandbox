@@ -28,9 +28,45 @@ def _handle(receipt, request_id):
     return result
 
 
+# Exit 2 for a request outside the documented bounds, as for other usage errors.
+_REQUEST_REFUSALS = frozenset({"host_exec_argv_invalid", "host_exec_argv_too_large",
+    "host_exec_argv_unsafe", "host_exec_stdin_too_large"})
+
+
+def _limits():
+    return {"argv_kib": host_exec.SERVER_ARGV_MAX_BYTES // 1024, "argv_items": host_exec.SERVER_ARGV_MAX_ITEMS,
+            "stdin_mib": host_exec.SERVER_STDIN_MAX_BYTES >> 20,
+            "intake": host_exec.SERVER_STDIN_INTAKE_SECONDS}
+
+
 def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
+    limits = _limits()
     messages = {
         "server_cli_exec_unavailable": "Server exec is unavailable; no controller fallback was attempted.",
+        "server_cli_exec_refused": "The server refused before accepting a job; nothing ran. Its runtime "
+            "predates named refusals, so the cause is not reported.",
+        "host_exec_argv_invalid": "The command after -- is not a valid argv; nothing was submitted.",
+        "host_exec_argv_too_large": "The command after -- is over {argv_kib} KiB or {argv_items} arguments, "
+            "or too long once quoted for the remote shell; nothing was submitted.".format(**limits),
+        "host_exec_argv_unsafe": "The command after -- carries a secret-shaped value; nothing was submitted.",
+        "host_exec_stdin_too_large": "stdin is over {stdin_mib} MiB; nothing was submitted.".format(**limits),
+        "host_exec_stdin_timeout": "stdin did not reach end of input within {intake} seconds; "
+            "nothing was submitted.".format(**limits),
+        "host_exec_stdin_unavailable": "stdin could not be read or held; nothing was submitted.",
+        "host_exec_stdin_mismatch": "The server received different stdin than was sent; nothing was accepted.",
+        "host_exec_unknown_service": "The target has no running first container for --service; "
+            "nothing was submitted.",
+        "server_cli_exec_request_invalid": "The server refused the exec request as invalid; nothing was accepted.",
+        "server_cli_exec_capability_unavailable": "The server's installed runtime does not offer this exec "
+            "contract; nothing was submitted and no controller fallback was attempted.",
+        "server_cli_exec_identity_changed": "The server's installed owner changed during the request; "
+            "nothing was accepted.",
+        "server_cli_exec_deadline_expired": "The --timeout ran out before the server accepted the job; "
+            "nothing ran.",
+        "server_cli_exec_target_unavailable": "The server could not read this target's records; "
+            "nothing was accepted.",
+        "server_cli_exec_target_changed": "The target's server records kept changing while the request "
+            "was sent, so the server accepted nothing; nothing ran.",
         "server_cli_exec_acceptance_unknown": "Inspect the original request before any replay; acceptance is unknown.",
         "server_cli_exec_observation_unavailable": "The original server job is retained; inspect it before any replay.",
         "host_exec_usage": "Host exec requires a service, one target or name, and a command after --.",
@@ -55,6 +91,18 @@ def _fail(args, code, request_id, *, acceptance, receipt=None, exit_code=1):
             "(a stack's template), forward it on every service, then re-apply",
         "server_cli_exec_observation_unavailable":
             "inspect it with sb job-status JOB_ID --remote NAME; do not replay it",
+        "host_exec_argv_too_large": "pass large input on stdin (up to {stdin_mib} MiB), e.g. "
+            "sb host exec ... -- sh -c 'cat > /tmp/in' < FILE".format(**limits),
+        "host_exec_argv_unsafe": "pass secret values on stdin, never in the command line",
+        "host_exec_stdin_too_large": "split the input, or copy it in parts on stdin",
+        "host_exec_unknown_service": "check --service against sb host status --remote NAME",
+        "server_cli_exec_capability_unavailable": "check sb remote service status NAME; the server "
+            "runtime may need sb remote service migrate",
+        "server_cli_exec_deadline_expired": "raise --timeout, then retry",
+        "server_cli_exec_target_changed": "retry; if it repeats, check sb host status for an apply, "
+            "TTL or share activity on this target",
+        "server_cli_exec_refused": "retry; if it repeats, check sb host status and sb remote service "
+            "status NAME",
     }
     if getattr(args, "name", None):
         # Stacks get their lifetime record from sb host stack up, never classify.
@@ -174,6 +222,9 @@ def dispatch_exec_if_selected(args) -> bool:
                 or getattr(args, "tailnet_hostname", None) is not None
                 or getattr(args, "image_action", None) is not None):
             _fail(args, "host_exec_usage", request_id, acceptance="not_accepted", exit_code=2)
+        # The documented argv bound is checked before any metadata read.
+        from sandbox.application.server_cli_exec import _exec_argv
+        _exec_argv(command)
         from sandbox.application.server_cli_targets import observe_server_cli_target
         snapshot = observe_server_cli_target(args.remote, target=target, name=name,
             environment=getattr(args, "environment", None))
@@ -181,22 +232,34 @@ def dispatch_exec_if_selected(args) -> bool:
         _fail(args, "host_exec_usage", request_id, acceptance="not_accepted", exit_code=2)
     except Exception as error:
         from sandbox.application.server_cli_targets import ServerTargetRefused, TARGET_REFUSAL_CODES
+        from sandbox.application.server_cli_exec import ServerCLIExecRefused
         if type(error) is ServerTargetRefused and error.code in TARGET_REFUSAL_CODES:
             _fail(args, error.code, request_id, acceptance="not_accepted")
+        if type(error) is ServerCLIExecRefused:
+            _fail(args, error.code, request_id, acceptance="not_accepted",
+                  exit_code=2 if error.code in _REQUEST_REFUSALS else 1)
         _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
 
     from sandbox.application.server_cli_exec import (
         submit_server_cli_exec, read_server_cli_exec_result, recover_server_cli_exec_acceptance,
-        ServerCLIExecAcceptanceUnknown, ServerCLIExecObservationUnavailable)
+        refusal_code, ServerCLIExecAcceptanceUnknown, ServerCLIExecObservationUnavailable)
     from sandbox.jobs.anonymous_input import AnonymousInputUnavailable
     receipt = None
+
+    def reobserve(budget_seconds=45):
+        # Only after the server's explicit "target changed" refusal (no job).
+        return observe_server_cli_target(args.remote, target=target, name=name,
+                                         environment=getattr(args, "environment", None),
+                                         budget_seconds=budget_seconds)
     try:
         with _original_stdin() as descriptor:
             receipt = submit_server_cli_exec(args.remote, snapshot=snapshot, service=service,
                 argv=command, stdin_fd=descriptor, request_id=request_id, timeout_seconds=timeout,
-                output_mode="artifact")
-    except (ServerCLIUnavailable, AnonymousInputUnavailable):
-        _fail(args, "server_cli_exec_unavailable", request_id, acceptance="not_accepted")
+                output_mode="artifact", reobserve=reobserve)
+    except (ServerCLIUnavailable, AnonymousInputUnavailable) as refused:
+        code = refusal_code(refused)
+        _fail(args, code, request_id, acceptance="not_accepted",
+              exit_code=2 if code in _REQUEST_REFUSALS else 1)
     except ServerCLIExecAcceptanceUnknown as unknown:
         # The receipt was lost, which is not a refusal. Ask the server's ledger
         # once, read-only, for this exact request before reporting unknown.

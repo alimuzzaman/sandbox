@@ -2240,7 +2240,37 @@ working-directory or environment option, and none is added.
   ([`host_apply_lease_held`](#host_apply_lease_held)).
 
 Joined-owner exec retains binary output in private, original-job-bound artifacts.
-The effect deadline remains the original request's deadline. Each result read has
+The effect deadline remains the original request's deadline.
+
+On a joined remote the request is bounded, and the controller checks the bounds
+before it submits anything:
+
+| Input | Limit | Refusal (nothing ran) |
+|---|---|---|
+| stdin | 1 MiB, end of input within 30 seconds | `host_exec_stdin_too_large` (exit 2), `host_exec_stdin_timeout` |
+| argv after `--` | 256 arguments and 64 KiB | `host_exec_argv_too_large` (exit 2) |
+| quoted command line | 124 KiB (Linux takes one argument of at most 128 KiB) | `host_exec_argv_too_large` (exit 2) |
+
+Send large input on stdin, not as argv chunks:
+`sb host exec --remote R --name S --service web -- sh -c 'cat > /tmp/in' < FILE`.
+stdin is read once into an anonymous file and only its size and SHA-256 travel
+in the request. A refusal before acceptance names its cause in `code`, with
+`acceptance: not_accepted`. Examples: `host_exec_unknown_service`,
+`server_cli_exec_capability_unavailable` (the server runtime lacks the exec
+contract), `server_cli_exec_deadline_expired` and `host_exec_stdin_mismatch`. When the
+target's server records change between the controller's read and the server's
+(an apply, a TTL change, share activity), the server answers
+`server_cli_exec_target_changed`. It accepted nothing, so the controller reads the
+target again and resends the same request ID and stdin, up to three sends within
+`--timeout`. A server runtime older than named refusals reports only
+`server_cli_exec_refused`. When all of the server's job slots are busy, the
+accepted job waits for one inside `--timeout`, minus 26 seconds kept for a minimum
+run, the kill grace and the lease release. It is not refused at once. The wait is
+part of `--timeout`. If no slot frees in time, the result is
+`anonymous_stdin_capacity_unavailable` and nothing ran. Waiting, named server
+refusals and the resend need the server runtime from this revision
+(`sb remote service migrate`). Until then the controller still checks the bounds
+first, and an older server refuses a busy slot at once. Each result read has
 a separate finite 60-second budget for authenticated status, output metadata and
 artifact retrieval. A terminal read may finish after the effect deadline; it
 does not submit or repeat the command. Missing or cancelled capture still refuses.

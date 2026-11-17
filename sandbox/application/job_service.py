@@ -57,6 +57,8 @@ def _launch_failure(stage: str, exc: BaseException) -> dict:
     return {"stage": stage, "error_class": type(exc).__name__[:64],
             "errno": errno if isinstance(errno, int) else None}
 CHILD_IDENTITY_PUBLISH_WAIT_SECONDS = 1.0
+# Admission poll while a stdin-bound server exec waits for a free slot.
+INPUT_SLOT_POLL_SECONDS = 0.5
 # Queued jobs read per page by one drain pass (spec 083); a pass reads every page.
 DRAIN_PAGE_SIZE = 500
 
@@ -73,8 +75,8 @@ def _parse_retention_timestamp(ts: Any) -> datetime | None:
         return None
 
 
-
-
+class InputSlotWaitInterrupted(Exception):
+    """The admitting process was told to stop while a stdin job waited for a slot."""
 
 
 class JobServiceProtocol(Protocol):
@@ -243,18 +245,27 @@ class JobService:
                     queue_reason=dependency_reason or "dependency")
                 return self._accepted(row, replay=False)
             if self.scheduler is not None:
+                parallel_safe = (submission.parallel_safe or
+                                 submission.workspace_mode == "isolated")
+                busy = None
                 try:
-                    self.scheduler.acquire(
-                        row,
-                        parallel_safe=(submission.parallel_safe or
-                                       submission.workspace_mode == "isolated"),
-                    )
-                except WorkspaceBusy as busy:
-                    if input_binding is not None:
+                    self.scheduler.acquire(row, parallel_safe=parallel_safe)
+                except WorkspaceBusy as refused:
+                    busy = refused
+                if busy is not None and input_binding is not None:
+                    # The stdin descriptor lives only in this process, so the
+                    # job cannot be queued for a later launcher. Wait for a
+                    # slot within the caller's bound instead (same job row).
+                    busy = self._await_input_slot(row, parallel_safe, anonymous_input, busy)
+                    if busy is not None:
+                        if busy.kind == "admitted":
+                            # Cancelled while it waited; nothing was launched.
+                            return self._accepted(self.repository.get(row["job_id"]), replay=False)
                         row = self.repository.transition(row['job_id'], Lifecycle.FAILED,
                             termination_reason='anonymous_stdin_capacity_unavailable')
                         self._finalize_terminal_workspace(row['job_id'])
                         return self._accepted(row, replay=False)
+                if busy is not None:
                     queue = self.scheduler.queue_details(row)
                     row = self.repository.transition(
                         row["job_id"], Lifecycle.QUEUED,
@@ -277,6 +288,53 @@ class JobService:
             self._finalize_terminal_workspace(row["job_id"])
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)
+
+    def _await_input_slot(self, row: dict, parallel_safe: bool, anonymous_input, busy):
+        """Retry admission while this process holds the job's only stdin descriptor.
+
+        Returns None once a slot is acquired, else the last refusal. Nothing is
+        launched while it waits, so retrying keeps the one job and request. A
+        refusal of kind ``admitted`` means the job moved on (cancelled) and
+        ends the wait.
+        """
+        import signal
+        import threading
+        previous = {}
+        stopped = []
+        sleeping = False
+        if threading.current_thread() is threading.main_thread():
+            # SIGTERM (a stopped login session or service) or SIGHUP would end
+            # this process without marking the row, leaving it "accepted" with
+            # no supervisor. Record the signal and raise between polls, never
+            # inside scheduler.acquire's transaction, so submit() marks it failed.
+            def interrupted(signum, _frame):
+                stopped.append(signal.Signals(signum).name)
+                if sleeping:
+                    raise InputSlotWaitInterrupted(stopped[0])
+            for signum in (signal.SIGHUP, signal.SIGTERM):
+                previous[signum] = signal.signal(signum, interrupted)
+        try:
+            while busy.kind != "admitted":
+                remaining = anonymous_input.admission_wait_remaining()
+                if remaining <= 0:
+                    return busy
+                sleeping = True
+                try:
+                    if stopped:
+                        raise InputSlotWaitInterrupted(stopped[0])
+                    time.sleep(min(INPUT_SLOT_POLL_SECONDS, remaining))
+                finally:
+                    sleeping = False
+                try:
+                    self.scheduler.acquire(row, parallel_safe=parallel_safe)
+                    return None
+                except WorkspaceBusy as refused:
+                    busy = refused
+            return busy
+        finally:
+            for signum, handler in previous.items():
+                if handler is not None:  # installed from C; nothing to restore from Python
+                    signal.signal(signum, handler)
 
     def _dependency_state(self, row: dict) -> tuple[str, str | None]:
         """Resolve label-based edges within a parent without touching child pipes."""

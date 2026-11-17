@@ -870,7 +870,8 @@ class TestRemoteInstanceControl(unittest.TestCase):
                 mock.patch("sandbox.core._remote.delete_remote_instance") as delete, \
                 contextlib.redirect_stdout(io.StringIO()):
             commands.cmd_instance({}, args)
-        delete.assert_called_once_with(entry, "preview-a")
+        delete.assert_called_once_with(
+            entry, "preview-a", creation_context=None, expected_incarnation=None)
 
 
 class TestRemoteExecInstanceSelection(unittest.TestCase):

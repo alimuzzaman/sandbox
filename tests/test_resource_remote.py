@@ -1078,8 +1078,9 @@ class TestThoroughProbeBudget(unittest.TestCase):
                                          "/usr/local/bin", "/usr/bin", "/bin")),
             })
             started = time.monotonic()
+            # Over stdin, as the adapter ships it: Linux caps one argv string at 128 KiB.
             completed = subprocess.run(
-                [sys.executable, "-c", program], capture_output=True, text=True,
+                [sys.executable, "-"], input=program, capture_output=True, text=True,
                 env=env, timeout=60,
             )
             elapsed = time.monotonic() - started

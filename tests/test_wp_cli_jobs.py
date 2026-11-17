@@ -26,6 +26,11 @@ from sandbox.commands import jobs  # noqa: E402
 
 class TestWpCliJobs(unittest.TestCase):
     def setUp(self):
+        # A host with network ranges (e.g. a remote under $SANDBOX_HOME) must not
+        # reach these fixtures; tests that need ranges patch their own.
+        _ranges = patch("sandbox.remote_network.runtime.default_runtime", return_value=None)
+        _ranges.start()
+        self.addCleanup(_ranges.stop)
         self.tempdir = tempfile.TemporaryDirectory(prefix="sb-wp-jobs-")
         self.root = Path(self.tempdir.name)
         self.instance = "unit"

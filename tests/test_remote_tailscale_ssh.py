@@ -92,12 +92,13 @@ class TailscaleSshTest(unittest.TestCase):
             remote_command._cmd_tailscale_ssh(args, False)
         self.assertIn("could not log in", out.getvalue())
 
-    def test_a_login_that_waits_for_a_browser_counts_as_denied(self):
+    def test_a_login_that_times_out_is_unknown_not_denied(self):
+        # 7818fbd: a timeout shows no policy-denial response, so it is not a denial.
         host = RemoteHost()
         _, result = self.run_command(
             "enable", host, confirm=True,
             login=mock.Mock(side_effect=subprocess.TimeoutExpired("ssh", 30)))
-        self.assertEqual(result["login"], "denied")
+        self.assertEqual(result["login"], "unknown")
 
     def test_a_tailnet_policy_refusal_counts_as_denied(self):
         refused = SimpleNamespace(returncode=255, stderr="tailscale: tailnet policy does not permit you to SSH\n")

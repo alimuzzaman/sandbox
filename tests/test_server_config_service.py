@@ -15,13 +15,14 @@ from sandbox.server_config.repository import ServerConfigRepository
 from sandbox.server_config.adapters.base import AdapterDescriptor, RenderedGeneration
 
 from sandbox.server_config.service import ServerConfigService
+from tests.server_config_support import private_base
 
 
 class TestServerConfigService(unittest.TestCase):
     """T020: Apply/list/show/replace/revert service orchestration."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.repository = ServerConfigRepository(self.temp_dir, FIXED_INCARNATION)
         self.clock = FakeClock()
         

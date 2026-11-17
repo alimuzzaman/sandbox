@@ -13,13 +13,14 @@ from sandbox.server_config.models import (
 from sandbox.server_config.repository import ServerConfigRepository
 from sandbox.server_config.service import ServerConfigService
 from sandbox.commands.server import _config_show
+from tests.server_config_support import private_base
 
 
 class TestServerConfigContentShow(unittest.TestCase):
     """T083: exact show --content stdout-only, no-added-newline/heading, pre-emission refusal, and --content --json incompatibility."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.repository = ServerConfigRepository(self.temp_dir, FIXED_INCARNATION)
         self.clock = FakeClock()
         from sandbox.server_config.adapters.base import AdapterDescriptor

@@ -14,13 +14,14 @@ from sandbox.server_config.lifecycle import (
     reconcile_restart_generation,
     check_instance_mount_and_image_drift,
 )
+from tests.server_config_support import private_base
 
 
 class TestServerConfigRestart(unittest.TestCase):
     """T072: stop/stopped/start, committed-generation restoration, drift detection, and readiness."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.repository = ServerConfigRepository(self.temp_dir, FIXED_INCARNATION)
         self.clock = FakeClock()
 

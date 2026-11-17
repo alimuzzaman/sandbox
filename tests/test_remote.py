@@ -1918,10 +1918,11 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         )
         self.assertEqual(applied, 1)
         mock_ssh_run_batch.assert_not_called()
-        rm_cmd = next(call.args[1] for call in mock_ssh_run.call_args_list
-                      if "rm -f --" in call.args[1])
-        self.assertIn("rm -f --", rm_cmd)
-        self.assertIn("gone.php", rm_cmd)
+        rm_call = next(call for call in mock_ssh_run.call_args_list
+                       if "xargs -0 rm -f --" in call.args[1])
+        self.assertNotIn("gone.php", rm_call.args[1])  # paths travel on stdin
+        self.assertEqual(rm_call.kwargs["input_data"],
+                         b"/home/ubuntu/sandbox/deploy-src/proj/gone.php")
 
     @patch("sandbox.core._remote.ssh_run")
     @patch("subprocess.run")

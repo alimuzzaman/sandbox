@@ -15,7 +15,13 @@ from sandbox.jobs.models import JobSubmission, SourceIdentity  # noqa: E402
 from sandbox.readiness import check, gate  # noqa: E402
 from sandbox.readiness.errors import RemoteNotReadyError  # noqa: E402
 from sandbox.transports.remote_jobs import RemoteJobTransport  # noqa: E402
+from sandbox.jobs.acceptance import CONTRACT as ACCEPTANCE_CONTRACT  # noqa: E402
 from tests.test_readiness import REMOTE, REVISION, _probes, _target  # noqa: E402
+
+# What _execution_remote requires of a remote before the readiness gate runs.
+# job.source-content.v1 keeps an unjoined fake from needing a control probe.
+_EXECUTION_CAPABILITIES = ("job.exec", "job.execution-policy.v1", ACCEPTANCE_CONTRACT,
+                           "job.source-content.v1")
 
 
 class _Counting:
@@ -125,7 +131,7 @@ class GateTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=never, ssh_run=never, readiness=not_ready,
             remote_lookup=lambda _name: {"provisioned": True,
-                                         "capabilities": ["job.exec", "job.execution-policy.v1"]})
+                                         "capabilities": list(_EXECUTION_CAPABILITIES)})
         submission = JobSubmission("test", "/project", "project:remote", "remote", "unit",
                                    ("echo", "x"), 60, SourceIdentity("caller"),
                                    remote_name="vps", workspace_mode="isolated")
@@ -134,6 +140,34 @@ class GateTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(RemoteNotReadyError) as caught:
                 submit()
             self.assertEqual(caught.exception.code, "remote_not_ready_capacity")
+
+    def test_capability_control_call_is_the_only_remote_call_before_readiness(self):
+        """`job-capabilities` is a read-only control call, not a transfer: the
+        transport may make it before the gate, and nothing else."""
+        def never(*_args, **_kwargs):
+            self.fail("nothing may be transferred after a not_ready row")
+
+        def not_ready(_root, _remote, *_submission):
+            raise RemoteNotReadyError(_ROW, remote="vps")
+        marker, revision = "a" * 24, "b" * 24
+        transport = RemoteJobTransport(
+            deploy=never, ssh_run=never, readiness=not_ready,
+            remote_lookup=lambda _name: {
+                "provisioned": True, "capabilities": list(_EXECUTION_CAPABILITIES[:3]),
+                "mcp_service": {"ownership_marker": marker, "runtime_revision": revision}})
+        controls = []
+
+        def control(name, argv, *, timeout=25):
+            controls.append((name, list(argv)))
+            return {"ok": True, "schema_version": 1, "capabilities": list(_EXECUTION_CAPABILITIES),
+                    "ownership_marker": marker, "runtime_revision": revision}
+        transport.control = control
+        submission = JobSubmission("test", "/project", "project:remote", "remote", "unit",
+                                   ("echo", "x"), 60, SourceIdentity("caller"),
+                                   remote_name="vps", workspace_mode="isolated")
+        with self.assertRaises(RemoteNotReadyError):
+            transport.submit(submission)
+        self.assertEqual(controls, [("vps", ["job-capabilities"])])
 
 
 def _calls_named(node, name):
@@ -551,7 +585,7 @@ class EntryPointRefusalTests(unittest.TestCase):
         stack.enter_context(patch("sandbox.readiness.gate.require_ready", refuse))
         stack.enter_context(patch.object(_remote, "deploy_exact_working_tree", never))
         stack.enter_context(patch.object(_remote, "get_remote", return_value={
-            "provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]}))
+            "provisioned": True, "capabilities": list(_EXECUTION_CAPABILITIES)}))
         return stack
 
     def _submission(self):

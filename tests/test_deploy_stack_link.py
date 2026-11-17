@@ -156,6 +156,7 @@ class StackUpKeepsSitesTest(unittest.TestCase):
     # Reuse the stack command harness (a real template checkout) without its tests.
     setUp = ths.StackCommandTests.setUp
     args = ths.StackCommandTests.args
+    _store_runner = ths.StackCommandTests._store_runner
 
     def test_up_again_keeps_linked_sites(self):
         site = {"hostname": "wp-demo.example.test", "instance": "sandbox-wp-demo", "label": "default",

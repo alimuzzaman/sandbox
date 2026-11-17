@@ -37,6 +37,11 @@ CREATED = {"ok": True, "link": LINK, "link_id": LINK_ID, "target": "demo-hub/dev
 
 class ShareRouteTest(unittest.TestCase):
     def setUp(self):
+        # A joined server host (~/.sandbox/mcp-remote.env) would route these
+        # requests through the owner panel gate; this harness is the controller.
+        hosts = mock.patch.object(ui_dash, "_hosts_control_service", return_value=False)
+        hosts.start()
+        self.addCleanup(hosts.stop)
         captured = {}
 
         class Capture:

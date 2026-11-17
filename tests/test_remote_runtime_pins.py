@@ -165,7 +165,10 @@ class PinTests(unittest.TestCase):
                   f"do sleep 0.05; done; {inner}")
         env = synthetic_environment({"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
                "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
-        proc = subprocess.Popen(["sh", "-c", pins.install_gate_command(target, (), script)],
+        # exec: ``proc`` must be the gate itself. A shell that forks it instead
+        # (whether it does is shell-specific) dies on the hangup on its own, while the gate,
+        # which ignores SIGHUP, keeps the install and the lock.
+        proc = subprocess.Popen(["sh", "-c", "exec " + pins.install_gate_command(target, (), script)],
                                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=new_session)
         deadline = time.time() + 20

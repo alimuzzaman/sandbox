@@ -69,6 +69,7 @@ class HostingViewTest(unittest.TestCase):
         with mock.patch.object(ui_dash, "_hosting_lifetimes", return_value=self.lifetimes), \
                 mock.patch.object(stack_registry, "read", return_value=stacks or {"version": 1, "stacks": {}}), \
                 mock.patch.object(ui_dash, "_hosts_control_service", return_value=server), \
+                mock.patch("sandbox.hosting.owner_origin.remote_label", return_value=None), \
                 mock.patch("sandbox.core._remote.list_remotes", return_value=registered or {},
                            side_effect=RuntimeError("unavailable") if registration_error else None), \
                 mock.patch("sandbox.core._paths.RUNTIME_DIR", self.runtime), \

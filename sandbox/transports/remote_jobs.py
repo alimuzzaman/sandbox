@@ -811,9 +811,15 @@ class RemoteJobTransport:
                if key in observed}})
         provenance['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
         submission = replace(submission, execution_policy_provenance=provenance)
-        deployed = self._deploy(remote, submission.project_root,
-                                deployment_timeout=submission.deadline_seconds)
-        self._validate_deployment(deployed)
+        try:
+            deployed = self._deploy(remote, submission.project_root,
+                                    deployment_timeout=submission.deadline_seconds)
+            self._validate_deployment(deployed)
+        except Exception as exc:
+            # Nothing was submitted yet: the caller may report this request
+            # as not accepted instead of unknown.
+            exc.server_cli_not_submitted = True
+            raise
         return self._submit_deployed(remote, deployed, submission)
 
     def submit_many(self, submissions: list) -> dict:

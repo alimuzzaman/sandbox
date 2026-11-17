@@ -568,7 +568,7 @@ for its SSH round trip (it was 10, and a slow tailnet hop lost the release of a 
 sync). A server-CLI command refused by a busy lock reports `server_cli_source_busy`
 (`acceptance: not_accepted`, `source_busy: true`) when Sandbox generated its request id;
 with your own `--request-id` it stays `server_cli_acceptance_unknown` (an earlier
-attempt with that id may have been accepted) and adds `source_busy: true`. Two
+attempt with that id may have been accepted) and adds `source_busy: true`. Any other failure while publishing the source (the working directory is not a git checkout, the remote's Docker network capacity or storage floor refuses it) also happens before submission: with a generated request id it reports `acceptance: not_accepted` with its own code (an admission refusal's redacted envelope under `detail`, otherwise `server_cli_source_unavailable`); with your own `--request-id` it stays unknown. Two
 checkouts with the same directory name share one `deploy-src/<name>` tree and so one
 lock; give one of them `"deploySlug"` in its `sandbox.config.json`
 (docs/sandbox-config-reference.md) to publish it to its own tree. To do the same by hand:

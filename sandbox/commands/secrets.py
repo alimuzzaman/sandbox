@@ -641,16 +641,16 @@ def _ownership_command(ctx, args, adapter):
     profile, action = args.profile, args.ownership_action
     entries = profile_entries(ctx, profile)
     if action == "classify":
-        report, _, source_names = classify_profile(ctx, profile)
-        if report.blocking or not args.check_destination:
-            return report_payload(report, "classification_blocked" if report.blocking else "classified",
-                                  ok=not report.blocking)
-        from sandbox.secrets.ownership.classify import classify
         from sandbox.secrets.ownership.migrate import MAX_RUN_SECONDS
         timeout_seconds = args.timeout_seconds
         if (not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool)
                 or not 1 <= timeout_seconds <= MAX_RUN_SECONDS):
             raise SecretBrokerError("input_invalid", "timeout must be between 1 and 3600 seconds")
+        report, _, source_names = classify_profile(ctx, profile)
+        if report.blocking or not args.check_destination:
+            return report_payload(report, "classification_blocked" if report.blocking else "classified",
+                                  ok=not report.blocking)
+        from sandbox.secrets.ownership.classify import classify
         grant = build_grant(ctx, profile, "read", tuple(sorted(e.name for e in entries)))
         # The destination's timeoutSeconds bounds each request (provider
         # contract); one GET per name needs a run deadline of its own.

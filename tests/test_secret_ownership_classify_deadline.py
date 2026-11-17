@@ -77,6 +77,14 @@ class TestClassifyDeadline(unittest.TestCase):
             require(code != 0 and body["code"] == "input_invalid", f"{value} must refuse: {body}")
             require(not deadlines, "no session may open for an invalid timeout")
 
+    def test_timeout_out_of_range_refuses_without_check_destination(self) -> None:
+        ctx = self.syn.context()
+        code, body = command_in_process(
+            ctx, self.exit_stack, FakeOwnershipAdapter(FakeAPI()),
+            "ownership", "classify", "--profile", "personal", "--timeout-seconds", "0",
+        )
+        require(code != 0 and body["code"] == "input_invalid", f"0 must refuse offline too: {body}")
+
     def test_run_timeout_does_not_change_authority(self) -> None:
         ctx = self.syn.context()
         before = authority_for(ctx, "personal", "read")

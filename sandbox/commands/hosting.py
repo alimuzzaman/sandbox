@@ -2107,10 +2107,15 @@ def _port_reallocation(args, validated, entry, state, observation):
                                     for section in ("listeners", "publications", "reservations")}}
 
 
+# A waiting up adds its wait to its own SSH timeout; 300 s fits the stack job's
+# 600 s of slack beyond the build budget (host_stack._submission_timeout).
+_COMPOSE_PUBLISH_MAX_WAIT_SECONDS = 300
+
+
 def _compose_publish_lock_wait(validated) -> int:
-    """How long one compose up waits for another: its budget less room to run."""
+    """How long one compose up waits for another before refusing busy."""
     budget = int(validated["compose"].get("build_timeout_seconds", 900))
-    return max(30, budget - 120)
+    return min(_COMPOSE_PUBLISH_MAX_WAIT_SECONDS, max(30, budget - 120))
 
 
 def _locked_host_compose_up(validated, runtime, command):
@@ -2334,7 +2339,8 @@ class _SideLoad:
                      f"revision on 127.0.0.1:{self.side_port} (shared: {', '.join(self.shared) or 'none'})")
         try:
             _run_locked_compose_up(self.entry, command, timeout=max(300, int(
-                self.validated["compose"].get("build_timeout_seconds", 900))),
+                self.validated["compose"].get("build_timeout_seconds", 900)))
+                + _compose_publish_lock_wait(self.validated),
                 progress=progress, log_path=apply_log, log_phase="blue_green_side_start")
         except HostComposePublishBusy:
             # Nothing started; an in-place recreate would wait on the same lock.
@@ -2536,11 +2542,19 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     elif side_load is not None and init_services and side_load.strategy != "in-place":
         side_load._ineligible("init services run as Compose dependencies of the recreate", progress)
     command = _locked_host_compose_up(validated, runtime, command)
-    _run_locked_compose_up(
-        entry, command, timeout=build_timeout,
-        progress=progress, log_path=apply_log,
-        log_phase="compose_recreate" if force_recreate else "compose_converge",
-    )
+    try:
+        _run_locked_compose_up(
+            entry, command, timeout=build_timeout + _compose_publish_lock_wait(validated),
+            progress=progress, log_path=apply_log,
+            log_phase="compose_recreate" if force_recreate else "compose_converge",
+        )
+    except HostComposePublishBusy as exc:
+        if side_load is None or not side_load.serving:
+            raise
+        # The route already moved to the new side: the runtime did change, so
+        # this is an ordinary (uncertain) recreate failure, not a busy refusal.
+        raise HostRemoteCommandFailed(str(exc), phase="compose_recreate",
+                                      exit_code=exc.exit_code) from None
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in init_services if force_recreate else ():

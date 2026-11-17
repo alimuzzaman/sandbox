@@ -2081,6 +2081,7 @@ APPLY_TRANSACTION_LOCKS = (
     "/run/lock/sandbox-hosting-caddy.lock",
     "/run/lock/sandbox-edge-nginx.lock",
     "/run/lock/sandbox-docker-pool.lock",
+    "/run/lock/sandbox-hosting-compose-publish.lock",
 )
 LEASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 # Kept in lockstep with sandbox/resources/reclaim.WORKSPACE_VOLUME_PATTERN.

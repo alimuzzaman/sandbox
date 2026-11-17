@@ -289,13 +289,19 @@ class TransportTests(unittest.TestCase):
         self.assertIsNone(caught.exception.__context__)
 
 
+# The real CLI with only the SSH-session check answered yes: a test cannot run
+# under a root-owned SSH server, which that check requires (FakeProcTests cover it).
+_TRUSTED_SESSION = (
+    "import sys; sys.path.insert(0, {repo!r}); import sandbox.commands.secrets as s; "
+    "s._direct_ssh_session_command = lambda **_: True; sys.argv = ['sb'] + sys.argv[1:]; "
+    "from sandbox.cli import main; main()")
+
+
 class RealCliEgressTests(Base):
     """Both halves through the real `sb secrets egress` CLI in a child process."""
 
     def setUp(self):
         super().setUp()
-        if not Path("/proc/self/comm").exists():
-            self.skipTest("egress identifies its SSH session through /proc")
         # The grant lives in the remote Sandbox home's own config (owner level).
         self.home = self.remote_root / "sandbox-home"
         self.home.mkdir()
@@ -305,12 +311,12 @@ class RealCliEgressTests(Base):
         source.write_bytes(REMOTE_FIXTURE)
         source.chmod(0o600)
         (self.home / "sb-src").symlink_to(REPO)
-        # A copy of sh named sshd stands in for the SSH server that runs the
-        # session's command; its child subshell execs sb, so sb's parent is "sshd".
+        # A copy of sh named sshd: the rename trick the session check must refuse.
         self.sshd = self.remote_root / "bin" / "sshd"
         self.sshd.parent.mkdir()
         self.sshd.write_bytes(Path("/bin/sh").read_bytes())
         self.sshd.chmod(0o755)
+        self.trusted = ["python3", "-c", _TRUSTED_SESSION.format(repo=str(REPO))]
 
     def env(self, *, ssh=True):
         env = {"HOME": str(self.home), "SANDBOX_HOME": str(self.home), "PATH": os.environ["PATH"],
@@ -321,7 +327,12 @@ class RealCliEgressTests(Base):
         return env
 
     def runner(self, entry, command_text, *, timeout, input_data):
-        return run_test_process([str(self.sshd), "-c", "(" + command_text + ")"], input=input_data,
+        # The controller's exact remote command, with its sb entry point swapped
+        # for the trusted-session launcher above.
+        marker = 'exec "$home/sb-src/sb" '
+        self.assertIn(marker, command_text)
+        launched = command_text.replace(marker, "exec " + " ".join(map(shlex.quote, self.trusted)) + " ")
+        return run_test_process(["/bin/sh", "-c", launched], input=input_data,
                                 capture_output=True, env=self.env(), timeout=60)
 
     def test_real_egress_lands_in_local_source_and_refuses_ungranted(self):
@@ -338,23 +349,71 @@ class RealCliEgressTests(Base):
         self.assert_value_free(payload)
 
     def test_real_egress_refuses_without_json_and_with_bad_nonce(self):
-        base = [str(REPO / "sb"), "secrets", "egress", "--project-dir",
-                str(self.home), "--source", "app-env", "--key", "GRANTED"]
-        session = lambda argv: [str(self.sshd), "-c", "(exec " + " ".join(map(shlex.quote, argv)) + ")"]
+        tail = ["secrets", "egress", "--project-dir", str(self.home), "--source", "app-env",
+                "--key", "GRANTED"]
+        real = [str(REPO / "sb"), *tail]
+        renamed = [str(self.sshd), "-c", "(exec " + " ".join(map(shlex.quote, real + ["--json"])) + ")"]
         for argv, stdin, code, env in (
-                (session(base), NONCE.hex() + "\n", "egress_requires_transport", self.env()),
-                (session(base + ["--json"]), "not-a-nonce\n", "input_invalid", self.env()),
+                ([*self.trusted, *tail], NONCE.hex() + "\n", "egress_requires_transport", self.env()),
+                ([*self.trusted, *tail, "--json"], "not-a-nonce\n", "input_invalid", self.env()),
                 # Fable review 10: a host-side process piping a nonce in is not an
-                # SSH session's command, with or without SSH_CONNECTION set.
-                (base + ["--json"], NONCE.hex() + "\n", "egress_requires_transport", self.env()),
-                (session(base + ["--json"]), NONCE.hex() + "\n", "egress_requires_transport",
-                 self.env(ssh=False))):
+                # SSH session's command, even with SSH_CONNECTION set and even
+                # under a parent renamed sshd.
+                ([*real, "--json"], NONCE.hex() + "\n", "egress_requires_transport", self.env()),
+                (renamed, NONCE.hex() + "\n", "egress_requires_transport", self.env())):
             with self.subTest(code=code, argv=argv[0]):
                 result = run_test_process(argv, input=stdin.encode(), capture_output=True, env=env)
                 self.assertNotEqual(result.returncode, 0)
                 output = (result.stdout + result.stderr).decode("utf-8", "replace")
                 self.assertIn(code, output)
                 self.assertNotIn(CANARY, output)
+
+
+class FakeProcTests(unittest.TestCase):
+    """The SSH-session check over a synthetic procfs tree."""
+
+    def setUp(self):
+        self.proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def process(self, pid, parent, uid, comm):
+        directory = self.proc / str(pid)
+        directory.mkdir()
+        (directory / "stat").write_text(f"{pid} ({comm}) S {parent} 0 0\n")
+        (directory / "status").write_text(f"Name:\t{comm}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        (directory / "comm").write_text(comm + "\n")
+
+    def check(self, environ={"SSH_CONNECTION": "x"}):
+        return command._direct_ssh_session_command(proc=str(self.proc), environ=environ, parent=20)
+
+    def test_openssh_and_tailscale_sessions_pass(self):
+        for server, session in (("sshd", "sshd"), ("sshd-session", "sshd-session"),
+                                ("tailscaled", "tailscaled")):
+            with self.subTest(server=server):
+                for child in self.proc.iterdir():
+                    for item in child.iterdir():
+                        item.unlink()
+                    child.rmdir()
+                self.process(20, 10, 1000, session)
+                self.process(10, 1, 0, server)
+                self.assertTrue(self.check())
+
+    def test_a_renamed_binary_without_a_root_server_is_refused(self):
+        self.process(20, 10, 1000, "sshd")
+        self.process(10, 1, 1000, "bash")
+        self.assertFalse(self.check())
+
+    def test_a_user_owned_sshd_grandparent_is_refused(self):
+        self.process(20, 10, 1000, "sshd")
+        self.process(10, 1, 1000, "sshd")
+        self.assertFalse(self.check())
+
+    def test_no_ssh_connection_or_wrong_parent_is_refused(self):
+        self.process(20, 10, 1000, "bash")
+        self.process(10, 1, 0, "sshd")
+        self.assertFalse(self.check())
+        self.assertFalse(self.check(environ={}))
+        self.assertFalse(command._direct_ssh_session_command(proc=str(self.proc), environ={"SSH_CONNECTION": "x"},
+                                                             parent=99))
 
 
 class CommandTests(Base):

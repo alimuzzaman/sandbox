@@ -1387,6 +1387,36 @@ class TestHostingManifest(unittest.TestCase):
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
+    def test_a_busy_publish_lock_is_busy_only_before_the_route_moved(self, remote_checked, _write):
+        # Fable review 2 (re-check S1): once a blue-green side serves, the runtime
+        # has changed, so a busy base up is an ordinary recreate failure.
+        from sandbox.hosting import ports
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+
+        def checked(entry, command, timeout=180, **kwargs):
+            if kwargs.get("log_phase") == "compose_recreate":
+                raise hosting_cmd.HostRemoteCommandFailed("", phase="compose_recreate",
+                                                          exit_code=ports.LOCK_BUSY_EXIT)
+            return ""
+        remote_checked.side_effect = checked
+        with self.assertRaises(hosting_cmd.HostComposePublishBusy):
+            hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", _observed_runtime())
+        side = Mock(serving=True, strategy="auto")
+        side.start.return_value = True
+        side.base_up_command.return_value = "docker compose up -d web"
+        with self.assertRaises(hosting_cmd.HostRemoteCommandFailed) as raised:
+            hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", _observed_runtime(),
+                                     side_load=side)
+        self.assertNotIsInstance(raised.exception, hosting_cmd.HostComposePublishBusy)
+        self.assertEqual(raised.exception.phase, "compose_recreate")
+        recreate = [call for call in remote_checked.call_args_list
+                    if call.kwargs.get("log_phase") == "compose_recreate"][-1]
+        budget = int(validated["compose"].get("build_timeout_seconds", 900))
+        self.assertEqual(recreate.kwargs["timeout"], budget + hosting_cmd._compose_publish_lock_wait(validated))
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
     def test_background_services_are_recreated_and_started_with_web(self, remote_checked, _write):
         with self._write(_manifest()) as directory:
             manifest = Path(directory) / "sandbox.hosting.yml"

@@ -639,7 +639,8 @@ names the exact key in `egressKeys`, in the config of `$SANDBOX_HOME` itself:
 
 A project's config (any `--source-project-dir` other than `$SANDBOX_HOME`) never grants egress,
 even when it lists `egressKeys`: a project file is one an agent can edit. Such a request refuses
-with `egress_not_granted`.
+with `egress_not_granted`. The home's config is owner-level by convention, not by an OS boundary:
+a process running as the same user can still edit it.
 
 The grant is the owner's approval. It lists exact key names only, with no wildcard. It needs a
 dotenv source, and the built-in `personal` source can never grant egress. Agents do not add or
@@ -653,9 +654,12 @@ there. Only names are in that command. The controller sends a fresh random 32-by
 session's stdin. The remote broker checks the grant, then writes one JSON line to the SSH channel
 holding the value and an HMAC-SHA256 of it keyed by that nonce. `egress` refuses
 (`egress_requires_transport`) when its stdout or stdin is a terminal, `--json` is missing, or it is
-not the direct command of an SSH session (`SSH_CONNECTION` set and its parent process `sshd`,
-`sshd-session` or `tailscaled`): a host-side process piping in its own nonce is refused. It has no
-MCP form. The controller keeps the answer in memory. It never logs, prints or writes it to
+not the direct command of an SSH session: `SSH_CONNECTION` must be set, its parent process must be
+named `sshd`, `sshd-session` or `tailscaled`, and that parent's parent must be a root-owned
+process with one of those names (the SSH server or its privileged monitor). A host-side process
+piping in its own nonce is refused, renamed or not. The check proves the request arrived as an SSH
+session's command, not that `copy --from-remote` sent it: SSH to the host itself, from the host or
+from any controller that can log in, is out of its scope. It has no MCP form. The controller keeps the answer in memory. It never logs, prints or writes it to
 a temporary file. The value never appears in argv, an environment variable, console output or
 either audit journal.
 

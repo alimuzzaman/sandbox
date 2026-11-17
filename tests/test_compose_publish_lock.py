@@ -33,9 +33,14 @@ class ComposePublishLockTests(unittest.TestCase):
         argv = _locked_argv(hosting_cmd._locked_host_compose_up(VALIDATED, RUNTIME, "docker compose up -d"))
         self.assertNotIn(hosting_cmd._CADDY_LOCK_PATH, argv)
         self.assertNotIn(nginx.LOCK_PATH, argv)
-        self.assertEqual(argv[:6], ["flock", "-w", "780", "-E", str(ports.LOCK_BUSY_EXIT),
+        self.assertEqual(argv[:6], ["flock", "-w", "300", "-E", str(ports.LOCK_BUSY_EXIT),
                                     hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH])
         self.assertEqual(argv.count("flock"), 1)
+
+    def test_the_wait_fits_the_stack_job_slack(self):
+        # Re-check S2: the wait is added to the up's SSH timeout, so it is capped.
+        long = {**VALIDATED, "compose": {**VALIDATED["compose"], "build_timeout_seconds": 3600}}
+        self.assertEqual(hosting_cmd._compose_publish_lock_wait(long), 300)
 
     def test_a_short_budget_still_waits_thirty_seconds(self):
         short = {**VALIDATED, "compose": {**VALIDATED["compose"], "build_timeout_seconds": 60}}

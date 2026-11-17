@@ -21,13 +21,15 @@ from typing import Iterator, Sequence
 
 # Literal copies of the lock files held by host apply transactions: Caddy
 # hosting (sandbox/commands/hosting.py), the nginx edge
-# (sandbox/hosting/front_door/nginx.py) and the Docker address pool
-# (sandbox/core/_remote.py).  Duplicated, not imported, because those modules
+# (sandbox/hosting/front_door/nginx.py), the Docker address pool
+# (sandbox/core/_remote.py) and the compose-publish lock a recreate holds
+# (sandbox/commands/hosting.py _COMPOSE_PUBLISH_LOCK_PATH).  Duplicated, not imported, because those modules
 # are owned elsewhere and the probe program cannot import them.
 APPLY_TRANSACTION_LOCKS = (
     "/run/lock/sandbox-hosting-caddy.lock",
     "/run/lock/sandbox-edge-nginx.lock",
     "/run/lock/sandbox-docker-pool.lock",
+    "/run/lock/sandbox-hosting-compose-publish.lock",
 )
 GUARD_NAME = "reclaim-host.lock"
 

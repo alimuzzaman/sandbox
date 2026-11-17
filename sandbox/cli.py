@@ -186,29 +186,44 @@ def _dispatch_remote_transport_error(exc: RemoteJobTransportError, args) -> None
     raise SystemExit(1)
 
 
-def _transient_remote_error(exc: BaseException, args) -> RemoteJobTransportError | None:
-    """A retryable transport error for a known transient remote failure, else None.
+# Read-only job commands: a timeout there changed nothing, so it is safe to retry.
+_READ_ONLY_JOB_COMMANDS = frozenset({
+    "job-status", "job-list", "job-output", "job-artifacts", "job-artifact-get", "job-metrics",
+})
 
-    These are raised below the transport boundary (source deploy preflight,
-    capability discovery, the materialization lock, an SSH timeout) and used to
-    reach the user as a traceback with nothing a caller could parse.
+
+def _transient_remote_error(exc: BaseException, args) -> RemoteJobTransportError | None:
+    """A typed transport error for a known remote failure raised below the
+    transport boundary, else None (the exception propagates unchanged).
+
+    These used to reach the user as a traceback with nothing a caller could
+    parse. ``retryable`` is true only for failures that a retry can clear.
     """
-    from sandbox.core._remote import RemoteHomeResolutionTimeout
-    from sandbox.core.remote_materialization import RemoteMaterializationBusy
-    from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+    try:
+        from sandbox.core._remote import RemoteHomeResolutionTimeout
+        from sandbox.core.remote_materialization import RemoteMaterializationBusy
+        from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+    except ImportError:
+        return None
     if isinstance(exc, RemoteHomeResolutionTimeout):
-        code, message = "remote_home_resolution_timeout", str(exc)
+        code, message, retryable = "remote_home_resolution_timeout", str(exc), True
     elif isinstance(exc, RemoteMaterializationBusy):
-        code, message = "remote_materialization_busy", str(exc)
+        # Names an unsettled operation to inspect; a plain retry does not clear it.
+        code, message, retryable = "remote_materialization_busy", str(exc), False
     elif isinstance(exc, ExecutionCapabilityUnavailable):
-        code, message = ExecutionCapabilityUnavailable.code, str(exc)
-    elif isinstance(exc, subprocess.TimeoutExpired) and getattr(args, "remote", None):
+        # Only discovery can be transient; malformed or changed identities
+        # need `remote service refresh`.
+        message = str(exc)
+        code = ExecutionCapabilityUnavailable.code
+        retryable = message.startswith("installed job capability discovery is unavailable")
+    elif (isinstance(exc, subprocess.TimeoutExpired) and getattr(args, "remote", None)
+          and getattr(args, "cmd", None) in _READ_ONLY_JOB_COMMANDS):
         # The expired command line can name private paths: never echo it.
-        code = "remote_control_timeout"
+        code, retryable = "remote_control_timeout", True
         message = f"a remote control call timed out after {int(exc.timeout or 0)} seconds"
     else:
         return None
-    mapped = RemoteJobTransportError(message, retryable=True)
+    mapped = RemoteJobTransportError(message, retryable=retryable)
     mapped.code = code
     return mapped
 

@@ -246,8 +246,8 @@ calendar expression (default `daily`); the timeout and jitter come from the
 remote's storage-monitor policy. It needs systemd with lingering and a matching
 runtime revision (`sb remote service migrate R --confirm`).
 
-Runtime installs and rollback (release layout, controller at or after
-de34d26): `sb remote service migrate R --plan --json` then `--confirm --json`,
+Runtime installs and rollback (release layout, a controller with
+side-by-side release support): `sb remote service migrate R --plan --json` then `--confirm --json`,
 then `sb remote service refresh R --adopt-compatible-revision --json`. No
 0-active wait: jobs keep running in their own scopes and the restart takes
 about a second. The gate refuses with `remote_jobs_active` only over a

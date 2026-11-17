@@ -337,7 +337,7 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
     side_net = shlex.quote(f"label=sandbox.hostside={name}")
     return (
         "set -u; docker info >/dev/null 2>&1 || exit 3; "
-        f"docker ps -aq --filter {side} | xargs -r docker rm -f >/dev/null || exit 4; "
+        f"docker ps -aq --filter {side} | xargs -r docker rm -f -v >/dev/null || exit 4; "
         f"docker ps -aq --filter {label} | xargs -r docker rm -f >/dev/null || exit 4; "
         f"docker network ls -q --filter {side_net} | xargs -r docker network rm >/dev/null || exit 4; "
         f"docker volume ls -q --filter {label} | xargs -r docker volume rm >/dev/null || exit 4; "

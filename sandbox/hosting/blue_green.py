@@ -159,8 +159,9 @@ def render_side(model: dict, validated: dict, *, base_project: str, colored: lis
     for name in colored:
         service = {key: value for key, value in model["services"][name].items()
                    if key not in ("ports", "build", "depends_on", "networks")}
+        built = "build" in model["services"][name]
         if not service.get("image"):
-            if "build" not in model["services"][name]:
+            if not built:
                 raise Ineligible(f"{name} has neither image nor build")
             # Compose's own tag for a built service without an image name.
             service["image"] = f"{base_project}-{name}"
@@ -168,7 +169,9 @@ def render_side(model: dict, validated: dict, *, base_project: str, colored: lis
         kept = {dep: spec for dep, spec in depends.items() if dep in colored}
         if kept:
             service["depends_on"] = kept
-        service["pull_policy"] = "never"
+        # Built images exist locally (the base build made them); image-only ones
+        # are pulled when missing, as the in-place up would.
+        service["pull_policy"] = "never" if built else "missing"
         if name == compose["service"]:
             service["ports"] = [{"mode": "ingress", "host_ip": "127.0.0.1",
                                  "target": int(compose["container_port"]),

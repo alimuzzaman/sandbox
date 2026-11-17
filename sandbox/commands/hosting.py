@@ -2208,9 +2208,32 @@ class _SideLoad:
             return self._ineligible("shared services are not running: " + ", ".join(missing), progress)
         return True
 
+    def _leftover_unusable(self, prefix: str, present: bool, progress) -> str | None:
+        """None when the side a failed apply left serving can keep serving."""
+        if not present:
+            return "the side the route points at is gone"
+        try:
+            _verify_remote_health(self.entry, {**self.runtime, "loopback_port": self.side_port}, None)
+        except RuntimeError:
+            return "the side the route points at is unhealthy"
+        strategy, self.strategy = self.strategy, "auto"  # report, never refuse, here
+        try:
+            loaded = self._load(prefix, None)
+        finally:
+            self.strategy = strategy
+        if not loaded:
+            return f"the side the route points at no longer fits this manifest ({self.skipped})"
+        label = shlex.quote(f"label=com.docker.compose.project={self.project}")
+        services = set(_remote_checked(
+            self.entry, f"docker ps -a --filter {label} --format "
+            + shlex.quote('{{.Label "com.docker.compose.service"}}'), timeout=30).split())
+        if services != set(self.colored):
+            return "the side the route points at runs other services than this manifest side-loads"
+        return None
+
     # -- phases ----------------------------------------------------------
     def start(self, prefix: str, runtime_dir: str, env_file: str, progress=None,
-              apply_log: str | None = None) -> bool:
+              apply_log: str | None = None, *, images_verified: bool = False) -> bool:
         """Steps 2-5. True when the side serves; False to recreate in place."""
         from sandbox.hosting import login_service
         if self.strategy == "in-place":
@@ -2223,22 +2246,28 @@ class _SideLoad:
             return self._ineligible("no earlier apply on this loopback port", progress)
         route = self.edge.read_previous(self.caddy_name)
         present = self._side_present()
-        if present and self.bg.serves_port(route, self.side_port):
-            # A previous apply failed after its switch: that side may still serve.
-            side_runtime = {**self.runtime, "loopback_port": self.side_port}
-            try:
-                _verify_remote_health(self.entry, side_runtime, None)
-            except RuntimeError:
-                return self._ineligible("the side a failed apply left behind is unhealthy", progress)
-            if not self._load(prefix, progress):
-                return False
-            _remote_checked(self.entry, self.connect_script(), timeout=120)
-            self.serving, self.route = True, route
+        if self.bg.serves_port(route, self.side_port):
+            # A previous apply failed after its switch: the route is on the side.
+            reason = self._leftover_unusable(prefix, present, progress)
+            if reason is None:
+                _remote_checked(self.entry, self.connect_script(), timeout=120)
+                self.serving, self.route = True, route
+                if progress is not None:
+                    progress(f"Blue-green: the side project already serves on {self.side_port}")
+                return True
+            # The base is not serving either, so recreating it in place costs no
+            # extra downtime, and the normal route render moves traffic back to P.
+            # Under both strategies: refusing would keep the target down.
+            self.skipped = reason
             if progress is not None:
-                progress(f"Blue-green: the side project already serves on {self.side_port}")
-            return True
+                progress(f"Blue-green: {reason}; recreating in place and moving the route back")
+            self._cleanup_quietly(progress)
+            return False
         if present:
-            self.teardown(progress)
+            try:
+                self.teardown(progress)
+            except Exception:
+                return self._ineligible("a stale side project could not be removed", progress)
         if not self.bg.serves_port(route, self.port):
             return self._ineligible(f"the installed route does not serve 127.0.0.1:{self.port}", progress)
         primary = shlex.quote(self.validated["compose"]["service"])
@@ -2255,7 +2284,8 @@ class _SideLoad:
         up = ("{ docker network inspect " + net + " >/dev/null 2>&1 || docker network create "
               f"--label sandbox.hostside={base} {net} >/dev/null; }} && "
               f"{{ {self.connect_script()}; }} && "
-              f"{self._side_prefix(env_file)} up -d --no-build --pull never --no-deps "
+              f"{self._side_prefix(env_file)} up -d --no-build "
+              f"--pull {'never' if images_verified else 'missing'} --no-deps "
               + " ".join(shlex.quote(name) for name in self.colored))
         side_runtime = {**self.runtime, "compose_project": self.project,
                         "loopback_port": self.side_port}
@@ -2268,9 +2298,10 @@ class _SideLoad:
             _remote_checked(self.entry, command, timeout=max(300, int(
                 self.validated["compose"].get("build_timeout_seconds", 900))),
                 progress=progress, log_path=apply_log, log_phase="blue_green_side_start")
-        except Exception:
-            # Busy side port, a port recheck refusal or Docker refusing the side:
-            # nothing serving changed, so auto recreates in place.
+        except HostRemoteCommandFailed:
+            # A known refusal (busy side port, the port recheck, Docker refusing
+            # the side): nothing serving changed, so auto recreates in place. A
+            # lost link or timeout may still be running under the locks: re-raise.
             self._cleanup_quietly(progress)
             return self._ineligible("the side project could not start (see apply log)", progress)
         try:
@@ -2280,15 +2311,17 @@ class _SideLoad:
             raise hosting.HostingError(
                 "blue_green_side_unhealthy: the new revision did not become healthy beside the "
                 f"running one; the running revision keeps serving untouched ({exc})") from exc
-        current = self.edge.read_previous(self.caddy_name)
+        current = None
         try:
+            current = self.edge.read_previous(self.caddy_name)
             switched = self.bg.swap_upstream(current, self.port, self.side_port)
             self.edge.configure(self.caddy_name, switched, current, log_path=apply_log)
         except Exception as exc:
-            try:
-                self.edge.restore(self.caddy_name, current, log_path=apply_log)
-            except Exception:
-                pass  # The apply rollback restores the same pre-apply route.
+            if current is not None:
+                try:
+                    self.edge.restore(self.caddy_name, current, log_path=apply_log)
+                except Exception:
+                    pass  # The apply rollback restores the same pre-apply route.
             self._cleanup_quietly(progress)
             raise hosting.HostingError(
                 f"blue_green_switch_failed: the route stayed on the running revision ({exc})") from exc
@@ -2334,8 +2367,8 @@ class _SideLoad:
         a rollback target, then it goes (also a leftover from an earlier apply)."""
         self.serving, self.route = False, None
         try:
-            if self._side_present():
-                self.teardown(progress)
+            # Idempotent: also clears a network or side file a partial teardown left.
+            self.teardown(None)
         except Exception as exc:  # The base serves; the next apply or destroy removes it.
             if progress is not None:
                 progress(f"Blue-green: side cleanup incomplete ({remote.redact_text(str(exc))[:200]})")
@@ -2455,7 +2488,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     pull_flag = " --pull never" if local_images_verified else ""
     command = f"{prefix} up -d{pull_flag}{converge_flags} --remove-orphans {service_args}"
     if (side_load is not None and force_recreate and not init_services
-            and side_load.start(prefix, runtime_dir, env_file, progress, apply_log)):
+            and side_load.start(prefix, runtime_dir, env_file, progress, apply_log,
+                                images_verified=local_images_verified)):
         command = side_load.base_up_command(prefix, pull_flag)
     elif side_load is not None and init_services and side_load.strategy != "in-place":
         side_load._ineligible("init services run as Compose dependencies of the recreate", progress)
@@ -6314,10 +6348,6 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     edge_cache_receipt = None
     # Set once this apply's own route is live, so a private rollback can keep it.
     edge_live = {"new": False}
-    if (private_closure is not None
-            and validated["deploy"]["blue_green_plan"]["strategy"] == "blue-green"):
-        raise hosting.HostingError(
-            "blue_green_ineligible: a private target closes its route first; use deploy.strategy auto or in-place")
     side_load = (_SideLoad(entry, validated, runtime, edge=edge, caddy_name=caddy_name,
                            previous_route=previous_caddy, previous_entry=previous_entry,
                            runtime_dir=runtime_dir)

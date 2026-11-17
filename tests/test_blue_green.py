@@ -131,7 +131,9 @@ class RenderTests(unittest.TestCase):
             "name": "sandbox-host-xspeed-hub-demo-sandbox_wp_html", "external": True}})
         self.assertEqual(side["networks"], {"default": {
             "name": "sandbox-hostside-xspeed-hub-demo-sandbox_net", "external": True}})
-        self.assertTrue(all(s["pull_policy"] == "never" for s in side["services"].values()))
+        # Built images exist locally; image-only ones are pulled when missing.
+        self.assertEqual({name: svc["pull_policy"] for name, svc in side["services"].items()},
+                         {"edge": "missing", "hub": "never", "wordpress": "missing"})
 
     def test_side_names_never_collide_with_base_projects(self):
         self.assertFalse(bg.side_project(validated()).startswith("sandbox-host-"))
@@ -193,7 +195,7 @@ class SideLoadTests(unittest.TestCase):
     ROUTE = "server { location / { proxy_pass http://127.0.0.1:18044; } }\n"
 
     def run_start(self, *, healthy=True, route=ROUTE, side_running=False, strategy="auto",
-                  stopped=(), side_start_fails=False):
+                  stopped=(), side_start_fails=None, side_services="edge\nhub\nwordpress\n"):
         import json
         import subprocess
         from unittest import mock
@@ -206,6 +208,8 @@ class SideLoadTests(unittest.TestCase):
             checked.append(command)
             if command.startswith("docker ps -aq --filter"):
                 return "abc\n" if side_running else ""
+            if command.startswith("docker ps -a --filter") and "--format" in command:
+                return side_services if side_running else ""
             if " ps -q --status running " in command or command.startswith("docker ps -q --filter"):
                 return "" if any(f"service={name}" in command for name in stopped) else "base\n"
             return ""
@@ -220,9 +224,9 @@ class SideLoadTests(unittest.TestCase):
         original = remote_checked
 
         def remote_checked(entry, command, timeout=180, **kwargs):
-            if side_start_fails and kwargs.get("log_phase") == "blue_green_side_start":
+            if side_start_fails is not None and kwargs.get("log_phase") == "blue_green_side_start":
                 checked.append(command)
-                raise RuntimeError("port recheck refused")
+                raise side_start_fails
             return original(entry, command, timeout, **kwargs)
         health = mock.Mock(side_effect=None if healthy else RuntimeError("remote healthcheck failed"))
         with mock.patch.object(hosting_cmd, "_remote_checked", side_effect=remote_checked), \
@@ -253,7 +257,7 @@ class SideLoadTests(unittest.TestCase):
         _, side_runtime, command = locked.call_args.args
         self.assertEqual((side_runtime["compose_project"], side_runtime["loopback_port"]),
                          ("sandbox-hostside-xspeed-hub-demo-sandbox", 19044))
-        self.assertIn("up -d --no-build --pull never --no-deps edge hub wordpress", command)
+        self.assertIn("up -d --no-build --pull missing --no-deps edge hub wordpress", command)
         self.assertIn("--alias db", command)
         self.assertNotIn("--alias sandbox-login", command)  # the gate stays off the side
         base = side.base_up_command("BASE", "")
@@ -289,12 +293,23 @@ class SideLoadTests(unittest.TestCase):
                         self.assertIn("compose", calls)
 
     def test_a_side_that_cannot_start_falls_back_under_auto(self):
-        side, edge, checked, *_, result, error = self.run_start(side_start_fails=True)
+        from sandbox.commands import hosting as hosting_cmd
+        refused = hosting_cmd.HostRemoteCommandFailed("port recheck refused",
+                                                      phase="blue_green_side_start", exit_code=1)
+        side, edge, checked, *_, result, error = self.run_start(side_start_fails=refused)
         self.assertIsNone(error)
         self.assertIs(result, False)
         self.assertIn("could not start", side.skipped)
         edge.configure.assert_not_called()
         self.assertTrue(any("docker network rm" in command for command in checked))
+
+    def test_a_lost_link_during_side_start_is_not_a_known_failure(self):
+        # It may still run under the ingress locks: no cleanup race, no fallback.
+        side, edge, checked, *_, result, error = self.run_start(
+            side_start_fails=RuntimeError("SSH connection lost during remote phase (exit 255)"))
+        self.assertIn("SSH connection lost", str(error))
+        self.assertFalse(any("docker network rm" in command for command in checked))
+        edge.configure.assert_not_called()
 
     def test_a_stopped_shared_service_falls_back(self):
         side, edge, checked, write, *_, result, error = self.run_start(stopped=("wp-db",))
@@ -327,21 +342,32 @@ class SideLoadTests(unittest.TestCase):
         self.assertTrue(base.endswith("--force-recreate --renew-anon-volumes edge hub wordpress"))
         self.assertNotIn("--force-recreate --renew-anon-volumes db", base)
 
-    def test_an_unhealthy_leftover_side_falls_back(self):
+    def test_an_unusable_leftover_side_recreates_in_place_under_both_strategies(self):
+        # The route points at a dead side: refusing would keep the target down.
         route = self.ROUTE.replace("18044", "19044")
-        side, edge, *_, result, error = self.run_start(route=route, side_running=True, healthy=False)
-        self.assertIs(result, False)
-        self.assertFalse(side.serving)
-        self.assertIn("unhealthy", side.skipped)
+        for strategy in ("auto", "blue-green"):
+            for case, expected in (({"healthy": False}, "unhealthy"),
+                                   ({"side_running": False}, "gone"),
+                                   ({"side_services": "edge\nhub\nwordpress\ndb\n"}, "other services")):
+                with self.subTest(strategy=strategy, case=case):
+                    options = {"side_running": True, **case}
+                    side, edge, checked, *_, result, error = self.run_start(
+                        route=route, strategy=strategy, **options)
+                    self.assertIsNone(error)
+                    self.assertIs(result, False)
+                    self.assertFalse(side.serving)
+                    self.assertIn(expected, side.skipped)
+                    self.assertTrue(any("docker network rm" in command for command in checked))
 
     def test_finish_clears_the_rollback_target_before_teardown(self):
         from unittest import mock
         from sandbox.commands import hosting as hosting_cmd
         side, *_ = self.run_start()
         self.assertTrue(side.serving)
-        with mock.patch.object(hosting_cmd, "_remote_checked", side_effect=[
-                "abc\n", RuntimeError("network rm failed")]):
+        with mock.patch.object(hosting_cmd, "_remote_checked",
+                               side_effect=RuntimeError("network rm failed")) as checked:
             side.finish(None)
+        self.assertIn("rm -f /rt/side.compose.json", checked.call_args.args[1])
         self.assertFalse(side.serving)
         self.assertIsNone(side.route)
 

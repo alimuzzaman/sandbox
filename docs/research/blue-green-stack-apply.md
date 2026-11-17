@@ -40,7 +40,9 @@ Apply, when the target is eligible (below):
      is reachable from the side. Every shared service must have a running
      container, or `auto` applies in place;
    - pins images: a service with `build` and no `image` uses the base's built
-     tag `<base>-<service>`; the side starts with `--no-build --pull never`.
+     tag `<base>-<service>` (`pull_policy: never`); an image-only service is
+     pulled when missing, as the in-place `up` would; the side starts with
+     `--no-build` (and `--pull never` when the apply verified local images).
 3. **Start the side** with `up -d --no-deps <colored services>`, under the same
    ingress locks and in-lock port recheck as the base `up` (owner: the side
    project, port S), as one `&&` chain: a refused recheck, network or connect
@@ -73,8 +75,13 @@ Apply, when the target is eligible (below):
 If step 6 or 7 fails, the route stays on the healthy side and the side keeps
 running; the apply fails with the normal recorded failure. The next apply sees a
 side and a route on S, health-checks the side, re-reads the split and
-reconnects the shared containers, skips steps 2-5, and continues from step 6. A
-leftover side that fails its health check means the next apply runs in place. `host destroy` removes a leftover side project and
+reconnects the shared containers, skips steps 2-5, and continues from step 6. If
+that side is gone, unhealthy, or runs other services than the manifest now
+side-loads, the base is not serving either, so the next apply (under `auto` and
+`blue-green` alike) removes the side, recreates in place and moves the route back.
+A side start that fails as a known command (a busy S, the port recheck, a Docker
+refusal) falls back to in-place under `auto`; a lost SSH link or timeout during it
+is re-raised, because that command may still be running under the ingress locks. `host destroy` removes a leftover side project and
 network too.
 
 ## When migrations and init services run

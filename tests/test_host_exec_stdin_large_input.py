@@ -337,9 +337,11 @@ class ReceiverNamesItsRefusal(unittest.TestCase):
 
     def test_accepted_input_may_wait_for_a_slot_inside_the_original_deadline(self):
         self.receive()
-        # 90 s deadline less the 25 s kill grace and lease release and a 1 s run.
-        self.assertGreater(self.held[0], 50)
-        self.assertLessEqual(self.held[0], 90 - host_exec.SERVER_POST_COMMAND_SECONDS - host_exec.TIMEOUT_MIN)
+        # 90 s deadline less the 25 s kill grace and lease release, and a run of
+        # at least 15 s or a quarter of the deadline (22 s): about 42 s of wait.
+        reserve = host_exec.SERVER_POST_COMMAND_SECONDS + max(host_exec.SERVER_MIN_RUN_SECONDS, 90 // 4)
+        self.assertGreater(self.held[0], 90 - reserve - 3)
+        self.assertLessEqual(self.held[0], 90 - reserve)
 
     def test_changed_target_and_changed_stdin_have_their_own_codes(self):
         changed = {'ok': True, **snapshot(), 'selector_digest': 'sha256:' + 'f' * 64}

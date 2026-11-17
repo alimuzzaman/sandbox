@@ -1420,7 +1420,23 @@ class ListRenewRemoveTests(ServiceTestCase):
         self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
         self.assertEqual(self.remote.blocks[FQDN], theirs)
         self.assertEqual(self.remote.leases, {})
-        self.assertNotIn(FQDN, self.store.load(), "a refused first add leaves no record")
+
+    def test_a_first_add_refused_under_the_lease_leaves_no_record(self):
+        """A stack must never come to own a name another run published meanwhile."""
+        call = self.remote.call
+        theirs = render.render_block(self.name, m.Upstream("127.0.0.1", 9000), TAILNET_IP,
+                                     http2_directive=True)
+
+        def racing(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks[FQDN] = theirs
+                self.remote.keys.add(FQDN)
+            return call(entry, action, payload)
+        self.deps.remote_call = racing
+        result = service.add(self.ctx, self.deps, self.name, self.upstream, stack="demo")
+        self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
+        self.assertNotIn(FQDN, self.store.load())
+        self.assertEqual(self.dns.requests, [])
 
 
     def test_a_run_whose_lease_was_taken_over_does_not_touch_dns(self):

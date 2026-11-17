@@ -276,7 +276,9 @@ class AttemptRepositoryTests(unittest.TestCase):
         rows = tuple(replace(self.plan, id=f"a-{index:032x}", created_at=100 + index,
                              expires_at=expires_at, phase=phase, grants=tuple(
                                  replace(grant, id=f"l-{index:012x}" if n == 0 else f"l-{index:032x}",
-                                         expires_at=expires_at, disposition=phase)
+                                         expires_at=expires_at, disposition=phase,
+                                         gate_revoked=phase == "revoked",
+                                         original_settled=phase == "revoked")
                                  for n, grant in enumerate(self.plan.grants)))
                      for index in range(256))
         with self.repo.locked():

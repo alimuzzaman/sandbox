@@ -75,7 +75,7 @@ def _probe(environment: dict) -> bool:
 
 
 def scoped_launch(argv: list[str], *, job_id: str) -> tuple[list[str], dict | None]:
-    """``(argv, env)`` for one supervisor launch; ``env`` None keeps the current one.
+    """``(argv, env)`` for one supervisor launch; ``env`` is always None (inherit).
 
     Off Linux, or without a working user manager, the plain argv is returned,
     except inside a service unit's cgroup, where the job would die with the
@@ -89,11 +89,16 @@ def scoped_launch(argv: list[str], *, job_id: str) -> tuple[list[str], dict | No
             raise ScopeUnavailable("systemd-run could not start a user scope for the job supervisor")
         return list(argv), None
     label = job_id[:16] if re.fullmatch(r"[0-9a-f]{32}", job_id or "") else "job"
+    # A variable added only to reach the user manager is set for systemd-run
+    # alone and removed again before the supervisor runs, so the launch never
+    # passes a whole environment.
+    give = [f"{key}={environment[key]}" for key in added]
     strip = [part for key in added for part in ("-u", key)]
-    return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+    return [*(["env", *give] if give else []),
+            "systemd-run", "--user", "--scope", "--quiet", "--collect",
             f"--unit=sandbox-job-{label}-{secrets.token_hex(3)}",
             "--description=Sandbox job supervisor", "--",
-            *(["env", *strip] if strip else []), *argv], (environment if added else None)
+            *(["env", *strip] if strip else []), *argv], None
 
 
 def admitted_release(descriptor_path, own_root: Path, interpreter: str) -> tuple[Path, str]:

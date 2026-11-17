@@ -246,9 +246,10 @@ class SupervisorScopeTest(unittest.TestCase):
                 patch.object(scope.os.path, "isdir", return_value=True), \
                 patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
             argv, env = scope.scoped_launch(["py"], job_id="d" * 32)
+        self.assertEqual(argv[:3], ["env", "XDG_RUNTIME_DIR=/run/user/%d" % os.getuid(), "systemd-run"])
         index = argv.index("--")
         self.assertEqual(argv[index + 1:], ["env", "-u", "XDG_RUNTIME_DIR", "py"])
-        self.assertIn("XDG_RUNTIME_DIR", env)
+        self.assertIsNone(env)
 
     def test_no_scope_inside_a_service_refuses_and_elsewhere_runs_plain(self):
         with patch.object(scope.sys, "platform", "linux"), \

@@ -394,25 +394,22 @@ class PinTests(unittest.TestCase):
         self.assertEqual(self._gated("exit 3").returncode, 3)
         repository.accept(self._submission("r-2"))
 
-    def test_release_layout_admits_jobs_during_the_switch(self):
-        """With sb-src a symlink, a running scoped job neither blocks nor is held up."""
+    def test_release_layout_refuses_only_over_supervisors_in_the_service_cgroup(self):
+        """With sb-src a symlink, a running job outside the service cgroup does not block."""
         path, repository = self._registry()
         row, _ = repository.accept(self._submission("r-scoped"))
+        with repository.transaction(immediate=True) as connection:
+            connection.execute("UPDATE jobs SET lifecycle='running' WHERE job_id=?", (row["job_id"],))
         os.symlink("current", self.remote_home / "sb-src")
         marker = self.remote_home / "installed"
-        # The inner install admits a job itself: the admission lock is free.
-        admit = (f"{sys.executable} -c \"import sys; sys.path.insert(0, {str(ROOT)!r}); "
-                 "from sandbox.jobs.registry import JobRepository; "
-                 f"JobRepository({str(path)!r}, busy_timeout_ms=200).connection.execute('BEGIN IMMEDIATE')\" "
-                 f"&& touch {marker}")
-        result = self._gated(admit)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._gated(f"touch {marker}").returncode, 0)
         self.assertTrue(marker.exists())
         # The plan's blocking listing agrees with the gate.
-        listing = pins.list_active_jobs(None, self.remote, blocking=True)
-        self.assertEqual(listing, (0, []))
+        self.assertEqual(pins.list_active_jobs(None, self.remote, blocking=True), (0, []))
         self.assertEqual(pins.list_active_jobs(None, self.remote)[0], 1)
-        self.assertTrue(row["job_id"])
+        # The old layout still refuses over it.
+        os.unlink(self.remote_home / "sb-src")
+        self.assertEqual(self._gated("true").returncode, pins.JOBS_ACTIVE_EXIT)
 
     def test_prepare_runs_before_the_lock_and_its_failure_runs_nothing(self):
         marker = self.remote_home / "installed"

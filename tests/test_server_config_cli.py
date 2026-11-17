@@ -1,5 +1,7 @@
+import sys
 import unittest
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import argparse
 
@@ -221,7 +223,7 @@ class TestServerConfigCLI(unittest.TestCase):
         """T048: Child subprocess runs with synthetic environment and refuses without leaking secrets."""
         from tests.subprocess_support import run_test_process
         result = run_test_process(
-            [".cli-venv/bin/python", "-m", "unittest", "tests.test_server_config_cli.TestServerConfigCLI.test_server_command_registered"],
-            env={"SANDBOX_TEST_SYNTHETIC": "1"},
+            [sys.executable, "-m", "unittest", "tests.test_server_config_cli.TestServerConfigCLI.test_server_command_registered"],
+            env={"SANDBOX_TEST_SYNTHETIC": "1"}, cwd=str(Path(__file__).resolve().parents[1]),
         )
         self.assertEqual(result.returncode, 0)

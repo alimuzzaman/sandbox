@@ -3149,7 +3149,9 @@ A job accepted in the moment before the old service stops can still lose its
 launch (`systemd-run` has not yet left the service's cgroup); any process
 running a job command then fails it as `supervisor_launch_failed` once it has
 had no supervisor for 120 s, freeing its slot, so a replay reports that
-outcome instead of `accepted`. The unit's `TimeoutStopSec=30` bounds the hold
+outcome instead of `accepted`. A server exec holding its own stdin is exempt until its
+`server_cli.absolute_deadline_at`: it waits, accepted and without a supervisor,
+for a slot, and fails itself on timeout or signal. The unit's `TimeoutStopSec=30` bounds the hold
 on hosts that still take it.
 Otherwise (the old layout, or a retained pre-scope release) it holds the lock
 until the old service is stopped, so no job is admitted between the check and

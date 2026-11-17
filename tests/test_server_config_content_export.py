@@ -12,13 +12,14 @@ from sandbox.server_config.input import write_fragment_output
 from sandbox.server_config.repository import ServerConfigRepository
 from sandbox.server_config.service import ServerConfigService
 from sandbox.commands.server import _config_show
+from tests.server_config_support import private_base
 
 
 class TestServerConfigContentExport(unittest.TestCase):
     """T084: owner-only regular destination, safe-parent, symlink/special/non-owner refusal, atomic replacement, basename-only JSON, zero state write."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.repository = ServerConfigRepository(self.temp_dir, FIXED_INCARNATION)
         self.clock = FakeClock()
         from sandbox.server_config.adapters.base import AdapterDescriptor

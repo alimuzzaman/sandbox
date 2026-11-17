@@ -28,6 +28,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `sb host tailnet-name` waits only on the caddy, edge and docker-pool locks; durable jobs never block it. certbot's deploy hook reloads nginx under the edge lock.
 
 ### Fixed
+- Lost-launch recovery no longer fails a `sb host exec` with stdin that is waiting more than 120 s for a job slot; such a job is left alone until its own deadline.
+- A remote provisioned before the acceptance-receipt contract (its recorded capabilities predate it) no longer refuses every job after `sb remote service migrate`: when the recorded list lacks a required contract, Sandbox reads the installed runtime's `job-capabilities`, bound to the recorded marker and revision, and accepts on that.
 - A job supervisor waits up to 60 s on a busy job registry instead of failing its job with `database is locked`.
 - `sb host ...` commands sent to a joined server (`stack list`, `status`, `retire-delivery --name`, and others) report a failure that happened before submission as `acceptance: not_accepted`, with the refusal's own code, when Sandbox generated the request id. Examples are a working directory that is not a git checkout and a Docker network capacity refusal. Before, every such failure read `server_cli_acceptance_unknown` although nothing reached the server.
 - `job-start`, `job-list` and the other remote job commands print a JSON error instead of a Python traceback when remote home resolution times out (`remote_home_resolution_timeout`), job capability discovery fails (`remote_execution_capability_unavailable`), a source lock is held (`remote_materialization_busy`) or a read-only job command times out (`remote_control_timeout`). `retryable` is true only where a retry can clear it.

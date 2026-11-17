@@ -4,7 +4,7 @@ import unittest
 
 class TestIngressDestroyOrdering(unittest.TestCase):
     def test_ingress_cleanup_precedes_dns_runtime_and_identity_deletion(self):
-        from sandbox.commands.instances_cmd import cmd_instance, _cleanup_instance_routes
+        from sandbox.commands.instances_cmd import _cmd_instance as cmd_instance, _cleanup_instance_routes
         helper = inspect.getsource(_cleanup_instance_routes)
         ingress = helper.index("ingress_service(cfg).cleanup_owner")
         dns = helper.index("domain_service(cfg).cleanup")

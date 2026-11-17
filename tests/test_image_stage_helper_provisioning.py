@@ -15,6 +15,12 @@ PROVISIONER = ROOT / "scripts" / "provision_image_stage_helper.py"
 HELPER = ROOT / "sandbox" / "hosting" / "images" / "staging_helper.py"
 
 
+def _private_parent() -> Path:
+    # The provisioner refuses a world-writable ancestor such as Linux /tmp (1777),
+    # as it should on a real host; the home directory is a safe parent.
+    return Path.home()
+
+
 class TestImageStageHelperProvisioning(unittest.TestCase):
     def _home(self, parent: str) -> Path:
         home = Path(parent).resolve() / "home" / "alim" / "sandbox"
@@ -31,7 +37,7 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
         )
 
     def test_exact_revision_gets_immutable_owner_only_helper_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             revision = "a" * 40
             result = self._run(home, revision)
@@ -54,7 +60,7 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
                 self.assertEqual(payload["runtime_revision"], revision)
 
     def test_revision_change_creates_new_identity_without_rewriting_active_authority(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             first = "a" * 40
             second = "b" * 40
@@ -69,7 +75,7 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
                              / f"sha256-{digest}-revision-{second}" / "manifest-v2.json").is_file())
 
     def test_unsafe_existing_helper_or_manifest_refuses_without_repair(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             revision = "c" * 40
             self.assertEqual(self._run(home, revision).returncode, 0)
@@ -93,14 +99,14 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
             self.assertEqual(json.loads(manifest.read_text())["runtime_revision"], "d" * 40)
 
     def test_invalid_revision_refuses_before_creating_runtime_authority(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             result = self._run(home, "not-a-revision")
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((home / "runtime").exists())
 
     def test_writable_pre_home_ancestor_refuses_without_authority_creation(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             home.parent.chmod(0o770)
             result = self._run(home, "e" * 40)
@@ -108,7 +114,7 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
             self.assertFalse((home / "runtime").exists())
 
     def test_partial_final_bundle_refuses_and_unpublished_temp_is_not_authority(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             revision = "f" * 40
             digest = hashlib.sha256(HELPER.read_bytes()).hexdigest()
@@ -126,7 +132,7 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
             self.assertEqual(list(root.parent.glob(".image-stage-helper.*")), [])
 
     def test_live_shaped_home_and_runtime_remove_write_bits_only(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             home = self._home(directory)
             home.chmod(0o775)
             runtime = home / "runtime"
@@ -144,7 +150,7 @@ class TestImageStageHelperProvisioning(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         spec.loader.exec_module(module)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=_private_parent()) as directory:
             parent = Path(directory).resolve()
             source = parent / "source"; target = parent / "target"
             source.mkdir(); target.mkdir()

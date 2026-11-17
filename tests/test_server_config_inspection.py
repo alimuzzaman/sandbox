@@ -29,6 +29,7 @@ from tests.server_config_fixtures import (
     FakeClock,
     fragment,
 )
+from tests.server_config_support import private_base
 
 
 def _directory_snapshot(path: Path) -> dict[str, tuple[int, int, int]]:
@@ -49,7 +50,7 @@ class TestServerConfigInspection(unittest.TestCase):
     """T060: Inspection projections and zero-persistent-write guarantees."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = private_base(self)
         self.clock = FakeClock()
         self.descriptor = AdapterDescriptor(
             server_type="nginx",

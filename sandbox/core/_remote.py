@@ -2927,11 +2927,16 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
     applied = 0
     deleted = snapshot.get("deleted") or []
     if deleted:
-        commands = [
-            f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
-            for relpath in deleted
-        ]
-        rm_res = lease.run(" && ".join(commands), timeout=30)
+        # Paths travel on stdin, NUL-separated: one argv string is capped at
+        # 128 KiB on Linux, about a thousand deletions. Each path is absolute
+        # under the target (no option injection) and holds no NUL or "..".
+        for relpath in deleted:
+            parts = PurePosixPath(relpath)
+            if not relpath or "\0" in relpath or parts.is_absolute() or ".." in parts.parts:
+                raise ValueError("dirty deployment identity contains an unsafe path")
+        paths = "\0".join(target_path.rstrip('/') + '/' + relpath for relpath in deleted)
+        rm_res = lease.run("xargs -0 rm -f --", timeout=30,
+                           input_data=paths.encode("utf-8", "surrogateescape"))
         if rm_res.returncode != 0:
             raise RuntimeError(
                 "could not remove deleted files on remote: "

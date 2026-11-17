@@ -1,5 +1,4 @@
 from __future__ import annotations
-from sandbox.project_registry.lifecycle import serialized_lifecycle
 import argparse
 import copy
 import json
@@ -978,8 +977,26 @@ def _cleanup_native_owner(cfg, owner) -> bool:
     return True
 
 
-@serialized_lifecycle
 def cmd_instance(cfg, args) -> None:
+    """Run one instance action; local delete holds its owner's project lock.
+
+    `list` takes no lifecycle lock. A local delete resolves, compares and tears
+    down under the owning project's writer lock, so an ensure of that project
+    cannot interleave, while other projects are not blocked.
+    """
+    remote = getattr(args, "remote", None) and not getattr(args, "local", False)
+    owner = (_core().registry_find_instance(args.name)
+             if args.action == "delete" and args.name and not remote else None)
+    if not owner or not owner.get("root"):
+        return _cmd_instance(cfg, args)
+    with _core().project_lock(owner["root"]):
+        current = _core().registry_find_instance(args.name)
+        if not current or current.get("root") != owner["root"]:
+            die("instance ownership changed; retry after checking status")
+        return _cmd_instance(cfg, args)
+
+
+def _cmd_instance(cfg, args) -> None:
     """List or change a sandbox instance lifecycle.
 
     ``./sb instance list`` is a discoverable singular alias for the

@@ -24,7 +24,25 @@ RSS_LIMIT = 256 * 1024 * 1024
 ZERO_BLOCK = bytes(1024 * 1024)
 
 
+def _reset_peak_rss() -> None:
+    # Linux carries the forking parent's peak RSS into the child, so a worker
+    # started from a large test runner would report the runner's peak.
+    # Writing 5 to clear_refs resets the peak (VmHWM) to the current RSS.
+    try:
+        with open("/proc/self/clear_refs", "w") as handle:
+            handle.write("5")
+    except OSError:
+        pass
+
+
 def _rss_bytes() -> int:
+    try:
+        with open("/proc/self/status") as handle:
+            for line in handle:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(value if sys.platform == "darwin" else value * 1024)
 
@@ -259,6 +277,7 @@ def _worker() -> int:
     if len(sys.argv) != 3 or sys.argv[1] not in {"helper", "promote"}:
         return 2
     base = Path(sys.argv[2])
+    _reset_peak_rss()
     if sys.argv[1] == "helper":
         _run_helper_worker(base)
     else:

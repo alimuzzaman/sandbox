@@ -446,6 +446,36 @@ class RemoteSourceAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(RemoteJobTransportError, 'measured-source capability'):
                 transport.submit(item)
 
+    def test_a_remote_provisioned_before_the_acceptance_contract_uses_the_verified_live_read(self):
+        """Fable [3]: provision alone records capabilities; migrate does not rewrite them."""
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+
+        class Deployed(Exception):
+            pass
+        record = {'provisioned': True, 'capabilities': ['job.exec', 'job.execution-policy.v1'],
+                  'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
+        def deploy(*args, **kwargs):
+            raise Deployed()
+        transport = RemoteJobTransport(deploy=deploy, ssh_run=deploy, remote_lookup=lambda name: record)
+        observed = {'ok': True, 'schema_version': 1, 'ownership_marker': 'a' * 24,
+                    'runtime_revision': 'b' * 24,
+                    'capabilities': ['job.exec', 'job.execution-policy.v1', 'job.acceptance-receipt.v1',
+                                     'job.source-content.v1']}
+        item = replace(self.submission(self.source, content_digest(self.source)),
+                       target_kind='remote', remote_name='box')
+        with patch.object(transport, 'control', return_value=observed):
+            with self.assertRaises(Deployed):
+                transport.submit(item)
+        # The live read is bound to the recorded runtime: another revision still refuses.
+        with patch.object(transport, 'control', return_value=dict(observed, runtime_revision='c' * 24)):
+            with self.assertRaises(RemoteJobTransportError):
+                transport.submit(item)
+        # And a runtime that really lacks the contract still refuses before deploying.
+        lacking = dict(observed, capabilities=['job.exec', 'job.execution-policy.v1', 'job.source-content.v1'])
+        with patch.object(transport, 'control', return_value=lacking):
+            with self.assertRaisesRegex(RemoteJobTransportError, 'retained acceptance contracts'):
+                transport.submit(item)
+
     def test_new_materialized_submission_cannot_omit_the_measured_binding(self):
         item = replace(self.submission(self.source, content_digest(self.source)),
                        source=SourceIdentity(self.identity, self.commit_a))

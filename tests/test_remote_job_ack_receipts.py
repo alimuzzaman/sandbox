@@ -102,7 +102,8 @@ class RetainedAckTests(unittest.TestCase):
         with self.assertRaises(RemoteJobTransportError):
             self.transport.submit(self.client)
         self.deploy.assert_not_called()
-        self.assertEqual(self.calls, [])
+        # Fable [3]: an incomplete recorded list costs one verified live read, nothing else.
+        self.assertTrue(all('job-capabilities' in command for command in self.calls), self.calls)
 
     def test_malformed_cached_capabilities_refuse_with_typed_error_before_deployment(self):
         for values in ([{}], [[]], ['job.exec', 'job.execution-policy.v1', CONTRACT, {}], None):
@@ -111,7 +112,8 @@ class RetainedAckTests(unittest.TestCase):
                 with self.assertRaises(RemoteJobTransportError):
                     self.transport.submit(self.client)
         self.deploy.assert_not_called()
-        self.assertEqual(self.calls, [])
+        # Fable [3]: an incomplete recorded list costs one verified live read, nothing else.
+        self.assertTrue(all('job-capabilities' in command for command in self.calls), self.calls)
 
     def test_direct_server_cli_malformed_capabilities_refuse_before_any_effect(self):
         record = {**self.record, 'joined': True, 'control_transport': 'tailscale'}

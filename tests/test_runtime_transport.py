@@ -780,7 +780,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         with mock.patch.object(
                 commands, "_core",
                 return_value=types.SimpleNamespace(
-                    registry_find_instance=lambda _name: owner)), \
+                    registry_find_instance=lambda _name: owner,
+                    project_lock=lambda _root: contextlib.nullcontext())), \
                 mock.patch.object(
                     commands, "runtime_service", return_value=service), \
                 mock.patch.object(
@@ -870,7 +871,8 @@ class TestRemoteInstanceControl(unittest.TestCase):
                 mock.patch("sandbox.core._remote.delete_remote_instance") as delete, \
                 contextlib.redirect_stdout(io.StringIO()):
             commands.cmd_instance({}, args)
-        delete.assert_called_once_with(entry, "preview-a")
+        delete.assert_called_once_with(
+            entry, "preview-a", creation_context=None, expected_incarnation=None)
 
 
 class TestRemoteExecInstanceSelection(unittest.TestCase):

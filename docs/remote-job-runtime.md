@@ -558,6 +558,10 @@ Publishing a project's source to a remote takes a lock directory beside its
 completion is unknown and the lock stays, so every later `job-start` for that project
 gets `remote source materialization lock is busy`. The controller records that
 operation id under `$SANDBOX_HOME/runtime/remote-materialization/pending.json`.
+A sync whose source measure fails on the remote (an unreadable, changing or unsupported
+entry under the target) is not unknown: the coordinator completes its receipt with a
+nonzero exit, the sync fails with `could not measure the remote source content`, and
+the lock is released.
 
 The next `job-start` for the same project inspects the recorded operation's remote
 receipt first. When the receipt says `idle` or `complete` (written only after every

@@ -1689,6 +1689,36 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
         self.assertEqual(payload["target"], {"kind": "remote", "remote": "vps"})
         self.assertNotIn("Traceback", output.getvalue())
 
+    def test_transient_remote_failures_become_retryable_envelopes(self):
+        import subprocess
+        import sandbox.cli as cli
+        from sandbox.core._remote import RemoteHomeResolutionTimeout
+        from sandbox.core.remote_materialization import RemoteMaterializationBusy
+        from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+
+        private = "/Users/someone/private/checkout"
+        remote_args = SimpleNamespace(json=True, remote="vps", cmd="job-start")
+        for error, code in (
+                (RemoteHomeResolutionTimeout(15), "remote_home_resolution_timeout"),
+                (RemoteMaterializationBusy("remote source materialization lock is busy"),
+                 "remote_materialization_busy"),
+                (ExecutionCapabilityUnavailable("installed job capability discovery is unavailable"),
+                 "remote_execution_capability_unavailable"),
+                (subprocess.TimeoutExpired(["ssh", private], 15), "remote_control_timeout")):
+            with self.subTest(code=code):
+                mapped = cli._transient_remote_error(error, remote_args)
+                output = StringIO()
+                with redirect_stdout(output), redirect_stderr(StringIO()):
+                    with self.assertRaises(SystemExit):
+                        cli._dispatch_remote_transport_error(mapped, remote_args)
+                payload = json.loads(output.getvalue())
+                self.assertEqual((payload["code"], payload["retryable"], payload["ok"]), (code, True, False))
+                self.assertNotIn(private, output.getvalue())
+        # Anything else, or a timeout in a command with no remote, is not mapped.
+        self.assertIsNone(cli._transient_remote_error(RuntimeError("x"), remote_args))
+        self.assertIsNone(cli._transient_remote_error(
+            subprocess.TimeoutExpired(["x"], 1), SimpleNamespace(json=True, remote=None, cmd="up")))
+
     def test_human_transport_error_is_bounded_and_does_not_claim_a_job(self):
         import sandbox.cli as cli
         from sandbox.transports.remote_jobs import RemoteJobTransportError

@@ -186,6 +186,33 @@ def _dispatch_remote_transport_error(exc: RemoteJobTransportError, args) -> None
     raise SystemExit(1)
 
 
+def _transient_remote_error(exc: BaseException, args) -> RemoteJobTransportError | None:
+    """A retryable transport error for a known transient remote failure, else None.
+
+    These are raised below the transport boundary (source deploy preflight,
+    capability discovery, the materialization lock, an SSH timeout) and used to
+    reach the user as a traceback with nothing a caller could parse.
+    """
+    from sandbox.core._remote import RemoteHomeResolutionTimeout
+    from sandbox.core.remote_materialization import RemoteMaterializationBusy
+    from sandbox.remote_runtime.execution_capabilities import ExecutionCapabilityUnavailable
+    if isinstance(exc, RemoteHomeResolutionTimeout):
+        code, message = "remote_home_resolution_timeout", str(exc)
+    elif isinstance(exc, RemoteMaterializationBusy):
+        code, message = "remote_materialization_busy", str(exc)
+    elif isinstance(exc, ExecutionCapabilityUnavailable):
+        code, message = ExecutionCapabilityUnavailable.code, str(exc)
+    elif isinstance(exc, subprocess.TimeoutExpired) and getattr(args, "remote", None):
+        # The expired command line can name private paths: never echo it.
+        code = "remote_control_timeout"
+        message = f"a remote control call timed out after {int(exc.timeout or 0)} seconds"
+    else:
+        return None
+    mapped = RemoteJobTransportError(message, retryable=True)
+    mapped.code = code
+    return mapped
+
+
 def _explicit_global_label(argv: list[str]) -> str | None:
     """Return a parser-level label supplied before passthrough arguments.
 
@@ -2196,6 +2223,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         _dispatch_remote_admission_error(exc, args)
     except RemoteJobTransportError as exc:
         _dispatch_remote_transport_error(exc, args)
+    except Exception as exc:  # noqa: BLE001 - only known transient remote failures are mapped
+        mapped = _transient_remote_error(exc, args)
+        if mapped is None:
+            raise
+        _dispatch_remote_transport_error(mapped, args)
 
 
 

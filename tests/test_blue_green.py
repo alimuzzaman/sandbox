@@ -278,7 +278,8 @@ class SideLoadTests(unittest.TestCase):
             with open(fake, "w") as handle:
                 handle.write(f"#!/bin/sh\necho \"$*\" >> {log}\necho id1\n")
             os.chmod(fake, 0o755)
-            env = {**os.environ, "PATH": root + os.pathsep + os.environ["PATH"]}
+            from tests.subprocess_support import synthetic_environment
+            env = synthetic_environment({"PATH": root + os.pathsep + os.environ["PATH"]})
             for check in ("false", "true"):
                 with self.subTest(check=check):
                     open(log, "w").close()

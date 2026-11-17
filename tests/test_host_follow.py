@@ -1091,7 +1091,7 @@ class AttemptScopeTests(unittest.TestCase):
     def test_the_attempt_survives_its_oneshot_poll_unit(self):
         """A real oneshot user unit (like sandbox-stack-follow.service) starts a
         detached process the way job-start starts its supervisor, then exits."""
-        environment = {**os.environ, **follow_tick.user_manager_environment()}
+        environment = synthetic_environment(follow_tick.user_manager_environment())
         if shutil.which("systemd-run") is None or subprocess.run(
                 ["systemctl", "--user", "show-environment"], capture_output=True,
                 env=environment, timeout=10).returncode != 0:
@@ -1278,7 +1278,7 @@ class AttemptModeTests(unittest.TestCase):
 
     def test_files_an_attempt_writes_from_a_umask_0077_poll_unit(self):
         """A real oneshot user unit with UMask=0077, like sandbox-stack-follow.service."""
-        environment = {**os.environ, **follow_tick.user_manager_environment()}
+        environment = synthetic_environment(follow_tick.user_manager_environment())
         if shutil.which("systemd-run") is None or subprocess.run(
                 ["systemctl", "--user", "show-environment"], capture_output=True,
                 env=environment, timeout=10).returncode != 0:

@@ -19,7 +19,8 @@ class TestWebDashboardRemoteSummaries(unittest.TestCase):
     def test_remote_summary_rows_are_lightweight_and_secret_free(self):
         from sandbox.commands.ui_dash import _remote_summary_rows
 
-        with patch(
+        # Not a joined server host: no implicit this-server row.
+        with patch("sandbox.commands.ui_dash._hosts_control_service", return_value=False), patch(
             "sandbox.core._remote.list_remotes",
             return_value={
                 "scaleway-sandbox": {

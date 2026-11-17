@@ -1399,8 +1399,9 @@ class TestHostingManifest(unittest.TestCase):
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertTrue(commands[0].endswith(" build --with-dependencies web worker"))
         self.assertIn("up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[1])
-        # The recreating up runs only under the Caddy and nginx locks.
-        self.assertIn('"flock", "-w", "30", "%s"' % hosting_cmd._CADDY_LOCK_PATH, commands[1])
+        # The recreating up runs under the compose-publish lock, never the edge locks.
+        self.assertIn('"%s"' % hosting_cmd._COMPOSE_PUBLISH_LOCK_PATH, commands[1])
+        self.assertNotIn(hosting_cmd._CADDY_LOCK_PATH, commands[1])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")

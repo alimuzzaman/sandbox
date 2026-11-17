@@ -59,7 +59,9 @@ class DivergedFallbackTests(unittest.TestCase):
             timeout=10, check=True, capture_output=True, text=True).stdout.strip()
 
     def ref(self, name):
-        return self.git(self.target, "rev-parse", "--verify", "-q", name)
+        """The ref's commit, or "" when the remote has no such ref."""
+        return run_test_process(["git", "-C", str(self.target), "rev-parse", "--verify", "-q", name],
+            timeout=10, check=False, capture_output=True, text=True).stdout.strip()
 
     def test_strict_deploy_still_refuses_a_diverged_branch(self):
         with self.assertRaises(sr.RemoteBranchDiverged):

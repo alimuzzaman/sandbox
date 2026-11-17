@@ -5232,8 +5232,24 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
             self.assertIn("remote_runtime_revision_mismatch", eligibility["prerequisite_failures"])
 
     def test_cmd_host_required_evidence_missing_advice_formats_previous_request_id(self):
+        die_msg = self._required_evidence_advice(
+            {"project_root": "/tmp/proj", "project": "proj", "environment": "production"})
+        self.assertIn("--original-request-id req-prev-12345", die_msg)
+        self.assertIn("retire-delivery --project-dir /tmp/proj ", die_msg)
+
+    def test_a_stack_retire_advice_names_the_stack_not_its_server_path(self):
+        # The stack checkout exists only on the server; a controller copying the
+        # server path got server_cli_execution_unavailable (staff-1116).
+        die_msg = self._required_evidence_advice(
+            {"project_root": "/home/alim/sandbox/runtime/stacks/staff-1116/source/x",
+             "manifest_root": "/home/alim/sandbox/runtime/stacks/staff-1116",
+             "project": "proj", "environment": "production", "stack": {"slug": "staff-1116"}})
+        self.assertIn("retire-delivery --name staff-1116 --remote remote1 ", die_msg)
+        self.assertNotIn("/home/alim/sandbox/runtime/stacks", die_msg)
+        self.assertIn("--original-request-id req-prev-12345", die_msg)
+
+    def _required_evidence_advice(self, validated):
         exc = hosting_cmd.DeliveryError("required_evidence_missing")
-        validated = {"project_root": "/tmp/proj", "project": "proj", "environment": "production"}
         args = types.SimpleNamespace(remote="remote1", json=False, action="apply", project_dir="/tmp/proj", environment="production", confirm=True)
         
         with patch.object(hosting_cmd.remote, "get_remote", return_value={"host": "1.2.3.4"}), \
@@ -5254,9 +5270,7 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 hosting_cmd.cmd_host({}, args)
             self.assertTrue(mock_die.called)
-            die_msg = mock_die.call_args[0][0]
-            self.assertIn("--original-request-id req-prev-12345", die_msg)
-            self.assertIn("retire-delivery", die_msg)
+            return mock_die.call_args[0][0]
 
 
 class TestComposeServiceStates(unittest.TestCase):

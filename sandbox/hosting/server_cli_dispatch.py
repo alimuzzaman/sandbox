@@ -182,6 +182,12 @@ def dispatch_host_if_selected(args) -> bool:
             bool(getattr(args, "_server_cli_submission_started", False))
             and code != "server_cli_capability_unavailable")
         busy = _source_busy(error)
+        from sandbox.core._remote import RemoteBranchDiverged
+        if isinstance(error, RemoteBranchDiverged) and generated_request_id:
+            # Git refused the source push, so this fresh request was never
+            # submitted. Say so instead of reporting unknown acceptance.
+            _failure(args, RemoteBranchDiverged.error_code, unknown=False,
+                     error="Not submitted: " + str(error))
         if busy is not None and generated_request_id:
             # The source lock refused before this request's job submission,
             # and no earlier attempt can have used this fresh request id.

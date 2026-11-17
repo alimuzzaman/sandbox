@@ -65,6 +65,36 @@ class ValidateTests(unittest.TestCase):
         self.assertEqual(bg.revision_exempt({"deploy": {}}), set())
 
 
+class ObservationTests(unittest.TestCase):
+    """A shared service carries no revision stamp; the apply's ready check agrees."""
+
+    def target(self, shared):
+        return {"compose": {"service": "web", "background_services": ["db"]},
+                "deploy": {"derived_environment": {"APP_SOURCE_REVISION": "pushed_commit_sha"},
+                           "blue_green_plan": {"strategy": "auto", "shared": list(shared),
+                                               "colored": []}}}
+
+    def observation(self, revision):
+        return {"complete": True, "configured_services": ["web", "db"],
+                "rows": [{"Service": name, "State": "running", "Health": "healthy"}
+                         for name in ("web", "db")],
+                "revision_checks": [{"service": "web", "key": "APP_SOURCE_REVISION",
+                                     "observed": revision},
+                                    {"service": "db", "key": "APP_SOURCE_REVISION",
+                                     "observed": None}]}
+
+    def test_an_unstamped_shared_service_is_exact_ready(self):
+        from sandbox.commands import hosting
+        revision = "a" * 40
+        target = self.target(["db"])
+        classified = hosting._classify_host_observation(target, self.observation(revision), revision)
+        self.assertTrue(hosting._host_observation_is_exact_ready(target, classified, revision))
+        # Without the exemption the same runtime is not ready: db must carry the stamp.
+        target = self.target([])
+        classified = hosting._classify_host_observation(target, self.observation(revision), revision)
+        self.assertFalse(hosting._host_observation_is_exact_ready(target, classified, revision))
+
+
 class SplitTests(unittest.TestCase):
     def test_declared_and_port_publishing_services_stay_single(self):
         split = bg.split(model(), validated(), gate_service="sandbox-login")

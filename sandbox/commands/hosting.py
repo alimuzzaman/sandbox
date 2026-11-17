@@ -3781,10 +3781,15 @@ def _mark_hosting_init_complete(state: dict, key: str, *, entry: dict,
 
 def _source_revision_evidence_ready(validated: dict, classified: dict,
                                     revision: str) -> bool:
+    # The same exemption as _classify_host_observation: a shared blue-green
+    # service keeps its container, so it carries no revision check.
+    from sandbox.hosting.blue_green import revision_exempt
+    exempt = revision_exempt(validated)
     expected = {
         (service, key)
         for service in [validated["compose"]["service"],
                         *validated["compose"].get("background_services", [])]
+        if service not in exempt
         for key, provider in validated["deploy"].get("derived_environment", {}).items()
         if provider == "pushed_commit_sha"
     }
@@ -9769,9 +9774,15 @@ def cmd_host(cfg, args) -> None:
                         prev_req_id = prior_op['request_id']
                 except Exception:
                     pass
+            # A stack's checkout lives only on the server; a controller that
+            # copies a server path gets server_cli_execution_unavailable. Name
+            # the stack instead, which resolves from any controller checkout.
+            stack_slug = (validated.get('stack') or {}).get('slug')
+            selector = (f"--name {shlex.quote(stack_slug)}" if isinstance(stack_slug, str) and stack_slug else
+                        f"--project-dir {shlex.quote(validated.get('manifest_root') or validated['project_root'])}")
             msg += (
                 f"; if a previous delivery attempt failed or was interrupted, retire it with: "
-                f"./sb host retire-delivery --project-dir {shlex.quote(validated.get('manifest_root') or validated['project_root'])} "
+                f"./sb host retire-delivery {selector} "
                 f"--remote {shlex.quote(args.remote)} --environment {shlex.quote(validated['environment'])} "
                 f"--original-request-id {shlex.quote(prev_req_id)} --confirm"
             )

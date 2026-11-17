@@ -564,8 +564,14 @@ def deploy_exact_working_tree(
     remote_name: str | None = None,
     push_timeout: int | None = None,
     committed_only: bool = False,
+    diverged_fallback: bool = False,
 ) -> dict:
     """Deploy committed, modified, and untracked project state once.
+
+    ``diverged_fallback`` lets a caller that only needs the exact tree (a
+    remote job) publish to the immutable ``sandbox-source-<sha>`` ref when the
+    managed remote branch has diverged, instead of refusing. ``sb deploy``
+    keeps the strict default: it never moves or forks a named branch.
 
     This is the reusable deploy primitive for remote jobs.  It intentionally
     returns identity metadata rather than a mutable instance record, allowing a
@@ -629,13 +635,19 @@ def deploy_exact_working_tree(
     # A detached HEAD (the normal PR-review checkout) is pushed to an
     # immutable sandbox-source-<sha> ref; only a named branch is pushed by name.
     branch = current_branch(root, allow_detached=True) if resolved_source is None else None
-    pushed_sha = push_commits(
-        remote, root, target, branch,
-        source_ref=source_ref, resolved_sha=resolved_source,
-        source_root=source_root,
-        push_timeout=push_timeout,
-        allow_detached=True,
-    )
+    push_options = dict(source_ref=source_ref, resolved_sha=resolved_source,
+                        source_root=source_root, push_timeout=push_timeout,
+                        allow_detached=True)
+    try:
+        pushed_sha = push_commits(remote, root, target, branch, **push_options)
+    except RemoteBranchDiverged:
+        # A rewritten local history (rebase, amend) cannot fast-forward the
+        # remote branch, and deploy never force-pushes. A remote job needs the
+        # exact tree, not the branch, so it takes the immutable ref a detached
+        # checkout would use. The named branch on the remote is left as it was.
+        if diverged_fallback is not True or branch is None:
+            raise
+        pushed_sha = push_commits(remote, root, target, None, **push_options)
     content_receipt = {}
     applied = update_target_to(
         remote, target, pushed_sha,

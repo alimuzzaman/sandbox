@@ -182,6 +182,12 @@ def dispatch_host_if_selected(args) -> bool:
             bool(getattr(args, "_server_cli_submission_started", False))
             and code != "server_cli_capability_unavailable")
         busy = _source_busy(error)
+        from sandbox.core._remote import RemoteBranchDiverged
+        if isinstance(error, RemoteBranchDiverged) and generated_request_id:
+            # Git refused the source push, so this fresh request was never
+            # submitted. Say so instead of reporting unknown acceptance.
+            _failure(args, RemoteBranchDiverged.error_code, unknown=False,
+                     error="Not submitted: " + str(error))
         if busy is not None and generated_request_id:
             # The source lock refused before this request's job submission,
             # and no earlier attempt can have used this fresh request id.
@@ -202,7 +208,7 @@ def _source_busy(error):
     return None
 
 
-def _failure(args, code, *, unknown, receipt=None, busy=None):
+def _failure(args, code, *, unknown, receipt=None, busy=None, error=None):
     request_id = getattr(args, "_server_cli_request_id", None) or getattr(args, "request_id", None)
     if not isinstance(request_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", request_id) is None:
         request_id = None
@@ -210,6 +216,8 @@ def _failure(args, code, *, unknown, receipt=None, busy=None):
         "acceptance": "unknown" if unknown else "not_accepted",
         "error": ("Inspect the original request/job; execution is not safe to replay."
                   if unknown else "Server execution is unavailable; no controller fallback was attempted.")}
+    if error is not None:
+        payload["error"] = error
     if busy is not None:
         # Fixed text from sandbox/core/_remote.py: names an operation id and the
         # inspect command, nothing from the remote.

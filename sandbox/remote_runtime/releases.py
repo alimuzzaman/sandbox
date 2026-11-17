@@ -43,7 +43,11 @@ imports it. Actions:
 """
 from __future__ import annotations
 
+import json
+import os
 import shlex
+import stat
+from pathlib import Path
 
 KEEP_RELEASES = 3
 
@@ -195,7 +199,7 @@ def prepare(stage_name, receipt, rev, source):
              "--disable-pip-version-check", "pyyaml"], target)
     # Content-addressed per source revision: refreshed even on reuse.
     run(["python3", os.path.join(target, "scripts", "provision_image_stage_helper.py"),
-         "--sandbox-home", home, "--runtime-revision", source], target)
+         "--sandbox-home", home, "--runtime-revision", source, "--source-root", target], target)
     if state == "built":
         run(["./sb", "mcp-install"], target)
         run([os.path.join(target, ".cli-venv", "bin", "python"), "-c",
@@ -213,11 +217,11 @@ def prepare(stage_name, receipt, rev, source):
     print(json.dumps({"release": rev, "state": state}, sort_keys=True), flush=True)
 
 def activate(rev, unit_path, origin_path):
-    # Exit 3: refused before any change, nothing to revert.
+    # Exit 3: refused, or failed and fully undone; nothing to revert.
     releases_dir()
     if marker(rev) is None:
         fail(3, "release is not complete")
-    state = {"release": rev, "converted": False,
+    state = {"release": rev, "steps": [],
              "had_current": os.path.lexists(CURRENT), "current": None,
              "had_previous": os.path.lexists(PREVIOUS), "previous": None}
     if os.path.lexists(CURRENT):
@@ -225,7 +229,8 @@ def activate(rev, unit_path, origin_path):
     if os.path.lexists(PREVIOUS):
         state["previous"] = os.readlink(PREVIOUS)
     legacy = os.lstat(LEGACY) if os.path.lexists(LEGACY) else None
-    if legacy is not None and stat.S_ISDIR(legacy.st_mode):
+    converting = legacy is not None and stat.S_ISDIR(legacy.st_mode)
+    if converting:
         if legacy.st_uid != uid:
             fail(3, "unsafe legacy runtime")
         old = unit_revision(unit_path)
@@ -233,37 +238,45 @@ def activate(rev, unit_path, origin_path):
             else "legacy-%d" % int(time.time())
         if os.path.lexists(os.path.join(REL, name)):
             fail(3, "legacy release name is taken")
-        # current first, so sb-src never dangles: current -> new release,
-        # then exchange a symlink with the old directory, then file the
-        # directory under releases/.
-        link(CURRENT, "releases/" + rev)
-        hold = os.path.join(home, ".sb-src-legacy-%d" % os.getpid())
-        os.symlink("current", hold)
-        exchange(hold, LEGACY)
-        os.rename(hold, os.path.join(REL, name))
-        put(os.path.join(REL, name, MARKER), json.dumps({
-            "schema_version": 1, "name": name, "state": "complete", "runtime_revision": old,
-            "legacy": True, "built_at": int(time.time())}, sort_keys=True))
-        for source, kept in ((unit_path, ".service-unit"),
-                             (os.path.join(home, "runtime", "source-revision.json"), ".source-revision.json"),
-                             (origin_path, ".owner-origin.json")):
-            if os.path.isfile(source) and not os.path.islink(source):
-                shutil.copyfile(source, os.path.join(REL, name, kept))
-                os.chmod(os.path.join(REL, name, kept), 0o600)
-        link(PREVIOUS, "releases/" + name)
-        state.update(converted=True, legacy=name)
-    else:
-        if legacy is not None and not (stat.S_ISLNK(legacy.st_mode) and os.readlink(LEGACY) == "current"):
-            fail(3, "sb-src is neither the old runtime nor the compatibility link")
-        old = target_name(CURRENT)
-        link(CURRENT, "releases/" + rev)
-        if old is not None and old != rev:
-            link(PREVIOUS, "releases/" + old)
-        if legacy is None:
-            os.symlink("current", LEGACY)
-            state["created_legacy_link"] = True
-    os.utime(os.path.join(REL, rev, MARKER))
-    fsync_dir(home)
+        state.update(legacy=name, hold=os.path.join(home, ".sb-src-legacy-%d" % os.getpid()))
+    elif legacy is not None and not (stat.S_ISLNK(legacy.st_mode) and os.readlink(LEGACY) == "current"):
+        fail(3, "sb-src is neither the old runtime nor the compatibility link")
+    steps = state["steps"]
+    try:
+        if converting:
+            # current first, so sb-src never dangles: current -> new release,
+            # then exchange a symlink with the old directory, then file the
+            # directory under releases/.
+            name, hold = state["legacy"], state["hold"]
+            link(CURRENT, "releases/" + rev); steps.append("current")
+            os.symlink("current", hold); steps.append("hold")
+            exchange(hold, LEGACY); steps.append("exchanged")
+            os.rename(hold, os.path.join(REL, name)); steps.append("filed")
+            put(os.path.join(REL, name, MARKER), json.dumps({
+                "schema_version": 1, "name": name, "state": "complete", "runtime_revision": old,
+                "legacy": True, "built_at": int(time.time())}, sort_keys=True))
+            for source, kept in ((unit_path, ".service-unit"),
+                                 (os.path.join(home, "runtime", "source-revision.json"), ".source-revision.json"),
+                                 (origin_path, ".owner-origin.json")):
+                if os.path.isfile(source) and not os.path.islink(source):
+                    shutil.copyfile(source, os.path.join(REL, name, kept))
+                    os.chmod(os.path.join(REL, name, kept), 0o600)
+            link(PREVIOUS, "releases/" + name); steps.append("previous")
+        else:
+            old = target_name(CURRENT)
+            link(CURRENT, "releases/" + rev); steps.append("current")
+            if old is not None and old != rev:
+                link(PREVIOUS, "releases/" + old); steps.append("previous")
+            if legacy is None:
+                os.symlink("current", LEGACY); steps.append("legacy_link")
+        os.utime(os.path.join(REL, rev, MARKER))
+        fsync_dir(home)
+    except Exception as exc:
+        try:
+            revert(state)
+        except Exception:
+            fail(1, "activation failed and could not be undone: %s" % exc)
+        fail(3, "activation failed and was undone: %s" % exc)
     print(json.dumps(state, sort_keys=True), flush=True)
 
 def restore_link(path, had, value):
@@ -272,22 +285,26 @@ def restore_link(path, had, value):
     elif os.path.lexists(path):
         os.unlink(path)
 
-def revert(text):
-    state = json.loads(text)
-    if state.get("converted"):
-        name = state["legacy"]
-        directory = os.path.join(REL, name)
-        exchange(directory, LEGACY)
-        os.unlink(directory)
+def revert(state):
+    """Undo exactly the steps one ``activate`` recorded, newest first."""
+    steps = state.get("steps") or []
+    if "exchanged" in steps:
+        moved = os.path.join(REL, state["legacy"]) if "filed" in steps else state["hold"]
+        exchange(moved, LEGACY)
+        os.unlink(moved)
         for kept in (MARKER, ".service-unit", ".source-revision.json", ".owner-origin.json"):
             try:
                 os.unlink(os.path.join(LEGACY, kept))
             except FileNotFoundError:
                 pass
-    elif state.get("created_legacy_link") and os.path.islink(LEGACY):
+    elif "hold" in steps and os.path.islink(state["hold"]):
+        os.unlink(state["hold"])
+    if "legacy_link" in steps and os.path.islink(LEGACY):
         os.unlink(LEGACY)
-    restore_link(CURRENT, state.get("had_current"), state.get("current"))
-    restore_link(PREVIOUS, state.get("had_previous"), state.get("previous"))
+    if "previous" in steps:
+        restore_link(PREVIOUS, state.get("had_previous"), state.get("previous"))
+    if "current" in steps:
+        restore_link(CURRENT, state.get("had_current"), state.get("current"))
     fsync_dir(home)
 
 def copy_private(source, target):
@@ -313,7 +330,7 @@ def restore(rev, unit_path, receipt_path, origin_path):
 
 def referenced():
     """Release names a live process runs from (cwd or command line)."""
-    prefix = REL + "/"; found = set()
+    prefix = os.path.realpath(REL) + "/"; found = set()
     for pid in os.listdir("/proc") if os.path.isdir("/proc") else ():
         if not pid.isdigit():
             continue
@@ -324,7 +341,16 @@ def referenced():
             pass
         try:
             with open("/proc/%s/cmdline" % pid, "rb") as handle:
-                texts.extend(handle.read().decode("utf-8", "replace").split("\0"))
+                texts.extend(os.path.realpath(part) if part.startswith("/") else part
+                             for part in handle.read().decode("utf-8", "replace").split("\0"))
+        except OSError:
+            pass
+        try:
+            # Mapped files (a venv's extension modules) name the release a
+            # process imports from even when its cwd and argv do not.
+            with open("/proc/%s/maps" % pid) as handle:
+                texts.extend(line.split(None, 5)[5].strip() for line in handle
+                             if len(line.split(None, 5)) == 6)
         except OSError:
             pass
         for text in texts:
@@ -365,8 +391,21 @@ if action == "prepare":
     prepare(*argv)
 elif action == "activate":
     activate(*argv)
+elif action == "check":
+    # The checks activate makes before its first change, alone: an install
+    # runs it before it arms its rollback.
+    releases_dir()
+    if marker(argv[0]) is None:
+        fail(3, "release is not complete")
+    if os.path.lexists(LEGACY):
+        info = os.lstat(LEGACY)
+        if stat.S_ISDIR(info.st_mode):
+            if info.st_uid != uid:
+                fail(3, "unsafe legacy runtime")
+        elif not (stat.S_ISLNK(info.st_mode) and os.readlink(LEGACY) == "current"):
+            fail(3, "sb-src is neither the old runtime nor the compatibility link")
 elif action == "revert":
-    revert(argv[0])
+    revert(json.loads(argv[0]))
 elif action == "record":
     record(*argv)
 elif action == "restore":
@@ -390,6 +429,20 @@ else:
 '''
 
 
+FUNCTION = "sb_releases"
+
+
+def define() -> str:
+    """Shell defining ``sb_releases``, so one command carries PROGRAM once."""
+    return (f"{FUNCTION}() {{ python3 -c {shlex.quote(PROGRAM)} \"$HOME/sandbox\" \"$@\"; }}; ")
+
+
+def call(action: str, *args: str) -> str:
+    """One action through ``define()``'s function; ``$``-arguments expand remotely."""
+    quoted = [f'"{arg}"' if arg.startswith("$") else shlex.quote(arg) for arg in args]
+    return " ".join([FUNCTION, shlex.quote(action), *quoted])
+
+
 def shell(action: str, *args: str) -> str:
     """Shell text running one ``PROGRAM`` action against ``$HOME/sandbox``.
 
@@ -399,3 +452,45 @@ def shell(action: str, *args: str) -> str:
     quoted = [f'"{arg}"' if arg.startswith("$") else shlex.quote(arg) for arg in args]
     return " ".join(["python3", "-c", shlex.quote(PROGRAM), '"$HOME/sandbox"',
                      shlex.quote(action), *quoted])
+
+
+def _private_file(path: Path) -> bool:
+    info = path.lstat()
+    return (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+            and not info.st_mode & 0o077)
+
+
+def retained_revision(home: Path, executable: Path, marker: str, revision: str) -> bool:
+    """Whether ``executable`` is the ``sb`` of a retained release ``revision``.
+
+    Retained: a complete release under ``<home>/sandbox/releases`` that
+    ``current`` has moved past, and that an install actually activated for
+    this service: the unit it recorded (``.service-unit``) names ``marker``
+    and the release's own ``revision``. A prepared but never activated
+    release, or the current one, is not retained.
+    """
+    release = executable.parent
+    try:
+        releases = (home / "sandbox" / "releases").resolve(strict=True)
+        current = (home / "sandbox" / "current").resolve(strict=True)
+    except OSError:
+        return False
+    if executable.name != "sb" or release.parent != releases or current == release \
+            or release.name != revision:
+        return False
+    try:
+        if not (_private_file(release / MARKER_NAME) and _private_file(release / UNIT_NAME)):
+            return False
+        value = json.loads((release / MARKER_NAME).read_text())
+        unit = (release / UNIT_NAME).read_text().splitlines()
+    except (OSError, ValueError, UnicodeError):
+        return False
+    if (not isinstance(value, dict) or value.get("state") != "complete"
+            or value.get("name") != revision or value.get("runtime_revision") != revision):
+        return False
+    return (f"Environment=SANDBOX_REMOTE_MCP_MARKER={marker}" in unit
+            and f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={revision}" in unit)
+
+
+MARKER_NAME = ".release.json"
+UNIT_NAME = ".service-unit"

@@ -64,11 +64,10 @@ def _installed_runtime_revision() -> str:
     """Hash the installed source once per installed tree in this process.
 
     Every authority check compares the unit's recorded revision with this
-    value, hundreds of times per job, and one hash reads the whole tree. A
-    migrate swaps the installed directory with renameat2 before it rewrites the
-    unit, so the cached hash is keyed on that directory's inode: the swap gives
-    a new inode and the next check hashes the new tree again. Unit, marker and
-    owner metadata are still re-read on every check.
+    value, hundreds of times per job, and one hash reads the whole tree. The
+    tree is this process's own resolved release directory (side-by-side
+    installs never change a release in place), so the cache is keyed on its
+    inode. Unit, marker and owner metadata are still re-read on every check.
     """
     global _installed_revision
     from sandbox.core import _remote
@@ -89,27 +88,17 @@ def _installed_runtime_revision() -> str:
     return value
 
 
-def _retained_release_revision(home: Path, executable: Path) -> str | None:
-    """This CLI's revision when it is a complete retained side-by-side release."""
-    release = executable.parent
-    releases = (home / 'sandbox' / 'releases').resolve()
-    if executable.name != 'sb' or release.parent != releases:
-        return None
+def _retained_release_revision(home: Path, executable: Path, marker: str) -> str | None:
+    """This CLI's revision when it is a retained side-by-side release.
+
+    Retained: a complete release under ``releases/`` that ``current`` has
+    moved past and that was installed for this same service (its recorded
+    unit names this marker and its own revision). See
+    ``sandbox.remote_runtime.releases.retained_revision``.
+    """
+    from sandbox.remote_runtime.releases import retained_revision
     revision = _installed_runtime_revision()
-    if release.name != revision:
-        return None
-    try:
-        info = (release / '.release.json').lstat()
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_mode & 0o077):
-            return None
-        value = json.loads((release / '.release.json').read_text())
-    except (OSError, ValueError):
-        return None
-    if (not isinstance(value, dict) or value.get('state') != 'complete'
-            or value.get('name') != revision or value.get('runtime_revision') != revision):
-        return None
-    return revision
+    return revision if retained_revision(home, executable, marker, revision) else None
 
 
 def is_retained_release(owner: ServerCliOwner) -> bool:
@@ -122,7 +111,8 @@ def is_retained_release(owner: ServerCliOwner) -> bool:
         return False
     return (release.parent == (home / 'sandbox' / 'releases').resolve()
             and release.name == owner.runtime_revision and current != release
-            and _retained_release_revision(home, Path(owner.executable)) == owner.runtime_revision)
+            and _retained_release_revision(home, Path(owner.executable),
+                                           owner.ownership_marker) == owner.runtime_revision)
 
 
 def _current_owner() -> ServerCliOwner:
@@ -162,7 +152,7 @@ def _current_owner() -> ServerCliOwner:
         # A job keeps running from the release it was admitted with after an
         # install moved ``current`` on (sandbox.remote_runtime.releases). Its
         # owner is that retained release, identified by its own tree.
-        revision = _retained_release_revision(home, executable)
+        revision = _retained_release_revision(home, executable, marker)
         if revision is None or Path(command[0]).resolve().parent.parent != executable.parent.parent:
             raise ServerCLIUnavailable('installed CLI and selected owner service identity do not agree')
     return ServerCliOwner(os.geteuid(), str(home), str(Path(RUNTIME_DIR).parent.resolve()),

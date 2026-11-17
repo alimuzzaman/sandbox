@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,13 +11,15 @@ from unittest.mock import patch
 
 from sandbox.jobs import scope
 from sandbox.remote_runtime import releases
+from tests.subprocess_support import run_test_process
 
 OLD, NEW, OTHER = "a" * 24, "b" * 24, "c" * 24
 
 
-def _run(home: Path, *args: str, env=None) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, "-c", releases.PROGRAM, str(home), *args],
-                          capture_output=True, text=True, timeout=60, env=env)
+def _run(home: Path, *args: str, env=None):
+    return run_test_process([sys.executable, "-c", releases.PROGRAM, str(home), *args],
+                            capture_output=True, text=True, timeout=60,
+                            env=env or {"PATH": "/usr/bin:/bin"})
 
 
 def _complete(home: Path, name: str, text: str = "new") -> Path:
@@ -141,7 +142,10 @@ class ReleaseLayoutTest(unittest.TestCase):
         (tree / "sandbox" / "hermes" / "cron-catalog.json").write_text("{}")
         (tree / "sb").write_text("#!/bin/sh\necho \"$PWD\" >> \"$BUILD_LOG\"\n")
         (tree / "sb").chmod(0o700)
-        (tree / "scripts" / "provision_image_stage_helper.py").write_text("")
+        # The helper must be handed the release it is building as its source.
+        (tree / "scripts" / "provision_image_stage_helper.py").write_text(
+            "import sys\nargs=sys.argv\nroot=args[args.index('--source-root')+1]\n"
+            "assert root.endswith('/releases/' + 'b'*24), root\n")
         stage.chmod(0o700)
         tree.chmod(0o700)
         receipt = '{"r":1}'
@@ -158,7 +162,7 @@ class ReleaseLayoutTest(unittest.TestCase):
             "chmod 700 \"$3/bin/python\"; exit 0; fi\n"
             f"exec {sys.executable} \"$@\"\n")
         (fake / "python3").chmod(0o700)
-        env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "BUILD_LOG": str(log)}
+        env = {"PATH": f"{fake}:/usr/bin:/bin", "BUILD_LOG": str(log), "HOME": str(self.base)}
         args = ("prepare", stage_name, receipt, NEW, "f" * 40)
         built = _run(self.home, *args, env=env)
         self.assertEqual(built.returncode, 0, built.stderr)
@@ -177,6 +181,23 @@ class ReleaseLayoutTest(unittest.TestCase):
         os.close(fd)
         reused = _run(self.home, *args, env=env)
         self.assertEqual(json.loads(reused.stdout), {"release": NEW, "state": "reused"})
+
+    def test_real_image_helper_provisions_from_the_release_without_sb_src(self):
+        root = Path(__file__).resolve().parents[1]
+        release = _complete(self.home, NEW)
+        (release / "sandbox" / "hosting" / "images").mkdir(parents=True)
+        (release / "sandbox" / "hosting" / "images" / "staging_helper.py").write_bytes(
+            (root / "sandbox" / "hosting" / "images" / "staging_helper.py").read_bytes())
+        self.assertFalse(os.path.lexists(self.home / "sb-src"))
+        result = run_test_process(
+            [sys.executable, str(root / "scripts" / "provision_image_stage_helper.py"),
+             "--sandbox-home", str(self.home), "--runtime-revision", "f" * 40,
+             "--source-root", str(release)],
+            capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundles = list((self.home / "runtime" / "helpers" / "image-stage").iterdir())
+        self.assertEqual(len(bundles), 1)
+        self.assertTrue(bundles[0].name.endswith("-revision-" + "f" * 40))
 
     def test_prepare_refuses_a_mismatched_receipt(self):
         stage_name = ".sb-src-stage-" + "f" * 12 + "-" + "e" * 32
@@ -219,12 +240,11 @@ class SupervisorScopeTest(unittest.TestCase):
         self.assertIsNone(env)
 
     def test_added_manager_variables_are_stripped_from_the_supervisor(self):
-        environ = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
         with patch.object(scope.sys, "platform", "linux"), \
                 patch.object(scope.shutil, "which", return_value="/usr/bin/systemd-run"), \
                 patch.object(scope, "_probe", return_value=True), \
                 patch.object(scope.os.path, "isdir", return_value=True), \
-                patch.dict(os.environ, environ, clear=True):
+                patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
             argv, env = scope.scoped_launch(["py"], job_id="d" * 32)
         index = argv.index("--")
         self.assertEqual(argv[index + 1:], ["env", "-u", "XDG_RUNTIME_DIR", "py"])

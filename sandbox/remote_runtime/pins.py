@@ -412,11 +412,6 @@ hold = None
         print(json.dumps({"jobs_gate": "blocked", "count": len(rows), "jobs": [
             {"job_id": r[0], "kind": r[1], "lifecycle": r[2]} for r in rows[:50]]}))
         raise SystemExit(47)
-    if releases:
-        # Nothing the restart can lose: admissions keep flowing.
-        hold.rollback()
-        hold.close()
-        hold = None
 signal.signal(signal.SIGHUP, signal.SIG_IGN)
 gate_dir = tempfile.mkdtemp(prefix=".jobs-gate-", dir=root)
 release = os.path.join(gate_dir, "release")

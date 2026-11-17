@@ -226,6 +226,10 @@ class JobService:
             if input_binding is not None:
                 descriptor['anonymous_input'] = input_binding
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
+            # The release that admitted the job, a bare JSON string beside the
+            # descriptor (sandbox.jobs.scope.admitted_release).
+            self.storage.write_json_atomic(row["job_id"], "release.json",
+                                           str(Path(__file__).resolve().parents[2]))
             stage = "scheduling"
             dependency_state, dependency_reason = self._dependency_state(row)
             if dependency_state == "blocked":
@@ -374,9 +378,13 @@ class JobService:
         # moves ``current``. Its own systemd scope lets it outlive a restart
         # of the service that launched it (sandbox.jobs.scope).
         package_root = Path(__file__).resolve().parents[2]
-        from sandbox.jobs.scope import scoped_launch
+        from sandbox.jobs.scope import admitted_release, scoped_launch
+        # A queued job can be started by another release's supervisor when it
+        # frees a slot (drain_after_release); it still runs from the release
+        # that admitted it, which its descriptor names.
+        package_root, interpreter = admitted_release(descriptor_path, package_root, sys.executable)
         argv, environment = scoped_launch(
-            [sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
+            [interpreter, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
             job_id=Path(descriptor_path).parent.name)
         process = subprocess.Popen(argv,
             stdin=subprocess.DEVNULL if anonymous_input is None else anonymous_input.fileno(),

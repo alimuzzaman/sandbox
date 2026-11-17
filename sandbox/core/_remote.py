@@ -5574,6 +5574,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "loaded:inactive:|not-found:inactive:) :;; *) exit 1;; esac; "
         + legacy_preflight +
         f"stage_root={stage_root}; runtime=$HOME/sandbox/sb-src; origin_path={origin_path}; "
+        + releases.define()
+        + releases.call("check", record["runtime_revision"]) + " </dev/null; " +
         "activation=''; activation_attempted=0; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
         "restore_file() { saved=$1; target=$2; tmp=$(mktemp \"$target.rollback.XXXXXX\") || return 1; "
         "cp \"$saved\" \"$tmp\" && chmod 600 \"$tmp\" && mv \"$tmp\" \"$target\" || "
@@ -5590,7 +5592,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "if test \"$had_unit\" = 1; then restore_file \"$backup/unit\" \"$unit_path\" || failed=1; else rm -f \"$unit_path\" || failed=1; fi; "
         "if test \"$had_env\" = 1; then restore_file \"$backup/env\" \"$env_path\" || failed=1; else rm -f \"$env_path\" || failed=1; fi; "
         "systemctl --user daemon-reload || failed=1; "
-        "if test -n \"$activation\"; then " + releases.shell("revert", "$activation")
+        "if test -n \"$activation\"; then " + releases.call("revert", "$activation")
         + " </dev/null || failed=1; elif test \"$activation_attempted\" = 1; then failed=1; fi; "
         f"if test \"$failed\" = 0 && test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
         "if test \"$failed\" = 0 && test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
@@ -5601,7 +5603,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         "test \"$failed\" = 0; }; "
         "on_exit() { status=$?; trap - EXIT; rollback || exit 44; exit \"$status\"; }; "
         "trap on_exit EXIT; activation_attempted=1; "
-        "activation=$(" + releases.shell("activate", record["runtime_revision"], "$unit_path", "$origin_path")
+        "activation=$(" + releases.call("activate", record["runtime_revision"], "$unit_path", "$origin_path")
         + " </dev/null) || { activated_rc=$?; if test \"$activated_rc\" = 3; then activation_attempted=0; fi; exit 1; }; "
         "test -n \"$activation\" || exit 1; "
         "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
@@ -5631,9 +5633,9 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str | 
         + _owner_origin_command(remote, record) +
         # Best effort: the service is live. Keep what this release ran with
         # for a later rollback, then drop old releases no job references.
-        "{ " + releases.shell("record", record["runtime_revision"], "$unit_path",
-                              "$HOME/sandbox/runtime/source-revision.json", "$origin_path")
-        + " </dev/null; " + releases.shell("gc") + " </dev/null >/dev/null; } || true; "
+        "{ " + releases.call("record", record["runtime_revision"], "$unit_path",
+                             "$HOME/sandbox/runtime/source-revision.json", "$origin_path")
+        + " </dev/null; " + releases.call("gc") + " </dev/null >/dev/null; } || true; "
         "rm -rf -- \"$stage_root\" \"$backup\"; "
         "test ! -e \"$backup\""
     )
@@ -5718,25 +5720,30 @@ def rollback_remote_mcp_service(remote: dict, *, confirm: bool = False,
     receipt, origin = "$HOME/sandbox/runtime/source-revision.json", "$HOME/sandbox/runtime/owner-origin.json"
     service = REMOTE_MCP_SERVICE
     command = (
-        "set -eu; umask 077; "
+        "set -eu; umask 077; " + releases.define() +
         f"unit_path={unit_path}; receipt={receipt}; origin_path={origin}; "
-        "name=$(" + releases.shell("rollback-target") + " </dev/null); "
+        "name=$(" + releases.call("rollback-target") + " </dev/null); "
         f"test \"$name\" = {shlex.quote(previous)}; "
         "mkdir -p \"$HOME/.sandbox\"; backup=$(mktemp -d \"$HOME/.sandbox/mcp-rollback-XXXXXX\"); "
         "for f in unit_path receipt origin_path; do eval p=\\$$f; "
         "if test -f \"$p\"; then cp -p \"$p\" \"$backup/$f\"; fi; done; "
         + RELEASE_JOBS_GATE_SH +
-        "activation=''; "
+        "activation=''; activation_attempted=0; "
         "undo() { set +e; failed=0; systemctl --user stop " + service + "; release_jobs_gate || failed=1; "
         "for f in unit_path receipt origin_path; do eval p=\\$$f; "
         "if test -f \"$backup/$f\"; then cp -p \"$backup/$f\" \"$p\" || failed=1; else rm -f -- \"$p\"; fi; done; "
         "systemctl --user daemon-reload || failed=1; "
-        "if test -n \"$activation\"; then " + releases.shell("revert", "$activation") + " </dev/null || failed=1; fi; "
-        "systemctl --user start " + service + " || failed=1; test \"$failed\" = 0; }; "
+        "if test -n \"$activation\"; then " + releases.call("revert", "$activation") + " </dev/null || failed=1; "
+        "elif test \"$activation_attempted\" = 1; then failed=1; fi; "
+        "if test \"$failed\" = 0; then systemctl --user start " + service + " || failed=1; fi; "
+        "test \"$failed\" = 0; }; "
+        # The backup is the only recovery copy: keep it when undo failed.
         "on_exit() { rc=$?; trap - EXIT; if test \"$rc\" != 0; then undo || rc=44; fi; "
-        "rm -rf -- \"$backup\"; exit \"$rc\"; }; trap on_exit EXIT; "
-        + releases.shell("restore", "$name", "$unit_path", "$receipt", "$origin_path") + " </dev/null; "
-        "activation=$(" + releases.shell("activate", "$name", "$unit_path", "$origin_path") + " </dev/null); "
+        "if test \"$rc\" != 44; then rm -rf -- \"$backup\"; fi; exit \"$rc\"; }; trap on_exit EXIT; "
+        + releases.call("restore", "$name", "$unit_path", "$receipt", "$origin_path") + " </dev/null; "
+        "activation_attempted=1; "
+        "activation=$(" + releases.call("activate", "$name", "$unit_path", "$origin_path") + " </dev/null) "
+        "|| { activated_rc=$?; if test \"$activated_rc\" = 3; then activation_attempted=0; fi; exit 1; }; "
         "test -n \"$activation\"; systemctl --user daemon-reload; "
         f"systemctl --user stop {service}; release_jobs_gate; "
         f"systemctl --user start {service}; systemctl --user is-active --quiet {service}"
@@ -5759,6 +5766,8 @@ def rollback_remote_mcp_service(remote: dict, *, confirm: bool = False,
             raise RuntimeError("remote_service_rollback_indeterminate")
         detail = _safe_remote_diagnostic(res, remote, limit=500)
         raise RuntimeError("could not roll back the remote runtime" + (f": {detail}" if detail else ""))
+    # The restored unit carries this release's revision. Bind, port and
+    # marker are this remote's registration, which a rollback never changes.
     service_record = {**(remote.get("mcp_service") or {}), "runtime_revision": target}
     return {**plan, "status": "rolled_back", "service": service_record}
 

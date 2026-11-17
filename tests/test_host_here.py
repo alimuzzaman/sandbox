@@ -107,7 +107,7 @@ class MigrateWritesTheRecordTests(unittest.TestCase):
                 confirm=True, source_revision=SOURCE, staged_source=_staged_source())
         command = ssh_run.call_args.args[1]
         self.assertIn("$HOME/sandbox/runtime/owner-origin.json", command)
-        self.assertLess(command.rindex("trap - EXIT"), command.index("owner-origin.json"))
+        self.assertLess(command.rindex("trap - EXIT"), command.index("/.owner-origin.XXXXXX"))
         self.assertIn('"remote_name":"xspeed-dev"', command)
         self.assertIn('"front_door":"nginx"', command)
         self.assertIn('"mcp_port":9174', command)

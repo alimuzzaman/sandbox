@@ -12,6 +12,7 @@ launcher's PID, umask, cwd, environment and file descriptors (anonymous stdin).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -68,7 +69,7 @@ def _probe(environment: dict) -> bool:
             ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"],
             capture_output=True, timeout=30, check=False, stdin=subprocess.DEVNULL,
             env=environment).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    except Exception:  # noqa: BLE001 - any probe failure means no scope
         return False
     return _probe_ok
 
@@ -93,3 +94,28 @@ def scoped_launch(argv: list[str], *, job_id: str) -> tuple[list[str], dict | No
             f"--unit=sandbox-job-{label}-{secrets.token_hex(3)}",
             "--description=Sandbox job supervisor", "--",
             *(["env", *strip] if strip else []), *argv], (environment if added else None)
+
+
+def admitted_release(descriptor_path, own_root: Path, interpreter: str) -> tuple[Path, str]:
+    """``(release_root, interpreter)`` for the release that admitted a job.
+
+    ``release.json`` beside the descriptor (written at admission) wins when it is
+    another complete release directory; the interpreter maps to the same
+    relative path inside it when it lives in this release (a venv), else it
+    is kept (the system Python the ``sb`` launcher picked).
+    """
+    try:
+        named = json.loads((Path(descriptor_path).parent / "release.json").read_text())
+    except (OSError, ValueError):
+        return own_root, interpreter
+    if not isinstance(named, str) or not named.startswith("/"):
+        return own_root, interpreter
+    root = Path(named)
+    if root == own_root or not (root / "sandbox" / "jobs" / "supervisor.py").is_file():
+        return own_root, interpreter
+    own = str(own_root).rstrip("/") + "/"
+    if interpreter.startswith(own):
+        mapped = str(root) + "/" + interpreter[len(own):]
+        if os.access(mapped, os.X_OK):
+            interpreter = mapped
+    return root, interpreter

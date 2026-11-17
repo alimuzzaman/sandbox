@@ -1079,8 +1079,11 @@ def _cmd_service(args, as_json: bool) -> None:
             # Flip current back to previous (sandbox.remote_runtime.releases).
             if confirmed:
                 ignored_jobs = _ignore_job_args(args)
+                planned = sr.rollback_remote_mcp_service(entry)
+                if planned.get("blockers"):
+                    raise RuntimeError("remote_runtime_rollback_unavailable: no complete previous release")
                 _would_break, acknowledged_pins = _migrate_pin_gate(
-                    entry, args, sr.rollback_remote_mcp_service(entry).get("target_runtime_revision"))
+                    entry, args, planned["target_runtime_revision"])
                 _invalidate_readiness(name, before=True)
                 plan = sr.rollback_remote_mcp_service(
                     entry, confirm=True, acknowledged_pins=acknowledged_pins,
@@ -1927,9 +1930,10 @@ def _upload_runtime_source(
                     runtime_revision=runtime_revision,
                     digest=hashlib.sha256(plain.stdout).hexdigest(), archive=None,
                     fetch=(fetch_url, excludes), timeout=300)
-            except RemoteRuntimeSourceIndeterminate:
+            except (RemoteRuntimeSourceIndeterminate, RemoteRuntimeSourceTimeout):
+                # A timed-out fetch may still publish its stage: inspect first.
                 raise
-            except (RuntimeError, RemoteRuntimeSourceTimeout) as exc:
+            except RuntimeError as exc:
                 print(f"remote fetch unavailable ({exc}); uploading instead", file=sys.stderr)
     return _stage_runtime_source(
         remote_or_target, source_revision=source_revision, runtime_revision=runtime_revision,
@@ -1948,7 +1952,8 @@ def _runtime_source_fetch_url() -> str | None:
                                      if not key.startswith("GIT_")})
     except (OSError, subprocess.SubprocessError):
         return None
-    url = (result.stdout or "").strip() if result.returncode == 0 else ""
+    url = result.stdout if result.returncode == 0 else ""
+    url = (url.decode(errors="replace") if isinstance(url, bytes) else str(url or "")).strip()
     match = (re.fullmatch(r"git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?", url)
              or re.fullmatch(r"(?:ssh://git@|https://)github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?", url))
     if match is None:
@@ -1961,13 +1966,13 @@ def _runtime_source_fetch_shell(url: str, source_revision: str, excludes) -> str
     git = ("GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false git -c credential.helper= "
            "-c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null")
     return (
-        "cache=\"$sandbox_home/runtime/sandbox-source.git\"; mkdir -p \"$sandbox_home/runtime\"; "
-        "test -d \"$cache\" || git init --quiet --bare \"$cache\"; "
+        "cache=\"$temporary/source.git\"; git init --quiet --bare \"$cache\"; "
         f"{git} -C \"$cache\" fetch --quiet --no-tags --depth=1 {shlex.quote(url)} "
         f"{source_revision} </dev/null; "
         f"test \"$(git -C \"$cache\" rev-parse --verify {source_revision}^{{commit}})\" = {source_revision}; "
         f"git -C \"$cache\" archive --format=tar {source_revision} -- . "
         + " ".join(shlex.quote(item) for item in excludes) + " > \"$archive\"; "
+        "rm -rf -- \"$cache\"; "
     )
 
 

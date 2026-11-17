@@ -168,11 +168,12 @@ and flips `current` to it (see "Side-by-side releases" below). Failure flips `cu
 back before the existing service is changed.
 
 The controller first asks the remote to fetch the exact commit itself, read-only,
-over anonymous HTTPS from the checkout's GitHub `origin` into
-`runtime/sandbox-source.git` (no credential helper, no prompt, HTTPS only). The remote
+over anonymous HTTPS from the checkout's GitHub `origin` into a throwaway bare
+repository inside the stage temporary (no credential helper, no prompt, HTTPS only). The remote
 must produce the byte-identical uncompressed `git archive` the controller computed
 locally (same SHA, same digest; checked across git 2.43 and 2.47). If the fetch or
-the digest fails before publication, the controller uploads the archive as before.
+the digest fails before publication, the controller uploads the archive as before; a
+fetch that times out is reported like an upload timeout (inspect before retrying).
 `SANDBOX_RUNTIME_SOURCE_FETCH=0` skips the fetch. A private repository needs a deploy
 key or token on the remote, which this does not configure; it then always uploads. A failed rollback, restored-service restart, or backup cleanup is reported
 as `remote_service_rollback_indeterminate`, never hidden as an ordinary install failure.
@@ -2951,8 +2952,9 @@ parts inside `pins.INSTALL_GATE`:
 
 1. **Prepare, with no lock held.** The staged tree is verified (owner, modes,
    receipt with exact source SHA, archive digest and runtime revision), moved
-   to `releases/<rev>` and built there: CLI venv, image staging helper, MCP
-   venv, tools venv. A venv bakes its absolute path, so a release is built in
+   to `releases/<rev>` and built there: CLI venv and MCP venv, plus the image
+   staging helper provisioned from that release's own tree (`--source-root`).
+   The browser tools venv (`runtime/.venv-tools`) stays shared across releases. A venv bakes its absolute path, so a release is built in
    place and marked complete (`.release.json`) last. A complete release of the
    same revision is reused. The old service keeps serving and jobs keep being
    admitted for the whole build.
@@ -2980,7 +2982,13 @@ release, a symlink to `current` is exchanged with the old directory
 (`renameat2` `RENAME_EXCHANGE`, so `sb-src` is never missing), and the old tree
 is filed as `releases/<old-unit-revision>` with its unit and receipts, so
 `rollback` can return to it. A failed conversion exchanges the directory back
-into place.
+into place. `activate` records each step it takes and undoes them itself when
+a later step fails, so a failure leaves either the old layout or a recorded
+state the install rolls back.
+
+A controller older than this change cannot migrate a converted host: its
+install requires `sb-src` to be a plain directory and fails with a generic
+error. Use a controller at or after this change.
 
 **Unfinished jobs.** Job supervisors start in their own transient
 `systemd --user` scope (`sandbox/jobs/scope.py`, the follow-attempt pattern:
@@ -2998,14 +3006,21 @@ So the gate refuses with `remote_jobs_active` only over jobs a restart could
 still kill:
 
 - **Release layout** (`sb-src` is a symlink): only a job whose supervisor
-  still sits in `sandbox-mcp-remote.service`'s cgroup. After that check the
-  gate releases the job admission lock at once, so submissions are never held
-  up during the switch.
+  still sits in `sandbox-mcp-remote.service`'s cgroup.
 - **Old layout** (the one-time conversion): every job that is `accepted`,
-  `running` or `cancelling`, as before. Here the gate holds the registry's
-  write lock (`BEGIN IMMEDIATE`) until the old service is stopped, so no job
-  can be admitted between the check and the restart. The build already
-  happened outside the lock, so that window is seconds.
+  `running` or `cancelling`, as before.
+
+In both, the gate then holds the registry's write lock (`BEGIN IMMEDIATE`)
+until the old service is stopped, so no job can be admitted between the check
+and the restart. The build already happened outside the lock, so that window
+is the flip, unit write and stop: seconds. A submission arriving then waits on
+the lock (`JobRepository`'s 5-second busy timeout) and is admitted once the old
+service stops.
+
+A queued job runs from the release that admitted it, even when another
+release's supervisor starts it on freeing a slot: the admitting release is
+recorded beside its descriptor (`release.json`). A release removed by cleanup
+falls back to the launcher's own.
 
 Queued jobs never block. If the lock cannot be taken within 15 seconds the
 install refuses with `remote_jobs_gate_unavailable`; an install that fails with

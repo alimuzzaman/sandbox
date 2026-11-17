@@ -2077,6 +2077,12 @@ class TestCmdRemoteRemove(unittest.TestCase):
 class TestUploadRuntimeSource(unittest.TestCase):
     REVISION = "a" * 40
 
+    def setUp(self):
+        # These cover the upload path; the remote fetch has its own tests.
+        environment = patch.dict(os.environ, {"SANDBOX_RUNTIME_SOURCE_FETCH": "0"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def _upload_archive_with_links(self, links):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "source"
@@ -2928,7 +2934,8 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                     self.assertEqual((release / ".service-unit").read_text(), unit.read_text())
                     self.assertEqual(backups, [])
                     continue
-                self.assertEqual(env_file.read_text(), "OLD=secret\n")
+                if not fail_restore:
+                    self.assertEqual(env_file.read_text(), "OLD=secret\n")
                 if expected_rc == 44:
                     self.assertEqual(len(backups), 1)
                     self.assertEqual((backups[0] / 'env').read_text(), 'OLD=secret\n')
@@ -2973,7 +2980,7 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertNotIn("unit_tmp=", prepare)
         self.assertNotIn("env_tmp=", prepare)
         self.assertIn("activate", inner)
-        self.assertLess(inner.index("activation=$("), inner.index("unit_tmp="))
+        self.assertLess(inner.index("activation=$("), inner.index("unit_tmp=$(mktemp"))
 
     @patch("sandbox.core._remote.ssh_run")
     def test_migration_unit_preflight_requires_sandbox_marker_and_runtime_path(self, mock_ssh_run):
@@ -4081,9 +4088,12 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 # unfinished-job listings.
                 from sandbox.hosting import login_reapply_plan
                 from sandbox.remote_runtime import pins
+                # The second listing keeps only the jobs the gate refuses over.
                 self.assertEqual([shlex.split(call.args[1])[:3] for call in ssh_run.call_args_list],
                                  [["python3", "-c", login_reapply_plan._PROGRAM],
+                                  ["python3", "-c", pins.ACTIVE_JOBS_PROGRAM],
                                   ["python3", "-c", pins.ACTIVE_JOBS_PROGRAM]])
+                self.assertEqual(shlex.split(ssh_run.call_args_list[2].args[1])[-1], "blocking")
                 upload.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")

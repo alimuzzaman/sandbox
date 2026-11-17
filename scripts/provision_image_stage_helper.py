@@ -238,11 +238,15 @@ def _validate_bundle(root: Path, source: bytes, digest: str,
             raise RuntimeError(f"installed {name} staging helper manifest mismatch")
 
 
-def provision(sandbox_home: Path, runtime_revision: str) -> dict[str, str]:
+def provision(sandbox_home: Path, runtime_revision: str,
+              source_root: Path | None = None) -> dict[str, str]:
     if REVISION_RE.fullmatch(runtime_revision) is None:
         raise RuntimeError("Sandbox runtime revision is unavailable or invalid")
     owner_uid = os.geteuid()
-    source_path = sandbox_home / "sb-src" / "sandbox" / "hosting" / "images" / "staging_helper.py"
+    # A side-by-side install provisions from the release it is building
+    # (``--source-root``), before ``sb-src`` points at it.
+    source_path = ((source_root or sandbox_home / "sb-src")
+                   / "sandbox" / "hosting" / "images" / "staging_helper.py")
     source = _read_source(source_path, owner_uid)
     digest = hashlib.sha256(source).hexdigest()
     # Revision participates in the immutable directory identity. A migration can
@@ -289,8 +293,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sandbox-home", type=Path, required=True)
     parser.add_argument("--runtime-revision", required=True)
+    parser.add_argument("--source-root", type=Path, default=None)
     args = parser.parse_args()
-    result = provision(args.sandbox_home, args.runtime_revision)
+    result = provision(args.sandbox_home, args.runtime_revision, args.source_root)
     print("image staging helper provisioned at "
           f"{result['artifact_digest']} revision {result['runtime_revision']}")
     return 0

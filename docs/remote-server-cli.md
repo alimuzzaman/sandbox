@@ -322,7 +322,9 @@ polling every 0.5 seconds. No effect is dispatched while it waits. The wait is b
 `AnonymousJobInput.hold_for_admission`; the exec receiver sets it to the
 original deadline less the kill grace, lease release and a one-second minimum
 run. A queued job that a finishing job starts can take the freed slot first.
-A cancel during the wait ends it. Only when no slot frees in time does the job end
+A cancel during the wait ends it. The wait comes out of the command's own `--timeout`:
+it always leaves the run at least 15 seconds or a quarter of the deadline, so a
+`--timeout` of about 15 seconds or less does not wait at all. Only when no slot frees in time does the job end
 with a retained terminal `anonymous_stdin_capacity_unavailable` receipt and no
 dispatch. Ordinary jobs retain DEVNULL. The dedicated no-source adapter composes this handoff; it does not
 enable generic project argv forwarding or an interactive TTY.

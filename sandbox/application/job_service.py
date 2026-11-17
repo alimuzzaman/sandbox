@@ -300,12 +300,17 @@ class JobService:
         import signal
         import threading
         previous = {}
+        stopped = []
+        sleeping = False
         if threading.current_thread() is threading.main_thread():
-            # A dropped SSH session sends SIGHUP; its default would end this
-            # process without marking the row, leaving it "accepted" with no
-            # supervisor. Raise instead, so submit() marks it failed.
+            # SIGTERM (a stopped login session or service) or SIGHUP would end
+            # this process without marking the row, leaving it "accepted" with
+            # no supervisor. Record the signal and raise between polls, never
+            # inside scheduler.acquire's transaction, so submit() marks it failed.
             def interrupted(signum, _frame):
-                raise InputSlotWaitInterrupted(signal.Signals(signum).name)
+                stopped.append(signal.Signals(signum).name)
+                if sleeping:
+                    raise InputSlotWaitInterrupted(stopped[0])
             for signum in (signal.SIGHUP, signal.SIGTERM):
                 previous[signum] = signal.signal(signum, interrupted)
         try:
@@ -313,7 +318,13 @@ class JobService:
                 remaining = anonymous_input.admission_wait_remaining()
                 if remaining <= 0:
                     return busy
-                time.sleep(min(INPUT_SLOT_POLL_SECONDS, remaining))
+                sleeping = True
+                try:
+                    if stopped:
+                        raise InputSlotWaitInterrupted(stopped[0])
+                    time.sleep(min(INPUT_SLOT_POLL_SECONDS, remaining))
+                finally:
+                    sleeping = False
                 try:
                     self.scheduler.acquire(row, parallel_safe=parallel_safe)
                     return None
@@ -322,7 +333,8 @@ class JobService:
             return busy
         finally:
             for signum, handler in previous.items():
-                signal.signal(signum, handler)
+                if handler is not None:  # installed from C; nothing to restore from Python
+                    signal.signal(signum, handler)
 
     def _dependency_state(self, row: dict) -> tuple[str, str | None]:
         """Resolve label-based edges within a parent without touching child pipes."""

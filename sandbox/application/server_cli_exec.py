@@ -379,6 +379,10 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
                 if not any(item['name'] == service and item['index'] == 1 for item in snapshot['services']):
                     raise ServerCLIExecRefused('host_exec_unknown_service',
                                                'selected owner service has no unique running first container')
+                if remaining() < SERVER_POST_COMMAND_SECONDS + TIMEOUT_MIN + 15:
+                    # Re-observation used the time a resend needs; nothing was sent.
+                    raise ServerCLIExecRefused('server_cli_exec_deadline_expired',
+                                               'too little of the original deadline is left to resend')
             selector = {'schema_version': 1, 'origin_remote_name': remote_name,
                 'target': snapshot['project'] + '/' + snapshot['environment'], 'name': None,
                 'environment': snapshot['environment'], 'selector_digest': snapshot['selector_digest'],

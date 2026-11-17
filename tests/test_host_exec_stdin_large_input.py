@@ -16,6 +16,7 @@ from pathlib import Path
 import shlex
 import tempfile
 from types import SimpleNamespace
+import threading
 import unittest
 from unittest import mock
 
@@ -426,6 +427,8 @@ class BusySlotWaitsInsteadOfRefusing(unittest.TestCase):
                          ('failed', 'anonymous_stdin_capacity_unavailable'))
         self.launch.assert_not_called()
 
+    @unittest.skipUnless(threading.current_thread() is threading.main_thread(),
+                         'signal handlers are installed only on the main thread')
     def test_a_hangup_during_the_wait_marks_the_job_failed(self):
         import signal
         calls = []

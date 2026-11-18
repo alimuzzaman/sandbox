@@ -3,6 +3,7 @@ from argparse import Namespace
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timedelta, timezone
 import io
+import itertools
 import json
 import os
 from types import SimpleNamespace
@@ -243,6 +244,10 @@ class ExecClientTests(unittest.TestCase):
     def test_lost_receipt_match_whose_result_is_unreadable_is_accepted_with_an_inspect_hint(self):
         self.lost_receipt([self.MATCH])
         self.read.side_effect = execute.ServerCLIExecObservationUnavailable({"job_id": "f" * 32})
+        # Failed polls continue until the original deadline; jump past it.
+        clock = itertools.count(0, 100)
+        self.enterContext(patch.object(client, "time", SimpleNamespace(
+            monotonic=lambda: next(clock), sleep=lambda _seconds: None)))
         result, code = self.run_failure()
         self.assertEqual(code, 1)
         self.assertEqual(result["acceptance"], "accepted")
@@ -299,7 +304,20 @@ class ExecClientTests(unittest.TestCase):
         self.assertEqual(self.controls, [])
         self.read.assert_not_called()
 
+    def test_one_failed_poll_of_a_running_job_keeps_polling_until_its_result(self):
+        # Fable 1118 [5]: one failed poll (an SSH reconnect) used to end the command.
+        self.read.side_effect = [{"status": "running", "result": None},
+            execute.ServerCLIExecObservationUnavailable(self.receipt),
+            {"status": "succeeded", "result": self.outcome}]
+        result = self.invoke()
+        self.assertEqual(result["stdout"], "hello\n")
+        self.assertEqual(self.read.call_count, 3)
+        self.submit.assert_called_once()
+
     def test_observation_failure_preserves_known_job_and_does_not_become_acceptance_unknown(self):
+        # Past the original deadline one failed observation is the answer.
+        self.receipt["execution_policy"]["provenance"]["server_cli.absolute_deadline_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         self.read.side_effect = execute.ServerCLIExecObservationUnavailable(self.receipt)
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(SystemExit):
@@ -309,6 +327,7 @@ class ExecClientTests(unittest.TestCase):
         self.assertEqual(result["job_id"], "a" * 32)
         self.assertEqual(result["code"], "server_cli_exec_observation_unavailable")
         self.submit.assert_called_once()
+        self.read.assert_called_once()
 
     def test_preacceptance_capability_failure_is_closed_and_never_reads_output(self):
         self.submit.side_effect = sdk.ServerCLIUnavailable("untrusted raw provider response")

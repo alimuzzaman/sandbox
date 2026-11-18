@@ -292,8 +292,16 @@ def dispatch_exec_if_selected(args) -> bool:
             # Result observation has several authenticated metadata/artifact
             # requests. Keep its finite read budget separate from the original
             # effect deadline; a late terminal read must not rerun execution.
-            observed = read_server_cli_exec_result(args.remote, receipt,
-                budget_seconds=60)
+            # One failed read (an SSH reconnect, a busy registry) says nothing
+            # about the job, so keep polling; report it only once the original
+            # deadline passes with no valid observation.
+            try:
+                observed = read_server_cli_exec_result(args.remote, receipt,
+                    budget_seconds=60)
+            except ServerCLIExecObservationUnavailable:
+                if stop - time.monotonic() <= 0:
+                    raise
+                observed = {"result": None}
             if observed["result"] is not None:
                 _render(args, observed["result"], receipt, request_id)
                 return True

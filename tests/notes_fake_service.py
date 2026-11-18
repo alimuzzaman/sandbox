@@ -27,6 +27,8 @@ class FakeNotes:
         self.tokens: list[dict] = []          # {"id", "name", "value", "revoked"}
         self.calls: list[str] = []
         self.trusted = True
+        self.redirect_mcp = False          # answer /mcp with a 302 to /sink
+        self.sink_headers: list[dict] = []
         self.sessions: set[str] = set()
         self._seq = 0
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
@@ -170,6 +172,9 @@ class FakeNotes:
 
             def do_GET(self):
                 path = urllib.parse.urlparse(self.path).path
+                if path == "/sink":
+                    service.sink_headers.append(dict(self.headers))
+                    return self._send(200, "{}")
                 if path.startswith("/n/") and "/assets/" in path:
                     _, _, slug, _, name = path.split("/", 4)
                     data = service.assets.get(slug, {}).get(name)
@@ -192,6 +197,11 @@ class FakeNotes:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length)
                 path = urllib.parse.urlparse(self.path).path
+                if path == "/sink":
+                    service.sink_headers.append(dict(self.headers))
+                    return self._send(200, "{}")
+                if path == "/mcp" and service.redirect_mcp:
+                    return self._send(302, "", "text/html", [("Location", "/sink")])
                 if path == "/mcp":
                     auth = self.headers.get("Authorization") or ""
                     live = {t["value"] for t in service.live_tokens()}
@@ -251,4 +261,4 @@ def _slugify(text: str) -> str:
     out = "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
     while "--" in out:
         out = out.replace("--", "-")
-    return out[:100] or "note"
+    return out[:60] or "note"   # src/notes.php slugify cuts to 60 characters

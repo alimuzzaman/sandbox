@@ -46,7 +46,7 @@ class InProcess:
         self.fail_after = fail_after
         self.batches: list[list[str]] = []
 
-    def call(self, calls):
+    def call(self, calls, on_batch=None):
         self.batches.append([c["tool"] for c in calls])
         out = []
         for call in calls:
@@ -58,7 +58,42 @@ class InProcess:
             data, is_error = self.fake.tool(call["tool"], dict(call["arguments"]))
             out.append({"ok": False, "code": "notes_tool_error", "error": data["error"]}
                        if is_error else {"ok": True, "result": data})
+        if on_batch is not None:
+            on_batch(0, out)
         return out
+
+
+class ScriptedBroker:
+    """A broker whose use_profile writes chosen result lines, then exits or raises."""
+
+    def __init__(self, lines, raise_after=None):
+        self.lines = lines
+        self.raise_after = raise_after
+
+    def __call__(self, profiles):
+        return self
+
+    def use_profile(self, name, surface):
+        from sandbox.notes.transport import PROFILE
+        assert name == PROFILE
+        response = Path(self.profile_argv[-1])
+        with response.open("a") as handle:
+            for line in self.lines:
+                handle.write(json.dumps(line) + "\n")
+        if self.raise_after is not None:
+            raise self.raise_after
+        return {"ok": True}
+
+
+def scripted_transport(tmp, lines, raise_after=None):
+    from sandbox.notes.transport import BrokerTransport
+    broker = ScriptedBroker(lines, raise_after)
+
+    def factory(profiles):
+        broker.profile_argv = next(iter(profiles.values()))["argv"]
+        return broker
+    service = notes_config.NotesService("fake", "https://n.example", "personal", "K")
+    return BrokerTransport(service, service_factory=factory, work_root=tmp / "work")
 
 
 class FakeCase(unittest.TestCase):
@@ -186,6 +221,14 @@ class BrokerChildTests(FakeCase):
         self.assertEqual([r["code"] for r in results], ["notes_unauthorized"] * 3)
         self.assertEqual([bool(r.get("skipped")) for r in results], [False, True, True])
 
+    def test_a_redirect_is_refused_and_the_token_never_follows_it(self):
+        token = self.fake.add_token("sb-notes-ci")
+        transport, _ = self._transport(token)
+        self.fake.redirect_mcp = True
+        results = transport.call([{"tool": "list_notes", "arguments": {}}])
+        self.assertEqual(results[0]["code"], "notes_bad_response")
+        self.assertEqual(self.fake.sink_headers, [])
+
     def test_missing_token_key_says_to_log_in(self):
         transport, _ = self._transport("an_x")
         transport.service = notes_config.NotesService("fake", self.fake.url, "personal", "OTHER_KEY")
@@ -255,6 +298,38 @@ class SyncTests(FakeCase):
         rerun = self.client.sync(self.tmp)
         self.assertEqual(len(rerun["created"]), 2)
         self.assertEqual(len(self.fake.notes), 3)
+
+    def test_a_child_that_stops_early_never_lends_its_result_to_later_calls(self):
+        for name in ("a.md", "b.md", "c.md"):
+            self._write(name, f"# {name}\n")
+        ok = {"ok": True, "i": 0, "result": {"slug": "AAA", "url": "https://n.example/n/AAA"}}
+        self.client.transport = scripted_transport(self.tmp, [ok])
+        report = self.client.sync(self.tmp)
+        self.assertEqual([i["slug"] for i in report["created"]], ["AAA"])
+        self.assertEqual([i["code"] for i in report["failed"]], ["notes_incomplete"] * 2)
+        self.assertEqual(list(self._map()["notes"]), ["a.md"])
+
+    def test_an_interrupt_keeps_the_notes_the_child_finished(self):
+        for name in ("a.md", "b.md"):
+            self._write(name, f"# {name}\n")
+        ok = {"ok": True, "i": 0, "result": {"slug": "AAA", "url": "https://n.example/n/AAA"}}
+        self.client.transport = scripted_transport(self.tmp, [ok], raise_after=KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            self.client.sync(self.tmp)
+        self.assertEqual(self._map()["notes"]["a.md"]["slug"], "AAA")
+        self.assertEqual(list((self.tmp / "work").iterdir()), [])
+
+    def test_symlinked_and_damaged_entries_are_handled(self):
+        outside = self.tmp.parent / (self.tmp.name + "-outside.md")
+        outside.write_text("# secret\n")
+        self.addCleanup(outside.unlink)
+        (self.tmp / "link.md").symlink_to(outside)
+        self._write("a.md", "# A\n")
+        (self.tmp / MAP_FILE).write_text(json.dumps({"version": 1, "remote": "fake",
+                                                     "notes": {"a.md": "garbage"}}))
+        report = self.client.sync(self.tmp)
+        self.assertEqual([i["file"] for i in report["created"]], ["a.md"])
+        self.assertNotIn("secret", json.dumps([n["title"] for n in self.fake.notes.values()]))
 
     def test_a_map_for_another_remote_is_refused(self):
         (self.tmp / MAP_FILE).write_text(json.dumps({"version": 1, "remote": "elsewhere", "notes": {}}))
@@ -355,8 +430,21 @@ class MockupTests(FakeCase):
         self.assertIn('<a href="gone.html">', html)
 
     def test_bad_names_are_refused(self):
+        for name in ("Bad Name", "a" * 54):
+            with self.subTest(name=name), self.assertRaises(NotesError):
+                self.mockups.publish(self.src, name)
+        longest = "a" * 53
+        self.mockups.publish(self.src, longest)
+        self.assertEqual([m["name"] for m in self.mockups.list()], [longest])
+
+    def test_a_symlinked_index_is_refused(self):
+        outside = self.tmp / "outside.html"
+        outside.write_text("<p>private</p>")
+        (self.src / "index.html").unlink()
+        (self.src / "index.html").symlink_to(outside)
         with self.assertRaises(NotesError):
-            self.mockups.publish(self.src, "Bad Name")
+            self.mockups.publish(self.src, "checkout")
+        self.assertEqual(self.fake.notes, {})
 
 
 class CliTests(FakeCase):

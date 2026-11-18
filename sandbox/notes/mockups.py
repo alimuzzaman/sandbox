@@ -23,7 +23,8 @@ import urllib.request
 from .errors import NotesError
 from .service import NotesClient
 
-NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+# The service cuts download filenames to 60 characters: "mockup-" plus 53 fits.
+NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,52}")
 PREFIX = "mockup-"
 ASSET_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MANIFEST_ID = "sb-mockup"
@@ -43,7 +44,7 @@ _INLINED_SCRIPT = re.compile(r'<script data-sb-src="([^"]+)"([^>]*)>(.*?)</scrip
 def check_name(name: str) -> str:
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise NotesError("notes_input_invalid",
-                         "mockup names use lowercase letters, digits and '-' (max 63)")
+                         "mockup names use lowercase letters, digits and '-' (max 53)")
     return name
 
 
@@ -67,7 +68,7 @@ class Packer:
         if not path:
             return None
         joined = PurePosixPath(posixpath.normpath(str(base / path)))
-        if str(joined).startswith(".."):
+        if joined.parts[:1] == ("..",):
             self.missing.append(ref)
             return None
         target = (self.root / joined).resolve()
@@ -120,13 +121,11 @@ class Packer:
         return _SRCSET.sub(srcset, tag_text)
 
     def pack(self, name: str) -> str:
-        index = self.root / "index.html"
-        if not index.is_file():
-            raise NotesError("notes_input_invalid", f"{self.root} has no index.html")
-        try:
-            text = index.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            raise NotesError("notes_input_invalid", "index.html is not UTF-8") from None
+        index = (self.root / "index.html").resolve()
+        if index.parent != self.root or not index.is_file():
+            raise NotesError("notes_input_invalid",
+                             f"{self.root} has no index.html (a symlink out of the folder is refused)")
+        text = _read_text(index)
         top = PurePosixPath(".")
 
         def link(match):
@@ -134,10 +133,10 @@ class Packer:
             href = _HREF.search(tag)
             if not (href and _STYLESHEET.search(tag) and is_local(href.group(2))):
                 return tag
-            rel = self._resolve(href.group(2), top)
+            rel = self._resolve(_html.unescape(href.group(2)), top)
             if rel is None:
                 return tag
-            css = self._css((self.root / rel).read_text(encoding="utf-8"), rel.parent)
+            css = self._css(_read_text(self.root / rel), rel.parent)
             return f'<style data-sb-src="{_html.escape(str(rel))}">{css}</style>'
 
         def script(match):
@@ -145,10 +144,10 @@ class Packer:
             src = _SRC.search(attrs)
             if not (src and is_local(src.group(2))):
                 return match.group(0)
-            rel = self._resolve(src.group(2), top)
+            rel = self._resolve(_html.unescape(src.group(2)), top)
             if rel is None:
                 return match.group(0)
-            body = (self.root / rel).read_text(encoding="utf-8").replace("</script", "<\\/script")
+            body = _read_text(self.root / rel).replace("</script", "<\\/script")
             rest = _SRC.sub("", attrs)
             return f'<script data-sb-src="{_html.escape(str(rel))}"{rest}>{body}</script>'
 
@@ -242,13 +241,17 @@ class Mockups:
             first = next(r for r in uploads if not r.get("ok"))
             raise NotesError("mockup_asset_failed", "image upload failed for: " + ", ".join(failed[:20]),
                              reason=first.get("error"), slug=slug)
-        assets = {}
+        assets, paths = {}, {}
         for placeholder, result in zip(placeholders, uploads):
             path = (result.get("result") or {}).get("path")
-            if not path:
-                raise NotesError("notes_bad_response", "upload_asset returned no path", slug=slug)
-            text = text.replace(placeholder, path)
+            if not isinstance(path, str) or not path.startswith(f"/n/{slug}/assets/"):
+                raise NotesError("notes_bad_response", "upload_asset returned no asset path", slug=slug)
+            paths[placeholder] = path
             assets[path] = placeholder[len("sb-asset:"):]
+        if paths:
+            # One pass, longest first, so "a.png" never rewrites inside "a.png.png".
+            pattern = re.compile("|".join(re.escape(p) for p in sorted(paths, key=len, reverse=True)))
+            text = pattern.sub(lambda m: paths[m.group(0)], text)
         text = _with_manifest(text, {"name": name, "assets": assets, "version": 1})
         arguments = {"slug": slug, "content": text, "format": "html", "filename": PREFIX + name}
         if title:
@@ -304,6 +307,8 @@ class Mockups:
 
     def pull(self, name: str, directory: Path, *, force: bool = False) -> dict:
         target = Path(directory)
+        if target.exists() and not target.is_dir():
+            raise NotesError("notes_input_invalid", f"{target} is not a directory")
         if target.exists() and any(target.iterdir()) and not force:
             raise NotesError("notes_input_invalid", f"{target} is not empty; pass --force to overwrite")
         data = self.get(name)
@@ -369,6 +374,22 @@ class Mockups:
         return result
 
 
+def _read_text(path: Path) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise NotesError("notes_input_invalid", f"{path.name} is not UTF-8 text") from None
+    except OSError as exc:
+        raise NotesError("notes_input_invalid", f"cannot read {path.name}: {exc.strerror}") from None
+
+
+class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith("https://"):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _title(text: str, name: str) -> str:
     from .service import html_title
     return html_title(text) or name
@@ -381,7 +402,7 @@ def _fetch(url: str) -> bytes:
         service_url(f"{parsed.scheme}://{parsed.netloc}")
     except NotesError:
         raise NotesError("notes_bad_response", "asset url is not https") from None
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _HttpsOnlyRedirect())
     try:
         with opener.open(urllib.request.Request(url, headers={"User-Agent": "sandbox-notes"}),
                          timeout=60) as response:

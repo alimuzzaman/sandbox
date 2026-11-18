@@ -80,25 +80,42 @@ class BrokerTransport:
         self._work_root = work_root
         self._executable = executable or sys.executable
 
-    def call(self, calls: Sequence[dict]) -> list[dict]:
+    def call(self, calls: Sequence[dict], on_batch=None) -> list[dict]:
+        """Run ``calls`` in batches. ``on_batch(offset, results)`` sees each batch as it ends,
+        including the finished part of a batch that was interrupted."""
         results: list[dict] = []
         for start in range(0, len(calls), BATCH):
             chunk = list(calls[start:start + BATCH])
-            got = self._batch(chunk)
+            try:
+                got = self._batch(chunk)
+            except _Interrupted as stop:
+                if on_batch is not None and stop.partial:
+                    on_batch(start, stop.partial)
+                raise stop.cause from None
+            # A child that wrote fewer lines than calls stopped early: on a refused
+            # token or dead service by itself, or killed (timeout, crash). The
+            # missing calls failed; never reuse another call's result for them.
+            last = got[-1] if got else None
+            code = (last.get("code") if last and not last.get("ok") else "notes_incomplete")
+            got.extend({"ok": False, "code": code, "skipped": True, "i": None,
+                        "error": "the notes client stopped before this call"}
+                       for _ in chunk[len(got):])
+            if on_batch is not None:
+                on_batch(start, got)
             results.extend(got)
-            if len(got) < len(chunk):
-                # The child stopped early (refused token, service down): every
-                # later call would fail the same way, so do not start them.
-                stop = got[-1] if got else {"ok": False, "code": "notes_unreachable",
-                                            "error": "the notes client did not run"}
-                results.extend(dict(stop, i=None, skipped=True) for _ in calls[start + len(got):])
+            if any(item.get("skipped") for item in got):
+                results.extend({"ok": False, "code": code, "skipped": True, "i": None,
+                                "error": "the notes client stopped before this call"}
+                               for _ in calls[start + len(chunk):])
                 break
         return results
 
     def _batch(self, calls: list[dict]) -> list[dict]:
         from sandbox.secrets import SecretBrokerError
 
-        work = _private_dir(self._work_root or _work_root())
+        root = self._work_root or _work_root()
+        _sweep(root)
+        work = _private_dir(root)
         request, response = work / "request.json", work / "response.jsonl"
         try:
             fd = os.open(request, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -119,17 +136,57 @@ class BrokerTransport:
                         f"no notes token is stored for '{self.service.remote}' "
                         f"({self.service.token_source}:{self.service.token_key}); "
                         f"run `sb notes login --remote {self.service.remote}`") from None
-                raise NotesError("notes_broker_refused",
-                                 f"the secrets broker refused the notes token ({exc.code})") from None
-            lines = response.read_text(encoding="utf-8").splitlines() if response.exists() else []
+                raise _Interrupted(NotesError(
+                    "notes_broker_refused",
+                    f"the secrets broker refused the notes token ({exc.code})"), _read(response)) from None
+            except NotesError:
+                raise
+            except Exception as exc:
+                raise _Interrupted(NotesError(
+                    "notes_broker_refused",
+                    f"the secrets broker could not run the notes client ({type(exc).__name__})"),
+                    _read(response)) from None
+            except BaseException as exc:  # Ctrl-C or kill: keep what finished
+                raise _Interrupted(exc, _read(response)) from None
+            return _read(response)
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        out = []
-        for line in lines:
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(item, dict):
-                out.append(item)
-        return out
+
+
+class _Interrupted(Exception):
+    def __init__(self, cause: BaseException, partial: list[dict]) -> None:
+        super().__init__("interrupted")
+        self.cause = cause
+        self.partial = partial
+
+
+def _read(response: Path) -> list[dict]:
+    try:
+        lines = response.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def _sweep(root: Path, max_age: float = 3600.0) -> None:
+    """Remove work directories a killed run left behind (they can hold share URLs)."""
+    import time
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    now = time.time()
+    for entry in entries:
+        try:
+            if entry.is_dir() and not entry.is_symlink() and now - entry.stat().st_mtime > max_age:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue

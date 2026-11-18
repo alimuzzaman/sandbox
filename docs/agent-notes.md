@@ -118,14 +118,17 @@ a durable job, because job output is retained.
   a new note (`recreated`, new URL).
 - A map entry whose file is gone is reported as `orphaned`. Only `--prune`
   deletes its note.
-- The map is rewritten after every note that changes, so an interrupted run
-  loses nothing. Running it again is always safe.
+- Calls go in batches of 25, and the map is saved after each batch. Ctrl-C or
+  a client that dies part way keeps every note that finished. Only if `sb`
+  itself is killed (SIGKILL) can the notes of the unfinished batch be
+  published without a map entry; the next run then publishes them again.
+  Running it again is otherwise always safe.
 - Exit 1 if any file failed. Failures are listed with their error code.
 
 ## `sb mockups`
 
 A mockup is a folder with an `index.html` and the files it uses. It is stored
-as one HTML note plus image assets. Its name (`[a-z0-9-]`, up to 63) is kept as
+as one HTML note plus image assets. Its name (`[a-z0-9-]`, up to 53) is kept as
 the note's download filename `mockup-<name>`, which is how the other commands
 find it.
 
@@ -160,6 +163,10 @@ The service allows 60 MCP calls a minute per token. The client waits and
 retries when it is rate limited, so a mockup with many images publishes slowly
 rather than failing.
 
+The broker child runs with a minimal environment (`PATH`, `HOME`, `TMPDIR`,
+locale). It uses Python's default CA store; `SSL_CERT_FILE` and `SSL_CERT_DIR`
+are not passed through.
+
 ## Errors
 
 | Code | Meaning |
@@ -168,6 +175,8 @@ rather than failing.
 | `notes_token_missing` | The broker has no token at the configured key. Run `login`. |
 | `notes_unauthorized` | The service refused the token (revoked or wrong). Run `login`. |
 | `notes_unreachable` | No connection, e.g. not on the tailnet. |
+| `notes_bad_response` | The service answered with something other than a tool result, including any redirect (never followed, so the token cannot leave). |
+| `notes_incomplete` | The client stopped before a call (killed or timed out); that call did not run. |
 | `notes_tool_error` | The service refused the call; the message is the service's own. |
 | `notes_login_untrusted` | The dashboard did not sign this machine in by tailnet trust. |
 | `notes_refused_in_job` | `login` or `share --ttl` inside a durable job. |

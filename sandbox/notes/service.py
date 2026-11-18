@@ -100,8 +100,9 @@ class NotesClient:
 
     # -- plumbing -----------------------------------------------------------
 
-    def many(self, calls: list[dict]) -> list[dict]:
-        results = self.transport.call(calls)
+    def many(self, calls: list[dict], on_batch=None) -> list[dict]:
+        results = (self.transport.call(calls, on_batch=on_batch) if on_batch is not None
+                   else self.transport.call(calls))
         if len(results) != len(calls):
             raise NotesError("notes_bad_response", "the notes client returned an incomplete batch")
         return results
@@ -191,9 +192,14 @@ class NotesClient:
                     f"{map_path} belongs to remote '{loaded.get('remote')}', not '{self.remote}'")
             state = {"version": 1, "remote": self.remote, "notes": dict(loaded["notes"])}
         entries: dict = state["notes"]
+        for name in [n for n, e in entries.items() if not (isinstance(e, dict) and e.get("slug"))]:
+            del entries[name]   # a damaged entry is treated as never published
+        root = directory.resolve()
         files = sorted(p for p in directory.iterdir()
                        if p.is_file() and not p.name.startswith(".")
-                       and p.suffix.lower() in SYNC_SUFFIXES)
+                       and p.suffix.lower() in SYNC_SUFFIXES
+                       # a symlink must not publish a file from outside the folder
+                       and p.resolve().parent == root)
         report = {"directory": str(directory), "map": str(map_path), "remote": self.remote,
                   "created": [], "updated": [], "recreated": [], "unchanged": [],
                   "orphaned": [], "pruned": [], "failed": []}
@@ -204,7 +210,7 @@ class NotesClient:
             title = title_for(path, text, html=False)
             texts[path.name] = (text, title)
             entry = entries.get(path.name)
-            if isinstance(entry, dict) and entry.get("slug"):
+            if entry is not None:
                 if entry.get("sha256") == sha256(text) and entry.get("title") == title:
                     report["unchanged"].append({"file": path.name, "slug": entry["slug"],
                                                 "url": entry.get("url")})
@@ -213,55 +219,64 @@ class NotesClient:
             else:
                 creates.append(path.name)
 
+        def save():
+            write_json_atomic(map_path, state)
+
+        def each(names, calls, handle):
+            """Handle results batch by batch and save the map after each, so an
+            interrupted run keeps every note it already published."""
+            def on_batch(offset, results):
+                for name, result in zip(names[offset:offset + len(results)], results):
+                    handle(name, result)
+                save()
+            self.many(calls, on_batch=on_batch)
+
         def record(name, data, bucket):
             text, title = texts[name]
             entries[name] = {"slug": data.get("slug"), "url": data.get("url"),
                              "title": title, "sha256": sha256(text)}
             report[bucket].append({"file": name, "slug": data.get("slug"), "url": data.get("url")})
-            write_json_atomic(map_path, state)
 
         def fail(name, result):
             report["failed"].append({"file": name, "code": result.get("code"),
                                      "error": result.get("error")})
 
+        def not_found(result):
+            return result.get("code") == "notes_tool_error" and "not found" in str(result.get("error"))
+
+        recreate = set()
+
+        def updated(name, result):
+            if result.get("ok"):
+                record(name, result.get("result") or {}, "updated")
+            elif not_found(result):
+                recreate.add(name)
+            else:
+                fail(name, result)
+
         if updates:
-            calls = [{"tool": "update_note", "arguments": {
+            each(updates, [{"tool": "update_note", "arguments": {
                 "slug": entries[name]["slug"], "title": texts[name][1], "content": texts[name][0]}}
-                for name in updates]
-            for name, result in zip(updates, self.many(calls)):
-                if result.get("ok"):
-                    record(name, result.get("result") or {}, "updated")
-                elif result.get("code") == "notes_tool_error" and "not found" in str(result.get("error")):
-                    creates.append(name)
-                    report.setdefault("_recreate", set()).add(name)
-                else:
-                    fail(name, result)
-        recreate = report.pop("_recreate", set())
+                for name in updates], updated)
+        creates += sorted(recreate)
         if creates:
-            calls = [{"tool": "create_note", "arguments": {
-                "title": texts[name][1], "content": texts[name][0]}} for name in creates]
-            for name, result in zip(creates, self.many(calls)):
-                if result.get("ok"):
-                    record(name, result.get("result") or {},
-                           "recreated" if name in recreate else "created")
-                else:
-                    fail(name, result)
+            each(creates, [{"tool": "create_note", "arguments": {
+                "title": texts[name][1], "content": texts[name][0]}} for name in creates],
+                lambda name, result: record(name, result.get("result") or {},
+                                            "recreated" if name in recreate else "created")
+                if result.get("ok") else fail(name, result))
         gone = sorted(name for name in entries if name not in texts)
         if gone and prune:
-            calls = [{"tool": "delete_note", "arguments": {"slug": entries[name].get("slug")}}
-                     for name in gone]
-            for name, result in zip(gone, self.many(calls)):
-                missing = (result.get("code") == "notes_tool_error"
-                           and "not found" in str(result.get("error")))
-                if result.get("ok") or missing:
+            def pruned(name, result):
+                if result.get("ok") or not_found(result):
                     report["pruned"].append({"file": name, "slug": entries[name].get("slug")})
                     del entries[name]
-                    write_json_atomic(map_path, state)
                 else:
                     fail(name, result)
+            each(gone, [{"tool": "delete_note", "arguments": {"slug": entries[name].get("slug")}}
+                        for name in gone], pruned)
         else:
             report["orphaned"] = [{"file": name, "slug": entries[name].get("slug")} for name in gone]
-        if not map_path.exists():
-            write_json_atomic(map_path, state)
+        save()
         report["ok"] = not report["failed"]
         return report

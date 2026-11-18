@@ -334,6 +334,8 @@ def cmd_notes(cfg, args) -> None:
         _notes(cfg, args)
     except NotesError as exc:
         _fail(args, exc)
+    except (OSError, UnicodeError) as exc:
+        _fail(args, NotesError("notes_io_error", f"{type(exc).__name__}: {exc}"))
 
 
 def cmd_mockups(cfg, args) -> None:
@@ -342,6 +344,8 @@ def cmd_mockups(cfg, args) -> None:
         _mockups(cfg, args)
     except NotesError as exc:
         _fail(args, exc)
+    except (OSError, UnicodeError) as exc:
+        _fail(args, NotesError("notes_io_error", f"{type(exc).__name__}: {exc}"))
 
 
 register_specs((

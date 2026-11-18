@@ -25,12 +25,19 @@ MAX_RETRY_WAIT = 65
 TIMEOUT = 60
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend the Authorization header to its target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _post(endpoint, token, body):
     request = urllib.request.Request(
         endpoint, data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json",
                  "Authorization": "Bearer " + token, "User-Agent": "sandbox-notes"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(request, timeout=TIMEOUT) as response:
             return response.status, response.read(), response.headers
@@ -60,6 +67,9 @@ def _call(endpoint, token, index, tool, arguments):
                 "error": "the stored token was refused; run `sb notes login`"}
     if status == 429:
         return {"ok": False, "code": "notes_rate_limited", "error": "rate limit still exceeded"}
+    if 300 <= status < 400:
+        return {"ok": False, "code": "notes_bad_response",
+                "error": "HTTP %d redirect refused; check the service url" % status}
     try:
         payload = json.loads(raw.decode() or "null")
     except ValueError:
@@ -70,7 +80,9 @@ def _call(endpoint, token, index, tool, arguments):
         error = payload.get("error") or {}
         return {"ok": False, "code": "notes_protocol_error",
                 "error": str(error.get("message") if isinstance(error, dict) else error)[:500]}
-    result = payload.get("result") or {}
+    result = payload.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("content") or [], list):
+        return {"ok": False, "code": "notes_bad_response", "error": "HTTP %d, no tool result" % status}
     text = ""
     for item in result.get("content") or ():
         if isinstance(item, dict) and item.get("type") == "text":
@@ -79,8 +91,10 @@ def _call(endpoint, token, index, tool, arguments):
         data = json.loads(text) if text else {}
     except ValueError:
         data = {"message": text}
+    if not isinstance(data, dict):
+        data = {"value": data}
     if result.get("isError"):
-        message = data.get("error") if isinstance(data, dict) else None
+        message = data.get("error")
         return {"ok": False, "code": "notes_tool_error", "error": str(message or text)[:500]}
     return {"ok": True, "result": data}
 
@@ -103,7 +117,10 @@ def main(argv):
     fd = os.open(argv[2], os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as out:
         for index, call in enumerate(calls):
-            outcome = _call(endpoint, token, index, call.get("tool"), call.get("arguments") or {})
+            try:
+                outcome = _call(endpoint, token, index, call.get("tool"), call.get("arguments") or {})
+            except Exception as exc:  # one bad answer must not lose the rest of the batch
+                outcome = {"ok": False, "code": "notes_bad_response", "error": type(exc).__name__}
             outcome["i"] = index
             out.write(json.dumps(outcome) + "\n")
             out.flush()

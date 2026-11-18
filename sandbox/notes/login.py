@@ -80,7 +80,10 @@ class DashboardSession:
         return _html.unescape(csrf.group(1)), token_rows(page)
 
     def revoke(self, csrf: str, ident: int) -> None:
-        self._open("/tokens/revoke", {"_csrf": csrf, "id": str(ident)})
+        path, _ = self._open("/tokens/revoke", {"_csrf": csrf, "id": str(ident)})
+        if path != "/dashboard":
+            raise NotesError("notes_login_failed",
+                             f"revoking the earlier token did not return to the dashboard ({path})")
 
     def create(self, csrf: str, name: str) -> str:
         _, page = self._open("/tokens/create", {"_csrf": csrf, "name": name})

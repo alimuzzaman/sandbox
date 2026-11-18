@@ -2172,7 +2172,10 @@ the last attempt with its job ids, and the last poll's reason.
 **Files.** Under `$SANDBOX_HOME/runtime/hosting/follow/`: `follows/<name>.json`,
 `audit.jsonl`, `keys/`, `known_hosts`, `work/<name>/repos/<repo>`, `locks/`. Timer:
 `~/.config/systemd/user/sandbox-stack-follow.{service,timer}` (needs user lingering;
-`follow_timer_unavailable` otherwise).
+`follow_timer_unavailable` otherwise). The service runs `$SANDBOX_HOME/sb-src/sb`, the
+link to the `current` release, so after `sb remote service migrate` the next poll runs the
+new runtime. A timer written by an older release names that release's own `sb`; the first
+`run-now` after the migrate rewrites it.
 
 **Where an attempt runs.** The poll is a `Type=oneshot` unit, and when it exits systemd
 stops everything in its cgroup. So the poll never starts the attempt job in its own

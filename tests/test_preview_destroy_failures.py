@@ -162,8 +162,10 @@ class PreviewDestroyFailureTests(unittest.TestCase):
                   "expires_at": "2026-01-01T00:00:00+00:00"}
         stuck = _row("p2", delete_phase="unknown")
         timed_out = _row("p4")
-        # Rows go in order: old and p2 refuse before any delete, p4's times out.
-        self.delete.side_effect = [subprocess.TimeoutExpired("ssh", 300), None]
+        def route(_entry, domain, **_kw):
+            if domain.startswith("p4."):
+                raise subprocess.TimeoutExpired("ssh", 120)
+        self.route.side_effect = route
         preview._save_state(self.state(legacy, stuck, timed_out, _row("p3")))
         args = types.SimpleNamespace(action="cleanup", remote="r", confirm=True, json=False)
         with patch.object(preview, "preview_target", return_value=self.entry), \
@@ -174,7 +176,7 @@ class PreviewDestroyFailureTests(unittest.TestCase):
         self.assertNotEqual(exit_.exception.code, 0)
         left = json.loads(preview._STATE_PATH.read_text())["previews"]
         self.assertEqual(sorted(left), ["old", "p2", "p4"])
-        self.assertEqual(left["p4"]["delete_phase"], "unknown")
+        self.assertEqual(left["p4"]["delete_phase"], "route_unknown")
         message = err.getvalue()
         self.assertIn("removed 1 expired", message)
         self.assertIn("old (preview_owner_alias_or_machine_mismatch)", message)

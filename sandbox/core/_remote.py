@@ -2013,6 +2013,13 @@ def configure_instance_https_route(remote: dict, domain: str, port: int, *, inca
         )
 
 
+class _RemoteCommandFailed(RuntimeError):
+    """A remote command that ran and exited non-zero; ``returncode`` is its status."""
+    def __init__(self, returncode, message):
+        self.returncode = returncode
+        super().__init__(message)
+
+
 def remove_instance_https_route(remote: dict, domain: str, *, expected_port=None, incarnation=None) -> None:
     """Remove only Sandbox's Caddy fragment for one public instance route."""
     _require_front_door(remote, "instance_routes")
@@ -2033,7 +2040,7 @@ def remove_instance_https_route(remote: dict, domain: str, *, expected_port=None
     )
     res = ssh_run(remote, _instance_route_command(domain, cmd), timeout=120)
     if res.returncode != 0:
-        raise RuntimeError(
+        raise _RemoteCommandFailed(res.returncode,
             f"could not remove remote instance HTTPS route: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
@@ -2088,7 +2095,7 @@ def delete_remote_instance(remote: dict, instance_name: str, *,
     # Older receivers reject the required options; never retry by name.
     res = ssh_run(remote, f"{shlex.quote(sb)} instance delete {shlex.quote(instance_name)} --yes --local" + conditional, timeout=300)
     if res.returncode != 0:
-        raise RuntimeError(
+        raise _RemoteCommandFailed(res.returncode,
             f"could not delete remote Sandbox instance: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )

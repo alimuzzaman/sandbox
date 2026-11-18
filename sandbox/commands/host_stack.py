@@ -228,6 +228,10 @@ def probe_ports(entry: dict) -> dict[int, set[str]]:
 
 # ---------------------------------------------------------------- durable job
 
+class JobStateUnavailable(RuntimeError):
+    """The job registry could not be read; that says nothing about the job."""
+
+
 def job_view(job_id: str | None) -> dict | None:
     if not job_id:
         return None
@@ -260,21 +264,105 @@ def _last_apply_view(record: dict) -> dict:
     return last
 
 
+# _submit's 180 s job-start deadline plus margin.
+_SUBMITTING_GRACE_SECONDS = 300
+_UNSETTLED_SUBMISSIONS = {"submitting", "submitted", "acceptance_unknown", "submission_failed"}
+
+
+def _jobs_for_request(request_id: str) -> list[str]:
+    """Job ids the local registry admitted under this request id (read-only).
+
+    `stack up` submits with `job-start --local`, so an admitted apply has a
+    row here; no row means it was never accepted.
+    """
+    import sqlite3
+    from sandbox.core import _paths
+    path = _paths.RUNTIME_DIR / "jobs" / "registry.sqlite3"
+    if not path.exists():
+        return []
+    try:
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            return [row[0] for row in connection.execute(
+                "SELECT job_id FROM jobs WHERE request_id=? AND target_kind='local' LIMIT 2",
+                (request_id,))]
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 -- an unreadable registry is unknown, never "free"
+        raise JobStateUnavailable("the local job registry could not be read") from None
+
+
+def _job_registry_readable() -> bool:
+    try:
+        _jobs_for_request("")
+    except JobStateUnavailable:
+        return False
+    return True
+
+
+def _job_running_from(worktrees: list) -> bool:
+    """True unless no job may still run from these worktrees (read-only)."""
+    from sandbox.core import _paths
+    from sandbox.hosting.here_source import _active_jobs_inside
+    for path in worktrees:
+        if not isinstance(path, str) or not path:
+            continue
+        busy = _active_jobs_inside(Path(path), str(Path(_paths.RUNTIME_DIR).parent))
+        if busy is None:
+            raise JobStateUnavailable("the local job registry could not be read")
+        if busy:
+            return True
+    return False
+
+
 def _refuse_if_active(record: dict | None) -> None:
     if not record:
         return
     last = record.get("last_apply") or {}
-    job = job_view(last.get("job_id"))
-    if (not job and (last.get("job_id") or last.get("status") in
-            {"submitting", "submitted", "acceptance_unknown", "submission_failed"})):
+    job_id = last.get("job_id")
+    unknown = StackCommandError(SUBMISSION_UNKNOWN,
+        f"stack {record.get('slug')} original apply request {last.get('request_id')} "
+        "has no established acceptance/outcome; inspect that original request/job before another apply")
+    try:
+        if not job_id and last.get("status") in _UNSETTLED_SUBMISSIONS:
+            # Settle the unknown by the original request id: a refused or
+            # never-started job-start left no admission row, so the slug is free.
+            # A nested server-cli submission runs under a derived request id,
+            # recorded as job_request_id; a record without it falls back to the
+            # stack's own request id plus the worktree check below.
+            request_id = last.get("job_request_id") or last.get("request_id")
+            if not isinstance(request_id, str) or not request_id:
+                raise unknown
+            matches = _jobs_for_request(request_id)
+            if not matches:
+                if _job_running_from(record.get("worktrees") or []):
+                    raise unknown
+                # A killed `up` can leave its job-start child running before
+                # it admits; wait out the submission deadline before "free".
+                submitted = last.get("submitted_at")
+                if last.get("status") == "submitting" and (
+                        type(submitted) is not int or time.time() - submitted < _SUBMITTING_GRACE_SECONDS):
+                    raise unknown
+                return
+            if len(matches) > 1:
+                raise unknown
+            job_id = matches[0]
+        job = job_view(job_id)
+    except JobStateUnavailable:
         raise StackCommandError(SUBMISSION_UNKNOWN,
-            f"stack {record.get('slug')} original apply request {last.get('request_id')} "
-            "has no established acceptance/outcome; inspect that original request/job before another apply")
+            f"stack {record.get('slug')}: the local job registry could not be read to check apply request "
+            f"{last.get('request_id')}; retry") from None
+    if not job and job_id:
+        if not _job_registry_readable():
+            raise StackCommandError(SUBMISSION_UNKNOWN,
+                f"stack {record.get('slug')}: the local job registry could not be read to check apply job "
+                f"{job_id}; retry")
+        raise unknown
     if job and job.get("lifecycle") in ACTIVE_LIFECYCLES:
         raise StackCommandError(
             APPLY_IN_PROGRESS,
-            f"stack {record.get('slug')} apply job {record['last_apply']['job_id']} is "
-            f"{job['lifecycle']}; wait for it (`sb job-status {record['last_apply']['job_id']}`)")
+            f"stack {record.get('slug')} apply job {job_id} is "
+            f"{job['lifecycle']}; wait for it (`sb job-status {job_id}`)")
 
 
 def _submission_timeout(validated: dict) -> int:
@@ -308,9 +396,14 @@ def _submit(argv: list[str], *, environment: dict | None = None) -> str:
     if (result.returncode != 0 or not isinstance(job_id, str)
             or re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{32})", job_id) is None
             or payload.get("ok") is False):
+        # job-start --json refuses with {"status": "refused"} and no job id (a
+        # workspace ownership refusal). The server-cli ancestor refusal asks
+        # for a receipt lookup instead; _refuse_if_active settles that one.
         if (isinstance(payload, dict) and payload.get("status") == "refused"
-                and payload.get("acceptance") == "not_accepted"):
-            raise StackCommandError(SUBMISSION_FAILED, "job-start explicitly refused before acceptance")
+                and payload.get("job_id") is None
+                and payload.get("acceptance") in {None, "not_accepted"}):
+            raise StackCommandError(SUBMISSION_FAILED, "job-start explicitly refused before acceptance"
+                + (f": {remote.redact_text(str(payload.get('code')))[:100]}" if payload.get("code") else ""))
         raise StackCommandError(SUBMISSION_UNKNOWN,
             "job-start returned no valid original acceptance receipt; inspect the original request")
     return job_id
@@ -795,6 +888,12 @@ def _up(args) -> dict:
         argv = hosting_cmd._host_delivery_guidance(
             validated, remote_name, request_id=request_id, source_commit=ref.commit,
             timeout=_submission_timeout(validated), json_output=True)
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        if "--request-id" in options:
+            # The id job-start admits this apply under (a nested server-cli
+            # submission derives its own), so an unknown can be settled later.
+            record["last_apply"]["job_request_id"] = options[options.index("--request-id") + 1]
+            registry.put(record)
         try:
             job_id = _submit(argv)
         except StackCommandError as exc:

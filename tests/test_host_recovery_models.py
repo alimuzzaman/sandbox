@@ -125,6 +125,52 @@ class HostRecoveryModelsTests(unittest.TestCase):
                     "remote/project/development", path=root / "metadata",
                     secret_path=secret_path, key_path=key_path)
 
+    def test_another_targets_write_to_the_shared_file_keeps_this_targets_binding(self):
+        """feedback bca4e8ac: one secrets file serves every target on the host."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            secret_path = root / "secrets"
+            key_path = root / "binding.key"
+            key_path.write_bytes(b"k" * 32)
+            key_path.chmod(0o600)
+            target = "remote/project/development"
+
+            def replace(text):
+                # write_secret replaces the file atomically: a new inode each time.
+                staged = root / "staged"
+                staged.write_text(text)
+                staged.chmod(0o600)
+                os.replace(staged, secret_path)
+
+            def read(compare_values=True):
+                return read_hosting_binding_metadata(target, path=root / "metadata",
+                                                     secret_path=secret_path, key_path=key_path,
+                                                     compare_values=compare_values)
+
+            replace("OWN_TOKEN=first\nOTHER_TOKEN=a\n")
+            result = write_hosting_binding_metadata(
+                target, {"OWN_TOKEN": "first"}, key=b"k" * 32, key_version="v1-test",
+                path=root / "metadata", secret_path=secret_path, key_path=key_path)
+            replace("OWN_TOKEN=first\nOTHER_TOKEN=b\nNEW_STACK_TOKEN=c\n")
+            self.assertEqual(read(), result)
+            with self.assertRaisesRegex(ValueError, "secret_file_epoch_mismatch"):
+                read(compare_values=False)  # recovery reads no secret source
+            replace("OWN_TOKEN=second\nOTHER_TOKEN=b\n")
+            with self.assertRaisesRegex(ValueError, "secret_file_epoch_mismatch"):
+                read()
+            replace("OTHER_TOKEN=b\n")
+            with self.assertRaisesRegex(ValueError, "secret_file_epoch_mismatch"):
+                read()
+            replace("OWN_TOKEN=first\n")
+            self.assertEqual(read(), result)
+            secret_path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "stale"):
+                read()
+            secret_path.chmod(0o600)
+            key_path.write_bytes(b"j" * 32)
+            with self.assertRaisesRegex(ValueError, "key_identity_mismatch"):
+                read()
+
     def test_broker_revision_is_exact_bounded_and_prepared_before_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -144,7 +144,7 @@ class JoinedShareTests(unittest.TestCase):
         self.assertEqual(result["target"], f"{self.validated['project']}/{self.validated['environment']}")
         self.assertEqual(len(self.commands), 2, "one probe, one create")
         self.assertIn(share.token_hash(token), self.commands[1])
-        self.assertIn("--json-link", self.commands[1], "no terminal here: the server must check agent_mint")
+        self.assertIn("--agent-link", self.commands[1], "no terminal here: the server must check agent_mint")
         self._no_token_sent(token)
         audit = [json.loads(line) for line in self.audit.read_text().splitlines()]
         self.assertEqual([(row["op"], row["outcome"]) for row in audit], [("create", "ok"), ("create", "ok")])
@@ -192,7 +192,7 @@ class JoinedShareTests(unittest.TestCase):
         self.assertNotIn("link", result)
         token = self.terminal.getvalue().strip().split("#", 1)[1]
         self.assertEqual(share.short_link_id(token), result["link_id"])
-        self.assertNotIn("--json-link", self.commands[1])
+        self.assertNotIn("--agent-link", self.commands[1])
         self._no_token_sent(token)
 
     def test_an_older_runtime_is_refused_with_migrate_advice_before_anything_runs(self):

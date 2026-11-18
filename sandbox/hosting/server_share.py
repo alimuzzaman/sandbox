@@ -12,7 +12,7 @@ operation and prints one JSON line.
 For ``create`` the token is made on the controller and only its SHA-256 crosses
 the channel, so the server's reply holds the link id and hostname but never the
 link. A ``create`` that timed out is not repeated: it may have stored the record.
-``--json-link`` tells the server the controller has no terminal to show the link
+``--agent-link`` tells the server the controller has no terminal to show the link
 on, so a target without ``share.agent_mint: true`` refuses before anything is
 stored. Both sides refuse inside a durable job, whose output is stored.
 
@@ -75,7 +75,7 @@ def check_selectors(*, remote_name, target, name, project_dir, email=None, stack
 
 
 def command(verb: str, remote_name: str, *, target=None, name=None, environment=None, entry=None,
-            link_id=None, path=None, ttl=None, uses=None, token_sha256=None, json_link=False) -> str:
+            link_id=None, path=None, ttl=None, uses=None, token_sha256=None, agent_link=False) -> str:
     """The fixed server command; selectors, options and at most the token's hash, never a link."""
     argv = ["host", "share", verb, *([link_id] if link_id else []), "--here", "--remote", remote_name,
             "--name" if name else "--target", name or target]
@@ -83,8 +83,8 @@ def command(verb: str, remote_name: str, *, target=None, name=None, environment=
                         ("--ttl", ttl), ("--uses", uses), ("--token-sha256", token_sha256)):
         if value is not None:
             argv += [flag, str(value)]
-    if json_link:
-        argv.append("--json-link")
+    if agent_link:
+        argv.append("--agent-link")
     return slu._SB + shlex.join([*argv, "--json"])
 
 
@@ -190,7 +190,7 @@ def _create_here(args, owner, found, declaration, entry_name) -> dict:
     request = share.LinkRequest(entry=entry_name, kind="site", scope=share.validate_scope(args.share_path),
                                 ttl_seconds=share.parse_ttl(args.ttl), uses=share.parse_uses(args.uses))
     agent_mint = bool((login.share_declaration(declaration) or {}).get("agent_mint"))
-    if getattr(args, "json_link", False) and not agent_mint:
+    if getattr(args, "agent_link", False) and not agent_mint:
         raise ShareRefusal(
             "agent_mint_not_enabled",
             "this target does not allow agent-made links; set `share.agent_mint: true` in its "
@@ -246,8 +246,8 @@ def run_here(args) -> None:
             raise ShareRefusal("share_options_conflict", "usage: sb host share create|list|revoke ID|all --here")
         if verb == "create" and not getattr(args, "token_sha256", None):
             raise ShareRefusal("share_options_conflict", "--here create needs --token-sha256 with the controller's hash")
-        if verb != "create" and (getattr(args, "token_sha256", None) or getattr(args, "json_link", False)):
-            raise ShareRefusal("share_options_conflict", "--token-sha256 and --json-link apply only to create")
+        if verb != "create" and (getattr(args, "token_sha256", None) or getattr(args, "agent_link", False)):
+            raise ShareRefusal("share_options_conflict", "--token-sha256 and --agent-link apply only to create")
         owner, found, declaration, entry_name = _resolve_here(args)
         result = _HANDLERS[verb](args, owner, found, declaration, entry_name)
         payload = {"ok": True, "contract": CONTRACT, "target": found.label, "name": getattr(args, "name", None),

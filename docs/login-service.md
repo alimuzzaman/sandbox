@@ -358,7 +358,7 @@ changes the gate under the target's writer lock, audits it on the server and ans
 with one JSON line. For `create` the controller makes the token and sends only its
 SHA-256; the server stores that hash and answers with the link id and gate hostname,
 never the link, and the controller builds the link and returns or shows it under the
-rules above. With no terminal to show it on, the controller passes `--json-link`, and a
+rules above. With no terminal to show it on, the controller passes `--agent-link`, and a
 target without `share.agent_mint: true` refuses on the server before anything is stored.
 A `create` that times out is not sent again, because it may have stored the record;
 revoke that id if it shows up in `list`. A runtime older than control protocol 28 lacks

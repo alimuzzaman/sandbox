@@ -300,7 +300,7 @@ def _create_joined(remote_name, entry_record, *, target, name, project_dir, envi
             reply = server_share.call(
                 remote_name, entry_record, "create", target=target, name=name, environment=environment,
                 entry=entry, path=None if path is None else scope, ttl=None if ttl is None else ttl_seconds,
-                uses=use_limit, token_sha256=share.token_hash(token), json_link=terminal is None)
+                uses=use_limit, token_sha256=share.token_hash(token), agent_link=terminal is None)
             fields.update(target=reply["target"], entry=reply["entry"])
             if reply.get("link_id") != share.short_link_id(token):
                 raise ShareRefusal("share_failed", "the server did not confirm this link")
@@ -621,8 +621,8 @@ def cmd_host_share(args) -> None:
     if getattr(args, "here", False):
         server_share.run_here(args)
         return
-    if getattr(args, "token_sha256", None) is not None or getattr(args, "json_link", False):
-        print("sb host share: share_options_conflict: --token-sha256 and --json-link are only for "
+    if getattr(args, "token_sha256", None) is not None or getattr(args, "agent_link", False):
+        print("sb host share: share_options_conflict: --token-sha256 and --agent-link are only for "
               "the server side (--here)", file=sys.stderr)
         raise SystemExit(1)
     verb = getattr(args, "image_action", None)

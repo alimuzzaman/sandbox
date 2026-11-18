@@ -113,7 +113,7 @@ Control protocol 28 adds `sb host share create|list|revoke --here` (contract
 `host.share-here.v1`, `sandbox/hosting/server_share.py`), listed under
 `host_share_capabilities` in `job-capabilities`. A joined controller reads that key first
 and refuses a runtime without it. For `create` it sends only its token's SHA-256 (with
-`--json-link` when the link must go to `--json`); the installed owner answers with one
+`--agent-link` when the link must go to `--json`); the installed owner answers with one
 JSON line carrying the contract, `target_identity`, `ownership_marker`, the echoed
 `token_sha256`, `link_id`, `hostname`, `agent_mint` and the expiry, never a link. 28
 serves every runtime 27 did.

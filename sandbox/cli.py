@@ -1202,7 +1202,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # host login-url --here: the controller's token hash; the token stays on the controller.
     host_p.add_argument("--token-sha256", dest="token_sha256", default=None, help=argparse.SUPPRESS)
     # host share create --here: the controller has no terminal, so the link goes to its --json.
-    host_p.add_argument("--json-link", dest="json_link", action="store_true", help=argparse.SUPPRESS)
+    host_p.add_argument("--agent-link", dest="agent_link", action="store_true", help=argparse.SUPPRESS)
     host_p.add_argument("--repo", dest="follow_repo", action="append", default=None,
         metavar="NAME=OWNER/REPO@BRANCH",
         help="host follow add: a GitHub repository and the branch to follow (repeatable; the first is the job source)")

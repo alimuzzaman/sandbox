@@ -258,7 +258,8 @@ class FakeNotes:
 
 
 def _slugify(text: str) -> str:
-    out = "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
+    # ASCII only, like PCRE without /u in src/notes.php
+    out = "".join(c if c.isascii() and c.isalnum() else "-" for c in text).strip("-").lower()
     while "--" in out:
         out = out.replace("--", "-")
     return out[:60] or "note"   # src/notes.php slugify cuts to 60 characters

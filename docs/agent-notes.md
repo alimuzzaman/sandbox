@@ -98,7 +98,7 @@ Every action takes `--remote NAME` and `--json` (one JSON object on stdout;
 | `get <slug>` | Prints the content (`--json`: the note, its assets included). |
 | `list` | All your notes, newest first. |
 | `delete <slug>` | Deletes the note and its assets. |
-| `sync <dir> [--prune]` | One note per `*.md` file in `dir` (not recursive; dotfiles skipped). See below. |
+| `sync <dir> [--prune] [--adopt \| --create-duplicates]` | One note per `*.md` file in `dir` (not recursive; dotfiles skipped). See below. |
 | `upload <slug> <file>` | Attaches a PNG, JPEG, GIF or WebP image. Prints the path to embed. |
 | `share <slug> --ttl 24h` | Creates an expiring read-only link on the public host and prints it. `--ttl` takes hours (`24`, `24h`) or days (`7d`). The service caps it. |
 | `share <slug> --revoke` | Revokes every active link on the note. |
@@ -112,7 +112,31 @@ a durable job, because job output is retained.
 
 - The map `<dir>/.notes.json` records `file -> {slug, url, title, sha256}` and
   the remote it belongs to. A map for another remote is refused.
-- A file with no map entry is created. A file whose content or first heading
+- A file with no map entry is first looked up among your existing notes, so a
+  lost map, or notes another client (such as an MCP session) already published,
+  do not turn into duplicates. Candidates are tailnet markdown notes that this
+  map does not already hold; public and HTML notes never are. A file matches
+  the note whose stored filename is the file's name as the service slugifies it
+  (`11-php-versions-7.4-8.4.md` is stored as `11-php-versions-7-4-8-4.md`).
+  Files with no filename match then match by title, but only notes published
+  without a filename (stored under their title's slug) qualify, so a note sync
+  made from another folder is never matched by its heading.
+  - If the match already has the file's exact content, sync adopts it: same URL,
+    reported as `adopted`, content unchanged; its title and download filename
+    are set from the file.
+  - If the content differs, the file fails with `notes_adopt_differs` and
+    nothing changes. To adopt that one note anyway, put its slug in
+    `.notes.json`; `--adopt` overwrites the match for every unmapped file in
+    the run.
+  - Two matches, or one note matching two files, fail with
+    `notes_adopt_ambiguous`.
+  - `--create-duplicates` skips the lookup and publishes new notes.
+  - A file that matches nothing is created.
+  - An adopted note is shared with any other folder whose map holds it: a later
+    edit in either folder overwrites it, and `--prune` in one deletes it for
+    both.
+- Every note sync creates or updates stores the file name (without `.md`) as
+  its download filename, so it can be found again the same way. A file whose content or first heading
   changed is updated (same URL). An unchanged file makes no call.
 - If a mapped note was deleted on the service, the file is published again as
   a new note (`recreated`, new URL).
@@ -180,5 +204,7 @@ are not passed through.
 | `notes_incomplete` | The client stopped (killed or timed out) before reporting this call. A call cut off mid-request may still have been applied. |
 | `notes_tool_error` | The service refused the call; the message is the service's own. |
 | `notes_login_untrusted` | The dashboard did not sign this machine in by tailnet trust. |
+| `notes_adopt_ambiguous` | `sync`: an unmapped file has more than one match, or shares one with another file; it was skipped. |
+| `notes_adopt_differs` | `sync`: an unmapped file matches an existing note with other content; nothing changed. Use `--adopt` or `--create-duplicates`. |
 | `notes_refused_in_job` | `login` or `share --ttl` inside a durable job. |
 | `mockup_exists` / `mockup_not_found` | `publish` over an existing name; any other action on a missing one. |

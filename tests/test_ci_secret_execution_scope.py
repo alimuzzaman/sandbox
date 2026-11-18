@@ -37,14 +37,18 @@ class CISecretExecutionScopeTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch("sandbox.application.context.durable_job_dependencies",
                                      return_value={"target_service": selector}))
-            for name in ("_resolve_secret", "_local_yaml", "_write_secrets_file", "_act_binary"):
+            for name in ("_resolve_secret", "_read_stdin_secrets", "_local_yaml",
+                         "_write_secrets_file", "_act_binary"):
                 stack.enter_context(patch.object(ci, name,
                     side_effect=AssertionError("controller secret/runtime access: " + name)))
             submit = stack.enter_context(patch.object(ci, "_run_remote_ci"))
             ci.cmd_ci({}, self.args)
         submit.assert_called_once_with(target, str(self.root), self.workflow, self.plan,
                                        self.args, as_json=True)
-        self.assertEqual(selector.resolve.call_args.args[0].remote, "fixture-server")
+        request = selector.resolve.call_args.args[0]
+        self.assertEqual(request.remote, "fixture-server")
+        self.assertFalse(request.local)
+        self.assertEqual(request.required_capability, "job.exec")
 
     def test_personal_local_missing_secret_still_refuses_before_execution(self):
         self.args.runtime, self.args.remote, self.args.local = "none", None, True

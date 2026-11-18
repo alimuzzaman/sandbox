@@ -1534,7 +1534,21 @@ back to root. A job-level `container:`, service containers and Docker actions ke
 their own image's user, as on GitHub. Without the option the `act-` images, as
 root, are used as before. It combines with `--container-limit` and is forwarded to
 every remote durable child and to `--async`; the MCP `ci_run` tool does not take
-it.
+it. The job's tool cache (`RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY`) is
+`/home/runner/hostedtoolcache` in the job container, so `actions/setup-node`,
+`setup-python` and `shivammathur/setup-php` add versions as `runner` (each checked
+on xspeed-dev with a version not yet cached). act's shared
+`act-toolcache` volume at `/opt/hostedtoolcache` holds root-owned folders from
+root jobs, so `runner` cannot write it. The cache is gone with the container;
+each run downloads what it installs, as on a fresh GitHub runner. act still
+reports `${{ runner.tool_cache }}` as `/opt/hostedtoolcache`, so a step that
+builds a path from it misses these tools; use `$RUNNER_TOOL_CACHE`. The variables
+reach every job act runs, a job-level `container:` included, where an image
+without `runner` gets the folder created by its own user. Under act,
+`shivammathur/setup-php` treats the job as self-hosted and sets
+`RUNNER_TOOL_CACHE=/opt/hostedtoolcache` for the steps after it, so a setup action
+later in the same job that installs an uncached version fails with `EACCES`
+again; run those setup actions before `setup-php`.
 
 The checkout is bind-mounted into the job container, so `runner` (uid 1001) must
 be able to write it: true where the host user that owns the workspace is uid 1001

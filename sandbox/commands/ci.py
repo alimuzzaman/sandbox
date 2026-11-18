@@ -124,6 +124,17 @@ _ACT_RUNNER_PLATFORM_MAP = {
     "ubuntu-24.04": "catthehacker/ubuntu:runner-24.04",
 }
 
+# act mounts one shared named volume, `act-toolcache`, at /opt/hostedtoolcache
+# in every job container. Root jobs on the act images create its tool folders
+# (node/, setup-php/, ...) as root 0755, so `runner` cannot add a version there
+# and setup-node, setup-python and the rest fail with EACCES. GitHub gives each
+# job a tool cache its user can write, so --as-runner points the tool cache at
+# a folder in runner's home inside the job's own container: writable by
+# runner, gone with the container, nothing shared with root jobs. The images'
+# own /opt/hostedtoolcache is empty (their bundled Node sits on PATH under
+# /opt/acttoolcache), so no preinstalled tool is lost.
+_RUNNER_TOOL_CACHE = "/home/runner/hostedtoolcache"
+
 
 def _runner_platforms(runs_on, cell: dict) -> list[str]:
     """The `runs-on:` labels of one job cell, each with a runner image, or ValueError.
@@ -674,6 +685,9 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
     platforms = _ACT_RUNNER_PLATFORM_MAP if as_runner else _ACT_PLATFORM_MAP
     for platform, image in platforms.items():
         cmd += ["-P", f"{platform}={image}"]
+    if as_runner:
+        cmd += ["--env", f"RUNNER_TOOL_CACHE={_RUNNER_TOOL_CACHE}",
+                "--env", f"AGENT_TOOLSDIRECTORY={_RUNNER_TOOL_CACHE}"]
     if runtime != "none":
         cmd += ["--env", f"WP_BASE_URL={url}",
                 "--env", f"SANDBOX_INSTANCE={entry.get('instance')}"]

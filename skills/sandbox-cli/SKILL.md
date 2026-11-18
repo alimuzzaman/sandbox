@@ -810,7 +810,10 @@ passwordless `sudo`), from `catthehacker/ubuntu:runner-*` for `ubuntu-latest`,
 selected jobs or their `needs` chain, refuses before anything runs; it never falls
 back to root. A job-level `container:` keeps its image's user, as on GitHub. The
 workspace is bind-mounted, so its host owner must be uid 1001 (as on xspeed-dev)
-for the job to write it; pull the image on that host first. It combines with
+for the job to write it; pull the image on that host first. The tool cache is
+`/home/runner/hostedtoolcache` in the job container, writable by `runner` and gone
+with it, so setup actions install new versions instead of failing on act's
+root-owned shared cache. It combines with
 `--container-limit` and reaches each remote durable child (CLI only, not MCP):
 
 ```sh

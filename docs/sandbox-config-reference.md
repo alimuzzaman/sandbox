@@ -1534,7 +1534,12 @@ back to root. A job-level `container:`, service containers and Docker actions ke
 their own image's user, as on GitHub. Without the option the `act-` images, as
 root, are used as before. It combines with `--container-limit` and is forwarded to
 every remote durable child and to `--async`; the MCP `ci_run` tool does not take
-it.
+it. The job's tool cache (`RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY`) is
+`/home/runner/hostedtoolcache` in the job container, so `actions/setup-node`,
+`setup-python`, `setup-php` and the rest can add versions as `runner`. act's shared
+`act-toolcache` volume at `/opt/hostedtoolcache` holds root-owned folders from
+root jobs, so `runner` cannot write it. The cache is gone with the container;
+each run downloads what it installs, as on a fresh GitHub runner.
 
 The checkout is bind-mounted into the job container, so `runner` (uid 1001) must
 be able to write it: true where the host user that owns the workspace is uid 1001

@@ -92,6 +92,40 @@ def _verify_dns(client, zone_id, domain, expected):
         raise ValueError('preview_dns_custody_mismatch')
 
 
+def _completed_failure(exc: BaseException) -> bool:
+    """True when a delete step definitely ran and failed, so it may be rerun.
+
+    A remote command that exited 1-123 or a Cloudflare 4xx or explicit
+    rejection is a known outcome. A timeout, an SSH failure (255), a remote
+    timeout or signal (124+), a 5xx or a lost response stays unknown.
+    """
+    import urllib.error
+    if isinstance(exc, cloudflare.CloudflareError):
+        cause = exc.__cause__
+        if isinstance(cause, urllib.error.HTTPError):
+            return 400 <= cause.code < 500
+        return cause is None and str(exc).startswith("Cloudflare rejected the request")
+    returncode = getattr(exc, "returncode", None)
+    return isinstance(exc, RuntimeError) and type(returncode) is int and 0 < returncode < 124
+
+
+def _delete_step(state: dict, record: dict, unknown_phase: str, effect) -> None:
+    """Persist ``unknown_phase`` before dispatch; undo it on a completed failure."""
+    previous = record.get('delete_phase')
+    record['delete_phase'] = unknown_phase
+    _save_state(state)
+    try:
+        effect()
+    except BaseException as exc:
+        if _completed_failure(exc):
+            if previous is None:
+                record.pop('delete_phase', None)
+            else:
+                record['delete_phase'] = previous
+            _save_state(state)
+        raise
+
+
 def _destroy(entry, state: dict, preview_id: str) -> None:
     record = state['previews'].get(preview_id)
     if not record:
@@ -131,24 +165,21 @@ def _destroy(entry, state: dict, preview_id: str) -> None:
         if proof.get('ok') is not True or proof.get('creation_receipt') != receipt:
             raise ValueError('preview_instance_custody_mismatch')
         # Persist before dispatch. A lost response can never trigger a blind retry.
-        record['delete_phase'] = 'unknown'
-        _save_state(state)
-        remote.delete_remote_instance(entry, record['instance'], creation_context=context,
-            expected_incarnation=receipt['instance_incarnation_id'])
+        _delete_step(state, record, 'unknown', lambda: remote.delete_remote_instance(
+            entry, record['instance'], creation_context=context,
+            expected_incarnation=receipt['instance_incarnation_id']))
         record['delete_phase'] = 'instance_deleted'
         _save_state(state)
     if record.get('delete_phase') != 'route_deleted':
-        record['delete_phase'] = 'route_unknown'
-        _save_state(state)
-        remote.remove_instance_https_route(entry, record['domain'], expected_port=port,
-            incarnation=receipt['instance_incarnation_id'])
+        _delete_step(state, record, 'route_unknown', lambda: remote.remove_instance_https_route(
+            entry, record['domain'], expected_port=port,
+            incarnation=receipt['instance_incarnation_id']))
         record['delete_phase'] = 'route_deleted'
         _save_state(state)
     # Reobserve provider identity after runtime/route teardown, before DNS deletion.
     _verify_dns(client, record['zone_id'], record['domain'], record['dns_record'])
-    record['delete_phase'] = 'dns_unknown'
-    _save_state(state)
-    client.delete_record(record['zone_id'], record['dns_record_id'])
+    _delete_step(state, record, 'dns_unknown', lambda: client.delete_record(
+        record['zone_id'], record['dns_record_id']))
     del state['previews'][preview_id]
     _save_state(state)
 
@@ -205,9 +236,19 @@ def _cmd_preview(cfg, args) -> None:
         entry = preview_target(args.remote)
         if not can_operate_host(entry):
             die("a provisioned --remote is required")
+        skipped = []
         for row in entries:
-            _destroy(entry, state, row["id"])
-        ok(f"removed {len(entries)} expired remote preview(s)")
+            # One row that cannot be removed (a legacy row without custody
+            # fields, a delete left unknown) must not stop the others.
+            try:
+                _destroy(entry, state, row["id"])
+            except (RuntimeError, ValueError) as exc:
+                skipped.append(f"{row['id']} ({remote.redact_text(str(exc))[:200]})")
+        removed = len(entries) - len(skipped)
+        if skipped:
+            die(f"removed {removed} expired remote preview(s); could not remove {len(skipped)}: "
+                + "; ".join(skipped))
+        ok(f"removed {removed} expired remote preview(s)")
         return
 
     # create: an explicit confirmation is required because it deploys code,

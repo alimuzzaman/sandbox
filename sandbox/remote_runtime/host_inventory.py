@@ -9,6 +9,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 _DIAGNOSTICS_SCHEMA_VERSION = 2
@@ -105,6 +107,69 @@ def _diagnostic_process_snapshot() -> dict:
     }
 
 
+# docker stats (~5 s) and the storage probe (~6 s) dominate /inventory, yet
+# admission checks (remote join, tailnet member probe) read only the schema.
+# A fast snapshot serves the last result of each slow probe with its age,
+# refreshes it single-flight in the background when older than the TTL, and
+# waits at most a moment for the very first one. A result older than
+# _SLOW_PROBE_MAX_AGE_SECONDS is never served. Deep scans measure directly and
+# store what they measured.
+_SLOW_PROBE_TTL_SECONDS = 30
+_SLOW_PROBE_MAX_AGE_SECONDS = 3 * _SLOW_PROBE_TTL_SECONDS
+_SLOW_PROBE_FIRST_WAIT_SECONDS = 1.0
+_slow_probe_lock = threading.Lock()
+_slow_probes: dict = {}
+
+
+def _slow_probe_entry(key) -> dict:
+    return _slow_probes.setdefault(key, {"value": None, "at": None, "failed": False, "thread": None})
+
+
+def _record_slow_probe(key, value) -> None:
+    with _slow_probe_lock:
+        entry = _slow_probe_entry(key)
+        entry["value"], entry["at"], entry["failed"] = value, time.monotonic(), False
+
+
+def _cached_slow_probe(key, compute) -> tuple[str, object, int | None]:
+    """(state, value, age_seconds) for one slow probe; state is ok, pending or failed.
+
+    ``key`` is the probe callable itself, so a replaced probe never reads another's value.
+    """
+    def usable(entry):
+        if entry["value"] is None:
+            return None
+        age = time.monotonic() - entry["at"]
+        return age if age < _SLOW_PROBE_MAX_AGE_SECONDS else None
+
+    with _slow_probe_lock:
+        entry = _slow_probe_entry(key)
+        age = usable(entry)
+        if age is None or age >= _SLOW_PROBE_TTL_SECONDS:
+            if entry["thread"] is None or not entry["thread"].is_alive():
+                def refresh():
+                    try:
+                        value = compute()
+                    except Exception:  # noqa: BLE001 - recorded as a failure; the caller reports unavailable
+                        with _slow_probe_lock:
+                            entry["failed"] = True
+                        return
+                    _record_slow_probe(key, value)
+                entry["thread"] = threading.Thread(target=refresh, name="inventory-probe", daemon=True)
+                entry["thread"].start()
+        if age is not None:
+            return "ok", entry["value"], int(age)
+        if entry["failed"]:
+            return "failed", None, None
+        thread = entry["thread"]
+    thread.join(_SLOW_PROBE_FIRST_WAIT_SECONDS)
+    with _slow_probe_lock:
+        age = usable(entry)
+        if age is not None:
+            return "ok", entry["value"], int(age)
+        return ("failed" if entry["failed"] else "pending"), None, None
+
+
 def _container_key(name: str) -> str:
     return name.lower().replace("_", "-")
 
@@ -195,8 +260,20 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
         instances = []
         partial.append("instance_inventory_unavailable")
 
-    diagnostics = _diagnostic_process_snapshot()
+    if deep:
+        diagnostics = _diagnostic_process_snapshot()
+        _record_slow_probe(_diagnostic_process_snapshot, diagnostics)
+        diagnostics_age = 0
+    else:
+        state, diagnostics, diagnostics_age = _cached_slow_probe(
+            _diagnostic_process_snapshot, _diagnostic_process_snapshot)
+        if state != "ok":
+            status = "pending" if state == "pending" else "unavailable"
+            diagnostics = {"containers": {"status": status, "rows": []}}
+            partial.append(f"container_inventory_{status}")
     container_view = diagnostics.get("containers") or {"status": "unavailable", "rows": []}
+    if diagnostics_age is not None and isinstance(container_view, dict):
+        container_view = {**container_view, "observed_age_seconds": diagnostics_age}
     container_rows = container_view.get("rows") if isinstance(container_view, dict) else []
     container_rows = container_rows if isinstance(container_rows, list) else []
     try:
@@ -233,23 +310,35 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     unattributed = [row for row in container_rows if str(row.get("name") or "") not in attributed_names]
 
     try:
-        storage_probe = LocalProbeAdapter().observe_reclaim(
-            budget_seconds=30 if deep else 8,
-            directory_cache="refresh" if deep else "cache_only",
-        )
-        storage = {
-            "status": "partial" if any(
-                str(item.get("status")) not in {"complete", "measured"}
-                for item in (storage_probe.get("category_outcomes") or ())
-                if isinstance(item, dict)
-            ) else "complete",
-            "capacity": storage_probe.get("capacity"),
-            "capacity_scope_id": storage_probe.get("capacity_scope_id"),
-            "attribution_status": (
-                "available" if storage_probe.get("deep_attribution") else "unknown"
-            ),
-            "category_outcomes": list(storage_probe.get("category_outcomes") or ())[:50],
-        }
+        if deep:
+            storage_probe = LocalProbeAdapter().observe_reclaim(
+                budget_seconds=30, directory_cache="refresh")
+            _record_slow_probe(LocalProbeAdapter, storage_probe)
+            storage_state, storage_age = "ok", 0
+        else:
+            storage_state, storage_probe, storage_age = _cached_slow_probe(
+                LocalProbeAdapter, lambda: LocalProbeAdapter().observe_reclaim(
+                    budget_seconds=8, directory_cache="cache_only"))
+        if storage_state == "ok":
+            storage = {
+                "status": "partial" if any(
+                    str(item.get("status")) not in {"complete", "measured"}
+                    for item in (storage_probe.get("category_outcomes") or ())
+                    if isinstance(item, dict)
+                ) else "complete",
+                "capacity": storage_probe.get("capacity"),
+                "capacity_scope_id": storage_probe.get("capacity_scope_id"),
+                "attribution_status": (
+                    "available" if storage_probe.get("deep_attribution") else "unknown"
+                ),
+                "category_outcomes": list(storage_probe.get("category_outcomes") or ())[:50],
+                "observed_age_seconds": storage_age,
+            }
+        else:
+            status = "pending" if storage_state == "pending" else "unavailable"
+            storage = {"status": status, "capacity": None,
+                       "attribution_status": "unknown", "category_outcomes": []}
+            partial.append(f"storage_inventory_{status}")
     except Exception:
         storage = {"status": "unavailable", "capacity": None,
                    "attribution_status": "unknown", "category_outcomes": []}

@@ -1597,12 +1597,18 @@ def _member_access_setting(entry: dict, home: str) -> bool | None:
     return isinstance(document, dict) and document.get("tailnet_members") is True
 
 
+# Join and the member-access probe read /inventory only for its schema, but the
+# server builds the whole dashboard snapshot (docker stats, an 8 s storage probe)
+# before it answers: about 19 s on xspeed-dev with 16 stacks. 15 s timed out.
+INVENTORY_ADMISSION_TIMEOUT = 60
+
+
 def _member_access_probe(entry: dict) -> str:
     """What the live control service does with a tailnet node that sends no token."""
     probe = {key: value for key, value in entry.items() if key != "bearer_token"}
     probe["control_access"] = "tailnet"
     try:
-        result = sr._remote_control_request(probe, "/inventory", timeout=15)
+        result = sr._remote_control_request(probe, "/inventory", timeout=INVENTORY_ADMISSION_TIMEOUT)
     except RuntimeError as exc:
         return "refused" if "HTTP 401" in str(exc) else "unknown"
     return "admitted" if result.get("inventory_schema") == 1 else "unknown"
@@ -1746,7 +1752,7 @@ def _cmd_join(args, as_json: bool) -> None:
              "tailscale_host": address, "mcp_port": port, "control_access": "tailnet",
              "provisioned": True, "joined": True}
     try:
-        inventory = sr._remote_control_request(entry, "/inventory", timeout=15)
+        inventory = sr._remote_control_request(entry, "/inventory", timeout=INVENTORY_ADMISSION_TIMEOUT)
     except RuntimeError as exc:
         if 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
             die('remote_access_denied: the control service denied the HTTP request')

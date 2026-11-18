@@ -144,6 +144,19 @@ class RetirementOutcomes(unittest.TestCase):
         self.lock.assert_not_called()
         self.save.assert_not_called()
 
+    def test_interrupted_operation_reads_without_closing_it(self):
+        lookup = lambda _job: {'lifecycle': 'failed'}  # noqa: E731
+        summary = delivery.interrupted_operation(self.validated, 'fixture-remote', 'abandoned-apply',
+                                                 job_lookup=lookup)
+        self.assertEqual(summary['request_id'], 'abandoned-apply')
+        self.assertEqual(self.retained(), self.original_operation)
+        retired = command.retire_delivery(self.validated, 'fixture-remote', 'abandoned-apply', lock_wait=1)
+        self.assertEqual(retired['execution_state'], 'interrupted')
+        self.save.assert_called_once()
+        with self.assertRaises(DeliveryError) as raised:
+            delivery.interrupted_operation(self.validated, 'fixture-remote', 'abandoned-apply', job_lookup=lookup)
+        self.assertEqual(raised.exception.code, 'delivery_terminal_conflict')
+
     def test_destroy_fence_written_between_phases_is_preserved(self):
         fenced = copy.deepcopy(self.state)
         fenced['hosts'][self.key]['active_operation'] = {'action': 'destroy'}

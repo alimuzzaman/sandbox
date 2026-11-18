@@ -2136,7 +2136,21 @@ stop lands while a timed-out prepare is being stopped or just as it exits. Other
 `succeeded` (the heads become the applied heads) or `failed` with a reason. The follower never
 removes or rolls back anything: after a failed apply the stack is exactly as a failed
 `host stack up` leaves it. Failed heads are not tried again until a branch moves or the
-owner runs `run-now`. A canonical stack's apply also runs the stack merge sweep
+owner runs `run-now`.
+
+**An interrupted earlier delivery.** A delivery whose owner stopped before recording an
+outcome (the attempt job or its apply was killed mid-apply) fences every later apply of
+the target with `required_evidence_missing`. Before the prepare step the attempt reads
+the target's recorded delivery. When it is still open and its job has ended, and its
+request id is one this follow's own attempts submitted (the nested apply id derived from
+an attempt job id in the follow's audit), the attempt retires it as
+`sb host retire-delivery` would, audits `predecessor_retired` and goes on. A delivery the
+follow did not start is never retired: the attempt fails with
+`follow_predecessor_not_owned`, and `status` puts the exact
+`sb host retire-delivery --name ... --original-request-id ... --confirm` command in
+`last_check.reason` and `last_check.next_command`; run it, then `run-now`. A retirement
+that fails names the same command (`follow_predecessor_retire_failed`). A predecessor
+whose job still runs makes the attempt `busy`. A canonical stack's apply also runs the stack merge sweep
 (spec 077), as a person's would.
 
 **Owner controls.** `pause` stops new attempts (one already running finishes and is

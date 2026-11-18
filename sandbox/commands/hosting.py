@@ -4349,48 +4349,42 @@ def _recovery_observer(validated: dict, entry: dict, remote_name: str,
     }
 
 
-def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
-    """Close an abandoned delivery attempt so the target can be applied again.
+class RetireCleanupPending(Exception):
+    """The attempt was retired, but host state cleanup could not take the state lock."""
 
-    This writes no runtime effect and observes nothing. It only records that a
-    human closed an attempt whose owner never reported back, which is the one
-    case `host recover` cannot resolve: recovery needs a complete runtime
-    observation, and an interrupted owner leaves none.
+    def __init__(self, summary: dict):
+        super().__init__("host state cleanup pending")
+        self.summary = summary
+
+
+def retire_delivery(validated: dict, remote_name: str, original: str, *, lock_wait: int) -> dict:
+    """Retire one interrupted delivery attempt and clear the fences it left in host state.
+
+    Raises ``DeliveryError`` with nothing changed, ``HostingRefusal``
+    (``host_destroy_owns_target``) when a destroy holds the target, and
+    ``RetireCleanupPending`` when the attempt was retired but host state was not cleaned.
     """
     from sandbox.delivery.hosting import retire_interrupted_operation
-    from sandbox.delivery.models import DeliveryError
-
-    original = getattr(args, "original_request_id", None)
-    if not isinstance(original, str) or not original.strip():
-        die("host retire-delivery requires --original-request-id; no record was changed")
-    if not getattr(args, "confirm", False):
-        die("host retire-delivery is protected; review `./sb delivery inspect` "
-            "then pass --confirm")
-    if _destroy_owns(hosting.load_host_state(), hosting.state_key(remote_name, validated)):
-        die("host destroy owns this target; finish or re-run it with --clear-fenced first; "
-            "no record was changed")
+    from sandbox.core._hosting import HostingRefusal
+    target_key = hosting.state_key(remote_name, validated)
+    if _destroy_owns(hosting.load_host_state(), target_key):
+        raise HostingRefusal("host_destroy_owns_target",
+                             "host destroy owns this target; finish or re-run it with --clear-fenced first; "
+                             "no record was changed")
+    summary = retire_interrupted_operation(
+        validated, remote_name, original, job_lookup=_recovery_job_lookup,
+        recorded_operation=lambda: ((hosting.load_host_state().get("hosts") or {}).get(
+            target_key) or {}).get("hosting_operation"))
     try:
-        summary = retire_interrupted_operation(
-            validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup,
-            recorded_operation=lambda: ((hosting.load_host_state().get("hosts") or {}).get(
-                hosting.state_key(remote_name, validated)) or {}).get("hosting_operation"))
-    except DeliveryError as exc:
-        payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
-                   "original_request_id": original.strip()}
-        if getattr(args, "json", False):
-            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-            raise SystemExit(1)
-        die(exc.code + "; inspect the retained delivery record before retrying")
-    try:
-        target_key = hosting.state_key(remote_name, validated)
         from sandbox.hosting.recovery.repository import RecoveryRepository
         # Under the state lock, so a destroy fence written after this read
         # cannot be overwritten by this save.
-        with RecoveryRepository().state_lock(timeout_seconds=_host_apply_lock_wait(args)):
+        with RecoveryRepository().state_lock(timeout_seconds=lock_wait):
             state = hosting.load_host_state()
             record = (state.get("hosts") or {}).get(target_key)
             if record and _destroy_owns(state, target_key):
-                die("host destroy took this target during retirement; its fence was kept")
+                raise HostingRefusal("host_destroy_owns_target",
+                                     "host destroy took this target during retirement; its fence was kept")
             if record:
                 record["active_operation"] = None
                 record["recovery_uncertainty"] = None
@@ -4412,11 +4406,45 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
                     record["retired_unproven_runtime"] = True
                 hosting.save_host_state(state)
     except TimeoutError:
+        raise RetireCleanupPending(summary) from None
+    return summary
+
+
+def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
+    """Close an abandoned delivery attempt so the target can be applied again.
+
+    This writes no runtime effect and observes nothing. It only records that a
+    human closed an attempt whose owner never reported back, which is the one
+    case `host recover` cannot resolve: recovery needs a complete runtime
+    observation, and an interrupted owner leaves none.
+    """
+    from sandbox.delivery.models import DeliveryError
+    from sandbox.core._hosting import HostingRefusal
+
+    original = getattr(args, "original_request_id", None)
+    if not isinstance(original, str) or not original.strip():
+        die("host retire-delivery requires --original-request-id; no record was changed")
+    if not getattr(args, "confirm", False):
+        die("host retire-delivery is protected; review `./sb delivery inspect` "
+            "then pass --confirm")
+    try:
+        summary = retire_delivery(validated, remote_name, original.strip(),
+                                  lock_wait=_host_apply_lock_wait(args))
+    except HostingRefusal as exc:
+        die(str(exc.detail if getattr(exc, "detail", None) else exc))
+    except DeliveryError as exc:
+        payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
+                   "original_request_id": original.strip()}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+            raise SystemExit(1)
+        die(exc.code + "; inspect the retained delivery record before retrying")
+    except RetireCleanupPending as exc:
         guidance = ("delivery retirement was recorded, but host state cleanup is pending; "
                     "inspect the retained delivery record and host state before any further action")
         payload = {"ok": False, "code": "operation_busy", "operation": "retire-delivery",
                    "original_request_id": original.strip(), "partial": True,
-                   "retired": summary, "host_state_cleanup": "pending", "guidance": guidance}
+                   "retired": exc.summary, "host_state_cleanup": "pending", "guidance": guidance}
         if getattr(args, "json", False):
             print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
             raise SystemExit(1)

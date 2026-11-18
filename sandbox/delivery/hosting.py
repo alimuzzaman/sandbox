@@ -104,23 +104,13 @@ def recorded_operation_lookup(repository, current_target, recorded_operation, re
     return operation
 
 
-def retire_interrupted_operation(validated, remote_name, original_request_id, *, job_lookup,
-                                 recorded_operation=None):
-    """Close an abandoned attempt that can never produce its own evidence.
+def _retirable_operation(validated, remote_name, original_request_id, *, job_lookup,
+                         recorded_operation=None):
+    """The retained attempt ``original_request_id`` if it is open and its owner has ended.
 
-    An owner that exits without recording a terminal outcome leaves the target
-    fenced: ordinary apply refuses while the predecessor has no terminal
-    snapshot, and observation recovery cannot retire it because the evidence it
-    needs was never written. This closes that loop for an operator without
-    inventing anything. The attempt becomes `interrupted`, its evidence stays
-    exactly as incomplete as it really is, and the pinned reason records that a
-    human retired it rather than an owner completing it.
-
-    ``recorded_operation`` is a zero-argument callable returning the target's recorded
-    hosting operation; it is read only when the current checkout's scope has no such
-    request (a stack's later checkout, spec 084).
+    Read-only. Raises the refusal retirement would give: ``delivery_terminal_conflict``
+    when it is already closed, ``authority_pending`` while its job can still report.
     """
-    import copy
     target = target_for_project(validated.get('manifest_root') or validated['project_root'], remote_name,
                                 environment=validated['environment'])
     repository = DeliveryRepository(RUNTIME_DIR.parent)
@@ -154,6 +144,37 @@ def retire_interrupted_operation(validated, remote_name, original_request_id, *,
         if isinstance(job, dict) and job.get('lifecycle') in {
                 'accepted', 'queued', 'running', 'cancelling'}:
             raise DeliveryError('authority_pending')
+    return repository, operation
+
+
+def interrupted_operation(validated, remote_name, original_request_id, *, job_lookup,
+                          recorded_operation=None):
+    """The summary of an attempt retirement would close, without closing it."""
+    return operation_summary(_retirable_operation(
+        validated, remote_name, original_request_id, job_lookup=job_lookup,
+        recorded_operation=recorded_operation)[1])
+
+
+def retire_interrupted_operation(validated, remote_name, original_request_id, *, job_lookup,
+                                 recorded_operation=None):
+    """Close an abandoned attempt that can never produce its own evidence.
+
+    An owner that exits without recording a terminal outcome leaves the target
+    fenced: ordinary apply refuses while the predecessor has no terminal
+    snapshot, and observation recovery cannot retire it because the evidence it
+    needs was never written. This closes that loop for an operator without
+    inventing anything. The attempt becomes `interrupted`, its evidence stays
+    exactly as incomplete as it really is, and the pinned reason records that a
+    human retired it rather than an owner completing it.
+
+    ``recorded_operation`` is a zero-argument callable returning the target's recorded
+    hosting operation; it is read only when the current checkout's scope has no such
+    request (a stack's later checkout, spec 084).
+    """
+    import copy
+    repository, operation = _retirable_operation(
+        validated, remote_name, original_request_id, job_lookup=job_lookup,
+        recorded_operation=recorded_operation)
     candidate = copy.deepcopy(operation)
     at = now()
     candidate = append_event(candidate, {

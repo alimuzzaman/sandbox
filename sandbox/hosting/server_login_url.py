@@ -140,11 +140,11 @@ def _reply(stdout: str) -> dict | None:
     return None
 
 
-def _call(entry, ssh_run, command: str, timeout: int, *, what: str):
+def _call(entry, ssh_run, command: str, timeout: int, *, what: str, retry_timeout: bool = True):
     """Run one control command; retry a connect failure or a timeout, nothing else.
 
-    A connect-phase failure never started the command. A timeout may have: it
-    is retried because the probe is read-only and the mint re-sends the same
+    A connect-phase failure never started the command. A timeout may have: with
+    ``retry_timeout`` (the default) it is retried because the probe is read-only and the mint re-sends the same
     hash, which installs the same entry rather than a second link. Any other
     answer, including an exit 255 after the session opened, is returned as is.
     """
@@ -153,6 +153,10 @@ def _call(entry, ssh_run, command: str, timeout: int, *, what: str):
         try:
             result = ssh_run(entry, command, timeout=timeout)
         except subprocess.TimeoutExpired:
+            if not retry_timeout:
+                # A repeated command could act twice; its first run may have.
+                raise HostingRefusal(UNAVAILABLE, f"{what} did not answer in time; it may have finished, "
+                                     "so it was not repeated; nothing was shown") from None
             timed_out = True
         else:
             if not _not_connected(result):
@@ -170,8 +174,10 @@ def _migrate_hint(remote_name: str) -> str:
     return f"sb remote service migrate {remote_name} --confirm"
 
 
-def _require_capability(args, entry, ssh_run, identity: str, marker: str) -> None:
-    """Admit only the registered owner whose installed runtime serves CONTRACT, before any mint."""
+def _require_capability(args, entry, ssh_run, identity: str, marker: str, *,
+                        key: str = "host_login_url_capabilities", contract: str = CONTRACT,
+                        purpose: str = "issue login links") -> None:
+    """Admit only the registered owner whose installed runtime serves ``contract``, before any mint."""
     import sandbox.core._remote as remote
     result = _call(entry, ssh_run, PROBE_COMMAND, PROBE_TIMEOUT_SECONDS,
                    what=f"{args.remote}'s capability probe")
@@ -184,9 +190,9 @@ def _require_capability(args, entry, ssh_run, identity: str, marker: str) -> Non
     if observed.get("target_identity") != identity or observed.get("ownership_marker") != marker:
         raise HostingRefusal(UNAVAILABLE, f"{args.remote} did not answer as its registered owner; "
                              "nothing was issued")
-    capabilities = observed.get("host_login_url_capabilities")
-    if not isinstance(capabilities, list) or CONTRACT not in capabilities:
-        raise HostingRefusal(UNAVAILABLE, f"the runtime installed on {args.remote} cannot issue login links "
+    capabilities = observed.get(key)
+    if not isinstance(capabilities, list) or contract not in capabilities:
+        raise HostingRefusal(UNAVAILABLE, f"the runtime installed on {args.remote} cannot {purpose} "
                              f"for the targets it records yet; migrate it first ({_migrate_hint(args.remote)}); "
                              "nothing was issued")
 
@@ -243,7 +249,7 @@ def _local_runner(command: str, timeout: int) -> str:
     return result.stdout
 
 
-def _require_this_host(remote_name: str) -> None:
+def _require_this_host(remote_name: str, *, command: str = "login-url") -> None:
     """``--remote`` must name this host, the origin its controllers registered it under.
 
     A name this host itself registers as one of its own remotes is another
@@ -256,10 +262,10 @@ def _require_this_host(remote_name: str) -> None:
         raise HostingRefusal(REMOTE_MISMATCH, "this host's own remote registry could not be read") from None
     if own is not None:
         raise HostingRefusal(REMOTE_MISMATCH, f"{remote_name} is a remote this host controls, not this host; "
-                             "run login-url from that remote's controller")
+                             f"run {command} from that remote's controller")
 
 
-def _require_stack(remote_name: str, args) -> dict:
+def _require_stack(remote_name: str, args, *, command: str = "login-url") -> dict:
     """Only a stack this host records; a plain target would read a manifest from the cwd."""
     from sandbox.hosting import stack_registry, target_resolution
     registry = stack_registry.read()
@@ -269,7 +275,7 @@ def _require_stack(remote_name: str, args) -> dict:
         if target_resolution._stack_record(registry, remote_name, project=project,
                                            environment=environment) is None:
             raise HostingRefusal(NOT_STACK, f"{target} is not a stack this server records for {remote_name}; "
-                                 "login-url on a joined remote covers recorded stacks only")
+                                 f"{command} on a joined remote covers recorded stacks only")
     return registry
 
 

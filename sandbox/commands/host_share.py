@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 from sandbox.hosting import login_service as login
-from sandbox.hosting import share, target_resolution
+from sandbox.hosting import server_share, share, target_resolution
 from sandbox.hosting.share import ShareRefusal
 from sandbox.hosting.share import stack_page, fanout
 
@@ -181,6 +181,11 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
     ``caller`` is ``cli``, ``mcp`` or ``panel``. Only ``cli`` may fall back to the
     terminal when the target has not opted in to agent-made links.
     """
+    joined = server_share.joined_entry(remote_name, target=target, name=name, stack=stack)
+    if joined is not None:
+        return _create_joined(remote_name, joined, target=target, name=name, project_dir=project_dir,
+                              environment=environment, entry=entry, path=path, ttl=ttl, uses=uses,
+                              email=email, caller=caller)
     found = None
     label = target or (f"stack:{stack}" if stack else name) or "unresolved"
     request = None
@@ -266,6 +271,64 @@ def create_share(remote_name: str, *, stack: str | None = None, target: str | No
     return {"ok": True, **result}
 
 
+def _joined(op: str, remote_name: str, label: str, run) -> dict:
+    """Run one server-side share verb; the controller audit records it like any other."""
+    fields = {}
+    try:
+        result = run(fields)
+    except Exception as exc:  # noqa: BLE001 -- every refusal is audited, then re-raised
+        refusal = _refusal_from(exc)
+        _audit(None, op, remote_name=remote_name, target_label=fields.get("target", label),
+               outcome="refused", code=refusal.code, entry=fields.get("entry"))
+        raise refusal from None
+    _audit(None, op, remote_name=remote_name, target_label=result["target"], outcome="ok",
+           entry=result.get("entry"), link_id=result.get("link_id"))
+    return result
+
+
+def _create_joined(remote_name, entry_record, *, target, name, project_dir, environment, entry, path,
+                   ttl, uses, email, caller) -> dict:
+    """``create`` for a target the joined server records: the token stays here."""
+    def run(fields):
+        server_share.check_selectors(remote_name=remote_name, target=target, name=name,
+                                     project_dir=project_dir, email=email)
+        scope, ttl_seconds, use_limit = share.validate_scope(path), share.parse_ttl(ttl), share.parse_uses(uses)
+        terminal = (_operator_terminal()
+                    if caller == "cli" and not os.environ.get(CALLER_ENV) else None)
+        try:
+            token = share.new_token()
+            reply = server_share.call(
+                remote_name, entry_record, "create", target=target, name=name, environment=environment,
+                entry=entry, path=None if path is None else scope, ttl=None if ttl is None else ttl_seconds,
+                uses=use_limit, token_sha256=share.token_hash(token), json_link=terminal is None)
+            fields.update(target=reply["target"], entry=reply["entry"])
+            if reply.get("link_id") != share.short_link_id(token):
+                raise ShareRefusal("share_failed", "the server did not confirm this link")
+            result = {key: reply.get(key) for key in (
+                "target", "entry", "kind", "scope", "expires_at", "expires_clamped", "uses", "hostname",
+                "link_id")}
+            link = share.share_url(reply["hostname"], token)
+            if reply.get("agent_mint") is True:
+                result["link"] = link
+            elif terminal is not None:
+                try:
+                    terminal.write(f"{link}\n")
+                    terminal.flush()
+                except OSError:
+                    raise ShareRefusal("share_failed", f"the terminal could not be written; revoke "
+                                                       f"{result['link_id']} and mint a new link") from None
+                result["link_shown_on"] = "terminal"
+            else:
+                raise ShareRefusal("share_failed", f"the server stored {result['link_id']} for no terminal; "
+                                                   "revoke it")
+            del link, token
+            return result
+        finally:
+            if terminal is not None:
+                terminal.close()
+    return {"ok": True, **_joined("create", remote_name, target or name, run)}
+
+
 def _mint_locked(found: ShareTarget, request: share.LinkRequest, stack_record: dict | None) -> dict:
     """Mint under the target's writer lock, so an apply never recreates the gate mid-mint."""
     from sandbox.commands.hosting import _with_host_writer_lock
@@ -296,6 +359,17 @@ def _mint_locked(found: ShareTarget, request: share.LinkRequest, stack_record: d
 def list_shares(remote_name: str, *, target: str | None = None, name: str | None = None,
                 stack: str | None = None, project_dir: str | None = None,
                 environment: str | None = None, entry: str | None = None) -> dict:
+    joined = server_share.joined_entry(remote_name, target=target, name=name, stack=stack)
+    if joined is not None:
+        def run(fields):
+            server_share.check_selectors(remote_name=remote_name, target=target, name=name,
+                                         project_dir=project_dir)
+            reply = server_share.call(remote_name, joined, "list", target=target, name=name,
+                                      environment=environment, entry=entry)
+            fields.update(target=reply["target"], entry=reply["entry"])
+            return {"ok": True, "target": reply["target"], "entry": reply["entry"],
+                    "links": list(reply["links"]), "sessions": list(reply["sessions"])}
+        return _joined("list", remote_name, target or name, run)
     found, label, name_ = None, target or name or stack or "unresolved", entry
     rows = ()
     try:
@@ -386,6 +460,19 @@ def _check_recorded_revoke_selectors(remote_name: str, attempt, *, target: str |
 def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, name: str | None = None,
                  stack: str | None = None, project_dir: str | None = None,
                  environment: str | None = None, entry: str | None = None, caller: str = "cli") -> dict:
+    joined = server_share.joined_entry(remote_name, target=target, name=name, stack=stack)
+    if joined is not None:
+        def run(fields):
+            server_share.check_selectors(remote_name=remote_name, target=target, name=name,
+                                         project_dir=project_dir)
+            if not isinstance(link_id, str) or not share.REVOKE_TARGET_RE.fullmatch(link_id):
+                raise ShareRefusal("site_link_unknown", "pass a link id (l-...), a session id (s-...), or all")
+            reply = server_share.call(remote_name, joined, "revoke", target=target, name=name,
+                                      environment=environment, entry=entry, link_id=link_id)
+            fields.update(target=reply["target"], entry=reply["entry"])
+            return {"ok": True, "target": reply["target"], "entry": reply["entry"], "link_id": link_id,
+                    **{key: reply.get(key, 0) for key in ("revoked_links", "revoked_sessions", "revoked_keys")}}
+        return _joined("revoke", remote_name, target or name, run)
     found, label, name_ = None, target or name or stack or "unresolved", entry
     try:
         if sum(value is not None for value in (target, name, stack)) > 1:
@@ -526,6 +613,13 @@ def _utc(epoch: object) -> str:
 
 
 def cmd_host_share(args) -> None:
+    if getattr(args, "here", False):
+        server_share.run_here(args)
+        return
+    if getattr(args, "token_sha256", None) is not None or getattr(args, "json_link", False):
+        print("sb host share: share_options_conflict: --token-sha256 and --json-link are only for "
+              "the server side (--here)", file=sys.stderr)
+        raise SystemExit(1)
     verb = getattr(args, "image_action", None)
     as_json = bool(getattr(args, "json", False))
     selector = {"target": getattr(args, "target", None), "name": getattr(args, "name", None),

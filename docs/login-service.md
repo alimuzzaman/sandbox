@@ -347,6 +347,25 @@ one; the `share` block's entry is the default. MCP tools `host_share_create`,
 - **Revoke.** Revoking a link ends its sessions at their next request and an open
   websocket within 30 seconds. `all` revokes every link and session of the entry.
 
+**Stacks a joined server records.** On a joined Tailnet remote, `host stack up` and the
+server's own follows (`host follow`) run on the server, so the stack record, its rendered
+manifest and the hosting state live there and the controller resolves nothing. There
+`create`, `list` and `revoke` with `--name` or `--target` run on the server, as
+`host login-url` does: the controller reads the installed runtime's `job-capabilities`
+(contract `host.share-here.v1` under `host_share_capabilities`), then makes one control
+call, `sb host share <verb> --here`. The installed owner resolves its recorded stack,
+changes the gate under the target's writer lock, audits it on the server and answers
+with one JSON line. For `create` the controller makes the token and sends only its
+SHA-256; the server stores that hash and answers with the link id and gate hostname,
+never the link, and the controller builds the link and returns or shows it under the
+rules above. With no terminal to show it on, the controller passes `--json-link`, and a
+target without `share.agent_mint: true` refuses on the server before anything is stored.
+A `create` that times out is not sent again, because it may have stored the record;
+revoke that id if it shows up in `list`. A runtime older than control protocol 28 lacks
+the contract and refuses with `login_url_server_unavailable` and
+`sb remote service migrate <remote> --confirm`. `--project-dir` cannot be combined with
+`--name` or `--target` there. A stack page (`--stack`) keeps the controller path.
+
 `host login-url --service <site entry>` still mints a whole-site link (terminal only,
 one use by default), now in the same form.
 

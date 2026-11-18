@@ -1194,13 +1194,15 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--force-owner", dest="force_owner", action="store_true",
         help="host stack down/ttl, host classify: act on a stack or target another owner holds (recorded)")
     host_p.add_argument("--here", action="store_true",
-        help="host stack reap, host login-url, host follow tick: run on this host itself (the remote side of the --remote form). "
+        help="host stack reap, host login-url, host share, host follow tick: run on this host itself (the remote side of the --remote form). "
              "host stack up|list|down|ttl|sweep|limits, host apply --confirm, host follow owner commands: "
              "as this host's installed owner, run the server CLI job locally (needs the owner origin record)")
     host_p.add_argument("--trigger", default=None, choices=["scheduled_routine", "stack_reap", "safe_tier"],
         help=argparse.SUPPRESS)
     # host login-url --here: the controller's token hash; the token stays on the controller.
     host_p.add_argument("--token-sha256", dest="token_sha256", default=None, help=argparse.SUPPRESS)
+    # host share create --here: the controller has no terminal, so the link goes to its --json.
+    host_p.add_argument("--json-link", dest="json_link", action="store_true", help=argparse.SUPPRESS)
     host_p.add_argument("--repo", dest="follow_repo", action="append", default=None,
         metavar="NAME=OWNER/REPO@BRANCH",
         help="host follow add: a GitHub repository and the branch to follow (repeatable; the first is the job source)")

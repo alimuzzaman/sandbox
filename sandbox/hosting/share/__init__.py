@@ -176,22 +176,47 @@ def clamp_expiry(issued_at: int, ttl_seconds: int, ends_at: int) -> tuple[int, b
     return expires, False
 
 
-def link_record(request: LinkRequest, minted: MintedLink) -> dict:
-    """The record the gate stores: the hash, never the token."""
-    return {"schema": "sandbox.share-link.v2", "entry": request.entry, "id": minted.link_id,
-            "token_sha256": minted.token_sha256, "issued_at": minted.issued_at,
-            "expires_at": minted.expires_at, "uses": request.uses, "scope": request.scope,
+def _record(request: LinkRequest, link_id: str, token_sha256: str, issued_at: int, expires_at: int) -> dict:
+    return {"schema": "sandbox.share-link.v2", "entry": request.entry, "id": link_id,
+            "token_sha256": token_sha256, "issued_at": issued_at,
+            "expires_at": expires_at, "uses": request.uses, "scope": request.scope,
             "kind": request.kind}
 
 
-def mint(request: LinkRequest, *, now: float, ends_at: int) -> MintedLink:
+def link_record(request: LinkRequest, minted: MintedLink) -> dict:
+    """The record the gate stores: the hash, never the token."""
+    return _record(request, minted.link_id, minted.token_sha256, minted.issued_at, minted.expires_at)
+
+
+def _lifetime(request: LinkRequest, now: float, ends_at: int) -> tuple[int, int, bool]:
     issued = int(now)
     expires, clamped = clamp_expiry(issued, request.ttl_seconds, ends_at)
     if expires - issued < MIN_TTL_SECONDS:
         raise ShareRefusal("login_service_expired",
                            "the gate's enabled_until is less than a minute away; extend it and apply")
+    return issued, expires, clamped
+
+
+def mint(request: LinkRequest, *, now: float, ends_at: int) -> MintedLink:
+    issued, expires, clamped = _lifetime(request, now, ends_at)
     token = new_token()
     return MintedLink(short_link_id(token), token, issued, expires, clamped)
+
+
+TOKEN_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def hashed_link_record(request: LinkRequest, token_sha256: str, *, now: float,
+                       ends_at: int) -> tuple[dict, bool]:
+    """The gate record for a token another host made: (record, clamped).
+
+    Only its SHA-256 is known here, so the id comes from that hash as
+    ``short_link_id`` derives it from the token.
+    """
+    if not isinstance(token_sha256, str) or not TOKEN_SHA256_RE.fullmatch(token_sha256):
+        raise ShareRefusal("share_options_conflict", "--token-sha256 must be 64 lowercase hex digits")
+    issued, expires, clamped = _lifetime(request, now, ends_at)
+    return _record(request, "l-" + token_sha256[:SHORT_ID_HEX], token_sha256, issued, expires), clamped
 
 
 # ---------------------------------------------------------------------------

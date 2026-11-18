@@ -438,7 +438,7 @@ class MockupTests(FakeCase):
         self.assertIn('<a href="gone.html">', html)
 
     def test_bad_names_are_refused(self):
-        for name in ("Bad Name", "a" * 54, "foo-", "-foo", "a--b"):
+        for name in ("Bad Name", "a" * 54, "a-" * 26 + "aa", "foo-", "-foo", "a--b"):
             with self.subTest(name=name), self.assertRaises(NotesError):
                 self.mockups.publish(self.src, name)
         longest = "a" * 53

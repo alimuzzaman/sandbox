@@ -25,7 +25,7 @@ from .service import NotesClient
 
 # The service cuts download filenames to 60 characters: "mockup-" plus 53 fits.
 # Single hyphens only, none at the ends: the service collapses and trims them.
-NAME = re.compile(r"[a-z0-9](?:-?[a-z0-9]){0,52}")
+NAME = re.compile(r"(?=[a-z0-9-]{1,53}\Z)[a-z0-9](?:-?[a-z0-9])*")
 PREFIX = "mockup-"
 ASSET_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MANIFEST_ID = "sb-mockup"

@@ -103,6 +103,13 @@ class JoinTest(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.put.assert_not_called()
 
+    def test_admission_waits_for_a_slow_inventory_snapshot(self):
+        # /inventory builds the full dashboard snapshot; on xspeed-dev it answers in ~19 s.
+        code, _ = self.join()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.control.call_args.args[1], "/inventory")
+        self.assertGreaterEqual(self.control.call_args.kwargs["timeout"], 45)
+
     def test_a_user_is_required(self):
         self.assertNotEqual(self.join(TAILNET)[0], 0)
         self.put.assert_not_called()

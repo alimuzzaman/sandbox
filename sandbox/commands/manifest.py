@@ -53,6 +53,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.recovery",
     "sandbox.commands.sync",
     "sandbox.commands.owned_storage",
+    "sandbox.commands.notes",
 )
 
 # Every currently shipped parser still defined in ``sandbox.cli`` is named here

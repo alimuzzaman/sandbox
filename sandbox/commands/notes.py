@@ -64,6 +64,12 @@ def configure_notes(parser) -> None:
     p.add_argument("directory")
     p.add_argument("--prune", action="store_true",
                    help="delete notes whose file is gone (default: report them)")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--adopt", action="store_true",
+                       help="for an unmapped file, take over the matching existing note even "
+                            "if its content differs (default: only an identical one)")
+    group.add_argument("--create-duplicates", action="store_true",
+                       help="for an unmapped file, always publish a new note")
 
     p = actions.add_parser("upload", help="attach an image to a note")
     _common(p)
@@ -266,7 +272,8 @@ def _notes(cfg, args) -> None:
             _emit(args, {"ok": True, "link": link},
                   [link.get("url", ""), f"expires {link.get('expires_at')}  id {link.get('id')}"])
     elif action == "sync":
-        report = client.sync(Path(args.directory), prune=args.prune)
+        report = client.sync(Path(args.directory), prune=args.prune, adopt=args.adopt,
+                             create_duplicates=args.create_duplicates)
         lines = []
         for bucket in ("created", "adopted", "updated", "recreated", "unchanged", "pruned"):
             for item in report[bucket]:

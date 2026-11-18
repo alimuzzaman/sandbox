@@ -112,15 +112,21 @@ a durable job, because job output is retained.
 
 - The map `<dir>/.notes.json` records `file -> {slug, url, title, sha256}` and
   the remote it belongs to. A map for another remote is refused.
-- A file with no map entry is first matched against your existing notes, so a
-  lost map or notes published by another client (such as an MCP session) are
-  not duplicated. It adopts the one note whose stored filename is the file's
-  name (as the service slugifies it, e.g. `11-php-versions-7.4-8.4.md` is
-  stored as `11-php-versions-7-4-8-4.md`), or failing that the one note with
-  the same title, and updates it in place (`adopted`, same URL). If two notes
-  match, the file fails with `notes_adopt_ambiguous` and nothing is created;
-  delete the extra note or add the right slug to the map. A file that matches
-  nothing is created.
+- A file with no map entry is first looked up among your existing notes, so a
+  lost map, or notes another client (such as an MCP session) already published,
+  do not turn into duplicates. Candidates are tailnet markdown notes that this
+  map does not already hold; public and HTML notes never are. A file matches
+  the note whose stored filename is the file's name as the service slugifies it
+  (`11-php-versions-7.4-8.4.md` is stored as `11-php-versions-7-4-8-4.md`).
+  Files with no filename match then match by title, among the notes left.
+  - If the match already has the file's exact content, sync adopts it: same URL,
+    reported as `adopted`, nothing overwritten.
+  - If the content differs, the file fails with `notes_adopt_differs` and
+    nothing changes. `--adopt` overwrites the match with the file instead.
+  - Two matches, or one note matching two files, fail with
+    `notes_adopt_ambiguous`.
+  - `--create-duplicates` skips the lookup and publishes new notes.
+  - A file that matches nothing is created.
 - Every note sync creates or updates stores the file name (without `.md`) as
   its download filename, so it can be found again the same way. A file whose content or first heading
   changed is updated (same URL). An unchanged file makes no call.
@@ -190,6 +196,7 @@ are not passed through.
 | `notes_incomplete` | The client stopped (killed or timed out) before reporting this call. A call cut off mid-request may still have been applied. |
 | `notes_tool_error` | The service refused the call; the message is the service's own. |
 | `notes_login_untrusted` | The dashboard did not sign this machine in by tailnet trust. |
-| `notes_adopt_ambiguous` | `sync`: two existing notes match an unmapped file; it was skipped. |
+| `notes_adopt_ambiguous` | `sync`: an unmapped file has more than one match, or shares one with another file; it was skipped. |
+| `notes_adopt_differs` | `sync`: an unmapped file matches an existing note with other content; nothing changed. Use `--adopt` or `--create-duplicates`. |
 | `notes_refused_in_job` | `login` or `share --ttl` inside a durable job. |
 | `mockup_exists` / `mockup_not_found` | `publish` over an existing name; any other action on a missing one. |

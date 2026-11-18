@@ -76,8 +76,9 @@ def title_for(path: Path, text: str, *, html: bool) -> str:
 def service_filename(name: str) -> str:
     """The download filename the service stores for ``name``: its slugify (src/notes.php)."""
     stem = Path(name).stem
-    slug = re.sub(r"[^a-z0-9]+", "-", stem, flags=re.I).strip("-").lower()[:60]
-    return slug or "note"
+    # ASCII only, like PCRE without /u; PHP's `?: 'note'` also treats "0" as empty.
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-").lower()[:60]
+    return slug if slug not in ("", "0") else "note"
 
 
 def sha256(text: str) -> str:
@@ -179,7 +180,66 @@ class NotesClient:
 
     # -- sync ---------------------------------------------------------------
 
-    def sync(self, directory: Path, *, prune: bool = False) -> dict:
+    def _adopt(self, names, texts, entries, *, adopt, fail, run) -> list[str]:
+        """Find already-published notes for unmapped files; return the files still to create.
+
+        Candidates are tailnet markdown notes not in this map. A file matches the one
+        note whose stored filename is its slugified name; files with no filename match
+        then match by title, over the notes still unclaimed. Without ``adopt`` a match
+        is taken only if its content already equals the file, so nothing is
+        overwritten; a match that differs, or more than one match, fails the file.
+        """
+        mapped = {e["slug"] for e in entries.values()}
+        existing = [n for n in self.list() if n.get("slug") not in mapped
+                    and n.get("format", "markdown") == "markdown"
+                    and n.get("visibility", "tailnet") == "tailnet"]
+        hint = ("pass --adopt to overwrite it with the file, or --create-duplicates to "
+                f"publish a new note, or map the right slug in {MAP_FILE}")
+        matches: dict[str, list[dict]] = {}
+        for name in names:
+            wanted = service_filename(name) + ".md"
+            matches[name] = [n for n in existing if n.get("filename") == wanted]
+        taken = {m[0]["slug"] for m in matches.values() if len(m) == 1}
+        for name in names:
+            if not matches[name]:
+                matches[name] = [n for n in existing if n.get("title") == texts[name][1]
+                                 and n["slug"] not in taken]
+        claims: dict[str, list[str]] = {}
+        for name in names:
+            if len(matches[name]) == 1:
+                claims.setdefault(matches[name][0]["slug"], []).append(name)
+        fresh, pending = [], []
+        for name in names:
+            found = matches[name]
+            if not found:
+                fresh.append(name)
+            elif len(found) > 1 or len(claims[found[0]["slug"]]) > 1:
+                others = sorted(n["slug"] for n in found) if len(found) > 1 else claims[found[0]["slug"]]
+                fail(name, {"code": "notes_adopt_ambiguous",
+                            "error": f"more than one match ({', '.join(others)}); {hint}"})
+            else:
+                pending.append((name, found[0]["slug"]))
+        if pending and not adopt:
+            notes = self.many([{"tool": "get_note", "arguments": {"slug": slug}}
+                               for _, slug in pending])
+            same = []
+            for (name, slug), result in zip(pending, notes):
+                content = (result.get("result") or {}).get("content") if result.get("ok") else None
+                if content == texts[name][0]:
+                    same.append((name, slug))
+                elif result.get("ok"):
+                    fail(name, {"code": "notes_adopt_differs",
+                                "error": f"existing note {slug} matches this file but its "
+                                         f"content differs; {hint}"})
+                else:
+                    fail(name, result)
+            pending = same
+        if pending:
+            run(pending)
+        return fresh
+
+    def sync(self, directory: Path, *, prune: bool = False, adopt: bool = False,
+             create_duplicates: bool = False) -> dict:
         directory = Path(directory)
         if not directory.is_dir():
             raise NotesError("notes_input_invalid", f"not a directory: {directory}")
@@ -233,38 +293,6 @@ class NotesClient:
             report["failed"].append({"file": name, "code": result.get("code"),
                                      "error": result.get("error")})
 
-        # A file with no map entry may already be published (by another client, or
-        # before the map was lost). Adopt the one existing note with the file's
-        # stored filename, else with the same title, instead of creating a copy.
-        adopts = []
-        if creates:
-            mapped = {e["slug"] for e in entries.values()}
-            existing = [n for n in self.list() if n.get("slug") not in mapped
-                        and n.get("format", "markdown") == "markdown"]
-            claimed: dict[str, str] = {}
-            fresh = []
-            for name in creates:
-                wanted = service_filename(name) + ".md"
-                found = [n for n in existing if n.get("filename") == wanted]
-                if not found:
-                    found = [n for n in existing if n.get("title") == texts[name][1]]
-                if len(found) > 1:
-                    fail(name, {"code": "notes_adopt_ambiguous", "error":
-                                f"{len(found)} existing notes match this file "
-                                f"({', '.join(sorted(n['slug'] for n in found))}); delete the "
-                                f"extra ones, or map the right one in {MAP_FILE}"})
-                elif found and found[0]["slug"] in claimed:
-                    fail(name, {"code": "notes_adopt_ambiguous", "error":
-                                f"note {found[0]['slug']} also matches "
-                                f"{claimed[found[0]['slug']]}; map the right one in {MAP_FILE}"})
-                elif found:
-                    claimed[found[0]["slug"]] = name
-                    entries[name] = {"slug": found[0]["slug"], "url": found[0].get("url")}
-                    adopts.append(name)
-                else:
-                    fresh.append(name)
-            creates = fresh
-
         def each(names, calls, handle):
             """Handle results batch by batch and save the map after each, so an
             interrupted run keeps every note it already published."""
@@ -293,22 +321,21 @@ class NotesClient:
             else:
                 fail(name, result)
 
-        def adopted(name, result):
-            if result.get("ok"):
-                record(name, result.get("result") or {}, "adopted")
-            else:
-                del entries[name]
-                fail(name, result)
-
-        def update_calls(names):
+        def update_calls(slugs):
             return [{"tool": "update_note", "arguments": {
-                "slug": entries[name]["slug"], "title": texts[name][1], "content": texts[name][0],
-                "filename": Path(name).stem}} for name in names]
+                "slug": slug, "title": texts[name][1], "content": texts[name][0],
+                "filename": Path(name).stem}} for name, slug in slugs]
 
-        if adopts:
-            each(adopts, update_calls(adopts), adopted)
+        # Mapped files first: they need no lookup, so a failed lookup cannot block them.
         if updates:
-            each(updates, update_calls(updates), updated)
+            each(updates, update_calls([(n, entries[n]["slug"]) for n in updates]), updated)
+        if creates and not create_duplicates:
+            creates = self._adopt(creates, texts, entries, adopt=adopt, fail=fail,
+                                  run=lambda slugs: each([n for n, _ in slugs], update_calls(slugs),
+                                                         lambda name, result: record(
+                                                             name, result.get("result") or {},
+                                                             "adopted")
+                                                         if result.get("ok") else fail(name, result)))
         creates += sorted(recreate)
         if creates:
             each(creates, [{"tool": "create_note", "arguments": {

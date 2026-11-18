@@ -242,7 +242,7 @@ def _cmd_preview(cfg, args) -> None:
             # fields, a delete left unknown) must not stop the others.
             try:
                 _destroy(entry, state, row["id"])
-            except (RuntimeError, ValueError) as exc:
+            except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
                 skipped.append(f"{row['id']} ({remote.redact_text(str(exc))[:200]})")
         removed = len(entries) - len(skipped)
         if skipped:

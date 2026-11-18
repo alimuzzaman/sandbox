@@ -1143,6 +1143,57 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "stack_apply_in_progress")
         self.assertIn(submitted["job"], str(caught.exception))
 
+    def test_a_nested_submission_is_settled_by_the_request_id_job_start_was_given(self):
+        # The server-cli path admits the apply under a derived nested-... id,
+        # from a project directory the worktree check would not see.
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, True)
+        nested = ["sb", "job-start", "--local", "--project-dir", outside,
+                  "--request-id", "nested-" + "1" * 32, "--", "sb", "host", "apply"]
+
+        def lose_receipt(argv):
+            self._accept_job(argv, "running")
+            raise host_stack.StackCommandError("stack_submission_unknown", "receipt lost")
+
+        with patch.object(hosting_cmd, "_host_delivery_guidance", return_value=nested), \
+                patch.object(host_stack, "_submit", side_effect=lose_receipt), \
+                self.assertRaises(host_stack.StackCommandError):
+            host_stack._up(self.args("up", confirm=True))
+        last = stack_registry.read()["stacks"]["r/demo"]["last_apply"]
+        self.assertEqual(last["job_request_id"], "nested-" + "1" * 32)
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_apply_in_progress")
+
+    def test_an_unknown_whose_admitted_job_finished_lets_up_and_down_proceed(self):
+        def lose_receipt(argv):
+            self._accept_job(argv, "failed")
+            raise host_stack.StackCommandError("stack_submission_unknown", "receipt lost")
+
+        with patch.object(host_stack, "_submit", side_effect=lose_receipt), \
+                self.assertRaises(host_stack.StackCommandError):
+            host_stack._up(self.args("up", confirm=True))
+        with patch.object(host_stack, "_submit", return_value="b" * 32):
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_id"], "b" * 32)
+        with stack_registry.locked() as registry:
+            record = registry.get("r", "demo")
+            record["last_apply"].update(job_id=None, status="acceptance_unknown",
+                                        job_request_id=record["last_apply"]["request_id"])
+            registry.put(record)
+        host_stack._refuse_if_active(stack_registry.read()["stacks"]["r/demo"])  # what `down` checks
+
+    def test_an_unreadable_job_registry_says_retry_not_inspect(self):
+        with patch.object(host_stack, "_submit", return_value="c" * 32):
+            host_stack._up(self.args("up", confirm=True))
+        path = self.runtime.runtime / "jobs" / "registry.sqlite3"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a database" * 100)
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._refuse_if_active(stack_registry.read()["stacks"]["r/demo"])
+        self.assertEqual(caught.exception.code, "stack_submission_unknown")
+        self.assertIn("retry", str(caught.exception))
+
     def test_an_unknown_without_a_request_row_still_refuses_while_a_job_runs_from_its_worktree(self):
         # A pre-fix record of a nested server-cli submission has no
         # job_request_id; its job ran under a derived request id.

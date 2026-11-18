@@ -290,6 +290,14 @@ def _jobs_for_request(request_id: str) -> list[str]:
         raise JobStateUnavailable("the local job registry could not be read") from None
 
 
+def _job_registry_readable() -> bool:
+    try:
+        _jobs_for_request("")
+    except JobStateUnavailable:
+        return False
+    return True
+
+
 def _job_running_from(worktrees: list) -> bool:
     """True unless no job may still run from these worktrees (read-only)."""
     from sandbox.core import _paths
@@ -337,6 +345,10 @@ def _refuse_if_active(record: dict | None) -> None:
             f"stack {record.get('slug')}: the local job registry could not be read to check apply request "
             f"{last.get('request_id')}; retry") from None
     if not job and job_id:
+        if not _job_registry_readable():
+            raise StackCommandError(SUBMISSION_UNKNOWN,
+                f"stack {record.get('slug')}: the local job registry could not be read to check apply job "
+                f"{job_id}; retry")
         raise unknown
     if job and job.get("lifecycle") in ACTIVE_LIFECYCLES:
         raise StackCommandError(

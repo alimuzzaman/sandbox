@@ -253,7 +253,7 @@ def listing_from_stack_list(payload: object, now: int) -> LifetimeListing:
     return listing(records, reasons, identities=names)
 
 
-# An observation older than this is dropped (a job pruned from the registry).
+# An observation not seen running for this long is dropped (a pruned or lost job).
 PENDING_MAX_SECONDS = 600
 _REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
@@ -265,8 +265,9 @@ def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
     Each remote has at most one observation: (request id, job id, started).
     While no job is known the SAME request id is submitted again on the next
     refresh: the request id makes the submission idempotent and the listing is
-    read-only, so an unknown or refused first try never blocks the remote. A
-    job that ended without usable output, or an observation older than
+    read-only, so an unknown or refused first try does not pin the remote (a
+    changed submission digest refuses the replay until the age bound). A job
+    that ended without usable output, or one not seen running for
     PENDING_MAX_SECONDS, is released so the next refresh starts a new one.
     """
     pending: dict[str, tuple[str, str | None, float]] = {}
@@ -334,6 +335,10 @@ def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
         if status.get("lifecycle") != "succeeded":
             if status.get("lifecycle") in {"failed", "timed_out", "cancelled", "interrupted"}:
                 release_observation()
+            else:
+                with lock:  # Seen alive: the age bound counts from the last sighting.
+                    if pending.get(remote, (None,))[0] == request_id:
+                        pending[remote] = (request_id, job_id, time.monotonic())
             return None
         if status.get("exit_code") != 0 or status.get("output_completeness") != "complete":
             release_observation()  # Terminal and unusable: the next refresh lists again.

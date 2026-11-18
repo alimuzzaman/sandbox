@@ -24,10 +24,14 @@ from sandbox.jobs import process as _process
 
 _SEAL = object()
 _LIVE = {}  # Actual Popen handles only. Never reconstruct one from a pid/body.
-# After the original docker CLI is proven gone, wait this long before cleanup
-# so an in-container effect still finishing cannot land after the revoke.
+# Every gate effect process kills itself EFFECT_DEADLINE_SECONDS after it starts
+# (SIGALRM, default action, even while blocked on the gate's mint lock). It can
+# only act after the release byte, which the original CLI sends while alive, so
+# it is gone EFFECT_DEADLINE_SECONDS after the CLI's exit at the latest. Cleanup
+# waits EFFECT_DRAIN_SECONDS after that exit was proven, so no effect lands later.
+EFFECT_DEADLINE_SECONDS = 25
 EFFECT_DRAIN_SECONDS = 30
-_LOADER = ("import base64,sys,zlib; "
+_LOADER = (f"import base64,signal,sys,zlib; signal.alarm({EFFECT_DEADLINE_SECONDS}); "
            "exec(compile(zlib.decompress(base64.b64decode(sys.argv[1])),'login_service','exec')) "
            "if sys.stdin.buffer.read(1) == b'\\x01' else sys.exit(73)")
 
@@ -365,7 +369,9 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
     row["operation"] = {"id": operation, "verb": verb, "pid": child.pid, "state": "accepted",
                         "grant_id": grant_id,
                         "boot_id": identity.host_boot_id if identity else None,
-                        "start": identity.start_identity if identity else None}
+                        "start": identity.start_identity if identity else None,
+                        "start_source": ("proc" if identity and _proc_start(child.pid) == identity.start_identity
+                                         else None)}
     try:
         store.save(row)
     except BaseException:
@@ -417,7 +423,18 @@ def _original_gone(operation):
     if not _process.is_boot_session_identity(boot) or not isinstance(start, str) or not start:
         return False  # A live pid and no recorded identity: it may be the original.
     observed = _process.capture_process_identity(pid)
-    return observed is not None and (observed.host_boot_id != boot or observed.start_identity != start)
+    if observed is None or not _process.is_boot_session_identity(observed.host_boot_id):
+        return False
+    if observed.host_boot_id != boot:
+        return True
+    # A start-time mismatch proves a reused pid only when both came from the
+    # kernel's /proc clock ticks; ps output varies with the caller's TZ/locale.
+    return (operation.get("start_source") == "proc" and observed.start_identity != start
+            and _proc_start(pid) == observed.start_identity)
+
+
+def _proc_start(pid):
+    return _process._linux_start_identity(pid, Path("/proc"))
 
 
 def observe_original(grant: GateGrant, row, store):

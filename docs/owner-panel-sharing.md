@@ -101,10 +101,13 @@ A timeout keeps the original Popen handle and apply lease; it never kills a gues
 pid or launches a replacement. A later admitted request can continue observing that
 same handle. A confirmed zero-exit original execution settles its fence at once. A
 failed original (nonzero exit, stderr or a bad reply) settles `EFFECT_DRAIN_SECONDS`
-(30) after its docker CLI is proven finished, so an in-container effect still running
-cannot land after the cleanup revoke. After a panel restart there is no handle: the
-pid, boot id and start time recorded at spawn prove the CLI gone (absent pid, reused
-pid or new boot), then the same drain applies. A process that may still run stays
+(30) after its docker CLI is proven finished. Each gate effect process kills itself
+`EFFECT_DEADLINE_SECONDS` (25) after it starts (SIGALRM, even while blocked on the mint
+lock) and acts only after the release byte the live CLI sends, so no gate effect lands
+after the cleanup revoke. After a panel restart there is no handle: the pid and boot id
+recorded at spawn prove the CLI gone (absent pid or new boot), or a reused pid when both
+start times came from `/proc` (a `ps` time depends on locale and zone and proves
+nothing), then the same drain applies. A process that may still run stays
 fenced. A settled row resumes its retained lease and runs the idempotent cleanup.
 Retrying create never skips unresolved original attempts.
 Recovered listings are discarded only after original-handle settlement and physical

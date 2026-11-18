@@ -442,6 +442,16 @@ class AcceptedJobFetcherTest(unittest.TestCase):
         self.assertNotEqual(self.request, first)
         self.assertEqual(sum(c[1] == "host" for c in self.calls), 2)
 
+    def test_a_job_seen_running_is_kept_past_the_age_bound(self):
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=self.run_command)
+        clock = [1000.0]
+        with mock.patch.object(pl.time, "monotonic", lambda: clock[0]):
+            self.assertIsNone(fetch("joined"))
+            for _ in range(3):
+                clock[0] += pl.PENDING_MAX_SECONDS - 1
+                self.assertIsNone(fetch("joined"))  # still running, re-observed
+        self.assertEqual(sum(c[1] == "host" for c in self.calls), 1)
+
     def test_stale_observation_is_released_after_the_age_bound(self):
         fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=self.run_command)
         clock = [1000.0]

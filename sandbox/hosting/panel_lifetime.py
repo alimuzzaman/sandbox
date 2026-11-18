@@ -253,13 +253,24 @@ def listing_from_stack_list(payload: object, now: int) -> LifetimeListing:
     return listing(records, reasons, identities=names)
 
 
+# An observation not seen running for this long is dropped (a pruned or lost job).
+PENDING_MAX_SECONDS = 600
 _REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
 
 def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
                        timeout: float = FETCH_TIMEOUT_SECONDS) -> Callable[[str], object]:
-    """Read inventory, retaining an accepted job across cache refreshes."""
-    pending: dict[str, tuple[str, str | None]] = {}
+    """Read inventory, retaining an accepted job across cache refreshes.
+
+    Each remote has at most one observation: (request id, job id, started).
+    While no job is known the SAME request id is submitted again on the next
+    refresh: the request id makes the submission idempotent and the listing is
+    read-only, so an unknown or refused first try does not pin the remote (a
+    changed submission digest refuses the replay until the age bound). A job
+    that ended without usable output, or one not seen running for
+    PENDING_MAX_SECONDS, is released so the next refresh starts a new one.
+    """
+    pending: dict[str, tuple[str, str | None, float]] = {}
     lock = threading.Lock()
 
     def fetch(remote: str) -> object:
@@ -283,15 +294,17 @@ def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
 
         with lock:
             original = pending.get(remote)
+            if original is not None and time.monotonic() - original[2] > PENDING_MAX_SECONDS:
+                pending.pop(remote, None)  # A pruned or lost job must not pin the remote.
+                original = None
             if original is None:
                 if len(pending) >= MAX_REMOTES:
                     return None
-                original = ("panel-lifetime-" + uuid.uuid4().hex, None)
-                pending[remote] = original  # Unknown acceptance must not resubmit.
-                submit = True
-            else:
-                submit = False
-        request_id, job_id = original
+                original = ("panel-lifetime-" + uuid.uuid4().hex, None, time.monotonic())
+                pending[remote] = original
+            # No known job: (re)submit the same request id, never a new one.
+            submit = original[1] is None
+        request_id, job_id, started = original
 
         def release_observation():
             with lock:
@@ -312,7 +325,7 @@ def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
                 return None
             job_id = payload["job_id"]
             with lock:
-                pending[remote] = (request_id, job_id)
+                pending[remote] = (request_id, job_id, started)
         if job_id is None:
             return None
         status = command(["job-status", job_id])
@@ -322,8 +335,13 @@ def stack_list_fetcher(entry: Path, *, run: Callable = subprocess.run,
         if status.get("lifecycle") != "succeeded":
             if status.get("lifecycle") in {"failed", "timed_out", "cancelled", "interrupted"}:
                 release_observation()
+            else:
+                with lock:  # Seen alive: the age bound counts from the last sighting.
+                    if pending.get(remote, (None,))[0] == request_id:
+                        pending[remote] = (request_id, job_id, time.monotonic())
             return None
         if status.get("exit_code") != 0 or status.get("output_completeness") != "complete":
+            release_observation()  # Terminal and unusable: the next refresh lists again.
             return None
         streams = status.get("output")
         stdout = [s for s in streams if isinstance(s, dict) and s.get("stream") == "stdout"] if isinstance(streams, list) else []

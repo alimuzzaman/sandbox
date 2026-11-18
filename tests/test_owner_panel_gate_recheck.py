@@ -66,6 +66,7 @@ class _Docker:
         self.effects.append(argv[:5])
         child = SimpleNamespace(pid=4242, returncode=0)
         child.communicate = lambda data=b"", timeout=None: (b"", b"")
+        child.poll = lambda: child.returncode
         return child
 
 
@@ -110,6 +111,8 @@ class GateRecheckTests(unittest.TestCase):
         scope.enter_context(patch.object(gate.subprocess, "run", side_effect=self.docker.run))
         scope.enter_context(patch.object(gate.subprocess, "Popen", side_effect=self.docker.popen))
         scope.enter_context(patch.object(gate.login, "assert_applicable"))
+        # Never observe a real host pid from a synthetic child.
+        scope.enter_context(patch.object(gate._process, "capture_process_identity", return_value=None))
         scope.enter_context(patch.object(gate.login, "parse_site_reply", side_effect=json.loads))
         scope.enter_context(patch.object(gate.panel_records, "read_server_records",
                                          side_effect=lambda _: {"targets": [json.loads(json.dumps(self.summary))]}))
@@ -282,6 +285,172 @@ class GateRecheckTests(unittest.TestCase):
         with self.assertRaises(ShareRefusal) as raised:
             self.bind()
         self.assertEqual(raised.exception.code, "owner_share_upgrade_required")
+
+
+
+class _Store:
+    def __init__(self):
+        self.saved = []
+
+    def save(self, row):
+        self.saved.append(json.loads(json.dumps(row)))
+
+
+BOOT = "0" * 8 + "-0000-0000-0000-" + "0" * 12
+
+
+class SettleTests(GateRecheckTests):
+    """Fable pass 2 [2]: a completed failure, or a restart mid-share, must settle."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(gate._LIVE.clear)
+        self.clock = [1000.0]
+        clock = patch.object(gate.time, "time", side_effect=lambda: self.clock[0])
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def failing(self, *, exited):
+        def popen(argv, **_):
+            child = SimpleNamespace(pid=4242, returncode=1 if exited else None)
+            def communicate(data=b"", timeout=None):
+                if not exited:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                return b"", b"Error response from daemon\n"
+            child.communicate = communicate
+            child.poll = lambda: child.returncode
+            return child
+        return popen
+
+    def run_failed_mint(self, *, exited, identity=None):
+        grant = self.bind()
+        row, store = {"id": "a-1", "phase": "minting"}, _Store()
+        identity = identity or gate._process.ProcessIdentity(BOOT, 4242, "111", "")
+        with patch.object(gate.subprocess, "Popen", side_effect=self.failing(exited=exited)), \
+                patch.object(gate, "_proc_start", return_value=identity.start_identity), \
+                patch.object(gate._process, "capture_process_identity", return_value=identity):
+            with self.assertRaises(ShareRefusal) as raised:
+                gate._execute(grant, "mint", row, store, payload={"link": {}}, grant_id="l-" + "1" * 12)
+        self.assertEqual(raised.exception.code, "owner_share_effect_unknown")
+        self.assertEqual(row["operation"]["state"], "unknown")
+        return grant, row, store
+
+    def test_a_failed_exec_settles_after_the_drain(self):
+        grant, row, store = self.run_failed_mint(exited=True)
+        gate.observe_original(grant, row, store)
+        self.assertEqual(row["operation"]["state"], "unknown")  # still inside the drain
+        self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+        gate.observe_original(grant, row, store)
+        self.assertEqual(row["operation"]["state"], "settled")
+        self.assertEqual(row["phase"], "cleanup_pending")
+        self.assertNotIn(row["operation"]["id"], gate._LIVE)
+
+    def test_restart_mid_share_settles_once_the_recorded_process_is_gone(self):
+        grant, row, store = self.run_failed_mint(exited=False)
+        gate._LIVE.clear()  # the panel restarted: no original handle
+        with patch.object(gate._process, "process_absence_proven", return_value=False), \
+                patch.object(gate._process, "capture_process_identity",
+                             return_value=gate._process.ProcessIdentity(BOOT, 4242, "111", "")):
+            self.clock[0] += 3600
+            gate.observe_original(grant, row, store)
+        self.assertEqual(row["operation"]["state"], "unknown")  # same process may still write
+        with patch.object(gate._process, "process_absence_proven", return_value=True):
+            gate.observe_original(grant, row, store)
+            self.assertEqual(row["operation"]["state"], "unknown")
+            self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+            gate.observe_original(grant, row, store)
+        self.assertEqual(row["operation"]["state"], "settled")
+
+    def test_a_reused_pid_or_new_boot_proves_the_original_gone(self):
+        for observed in (gate._process.ProcessIdentity(BOOT, 4242, "222", ""),
+                         gate._process.ProcessIdentity("1" + BOOT[1:], 4242, "111", "")):
+            with self.subTest(observed=observed):
+                grant, row, store = self.run_failed_mint(exited=False)
+                gate._LIVE.clear()
+                with patch.object(gate._process, "process_absence_proven", return_value=False), \
+                        patch.object(gate, "_proc_start", return_value=observed.start_identity), \
+                        patch.object(gate._process, "capture_process_identity", return_value=observed):
+                    gate.observe_original(grant, row, store)
+                    self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+                    gate.observe_original(grant, row, store)
+                self.assertEqual(row["operation"]["state"], "settled")
+
+    def test_a_ps_only_start_mismatch_never_proves_the_original_gone(self):
+        # ps lstart depends on the caller's TZ/locale: a restart under another
+        # environment must not read the same live CLI as a reused pid.
+        grant, row, store = self.run_failed_mint(exited=False)
+        gate._LIVE.clear()
+        with patch.object(gate._process, "process_absence_proven", return_value=False), \
+                patch.object(gate, "_proc_start", return_value=None), \
+                patch.object(gate._process, "capture_process_identity",
+                             return_value=gate._process.ProcessIdentity(BOOT, 4242, "Tue 9 UTC", "")):
+            for _ in range(2):
+                gate.observe_original(grant, row, store)
+                self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+        self.assertEqual(row["operation"]["state"], "unknown")
+
+    def test_a_settled_failure_cleans_up_by_retained_id(self):
+        grant, row, store = self.run_failed_mint(exited=True)
+        self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+        gate.observe_original(grant, row, store)
+        self.assertEqual(row["operation"]["state"], "settled")
+        link = "l-" + "1" * 12
+        row.update(bindings=[share._binding(grant)], expires_at=2, stack="example",
+                   grants=[{"id": link, "status": "minting", "expires_at": 2, "target": "t",
+                            "wordpress": True}])
+        effects = []
+        def popen(argv, **_):
+            effects.append(argv)
+            child = SimpleNamespace(pid=4243, returncode=0)
+            reply = b"" if argv[4] == "php" else json.dumps(
+                {"ok": True, "revoked_links": 0, "revoked_sessions": 0}).encode()
+            child.communicate = lambda data=b"", timeout=None: (reply, b"")
+            child.poll = lambda: 0
+            return child
+        with patch.object(gate.subprocess, "Popen", side_effect=popen), \
+                patch.object(share, "_audit"):
+            result = share._cleanup(store, self.request, row, [grant])
+        self.assertTrue(result["ok"])
+        self.assertEqual(row["phase"], "revoked")
+        self.assertEqual(row["grants"][0]["status"], "revoked")
+        self.assertIn(link, effects[0])  # revoke by the retained original id
+        self.assertEqual(effects[1][4], "php")  # then the WordPress key removal
+
+    def test_a_row_without_identity_settles_only_on_an_absent_pid(self):
+        grant = self.bind()
+        row = {"id": "a-1", "phase": "cleanup_pending",
+               "operation": {"id": "o-x", "verb": "mint", "pid": 4242, "state": "unknown"}}
+        self.clock[0] += 3600
+        with patch.object(gate._process, "process_absence_proven", return_value=False):
+            gate.observe_original(grant, row, _Store())
+            self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+            gate.observe_original(grant, row, _Store())
+        self.assertEqual(row["operation"]["state"], "unknown")
+        with patch.object(gate._process, "process_absence_proven", return_value=True):
+            gate.observe_original(grant, row, _Store())
+            self.clock[0] += gate.EFFECT_DRAIN_SECONDS
+            gate.observe_original(grant, row, _Store())
+        self.assertEqual(row["operation"]["state"], "settled")
+
+
+
+class EffectDeadlineTests(unittest.TestCase):
+    def test_the_effect_loader_kills_a_blocked_effect_before_the_drain_ends(self):
+        self.assertLess(gate.EFFECT_DEADLINE_SECONDS, gate.EFFECT_DRAIN_SECONDS)
+        self.assertIn(f"signal.alarm({gate.EFFECT_DEADLINE_SECONDS})", gate._LOADER)
+        # The same loader with a 1 s alarm, around a program stuck on a held flock.
+        import base64, fcntl, sys, time, zlib
+        with tempfile.NamedTemporaryFile() as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            program = f"import fcntl; fcntl.flock(open({lock.name!r}), fcntl.LOCK_EX); print('landed')"
+            source = base64.b64encode(zlib.compress(program.encode())).decode()
+            loader = gate._LOADER.replace(f"alarm({gate.EFFECT_DEADLINE_SECONDS})", "alarm(1)")
+            started = time.monotonic()
+            done = subprocess.run([sys.executable, "-c", loader, source], input=b"\x01",
+                                  capture_output=True, timeout=20)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn(b"landed", done.stdout)
 
 
 if __name__ == "__main__":

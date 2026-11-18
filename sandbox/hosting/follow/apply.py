@@ -11,12 +11,19 @@ Before prepare, before plan and again right before confirm it re-reads the
 target: a busy target ends the attempt as ``busy`` (the next poll tries the
 same heads again), and a stack removed or reaped meanwhile pauses the follow
 instead of being recreated.
+
+An earlier delivery left open on the target (its owner was interrupted before
+recording an outcome) fences every later apply. When that delivery was one of
+this follow's own attempts, the attempt retires it, as ``host retire-delivery``
+does, and goes on. Another owner's delivery is never retired here: the attempt
+fails with the exact command that retires it.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -78,6 +85,75 @@ def follow_source(record: dict, heads: dict) -> dict | None:
     return {"branch": branch, "commit": heads[repo]}
 
 
+def apply_request_id(name: str, attempt_id: str) -> str:
+    """The request id an attempt's ``host stack up`` confirm runs under."""
+    return f"follow-{name}-{attempt_id}-apply"
+
+
+def owned_requests(store: FollowStore, record: dict) -> set[str]:
+    """Delivery request ids this follow's own attempts submitted their applies under.
+
+    An attempt job's nested apply is admitted under an id derived from that
+    job's id and the attempt's apply request id, so the follow's audit of
+    submitted attempts (plus the current one) proves which deliveries are its own.
+    """
+    from sandbox.application.server_cli import nested_request_id
+    name = record["name"]
+    pairs = set(store.submitted_attempts(name))
+    attempt = record["state"].get("attempt") or {}
+    if isinstance(attempt.get("id"), str) and isinstance(attempt.get("job_id"), str):
+        pairs.add((attempt["id"], attempt["job_id"]))
+    return {nested_request_id(job_id, apply_request_id(name, attempt_id)) for attempt_id, job_id in pairs}
+
+
+def retire_command(record: dict, request_id: str) -> str:
+    import shlex
+    return shlex.join(["sb", "host", "retire-delivery", "--name", record["name"], "--remote", record["remote"],
+                       "--original-request-id", request_id, "--confirm"])
+
+
+def _stack_manifest(stack: dict) -> dict:
+    import sandbox.core._hosting as hosting
+    from sandbox.hosting import stack_registry
+    return hosting.validate_manifest(str(stack_registry.stack_dir(stack["slug"])), stack["environment"])
+
+
+def default_predecessor(record: dict, stack: dict | None) -> dict | None:
+    """The target's open earlier delivery on this host, or None.
+
+    Returns ``{"request_id", "validated"}`` only for a delivery whose owner has
+    ended without an outcome. A closed, unknown or unreadable predecessor is
+    None: the apply then reports its own refusal. One whose job still runs is
+    reported as ``{"busy": ...}``.
+    """
+    import sandbox.core._hosting as hosting
+    from sandbox.delivery.hosting import interrupted_operation
+    from sandbox.delivery.models import DeliveryError
+    from sandbox.commands.hosting import _recovery_job_lookup
+    if not stack or not isinstance(stack.get("slug"), str):
+        return None
+    key = f"{record['remote']}/{stack.get('project')}/{stack.get('environment')}"
+    try:
+        operation = ((hosting.load_host_state().get("hosts") or {}).get(key) or {}).get("hosting_operation")
+        request_id = operation.get("request_id") if isinstance(operation, dict) else None
+        if not isinstance(request_id, str) or not request_id:
+            return None
+        validated = _stack_manifest(stack)
+        interrupted_operation(validated, record["remote"], request_id, job_lookup=_recovery_job_lookup,
+                              recorded_operation=lambda: operation)
+    except DeliveryError as exc:
+        return {"busy": "predecessor_delivery_running"} if exc.code == "authority_pending" else None
+    except Exception:  # noqa: BLE001 -- unreadable is unknown; the apply's own check decides
+        return None
+    return {"request_id": request_id, "validated": validated}
+
+
+def default_retire(record: dict, predecessor: dict) -> dict:
+    from sandbox.commands.hosting import retire_delivery
+    # The host state lock is shared by every apply on the host: wait as an apply does.
+    return retire_delivery(predecessor["validated"], record["remote"], predecessor["request_id"], lock_wait=600)
+
+
 def stack_namespace(record: dict, template: Path, attempt_id: str, *, plan: bool,
                     source: dict | None = None) -> argparse.Namespace:
     """The arguments a person's ``host stack up`` would carry, plus the follow's source."""
@@ -86,7 +162,7 @@ def stack_namespace(record: dict, template: Path, attempt_id: str, *, plan: bool
         remote=record["remote"], name=record["name"], ref=record["ref"], owner=record["owner"],
         environment=record.get("environment"), lifetime=record.get("lifetime"), ttl=None, copy=None,
         port=None, generate_secrets=bool(record.get("generate")),
-        request_id=f"follow-{record['name']}-{attempt_id}-apply", json=True,
+        request_id=apply_request_id(record["name"], attempt_id), json=True,
         server_cli_stack_ref=None, follow_source=source, plan=plan, confirm=not plan)
 
 
@@ -204,12 +280,14 @@ class Attempt:
                  environment: Callable | None = None, sleep: Callable = time.sleep,
                  now: Callable = lambda: datetime.now(timezone.utc),
                  stack_lookup: Callable = follow_tick.stack_record, busy: Callable = follow_tick.target_busy,
-                 lifetime: Callable = follow_tick.lifetime_state, home: Callable = follow_tick.sandbox_home):
+                 lifetime: Callable = follow_tick.lifetime_state, home: Callable = follow_tick.sandbox_home,
+                 predecessor: Callable = default_predecessor, retire: Callable = default_retire):
         self.store = store or FollowStore()
         self.context_for, self.stack_up, self.job_view = context_for, stack_up, job_view
         self.prepare, self.head, self.sleep, self.now = prepare, head, sleep, now
         self.environment = environment or self._owner_environment
         self.stack_lookup, self.busy, self.lifetime, self.home = stack_lookup, busy, lifetime, home
+        self.predecessor, self.retire = predecessor, retire
 
     @staticmethod
     def _owner_environment(context) -> dict:
@@ -241,6 +319,8 @@ class Attempt:
                 outcome.update({"status": stop.status, "reason": stop.reason})
             except FollowError as exc:
                 outcome["reason"] = f"{exc.code}: {_redact(exc.message)}"
+                if getattr(exc, "next_command", None):
+                    outcome["next_command"] = exc.next_command
             except Exception as exc:  # stack up refusals and unexpected errors are an outcome
                 code = getattr(exc, "code", None) or type(exc).__name__
                 outcome["reason"] = f"{code}: {_redact(exc)}"
@@ -259,6 +339,42 @@ class Attempt:
         if busy is not None:
             raise _Stop("busy", busy)
 
+    def _clear_predecessor(self, record: dict) -> None:
+        """Retire an interrupted earlier delivery of this follow's own; refuse another's."""
+        found = self.predecessor(record, self.stack_lookup(record["remote"], record["name"]))
+        if not found:
+            return
+        if found.get("busy"):
+            raise _Stop("busy", found["busy"])
+        request_id = found["request_id"]
+        command = retire_command(record, request_id)
+        if request_id not in owned_requests(self.store, record):
+            error = FollowError("follow_predecessor_not_owned",
+                                f"an interrupted delivery this follow did not start fences the stack; run: {command}")
+            error.next_command = command
+            raise error
+        from sandbox.commands.hosting import RetireCleanupPending
+        from sandbox.core._hosting import HostingError
+        from sandbox.delivery.models import DeliveryError
+        try:
+            self.retire(record, found)
+        except RetireCleanupPending:
+            # Retired, but its host state fences stay until an operator checks them.
+            status = shlex.join(["sb", "host", "status", "--name", record["name"], "--remote", record["remote"]])
+            error = FollowError("follow_predecessor_cleanup_pending",
+                                f"retired interrupted delivery {request_id}, but host state cleanup could not "
+                                f"take the state lock; inspect: {status}")
+            error.next_command = status
+            raise error from None
+        except (DeliveryError, HostingError, TimeoutError, RuntimeError, OSError) as exc:
+            code = getattr(exc, "code", None) or type(exc).__name__
+            error = FollowError("follow_predecessor_retire_failed",
+                                f"retiring this follow's interrupted delivery failed ({code}); run: {command}")
+            error.next_command = command
+            raise error from None
+        print(f"follow {record['name']}: retired its own interrupted delivery {request_id}", flush=True)
+        self.store.audit("predecessor_retired", record["name"], actor=ACTOR, request_id=request_id)
+
     def _apply(self, record: dict, context, attempt_id: str, heads: dict) -> dict:
         name = record["name"]
         work = self.store.work_dir(name)
@@ -268,6 +384,7 @@ class Attempt:
                 raise FollowError("follow_source_changed",
                                   f"checkout {repo} is not at the attempt's commit {heads.get(repo, '')[:12]}")
         self._gate(record)
+        self._clear_predecessor(record)
         values = {"work_dir": work, "name": name, "repo_dirs": repo_dirs, "heads": heads}
         if record.get("prepare"):
             argv = [follow_spec.substitute(item, **values) for item in record["prepare"]]
@@ -349,6 +466,10 @@ class Attempt:
                     state.update({"paused": True, "pause_reason": outcome["reason"]})
                 else:
                     state["failed_heads"] = heads
+                if outcome.get("next_command"):
+                    # Status shows the way out now, not only on the next poll.
+                    state["last_check"] = {"at": utc_now(), "action": "attempt", "reason": outcome["reason"],
+                                           "next_command": outcome["next_command"]}
                 self.store.write(record)
             self.store.audit("attempt_finished", name, actor=ACTOR, attempt=attempt_id,
                              status=status, reason=outcome["reason"],

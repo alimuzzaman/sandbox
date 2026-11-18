@@ -426,6 +426,9 @@ class Tick:
                 row["error"] = fetch_error
             if held is not None:
                 row["busy_seconds"] = held
+            if reason == "waiting_after_failure" and (attempt or {}).get("next_command"):
+                # The failure needs an owner step: say which, not only that it is waiting.
+                row.update(reason=attempt["reason"], next_command=attempt["next_command"])
             if action == "pause":
                 state.update({"paused": True, "pause_reason": reason})
                 self.store.write(record)

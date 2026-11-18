@@ -220,6 +220,7 @@ def capabilities() -> dict:
     from sandbox.hosting.source_repair import CONTRACT as SOURCE_REPAIR_CONTRACT
     from sandbox.hosting.publisher_proof import contract_available as publisher_proof_available, CONTRACT as PUBLISHER_PROOF_CONTRACT
     from sandbox.hosting.server_login_url import CONTRACT as LOGIN_URL_CONTRACT
+    from sandbox.hosting.server_share import CONTRACT as SHARE_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
@@ -231,6 +232,7 @@ def capabilities() -> dict:
             'server_cli_apply_capabilities': [SOURCE_BRANCH_CONTRACT, NESTED_APPLY_CONTRACT] if source_branch_contract_available() else [],
             # Its own key: `capabilities` admits only contracts every controller knows.
             'host_login_url_capabilities': [LOGIN_URL_CONTRACT],
+            'host_share_capabilities': [SHARE_CONTRACT],
             'capabilities': ['job.exec', 'job.execution-policy.v1', ACCEPTANCE_CONTRACT, CONTRACT] +
                 (['job.source-content.v1'] if '--source-content-digest' in parser._option_string_actions
                  and source_content_available() else []) +
@@ -499,6 +501,11 @@ def validate_owner_current(owner: ServerCliOwner) -> ServerCLIContext:
     return context
 
 
+def nested_request_id(parent_job_id: str, request_id: str) -> str:
+    """The request id a nested CLI job is admitted under, derived from its parent job."""
+    return 'nested-' + hashlib.sha256((parent_job_id + '\0' + request_id).encode()).hexdigest()[:32]
+
+
 def local_server_cli_submission_argv(owner: ServerCliOwner, argv, *, project_dir: str,
                                     request_id: str, source_commit: str,
                                     timeout_seconds: int, parent_job_id: str) -> list[str]:
@@ -516,7 +523,7 @@ def local_server_cli_submission_argv(owner: ServerCliOwner, argv, *, project_dir
         raise ServerCLIUnavailable('original server CLI deadline expired')
     policy = resolve_execution_policy({}, execution_profile='exec',
                                       timeout_seconds=min(timeout_seconds, remaining))
-    key = 'nested-' + hashlib.sha256((parent_job_id + '\0' + request_id).encode()).hexdigest()[:32]
+    key = nested_request_id(parent_job_id, request_id)
     encoded = base64.b64encode(json.dumps(policy.as_dict(), sort_keys=True, separators=(',', ':')).encode()).decode()
     return [owner.executable, 'job-start', '--local', '--server-cli',
         '--server-cli-target', owner.target_identity, '--server-cli-revision', owner.runtime_revision,

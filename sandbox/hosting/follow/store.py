@@ -26,6 +26,7 @@ SCHEMA = 1
 AUDIT_EVENTS = frozenset({
     "add", "replace", "remove", "pause", "resume", "run_now", "key", "status",
     "attempt_started", "attempt_submitted", "attempt_finished", "auto_pause", "refused",
+    "predecessor_retired",
 })
 
 
@@ -194,6 +195,23 @@ class FollowStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+    def submitted_attempts(self, name: str) -> set[tuple[str, str]]:
+        """(attempt id, attempt job id) of every attempt job this follow submitted."""
+        try:
+            lines = self.audit_path.read_text().splitlines()
+        except FileNotFoundError:
+            return set()
+        pairs = set()
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (isinstance(row, dict) and row.get("follow") == name and row.get("event") == "attempt_submitted"
+                    and isinstance(row.get("attempt"), str) and isinstance(row.get("job_id"), str)):
+                pairs.add((row["attempt"], row["job_id"]))
+        return pairs
 
     def audit_tail(self, name: str, limit: int = 10) -> list[dict]:
         try:

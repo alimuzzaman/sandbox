@@ -164,6 +164,11 @@ def dispatch_host_if_selected(args) -> bool:
         from sandbox.hosting.server_login_url import run_here
         run_here(args)
         return True
+    if getattr(args, "action", None) == "share" and getattr(args, "here", False):
+        # The installed owner's side of a joined remote's share create|list|revoke.
+        from sandbox.hosting.server_share import run_here as share_here
+        share_here(args)
+        return True
     from sandbox.hosting import server_cli_here
     if server_cli_here.claims(args):
         # The installed owner on the host itself (Fix 5): the same server CLI

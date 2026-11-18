@@ -624,6 +624,8 @@ class AttemptTests(FollowCase):
         self.stack = {"project": "p", "environment": "e"}
         self.busy_answers = []  # popped per target check; (None, None) once empty
         self.lifetime_value = None
+        self.predecessor_value = None  # what the target's open earlier delivery looks like
+        self.retired, self.retire_error = [], None
 
     def stack_up(self, namespace):
         self.calls.append(namespace)
@@ -645,8 +647,21 @@ class AttemptTests(FollowCase):
                           head=lambda directory: self.heads[Path(directory).name],
                           environment=lambda _context: {"PATH": "/usr/bin"}, sleep=lambda _s: None,
                           stack_lookup=lambda _remote, _name: self.stack, busy=self.busy,
-                          lifetime=lambda _record, home: self.lifetime_value, home=lambda: str(self.home))
+                          lifetime=lambda _record, home: self.lifetime_value, home=lambda: str(self.home),
+                          predecessor=lambda _record, _stack: self.predecessor_value, retire=self.retire)
         return attempt.run("xspeed-dev", "dev", self.attempt_id)
+
+    def retire(self, record, predecessor):
+        if self.retire_error is not None:
+            raise self.retire_error
+        self.retired.append(predecessor["request_id"])
+        return {"request_id": predecessor["request_id"], "execution_state": "interrupted"}
+
+    def own_interrupted_request(self, attempt_id="fedcba9876543210", job_id="job-earlier"):
+        """An earlier attempt of this follow whose nested apply was interrupted."""
+        from sandbox.application.server_cli import nested_request_id
+        self.store.audit("attempt_submitted", "dev", actor="follower", attempt=attempt_id, job_id=job_id)
+        return nested_request_id(job_id, f"follow-dev-{attempt_id}-apply")
 
     def test_a_successful_attempt_prepares_plans_confirms_waits_and_records_applied_heads(self):
         result = self.run_attempt()
@@ -794,6 +809,95 @@ class AttemptTests(FollowCase):
                          [{"branch": "dev", "commit": HEAD_A}] * 2)
         record = self.store.read("dev")
         self.assertIsNone(follow_apply.follow_source({**record, "template": "{dir}/stack.yml"}, self.heads))
+
+
+class InterruptedPredecessorTests(AttemptTests):
+    """feedback 4c09145b: an attempt interrupted mid-apply fenced every later one."""
+
+    def test_the_follows_own_interrupted_delivery_is_retired_and_the_apply_goes_on(self):
+        request = self.own_interrupted_request()
+        self.predecessor_value = {"request_id": request, "validated": {}}
+        result = self.run_attempt()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.retired, [request])
+        self.assertEqual([call.plan for call in self.calls], [True, False])
+        self.assertIn("predecessor_retired", self.audit_events())
+
+    def test_another_owners_interrupted_delivery_is_kept_and_status_names_the_command(self):
+        self.own_interrupted_request()
+        self.predecessor_value = {"request_id": "nested-" + "0" * 32, "validated": {}}
+        result = self.run_attempt()
+        self.assertFalse(result["ok"])
+        self.assertEqual((self.retired, self.calls, self.prepared), ([], [], []))
+        command = ("sb host retire-delivery --name dev --remote xspeed-dev "
+                   "--original-request-id nested-" + "0" * 32 + " --confirm")
+        self.assertTrue(result["reason"].startswith("follow_predecessor_not_owned"), result["reason"])
+        self.assertIn(command, result["reason"])
+        state = self.store.read("dev")["state"]
+        self.assertEqual(state["failed_heads"], self.heads)
+        self.assertEqual(state["last_check"]["next_command"], command)
+        self.assertIn(command, state["last_check"]["reason"])
+        # The next poll waits on the same heads and keeps the way out in its last check.
+        row = follow_tick.Tick(self.store, submit=lambda argv: "job-2", capability=lambda: CAPABILITY,
+                               job_view=lambda _job: None, fetch=lambda *a, **k: HEAD_A,
+                               checkout=lambda *a, **k: None, stack_lookup=lambda *_a: self.stack,
+                               busy=lambda _r, home: (None, None), lifetime=lambda _r, home: None,
+                               home=lambda: str(self.home)).run()["follows"][0]
+        self.assertEqual(row["action"], "skip")
+        self.assertIn(command, row["reason"])
+        self.assertEqual(self.store.read("dev")["state"]["last_check"]["next_command"], command)
+
+    def test_the_current_attempts_own_job_counts_as_its_own(self):
+        from sandbox.application.server_cli import nested_request_id
+        # The attempt records its own job id as it starts.
+        request = nested_request_id(self.context.job_id, f"follow-dev-{self.attempt_id}-apply")
+        self.predecessor_value = {"request_id": request, "validated": {}}
+        self.assertTrue(self.run_attempt()["ok"])
+        self.assertEqual(self.retired, [request])
+
+    def test_a_failed_retirement_names_the_command_and_applies_nothing(self):
+        from sandbox.delivery.models import DeliveryError
+        request = self.own_interrupted_request()
+        self.predecessor_value = {"request_id": request, "validated": {}}
+        self.retire_error = DeliveryError("binding_mismatch")
+        result = self.run_attempt()
+        self.assertTrue(result["reason"].startswith("follow_predecessor_retire_failed"), result["reason"])
+        self.assertIn("binding_mismatch", result["reason"])
+        self.assertIn(f"--original-request-id {request} --confirm", result["reason"])
+        self.assertEqual(self.calls, [])
+
+    def test_a_retirement_whose_host_state_cleanup_timed_out_says_what_to_inspect(self):
+        from sandbox.commands.hosting import RetireCleanupPending
+        request = self.own_interrupted_request()
+        self.predecessor_value = {"request_id": request, "validated": {}}
+        self.retire_error = RetireCleanupPending({"request_id": request})
+        result = self.run_attempt()
+        self.assertTrue(result["reason"].startswith("follow_predecessor_cleanup_pending"), result["reason"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.read("dev")["state"]["last_check"]["next_command"],
+                         "sb host status --name dev --remote xspeed-dev")
+
+    def test_a_predecessor_whose_job_still_runs_is_busy_not_failed(self):
+        self.predecessor_value = {"busy": "predecessor_delivery_running"}
+        result = self.run_attempt()
+        self.assertEqual((result["status"], result["reason"]), ("busy", "predecessor_delivery_running"))
+        self.assertIsNone(self.store.read("dev")["state"]["failed_heads"])
+
+    def test_the_derived_id_is_the_one_the_nested_apply_is_admitted_under(self):
+        from sandbox.application import server_cli
+        owner = SimpleNamespace(executable="/srv/sb", target_identity="t", runtime_revision="r",
+                                ownership_marker="m")
+        context = SimpleNamespace(owner=owner, job_id="job-earlier", deadline_at="2099-01-01T00:00:00+00:00",
+                                  origin_remote_name="xspeed-dev", target_metadata={})
+        with patch.object(server_cli, "validate_owner_current", return_value=context), \
+                patch.object(server_cli, "installed_cli", return_value=Path("/srv/sb")):
+            argv = server_cli.local_server_cli_submission_argv(
+                owner, ("host", "apply"), project_dir=str(self.home), source_commit=HEAD_A,
+                request_id=follow_apply.apply_request_id("dev", "fedcba9876543210"),
+                timeout_seconds=60, parent_job_id="job-earlier")
+        admitted = argv[argv.index("--request-id") + 1]
+        self.assertEqual(admitted, self.own_interrupted_request())
+        self.assertIn(admitted, follow_apply.owned_requests(self.store, self.store.read("dev")))
 
 
 class ReviewCommandTests(FollowCase):

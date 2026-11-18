@@ -109,6 +109,15 @@ legacy bearer remains stored locally. The shared installer enforces that rule
 for low-level callers too. `remote provision --force` cannot replace a joined
 Tailnet registration; use the supported lifecycle commands instead.
 
+Control protocol 28 adds `sb host share create|list|revoke --here` (contract
+`host.share-here.v1`, `sandbox/hosting/server_share.py`), listed under
+`host_share_capabilities` in `job-capabilities`. A joined controller reads that key first
+and refuses a runtime without it. For `create` it sends only its token's SHA-256 (with
+`--agent-link` when the link must go to `--json`); the installed owner answers with one
+JSON line carrying the contract, `target_identity`, `ownership_marker`, the echoed
+`token_sha256`, `link_id`, `hostname`, `agent_mint` and the expiry, never a link. 28
+serves every runtime 27 did.
+
 Control protocol 27 records the `_helper_failure` detail keys of the PostgreSQL
 recovery transport (`helper_code`, `step`, `command`, `exit`, `check`), which ee78ede and
 0a79b72 added under 26 without a bump. The controller builds them from the helper's

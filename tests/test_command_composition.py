@@ -51,7 +51,7 @@ class TestCommandComposition(unittest.TestCase):
         load_builtin_commands()
         self.assertEqual(len(BUILTIN_COMMAND_MODULES), len(set(BUILTIN_COMMAND_MODULES)))
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
-        self.assertEqual(len(COMMANDS), 95)
+        self.assertEqual(len(COMMANDS), 97)
         self.assertIn("sandbox.commands.activation", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.domains", BUILTIN_COMMAND_MODULES)
@@ -61,7 +61,8 @@ class TestCommandComposition(unittest.TestCase):
         self.assertIn("sandbox.commands.owned_storage", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.server", BUILTIN_COMMAND_MODULES)
         self.assertEqual(set(COMMANDS) - {"secrets", "init", "activation", "sync", "storage", "server", "delivery",
-                                         "job-policy", "job-capabilities", "publisher-proof"},
+                                         "job-policy", "job-capabilities", "publisher-proof",
+                                         "notes", "mockups"},
                          set(LEGACY_BRIDGE_COMMANDS))
         self.assertEqual(validate_builtin_command_coverage(), ())
         self.assertEqual(COMMAND_SPECS.get("domains").owner, "sandbox.commands.domains")

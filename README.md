@@ -479,6 +479,15 @@ Source cleanup requires its own human approval. Storage remains operator-atteste
 live provider/controller proofs and human security review are still required
 before real migration. See [ownership profiles](docs/secret-inspection.md#ownership-profiles-and-create-only-migration).
 
+### Publishing notes and mockups
+
+`sb notes` publishes markdown or HTML files to an Agent Notes service and
+`sb mockups` publishes a folder with an `index.html` as one HTML note with image
+assets. `sb notes sync DIR` keeps a folder of markdown files published and can be
+rerun. The bearer token is minted once with `sb notes login` and held by the
+secrets broker; it is never in argv, output or config. See
+[docs/agent-notes.md](docs/agent-notes.md).
+
 ### Host storage monitoring and safe cleanup
 
 Inspect local or named-remote storage without booting an instance:

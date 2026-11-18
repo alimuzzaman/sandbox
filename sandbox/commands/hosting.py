@@ -3782,7 +3782,8 @@ def _refresh_hosting_operation(state: dict, key: str, *, classified: dict,
         return
     save_state = save_state or hosting.save_host_state
     with personal_secrets.hosting_binding_broker_lock():
-        binding_metadata = personal_secrets.read_hosting_binding_metadata(key)
+        # Another target's generated secrets rewrite the shared file mid-apply.
+        binding_metadata = personal_secrets.read_hosting_binding_metadata(key, compare_values=True)
         if (binding_metadata.get("metadata_id") !=
                 evidence.get("secret_binding_metadata_id") or
                 binding_metadata.get("revision") != evidence.get("secret_binding_revision")):

@@ -36,8 +36,12 @@ def read_secret_file(path: Path | None = None) -> dict[str, str]:
     path = path or secret_file()
     if not path.exists():
         return {}
+    return _parse_secret_text(path.read_text(), path)
+
+
+def _parse_secret_text(text: str, path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    for number, raw in enumerate(path.read_text().splitlines(), 1):
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -461,10 +465,60 @@ def prospective_hosting_binding_reference(target_key: str,
         key_path=key_path)
 
 
+def _bindings_still_hold(metadata: dict, secret_path: Path | None, epoch: dict,
+                         key: bytes) -> bool:
+    """True when the shared file changed but this target's bound values did not.
+
+    One secrets file serves every target on the host, so another target's
+    generated secrets change its epoch mid-apply. The file is read once, without
+    following links, only if it is still the file ``epoch`` describes, and only
+    the references this target bound are compared, under the same binding key.
+    Values never leave this function.
+    """
+    from sandbox.hosting.recovery.models import secret_binding_identities
+
+    if metadata.get("key_identity") != "sha256:" + hashlib.sha256(key).hexdigest():
+        return False
+    selected = Path(secret_path or secret_file()).expanduser()
+    try:
+        descriptor = os.open(selected, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return False
+    try:
+        info = os.fstat(descriptor)
+        if ((info.st_dev, info.st_ino) != (epoch["device"], epoch["inode"]) or
+                not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
+            return False
+        with os.fdopen(os.dup(descriptor), "r") as handle:
+            values = _parse_secret_text(handle.read(), selected)
+    except (OSError, ValueError, SecretError):
+        return False
+    finally:
+        os.close(descriptor)
+    references = [item["reference"] for item in metadata["bindings"]]
+    if any(name not in values for name in references):
+        return False
+    try:
+        current = secret_binding_identities(
+            {name: values[name] for name in references}, key=key,
+            key_version=metadata["key_version"])["bindings"]
+    except ValueError:
+        return False
+    return current == sorted(metadata["bindings"], key=lambda item: item["reference"])
+
+
 def read_hosting_binding_metadata(target_key: str, *, path: Path | None = None,
                                   secret_path: Path | None = None,
-                                  key_path: Path | None = None) -> dict:
-    """Read only opaque broker metadata; never parse or materialize secret values."""
+                                  key_path: Path | None = None,
+                                  compare_values: bool = False) -> dict:
+    """Read only opaque broker metadata.
+
+    Recovery never parses or materializes secret values. An apply, which read
+    the source itself, passes ``compare_values`` so a change to the shared file
+    that leaves this target's bound values intact does not fail it.
+    """
     from sandbox.core._paths import RUNTIME_DIR
 
     selected_root = Path(path or (
@@ -566,7 +620,9 @@ def read_hosting_binding_metadata(target_key: str, *, path: Path | None = None,
         reasons.append("metadata_digest_mismatch")
     if metadata.get("environment_backed"):
         reasons.append("environment_backed_secret_override")
-    if secret_epoch is not None and metadata.get("secret_file_epoch") != secret_epoch:
+    if (secret_epoch is not None and metadata.get("secret_file_epoch") != secret_epoch and
+            not (compare_values and shape_valid and current_key is not None and
+                 _bindings_still_hold(metadata, secret_path, secret_epoch, current_key))):
         reasons.append("secret_file_epoch_mismatch")
     if current_key is not None and metadata.get("key_identity") != "sha256:" + hashlib.sha256(current_key).hexdigest():
         reasons.append("key_identity_mismatch")

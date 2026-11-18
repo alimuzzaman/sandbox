@@ -813,7 +813,8 @@ workspace is bind-mounted, so its host owner must be uid 1001 (as on xspeed-dev)
 for the job to write it; pull the image on that host first. The tool cache is
 `/home/runner/hostedtoolcache` in the job container, writable by `runner` and gone
 with it, so setup actions install new versions instead of failing on act's
-root-owned shared cache. It combines with
+root-owned shared cache. `setup-php` resets it to `/opt/hostedtoolcache` for later
+steps, so put other setup actions before it. It combines with
 `--container-limit` and reaches each remote durable child (CLI only, not MCP):
 
 ```sh

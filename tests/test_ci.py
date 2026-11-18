@@ -464,9 +464,9 @@ class TestAsRunner(unittest.TestCase):
     def test_as_runner_gives_the_job_a_tool_cache_runner_can_write(self):
         # act's shared act-toolcache volume at /opt/hostedtoolcache holds root
         # 0755 folders from root jobs, so setup-node failed with EACCES there.
-        self.assertEqual(self.env(self.act_command(as_runner=True))[:2],
-                         ["RUNNER_TOOL_CACHE=/home/runner/hostedtoolcache",
-                          "AGENT_TOOLSDIRECTORY=/home/runner/hostedtoolcache"])
+        env = self.env(self.act_command(as_runner=True))
+        self.assertIn("RUNNER_TOOL_CACHE=/home/runner/hostedtoolcache", env)
+        self.assertIn("AGENT_TOOLSDIRECTORY=/home/runner/hostedtoolcache", env)
         self.assertNotIn("hostedtoolcache", " ".join(self.act_command()))
 
 

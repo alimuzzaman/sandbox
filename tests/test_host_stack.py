@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -1069,6 +1070,98 @@ class StackCommandTests(unittest.TestCase):
         record = stack_registry.read()["stacks"]["r/demo"]
         self.assertEqual(record["last_apply"]["status"], "refused")
         self.assertIn("mailpit", record["ports"])
+
+    def _accept_job(self, argv, lifecycle):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        from sandbox.jobs.registry import JobRepository
+        repository = JobRepository(self.runtime.runtime / "jobs" / "registry.sqlite3")
+        try:
+            row, _ = repository.accept(JobSubmission(
+                kind="test", project_root=argv[argv.index("--project-dir") + 1],
+                project_identity="stuck-unknown-fixture", target_kind="local",
+                workspace_label="default", argv=("true",), deadline_seconds=60,
+                request_id=argv[argv.index("--request-id") + 1],
+                source=SourceIdentity("sha256:" + "a" * 64)))
+            if lifecycle != "accepted":
+                repository.transition(row["job_id"], "running")
+            if lifecycle == "failed":
+                repository.transition(row["job_id"], "failed", exit_code=1)
+            return row["job_id"]
+        finally:
+            repository.close()
+
+    def test_job_start_json_refusal_is_a_failed_submission_not_unknown(self):
+        # Fable 1118 [1]: job-start never prints acceptance "not_accepted".
+        refusal = json.dumps({"ok": False, "code": "workspace_owner_mismatch", "error": "x",
+                              "operation": "job-start", "status": "refused"})
+        for stdout, code in ((refusal, "stack_submission_failed"),
+                             ("", "stack_submission_unknown"),
+                             (json.dumps({"status": "refused", "acceptance": "not_started_by_this_attempt"}),
+                              "stack_submission_unknown")):
+            with self.subTest(stdout=stdout[:40]):
+                reply = subprocess.CompletedProcess([], 1, stdout=stdout + "\n", stderr="")
+                with patch.object(host_stack.subprocess, "run", return_value=reply), \
+                        self.assertRaises(host_stack.StackCommandError) as caught:
+                    host_stack._submit(["sb", "job-start"])
+                self.assertEqual(caught.exception.code, code)
+
+    def test_an_unknown_submission_with_no_admitted_job_is_settled_by_its_request_id(self):
+        # Fable 1118 [1]: acceptance_unknown (and main's submission_failed)
+        # with no job id used to refuse `up` and `down` for good.
+        for status in ("acceptance_unknown", "submission_failed", "submitting"):
+            with self.subTest(status=status):
+                unknown = host_stack.StackCommandError("stack_submission_unknown", "lost")
+                with patch.object(host_stack, "_submit", side_effect=unknown), \
+                        self.assertRaises(host_stack.StackCommandError):
+                    host_stack._up(self.args("up", confirm=True))
+                with stack_registry.locked() as registry:
+                    record = registry.get("r", "demo")
+                    record["last_apply"]["status"] = status
+                    record["last_apply"].pop("job_request_id", None)  # a record from before the fix
+                    registry.put(record)
+                with patch.object(host_stack, "_submit", return_value="a" * 32):
+                    host_stack._up(self.args("up", confirm=True))
+                self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_id"], "a" * 32)
+                with stack_registry.locked() as registry:
+                    record = registry.get("r", "demo")
+                    record["last_apply"].update(job_id=None, status="acceptance_unknown")
+                    registry.put(record)
+
+    def test_an_unknown_submission_whose_request_was_admitted_is_judged_by_that_job(self):
+        submitted = {}
+
+        def lose_receipt(argv):
+            submitted["job"] = self._accept_job(argv, "running")
+            raise host_stack.StackCommandError("stack_submission_unknown", "receipt lost")
+
+        with patch.object(host_stack, "_submit", side_effect=lose_receipt), \
+                self.assertRaises(host_stack.StackCommandError):
+            host_stack._up(self.args("up", confirm=True))
+        self.assertIsNone(stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_id"])
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_apply_in_progress")
+        self.assertIn(submitted["job"], str(caught.exception))
+
+    def test_an_unknown_without_a_request_row_still_refuses_while_a_job_runs_from_its_worktree(self):
+        # A pre-fix record of a nested server-cli submission has no
+        # job_request_id; its job ran under a derived request id.
+        def lose_receipt(argv):
+            renamed = list(argv)
+            renamed[renamed.index("--request-id") + 1] = "nested-" + "0" * 32
+            self._accept_job(renamed, "running")
+            raise host_stack.StackCommandError("stack_submission_unknown", "receipt lost")
+
+        with patch.object(host_stack, "_submit", side_effect=lose_receipt), \
+                self.assertRaises(host_stack.StackCommandError):
+            host_stack._up(self.args("up", confirm=True))
+        with stack_registry.locked() as registry:
+            record = registry.get("r", "demo")
+            record["last_apply"].pop("job_request_id", None)
+            registry.put(record)
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_submission_unknown")
 
     def test_hostname_owned_by_other_project_refuses_before_any_change(self):
         state = {"version": 1, "hosts": {"r/other/production": {"hostnames": ["admin-demo.example.test"]}}}

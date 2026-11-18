@@ -172,6 +172,58 @@ class SnapshotTest(unittest.TestCase):
                          ("demo", "alice", "temporary"))
         self.assertTrue(any(reason.startswith("lifetime_record_invalid:") for reason in snapshot["partial_reasons"]))
 
+    def test_slow_probes_never_hold_the_fast_snapshot(self):
+        # remote join reads /inventory for its schema with a fixed timeout; docker stats and
+        # the storage probe took ~5 s each on xspeed-dev and made every first join time out.
+        import threading
+        import time
+        release = threading.Event()
+        def slow_diagnostics():
+            release.wait(10)
+            return {"containers": {"status": "complete", "rows": [container("late")]}, "process_view": {}}
+        storage = mock.MagicMock()
+        storage.return_value.observe_reclaim.side_effect = lambda **_: (release.wait(10), {"category_outcomes": []})[1]
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("sandbox.core._paths.RUNTIME_DIR", Path(tmp)), \
+                mock.patch("sandbox.core._config.load_config", return_value={}), \
+                mock.patch("sandbox.core._dash.collect_instance_rows", return_value=[]), \
+                mock.patch("sandbox.resources.remote.LocalProbeAdapter", storage), \
+                mock.patch.object(host_inventory, "_diagnostic_process_snapshot", side_effect=slow_diagnostics):
+            started = time.monotonic()
+            first = host_inventory._hosted_inventory_snapshot()
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 3)
+            self.assertEqual(first["inventory_schema"], 1)
+            self.assertIn("container_inventory_pending", first["partial_reasons"])
+            self.assertIn("storage_inventory_pending", first["partial_reasons"])
+            self.assertEqual(first["storage"]["status"], "pending")
+            release.set()
+            for _ in range(50):
+                second = host_inventory._hosted_inventory_snapshot()
+                if not {"container_inventory_pending", "storage_inventory_pending"} & set(second["partial_reasons"]):
+                    break
+                time.sleep(0.1)
+            self.assertEqual([row["name"] for row in second["unattributed_containers"]], ["late"])
+            self.assertNotEqual(second["storage"]["status"], "pending")
+            # One background run per probe, not one per request.
+            self.assertEqual(storage.return_value.observe_reclaim.call_count, 1)
+
+    def test_deep_snapshot_still_measures_directly(self):
+        storage = mock.MagicMock()
+        storage.return_value.observe_reclaim.return_value = {"category_outcomes": []}
+        diagnostics = mock.Mock(return_value={"containers": {"status": "complete", "rows": []}, "process_view": {}})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("sandbox.core._paths.RUNTIME_DIR", Path(tmp)), \
+                mock.patch("sandbox.core._config.load_config", return_value={}), \
+                mock.patch("sandbox.core._dash.collect_instance_rows", return_value=[]), \
+                mock.patch("sandbox.resources.remote.LocalProbeAdapter", storage), \
+                mock.patch.object(host_inventory, "_diagnostic_process_snapshot", diagnostics):
+            host_inventory._hosted_inventory_snapshot(deep=True)
+            host_inventory._hosted_inventory_snapshot(deep=True)
+        self.assertEqual(diagnostics.call_count, 2)
+        self.assertEqual(storage.return_value.observe_reclaim.call_args.kwargs,
+                         {"budget_seconds": 30, "directory_cache": "refresh"})
+
     def test_no_hosted_targets_keeps_the_old_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             snapshot = self.snapshot(Path(tmp), [container("unrelated")])

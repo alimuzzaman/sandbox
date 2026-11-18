@@ -9,6 +9,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 _DIAGNOSTICS_SCHEMA_VERSION = 2
@@ -105,6 +107,44 @@ def _diagnostic_process_snapshot() -> dict:
     }
 
 
+# docker stats (~5 s) and the storage probe (~6 s) dominate /inventory, yet
+# admission checks (remote join, tailnet member probe) read only the schema.
+# A fast snapshot serves the last result of each slow probe, refreshes it in
+# the background when older than the TTL, and waits at most a moment for the
+# very first one. Deep scans still measure directly.
+_SLOW_PROBE_TTL_SECONDS = 30
+_SLOW_PROBE_FIRST_WAIT_SECONDS = 1.0
+_slow_probe_lock = threading.Lock()
+_slow_probes: dict = {}
+
+
+def _cached_slow_probe(key, compute):
+    """Last value of ``compute`` (None if none yet), refreshed single-flight in the background.
+
+    ``key`` is the probe callable itself, so a replaced probe never reads another's value.
+    """
+    with _slow_probe_lock:
+        entry = _slow_probes.setdefault(key, {"value": None, "at": None, "thread": None})
+        if entry["value"] is not None and time.monotonic() - entry["at"] < _SLOW_PROBE_TTL_SECONDS:
+            return entry["value"]
+        if entry["thread"] is None or not entry["thread"].is_alive():
+            def refresh():
+                try:
+                    value = compute()
+                except Exception:  # noqa: BLE001 - keep the previous value; the caller reports unavailable
+                    return
+                with _slow_probe_lock:
+                    entry["value"], entry["at"] = value, time.monotonic()
+            entry["thread"] = threading.Thread(target=refresh, name="inventory-probe", daemon=True)
+            entry["thread"].start()
+        thread, stale = entry["thread"], entry["value"]
+    if stale is not None:
+        return stale
+    thread.join(_SLOW_PROBE_FIRST_WAIT_SECONDS)
+    with _slow_probe_lock:
+        return entry["value"]
+
+
 def _container_key(name: str) -> str:
     return name.lower().replace("_", "-")
 
@@ -195,7 +235,13 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
         instances = []
         partial.append("instance_inventory_unavailable")
 
-    diagnostics = _diagnostic_process_snapshot()
+    if deep:
+        diagnostics = _diagnostic_process_snapshot()
+    else:
+        diagnostics = _cached_slow_probe(_diagnostic_process_snapshot, _diagnostic_process_snapshot)
+        if diagnostics is None:
+            diagnostics = {"containers": {"status": "pending", "rows": []}}
+            partial.append("container_inventory_pending")
     container_view = diagnostics.get("containers") or {"status": "unavailable", "rows": []}
     container_rows = container_view.get("rows") if isinstance(container_view, dict) else []
     container_rows = container_rows if isinstance(container_rows, list) else []
@@ -233,10 +279,14 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     unattributed = [row for row in container_rows if str(row.get("name") or "") not in attributed_names]
 
     try:
-        storage_probe = LocalProbeAdapter().observe_reclaim(
-            budget_seconds=30 if deep else 8,
-            directory_cache="refresh" if deep else "cache_only",
-        )
+        if deep:
+            storage_probe = LocalProbeAdapter().observe_reclaim(
+                budget_seconds=30, directory_cache="refresh")
+        else:
+            storage_probe = _cached_slow_probe(LocalProbeAdapter, lambda: LocalProbeAdapter().observe_reclaim(
+                budget_seconds=8, directory_cache="cache_only"))
+            if storage_probe is None:
+                raise LookupError("storage probe pending")
         storage = {
             "status": "partial" if any(
                 str(item.get("status")) not in {"complete", "measured"}
@@ -250,10 +300,11 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
             ),
             "category_outcomes": list(storage_probe.get("category_outcomes") or ())[:50],
         }
-    except Exception:
-        storage = {"status": "unavailable", "capacity": None,
+    except Exception as exc:
+        pending = isinstance(exc, LookupError) and str(exc) == "storage probe pending"
+        storage = {"status": "pending" if pending else "unavailable", "capacity": None,
                    "attribution_status": "unknown", "category_outcomes": []}
-        partial.append("storage_inventory_unavailable")
+        partial.append("storage_inventory_pending" if pending else "storage_inventory_unavailable")
 
     running = sum(1 for row in instances if row["running"])
     host = _memory_snapshot()

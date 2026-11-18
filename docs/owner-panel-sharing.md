@@ -99,9 +99,14 @@ Private payloads travel on stdin, never in process arguments or job output.
 
 A timeout keeps the original Popen handle and apply lease; it never kills a guessed
 pid or launches a replacement. A later admitted request can continue observing that
-same handle. Only confirmed zero-exit original execution settles its fence. A process
-restart or ambiguous transport failure has no reconstructed handle and stays fenced
-for coordinated recovery. Retrying create never skips unresolved original attempts.
+same handle. A confirmed zero-exit original execution settles its fence at once. A
+failed original (nonzero exit, stderr or a bad reply) settles `EFFECT_DRAIN_SECONDS`
+(30) after its docker CLI is proven finished, so an in-container effect still running
+cannot land after the cleanup revoke. After a panel restart there is no handle: the
+pid, boot id and start time recorded at spawn prove the CLI gone (absent pid, reused
+pid or new boot), then the same drain applies. A process that may still run stays
+fenced. A settled row resumes its retained lease and runs the idempotent cleanup.
+Retrying create never skips unresolved original attempts.
 Recovered listings are discarded only after original-handle settlement and physical
 lease release. Completed management observations are also pruned after a crash
 between lease release and journal deletion, so they cannot strand the reserved

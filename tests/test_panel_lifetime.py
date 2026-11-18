@@ -8,6 +8,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from sandbox.hosting import panel_lifetime as pl
@@ -397,7 +398,8 @@ class AcceptedJobFetcherTest(unittest.TestCase):
         self.assertEqual(fetch("joined"), self.payload)
         self.assertEqual(sum(c[1] == "host" for c in self.calls), 1)
 
-    def test_unknown_submission_is_not_repeated_on_refresh(self):
+    def test_unknown_submission_retries_with_the_same_request_id(self):
+        # Fable pass 2 [3]: one timed-out submission must not pin the remote.
         calls = []
         def timeout(argv, **kwargs):
             calls.append(argv)
@@ -405,8 +407,51 @@ class AcceptedJobFetcherTest(unittest.TestCase):
         fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=timeout)
         with self.assertRaises(subprocess.TimeoutExpired):
             fetch("joined")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            fetch("joined")
+        self.assertEqual(len(calls), 2)
+        first, second = (c[c.index("--request-id") + 1] for c in calls)
+        self.assertEqual(first, second)  # idempotent replay, never a second identity
+
+    def test_refused_submission_then_accepted_job_is_observed(self):
+        refused = [True]
+        def run(argv, **kwargs):
+            if argv[1] == "host" and refused[0]:
+                refused[0] = False
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+            return self.run_command(argv, **kwargs)
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=run)
         self.assertIsNone(fetch("joined"))
-        self.assertEqual(len(calls), 1)
+        self.running = False
+        self.assertEqual(fetch("joined"), self.payload)
+
+    def test_failed_exit_on_succeeded_job_releases_the_remote(self):
+        failing = [True]
+        def run(argv, **kwargs):
+            result = self.run_command(argv, **kwargs)
+            if argv[1] == "job-status" and failing[0]:
+                value = json.loads(result.stdout)
+                value.update(lifecycle="succeeded", exit_code=1)
+                result = subprocess.CompletedProcess(argv, 0, stdout=json.dumps(value), stderr="")
+            return result
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=run)
+        self.assertIsNone(fetch("joined"))
+        first = self.request
+        failing[0] = False
+        self.assertIsNone(fetch("joined"))  # a new listing, still running
+        self.assertNotEqual(self.request, first)
+        self.assertEqual(sum(c[1] == "host" for c in self.calls), 2)
+
+    def test_stale_observation_is_released_after_the_age_bound(self):
+        fetch = pl.stack_list_fetcher(Path("/checkout/sb"), run=self.run_command)
+        clock = [1000.0]
+        with mock.patch.object(pl.time, "monotonic", lambda: clock[0]):
+            self.assertIsNone(fetch("joined"))
+            first = self.request
+            clock[0] += pl.PENDING_MAX_SECONDS + 1
+            self.assertIsNone(fetch("joined"))
+        self.assertNotEqual(self.request, first)
+        self.assertEqual(sum(c[1] == "host" for c in self.calls), 2)
 
 
 if __name__ == "__main__":

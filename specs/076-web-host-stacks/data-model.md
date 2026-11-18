@@ -104,6 +104,7 @@ Rule: anything other than a record that `hoststore.parse_record` accepts gives `
 
 **HostingView additions**:
 - `StackView` and `TargetView` gain `compose_project` and `lifetime`. `TargetView` gains `stack_slug` (str or null), the lifetime record's slug for a target without a summary.
+- (2026-11-15) `TargetView` gains `ports` (the manifest's declared `ports`, `{}` when none), `mailpit_port` (int or null) and `mail_access` (as on `StackView`). `TargetSummary` gains an optional top-level `ports`, only for a target without `stack`.
 - A top-level `lifetimes: [LifetimeRow]` lists one row per stack and target plus any lifetime record without a card. A `LifetimeRow` is a `LifetimeView` plus `remote`, `source`, `project`, `environment`, `compose_project`, `name` (slug, or `project · environment`) and `card` (bool).
 
 Order: rank (temporary and reapable 0, temporary 1, hosted 2, permanent 3, unknown 4, unclassified 5), then `expires_at` ascending, then owner, then name.

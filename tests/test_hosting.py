@@ -741,6 +741,42 @@ class TestHostingManifest(unittest.TestCase):
         # Redirect-only aliases stay plain redirects.
         self.assertIn("redir https://xn--94b2eraib0c0bd9i.xn--54b7fta0cc{uri} 308", rendered)
 
+    def test_declared_ports_are_validated_and_sorted(self):
+        with self._write(_manifest()) as directory:
+            self.assertEqual(hosting.validate_manifest(directory)["ports"], {})
+        manifest = _manifest().replace("    cloudflare:\n", "    ports:\n      mailpit: 8026\n      adminer: 8081\n    cloudflare:\n")
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        self.assertEqual(list(result["ports"].items()), [("adminer", 8081), ("mailpit", 8026)])
+
+    def test_rejects_invalid_declared_ports(self):
+        cases = {
+            "{}": "ports must map 1 to 32",
+            "[mailpit]": "ports must map 1 to 32",
+            "{Mailpit: 8026}": "ports names must start",
+            "{mailpit: '8026'}": "ports.mailpit must be an integer",
+            "{mailpit: true}": "ports.mailpit must be an integer",
+            "{mailpit: 70000}": "ports.mailpit must be an integer",
+            "{mailpit: 18000}": "managed range 18000-18999",
+            "{mailpit: 18142}": "managed range 18000-18999",
+            "{mailpit: 19000}": "managed range 19000-19999",
+            "{mailpit: 19999}": "managed range 19000-19999",
+            "{mailpit: 21005}": "managed range 21000-21999",
+            "{mailpit: 8026, smtp: 8026}": "same port",
+        }
+        for value, message in cases.items():
+            manifest = _manifest().replace("    cloudflare:\n", f"    ports: {value}\n    cloudflare:\n")
+            with self.subTest(value=value), self._write(manifest) as directory:
+                with self.assertRaisesRegex(hosting.HostingError, message):
+                    hosting.validate_manifest(directory)
+
+    def test_declared_ports_are_refused_on_a_stack(self):
+        with self.assertRaisesRegex(hosting.HostingError, "stack.ports"):
+            hosting.validate_declared_ports({"mailpit": 8026}, stack=True)
+        self.assertEqual(hosting.validate_declared_ports(None, stack=True), {})
+        self.assertEqual(hosting.validate_declared_ports({"mailpit": 18999 + 1001}, stack=False),
+                         {"mailpit": 20000})
+
     def test_rejects_an_unknown_robots_mode(self):
         manifest = _manifest().replace("    cloudflare:\n", "    robots: sometimes\n    cloudflare:\n")
         with self._write(manifest) as directory:

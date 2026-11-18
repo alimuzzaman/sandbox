@@ -95,6 +95,34 @@ class HostingViewTest(unittest.TestCase):
         self.assertEqual(len(self.jobs), 2)  # scheduled, not awaited
         self.assertNotIn(SECRET, json.dumps(view))
 
+    def test_server_view_asks_for_a_declared_hosted_mailpit_upstream(self):
+        write_summary(self.runtime)
+        summary = pr.parse_target_summary({
+            "schema": 1, "remote": "xspeed-dev", "project": "setup-plan", "environment": "production",
+            "compose_project": "sandbox-host-setup-plan-production", "loopback_port": 18020,
+            "healthcheck_path": "/",
+            "routes": [{"hostname": "setup-plan.example.test", "mode": "serve", "primary": True}],
+            "commit": COMMIT,
+            "last_apply": {"status": "succeeded", "started_at": 1, "finished_at": 2, "request_id": None},
+            "stack": None, "ports": {"mailpit": 8026},
+        })
+        target = self.runtime / "hosts" / "setup-plan" / "production"
+        target.mkdir(parents=True)
+        (target / "summary.json").write_text(pr.encode_record(summary))
+        url = "https://mail-setup-plan.example.test/mail/"
+        names = {"available": True, "partial": False,
+                 "names": [{"upstream": "127.0.0.1:8026", "url": url}]}
+        with mock.patch("sandbox.hosting.tailnet_names.panel.read_server", return_value=names) as read:
+            code, view = self.view()
+        self.assertEqual(code, 200)
+        self.assertEqual(read.call_args.kwargs["upstreams"], ["127.0.0.1:18142", "127.0.0.1:8026"])
+        (row,) = view["targets"]
+        self.assertEqual(row["mail_access"], {"status": "ready", "url": url, "upstream": "127.0.0.1:8026"})
+        with mock.patch("sandbox.hosting.tailnet_names.panel.read_server", return_value=names):
+            code, view = self.view(registry={"k": {"instance": "sandbox-wp-demo", "mailpit_port": 8026}})
+        (row,) = view["targets"]
+        self.assertEqual(row["mail_access"]["reason"], "shared_port")
+
     def test_server_view_carries_this_servers_lifetimes(self):
         write_summary(self.runtime)
         store = self.runtime / "target-lifetimes"

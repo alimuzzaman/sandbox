@@ -604,6 +604,47 @@ def _basic_auth_route_pattern(path_template: str) -> str:
     return "^/" + "/".join(rendered) + "$"
 
 
+_DECLARED_PORT_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
+_DECLARED_PORTS_LIMIT = 32
+
+
+def validate_declared_ports(value: object, *, stack: bool) -> dict[str, int]:
+    """Named loopback ports a plain target's own Compose publishes (``ports: {mailpit: 8026}``).
+
+    Sandbox allocates nothing for them; the panel only shows them, and a Mailpit
+    port still needs a managed tailnet name for that exact upstream before it
+    links an inbox. A port in a range Sandbox allocates (target, stack and
+    side-loaded revision and login-gate ports) is refused. A pinned stack port
+    or an instance's Mailpit port can still match; the panel's claim count
+    catches those. The panel reads summaries through this same check.
+    """
+    from sandbox.hosting.blue_green import SIDE_OFFSET
+    from sandbox.hosting.login_service import GATE_PORT_OFFSET
+    managed = tuple((_PORT_START + offset, _PORT_START + offset + _PORT_COUNT)
+                    for offset in (0, SIDE_OFFSET, GATE_PORT_OFFSET))
+    if value is None:
+        return {}
+    if stack:
+        raise HostingError("ports is for a plain hosted target; a stack names its ports in stack.ports")
+    if not isinstance(value, dict) or not value or len(value) > _DECLARED_PORTS_LIMIT:
+        raise HostingError(f"ports must map 1 to {_DECLARED_PORTS_LIMIT} names to loopback ports")
+    ports: dict[str, int] = {}
+    for name, port in value.items():
+        if not isinstance(name, str) or not _DECLARED_PORT_NAME_RE.fullmatch(name):
+            raise HostingError("ports names must start with a lowercase letter and use lowercase "
+                               "letters, digits and hyphens (at most 32 characters)")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise HostingError(f"ports.{name} must be an integer between 1 and 65535")
+        for start, end in managed:
+            if start <= port < end:
+                raise HostingError(f"ports.{name} is in Sandbox's managed range {start}-{end - 1}; "
+                                   "declare the fixed loopback port your own Compose publishes")
+        ports[name] = port
+    if len(set(ports.values())) != len(ports):
+        raise HostingError("ports must not give two names the same port")
+    return dict(sorted(ports.items()))
+
+
 def validate_manifest(project_dir: str | Path, environment: str | None = None, *,
                       git_root_observer=None) -> dict:
     root, manifest = load_manifest(project_dir)
@@ -834,6 +875,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     if robots == "allow" and indexing != "public":
         raise HostingError("robots: allow lets crawlers in; it needs `indexing: public` on the "
                            "environment (hosted targets are not indexed by default)")
+    declared_ports = validate_declared_ports(env.get("ports"), stack=stack is not None)
     from sandbox.hosting import login_service
     try:
         login_declaration = login_service.parse_declaration(
@@ -882,7 +924,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             "basic_auth": basic_auth,
             "stack": ({key: value for key, value in stack.items() if key != "source_root"}
                       if stack is not None else None),
-            "robots": robots, "indexing": indexing,
+            "robots": robots, "indexing": indexing, "ports": declared_ports,
             "warnings": _fingerprint_warnings(deploy, secrets)}
 
 

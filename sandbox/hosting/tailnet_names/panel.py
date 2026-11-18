@@ -24,7 +24,8 @@ class ReadyMailAccess(TypedDict):
 class UnavailableMailAccess(TypedDict):
     status: Literal["unavailable"]
     reason: Literal["no_port", "not_same_server", "inventory_unavailable", "inventory_partial",
-                    "not_found", "not_ready", "ambiguous"]
+                    "not_found", "not_ready", "ambiguous", "shared_port",
+                    "claims_unverified"]
     upstream: str | None
 
 

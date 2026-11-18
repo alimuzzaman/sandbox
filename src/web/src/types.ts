@@ -99,7 +99,7 @@ export type MailAccess =
   | { status: "ready"; url: string; upstream: string }
   | { status: "unavailable"; upstream: string | null; reason:
       "no_port" | "not_same_server" | "inventory_unavailable" | "inventory_partial" |
-      "not_found" | "not_ready" | "ambiguous" };
+      "not_found" | "not_ready" | "ambiguous" | "shared_port" | "claims_unverified" };
 
 export type RevisionEvidence = "verified" | "unverified" | "not_delivered";
 export interface StackPageAccess {
@@ -127,6 +127,8 @@ export interface HostingTarget {
   project: string; environment: string; commit: string | null; loopback_port: number | null;
   last_apply: HostingApply | null; recorded: boolean;
   compose_project: string; lifetime: LifetimeView; stack_slug: string | null;
+  // Declared in the manifest's `ports`; older panels omit these fields.
+  ports?: Record<string, number>; mailpit_port?: number | null; mail_access?: MailAccess;
   servers: HostingServer[];
 }
 export interface HostingView {

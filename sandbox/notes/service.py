@@ -73,12 +73,16 @@ def title_for(path: Path, text: str, *, html: bool) -> str:
     return (html_title(text) if html else markdown_title(text)) or Path(path).stem
 
 
-def service_filename(name: str) -> str:
-    """The download filename the service stores for ``name``: its slugify (src/notes.php)."""
-    stem = Path(name).stem
-    # ASCII only, like PCRE without /u; PHP's `?: 'note'` also treats "0" as empty.
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-").lower()[:60]
+def slugify(text: str) -> str:
+    """The service's slugify (src/notes.php): ASCII only, like PCRE without /u;
+    PHP's `?: 'note'` also treats "0" as empty."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()[:60]
     return slug if slug not in ("", "0") else "note"
+
+
+def service_filename(name: str) -> str:
+    """The download filename the service stores for a file published as ``name``."""
+    return slugify(Path(name).stem)
 
 
 def sha256(text: str) -> str:
@@ -190,20 +194,27 @@ class NotesClient:
         overwritten; a match that differs, or more than one match, fails the file.
         """
         mapped = {e["slug"] for e in entries.values()}
-        existing = [n for n in self.list() if n.get("slug") not in mapped
+        existing, seen = [], set()
+        for n in self.list():      # offset paging can repeat a note under concurrent edits
+            if (n.get("slug") not in mapped and n.get("slug") not in seen
                     and n.get("format", "markdown") == "markdown"
-                    and n.get("visibility", "tailnet") == "tailnet"]
-        hint = ("pass --adopt to overwrite it with the file, or --create-duplicates to "
-                f"publish a new note, or map the right slug in {MAP_FILE}")
+                    and n.get("visibility", "tailnet") == "tailnet"):
+                seen.add(n.get("slug"))
+                existing.append(n)
+        hint = (f"map the right slug for this file in {MAP_FILE}, or rerun with --adopt "
+                "(overwrites the match for every unmapped file) or --create-duplicates")
         matches: dict[str, list[dict]] = {}
         for name in names:
             wanted = service_filename(name) + ".md"
             matches[name] = [n for n in existing if n.get("filename") == wanted]
-        taken = {m[0]["slug"] for m in matches.values() if len(m) == 1}
+        taken = {n["slug"] for m in matches.values() for n in m}
         for name in names:
             if not matches[name]:
+                # Only notes published without a filename (stored as the title's slug):
+                # a note sync made elsewhere stores its own file name, never this.
                 matches[name] = [n for n in existing if n.get("title") == texts[name][1]
-                                 and n["slug"] not in taken]
+                                 and n["slug"] not in taken
+                                 and n.get("filename") == slugify(n["title"]) + ".md"]
         claims: dict[str, list[str]] = {}
         for name in names:
             if len(matches[name]) == 1:

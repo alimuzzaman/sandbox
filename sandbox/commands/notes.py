@@ -66,8 +66,9 @@ def configure_notes(parser) -> None:
                    help="delete notes whose file is gone (default: report them)")
     group = p.add_mutually_exclusive_group()
     group.add_argument("--adopt", action="store_true",
-                       help="for an unmapped file, take over the matching existing note even "
-                            "if its content differs (default: only an identical one)")
+                       help="for EVERY unmapped file in the run, take over its matching "
+                            "existing note even if the content differs (default: only an "
+                            "identical one); to adopt one file, map its slug in .notes.json")
     group.add_argument("--create-duplicates", action="store_true",
                        help="for an unmapped file, always publish a new note")
 

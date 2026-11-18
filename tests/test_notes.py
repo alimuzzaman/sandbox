@@ -429,6 +429,33 @@ class SyncTests(FakeCase):
         self.assertEqual([(i["file"], i["slug"]) for i in report["adopted"]], [("overview.md", old["slug"])])
         self.assertEqual([i["file"] for i in report["created"]], ["notes.md"])
 
+    def test_a_heading_never_matches_a_note_that_has_its_own_filename(self):
+        other = self._existing(title="Summary", content="theirs", filename="summary-2026")
+        self._write("overview.md", "# Summary\nmine\n")
+        report = self.client.sync(self.tmp)
+        self.assertEqual(([i["file"] for i in report["created"]], report["failed"]),
+                         (["overview.md"], []))
+        self.assertEqual(self.fake.notes[other["slug"]]["content"], "theirs")
+
+    def test_a_note_in_an_ambiguous_filename_group_is_not_title_matched(self):
+        # n1's filename "a" is also its title's slug, so only the filename group keeps
+        # c.md (heading "A") from title-matching it.
+        first = self._existing(title="A", content="# A\n", filename="a")
+        self._existing(title="t", content="x", filename="a")
+        self._write("a.md", "# x\n")
+        self._write("c.md", "# A\n")
+        report = self.client.sync(self.tmp, adopt=True)
+        self.assertEqual([i["code"] for i in report["failed"]], ["notes_adopt_ambiguous"])
+        self.assertEqual([i["file"] for i in report["created"]], ["c.md"])
+        self.assertEqual(self.fake.notes[first["slug"]]["content"], "# A\n")
+
+    def test_the_refusal_says_adopt_applies_to_every_unmapped_file(self):
+        self._existing(content="theirs", filename="plan")
+        self._write("plan.md", "# Plan\n")
+        error = self.client.sync(self.tmp)["failed"][0]["error"]
+        self.assertIn(MAP_FILE, error)
+        self.assertIn("every unmapped file", error)
+
     def test_two_existing_matches_are_refused_and_nothing_is_created(self):
         for _ in range(2):
             self._existing(content="# A\n", filename="a")
@@ -469,7 +496,8 @@ class SyncTests(FakeCase):
         # Vectors from agent-notes src/notes.php slugify() run under php -r.
         for name, want in (("11-php-versions-7.4-8.4.md", "11-php-versions-7-4-8-4"),
                            ("0.md", "note"), ("café au lait.md", "caf-au-lait"),
-                           ("İstanbul.md", "stanbul"), ("a" * 59 + "-b.md", "a" * 59 + "-")):
+                           ("İstanbul.md", "stanbul"), ("a" * 59 + "-b.md", "a" * 59 + "-"),
+                           ("\u212aelvin.md", "elvin"), ("-0-.md", "note")):
             with self.subTest(name=name):
                 self.assertEqual(service_filename(name), want)
 

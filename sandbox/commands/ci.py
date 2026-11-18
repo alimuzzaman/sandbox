@@ -589,10 +589,13 @@ DEFAULT_OUTPUT_LIMIT = 6000
 def _output_tail(stdout, stderr, limit: int) -> str:
     """Join a cell's act stdout and stderr and keep the last ``limit``
     characters; 0 keeps everything. A ``TimeoutExpired`` carries bytes even
-    under ``text=True``, so bytes are decoded the way ``text=True`` decodes."""
+    under ``text=True``, so bytes are decoded with the locale encoding and
+    universal newlines, as ``text=True`` does; undecodable bytes become U+FFFD
+    because a cut can split a character."""
     import locale
     encoding = locale.getpreferredencoding(False)
     stdout, stderr = ((part.decode(encoding, errors="replace")
+                       .replace("\r\n", "\n").replace("\r", "\n")
                        if isinstance(part, bytes) else part) for part in (stdout, stderr))
     out = ((stdout or "") + "\n" + (stderr or "")).strip()
     return out[-limit:] if limit else out
@@ -982,6 +985,9 @@ def cmd_ci(cfg, args) -> None:
     event = getattr(args, "event", None) or if_event
     if event is not None and not re.fullmatch(r"[a-z_]{1,64}", event):
         die(f"invalid GitHub event name {event!r}")
+    # A bad --output-limit is refused even when --if-event would skip the run.
+    if _output_limit(args) < 0:
+        die("--output-limit must be 0 (no limit) or a positive number of characters")
     if if_event and not _event_matches(plan.get("on"), if_event):
         msg = f"workflow '{wf_path.name}' does not trigger on '{if_event}' — nothing to run."
         if as_json:
@@ -992,8 +998,6 @@ def cmd_ci(cfg, args) -> None:
 
     # action == "run". Refuse a bad --container-limit or --as-runner before any
     # target, secret, temp file, --async launch or remote submission.
-    if _output_limit(args) < 0:
-        die("--output-limit must be 0 (no limit) or a positive number of characters")
     try:
         _container_limit_options(getattr(args, "container_limits", None) or ())
         if getattr(args, "as_runner", False):

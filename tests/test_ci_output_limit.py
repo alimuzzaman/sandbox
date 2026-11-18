@@ -60,6 +60,10 @@ class CellOutputLimitTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error"], "timed out after 30s")
         self.assertEqual(result["output"], OUTPUT + "\nkilled")
+        # Partial bytes get text=True's universal newlines, like a cell that finished.
+        progress = _run_cell(side_effect=subprocess.TimeoutExpired(
+            ["act"], 30, output=b"pull 10%\rpull 90%\r\ndone\r\n", stderr=None), output_limit=0)
+        self.assertEqual(progress["output"], "pull 10%\npull 90%\ndone")
         limited = _run_cell(side_effect=subprocess.TimeoutExpired(
             ["act"], 30, output=OUTPUT.encode(), stderr=None))
         self.assertEqual(limited["output"], OUTPUT[-6000:])
@@ -107,6 +111,16 @@ class OutputLimitFlagTests(unittest.TestCase):
 
     def test_a_negative_limit_is_refused_before_the_launch(self):
         path = self.workflow()
+        for extra in ({"if_event": "pull_request"}, {"run_async": False, "local": False}):
+            with self.subTest(**extra), \
+                    patch("sandbox.commands.ci.launch_background_job") as launch, \
+                    patch("sys.stderr", io.StringIO()) as stderr, \
+                    patch("sys.stdout", io.StringIO()) as stdout, \
+                    self.assertRaises(SystemExit):
+                ci.cmd_ci({}, self.run_args(path, output_limit=-1, **extra))
+            launch.assert_not_called()
+            self.assertIn("--output-limit", stderr.getvalue())
+            self.assertNotIn("skipped", stdout.getvalue())
         with patch("sandbox.commands.ci.launch_background_job") as launch, \
                 patch("sandbox.commands.ci._act_binary", return_value="act"), \
                 patch("sys.stderr", io.StringIO()) as stderr, \

@@ -817,6 +817,13 @@ for the job to write it; pull the image on that host first. It combines with
 sb ci run .github/workflows/tests.yml --remote xspeed-dev --as-runner --container-limit memory=2g --json
 ```
 
+Each cell's `output` keeps only the last 6000 characters of the `act` log. Pass
+`--output-limit 0` to keep all of it, or `--output-limit N` for the last N; a
+cell that times out keeps what it wrote before the deadline. The flag reaches
+`--async`, each remote durable child and MCP `ci_run` (`output_limit`). A
+non-default limit needs a remote migrated to this revision; an older one fails
+each child on the unknown flag.
+
 Retry only a terminal job, use a request ID for replay-safe control, and clean
 up only after retrieving any evidence you need:
 

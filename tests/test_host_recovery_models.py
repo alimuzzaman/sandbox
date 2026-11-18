@@ -163,6 +163,20 @@ class HostRecoveryModelsTests(unittest.TestCase):
                 read()
             replace("OWN_TOKEN=first\n")
             self.assertEqual(read(), result)
+            # A file swapped in after the epoch was taken is never read.
+            decoy = root / "decoy"
+            decoy.write_text("OWN_TOKEN=first\n")
+            decoy.chmod(0o600)
+            info = decoy.lstat()
+            swapped = {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size,
+                       "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}
+            with patch("sandbox.core._secrets._secret_file_epoch", return_value=swapped), \
+                    self.assertRaisesRegex(ValueError, "secret_file_epoch_mismatch"):
+                read()
+            os.link(secret_path, root / "alias")
+            with self.assertRaisesRegex(ValueError, "stale"):
+                read()
+            (root / "alias").unlink()
             secret_path.chmod(0o644)
             with self.assertRaisesRegex(ValueError, "stale"):
                 read()

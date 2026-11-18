@@ -170,7 +170,8 @@ def apply_lease(home: str, project: str, environment: str, operation_id: str, *,
     """Use target_lease's actual file/lock protocol, including other controllers.
 
     Unknown effects retain the lease. A later request cannot silently adopt it.
-    Cleanup after uncertainty requires the original in-process handle to settle.
+    Cleanup after uncertainty resumes it only once observe_original settles the
+    operation (its original docker CLI proven finished, plus the effect drain).
     """
     from sandbox.hosting.target_lease import lease_path
     path = Path(lease_path(home, project, environment))

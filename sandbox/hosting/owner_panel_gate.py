@@ -20,9 +20,13 @@ from sandbox.hosting import login_service as login
 from sandbox.hosting import panel_records
 from sandbox.hosting.owner_share_record import digest
 from sandbox.hosting.share import ShareRefusal
+from sandbox.jobs import process as _process
 
 _SEAL = object()
 _LIVE = {}  # Actual Popen handles only. Never reconstruct one from a pid/body.
+# After the original docker CLI is proven gone, wait this long before cleanup
+# so an in-container effect still finishing cannot land after the revoke.
+EFFECT_DRAIN_SECONDS = 30
 _LOADER = ("import base64,sys,zlib; "
            "exec(compile(zlib.decompress(base64.b64decode(sys.argv[1])),'login_service','exec')) "
            "if sys.stdin.buffer.read(1) == b'\\x01' else sys.exit(73)")
@@ -289,8 +293,8 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
     """Closed effect adapter; stdout contains ids/counts only, stdin holds private bytes.
 
     The actual child waits for a one-byte release before any effect. Persist its
-    real pid first. Timeout retains that exact Popen and permanently fences new
-    effects until original-handle observation/recovery; never launch a retry.
+    real pid and identity first. Timeout retains that exact Popen and fences new
+    effects until observe_original settles the operation; never launch a retry.
     """
     if type(grant) is not GateGrant or grant._seal is not _SEAL:
         raise _refuse()
@@ -357,8 +361,11 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     operation = "o-" + uuid.uuid4().hex
     _LIVE[operation] = child
+    identity = _process.capture_process_identity(child.pid)
     row["operation"] = {"id": operation, "verb": verb, "pid": child.pid, "state": "accepted",
-                        "grant_id": grant_id}
+                        "grant_id": grant_id,
+                        "boot_id": identity.host_boot_id if identity else None,
+                        "start": identity.start_identity if identity else None}
     try:
         store.save(row)
     except BaseException:
@@ -395,29 +402,52 @@ def _execute(grant: GateGrant, verb: str, row, store, *, payload=None, grant_id=
         return reply
     except BaseException:
         row["operation"]["state"] = "unknown"
+        if child.poll() is not None:
+            row["operation"]["exited_at"] = time.time()  # a completed failure, not a live one
         row["phase"] = "cleanup_pending"
         store.save(row)
         raise _refuse("owner_share_effect_unknown") from None
 
 
-def observe_original(grant: GateGrant, row, store):
-    """Observe only a retained original handle. Never infer completion from a pid.
+def _original_gone(operation):
+    """True only when the recorded docker CLI process provably no longer exists."""
+    pid, boot, start = operation.get("pid"), operation.get("boot_id"), operation.get("start")
+    if _process.process_absence_proven(pid):
+        return True  # No process holds the pid at all, so the original is gone.
+    if not _process.is_boot_session_identity(boot) or not isinstance(start, str) or not start:
+        return False  # A live pid and no recorded identity: it may be the original.
+    observed = _process.capture_process_identity(pid)
+    return observed is not None and (observed.host_boot_id != boot or observed.start_identity != start)
 
-    Docker CLI zero exit confirms the original exec finished; an invalid reply
-    still needs cleanup, never a new mint. Nonzero/transport loss remains unknown.
-    After process restart there is deliberately no guessed replacement handle.
+
+def observe_original(grant: GateGrant, row, store):
+    """Settle an operation whose original docker CLI is finished. Never re-launch it.
+
+    A clean zero exit settles at once; an invalid reply still needs cleanup,
+    never a new mint. A failed exit, or after a panel restart a recorded process
+    proven gone (other boot, absent pid, or a reused pid), settles once
+    EFFECT_DRAIN_SECONDS have passed. A process that may still run stays unknown.
     """
     operation = row.get("operation") or {}
     if operation.get("state") not in ("accepted", "unknown"):
         return
     child = _LIVE.get(operation.get("id"))
-    if child is None:
-        return
     try:
-        # Resume draining the same pipes too; a blocked stdout writer must not
-        # require another process or guessed pid-based completion.
-        stdout, stderr = child.communicate(timeout=0.05)
-        if child.returncode != 0 or stderr or len(stdout) > 1048576:
+        if operation.get("exited_at") is None:
+            if child is not None:
+                # Resume draining the same pipes too; a blocked stdout writer must not
+                # require another process or guessed pid-based completion.
+                stdout, stderr = child.communicate(timeout=0.05)
+                clean = child.returncode == 0 and not stderr and len(stdout) <= 1048576
+            elif _original_gone(operation):
+                clean = False
+            else:
+                return
+            if not clean:
+                operation["exited_at"] = time.time()
+                store.save(row)
+        if (operation.get("exited_at") is not None
+                and time.time() - operation["exited_at"] < EFFECT_DRAIN_SECONDS):
             return
         grant.require_current()
         operation["state"] = "settled"

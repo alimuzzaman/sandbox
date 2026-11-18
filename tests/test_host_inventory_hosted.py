@@ -190,7 +190,8 @@ class SnapshotTest(unittest.TestCase):
                 mock.patch("sandbox.resources.remote.LocalProbeAdapter", storage), \
                 mock.patch.object(host_inventory, "_diagnostic_process_snapshot", side_effect=slow_diagnostics):
             started = time.monotonic()
-            first = host_inventory._hosted_inventory_snapshot()
+            with mock.patch.object(host_inventory, "_SLOW_PROBE_FIRST_WAIT_SECONDS", 0.05):
+                first = host_inventory._hosted_inventory_snapshot()
             elapsed = time.monotonic() - started
             self.assertLess(elapsed, 3)
             self.assertEqual(first["inventory_schema"], 1)
@@ -205,8 +206,50 @@ class SnapshotTest(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual([row["name"] for row in second["unattributed_containers"]], ["late"])
             self.assertNotEqual(second["storage"]["status"], "pending")
+            self.assertIsInstance(second["storage"]["observed_age_seconds"], int)
+            self.assertIsInstance(second["containers"]["observed_age_seconds"], int)
             # One background run per probe, not one per request.
             self.assertEqual(storage.return_value.observe_reclaim.call_count, 1)
+
+    def test_a_failing_probe_reports_unavailable_and_old_values_expire(self):
+        import time
+        storage = mock.MagicMock()
+        storage.return_value.observe_reclaim.side_effect = OSError("disk probe broke")
+        diagnostics = mock.Mock(return_value={"containers": {"status": "complete", "rows": []}, "process_view": {}})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("sandbox.core._paths.RUNTIME_DIR", Path(tmp)), \
+                mock.patch("sandbox.core._config.load_config", return_value={}), \
+                mock.patch("sandbox.core._dash.collect_instance_rows", return_value=[]), \
+                mock.patch("sandbox.resources.remote.LocalProbeAdapter", storage), \
+                mock.patch.object(host_inventory, "_diagnostic_process_snapshot", diagnostics):
+            first = host_inventory._hosted_inventory_snapshot()
+            self.assertEqual(first["storage"]["status"], "unavailable")
+            self.assertIn("storage_inventory_unavailable", first["partial_reasons"])
+            # A value older than the maximum age is never served, even with a refresh failing.
+            entry = host_inventory._slow_probes[diagnostics]
+            with host_inventory._slow_probe_lock:
+                entry["at"] = time.monotonic() - host_inventory._SLOW_PROBE_MAX_AGE_SECONDS - 1
+            diagnostics.side_effect = RuntimeError("docker gone")
+            later = host_inventory._hosted_inventory_snapshot()
+            self.assertEqual(later["containers"]["status"], "unavailable")
+
+    def test_a_deep_scan_refreshes_the_fast_cache(self):
+        storage = mock.MagicMock()
+        storage.return_value.observe_reclaim.return_value = {"category_outcomes": [], "capacity": {"total": 7}}
+        diagnostics = mock.Mock(return_value={"containers": {"status": "complete", "rows": [container("deep")]},
+                                              "process_view": {}})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("sandbox.core._paths.RUNTIME_DIR", Path(tmp)), \
+                mock.patch("sandbox.core._config.load_config", return_value={}), \
+                mock.patch("sandbox.core._dash.collect_instance_rows", return_value=[]), \
+                mock.patch("sandbox.resources.remote.LocalProbeAdapter", storage), \
+                mock.patch.object(host_inventory, "_diagnostic_process_snapshot", diagnostics):
+            host_inventory._hosted_inventory_snapshot(deep=True)
+            fast = host_inventory._hosted_inventory_snapshot()
+        self.assertEqual(diagnostics.call_count, 1)
+        self.assertEqual(storage.return_value.observe_reclaim.call_count, 1)
+        self.assertEqual([row["name"] for row in fast["unattributed_containers"]], ["deep"])
+        self.assertEqual(fast["storage"]["capacity"], {"total": 7})
 
     def test_deep_snapshot_still_measures_directly(self):
         storage = mock.MagicMock()

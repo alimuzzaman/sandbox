@@ -411,5 +411,60 @@ class SideLoadTests(unittest.TestCase):
         self.assertIn("blue_green_ineligible", str(error))
 
 
+class ConnectScriptTests(unittest.TestCase):
+    """compose_recreate exit 9 (pr-hub-642, 2026-11-18): a shared setup container
+    restarting right after `up` made the side-network rejoin fail with no cause."""
+
+    FAKE_DOCKER = """#!/bin/sh
+state="$FAKE_STATE"
+case "$1" in
+  ps) echo c1 ;;
+  network)
+    n=$(cat "$state/connects" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$state/connects"
+    if [ "$n" -le "$FAKE_RESTARTING" ]; then
+      echo "Error response from daemon: Container c1 is restarting, wait until the container is running" >&2
+      exit 1
+    fi
+    : > "$state/joined" ;;
+  inspect) [ -f "$state/joined" ] && echo '{"sandbox-hostside-xspeed-hub-demo-sandbox_net":{}}' || echo '{}' ;;
+esac
+"""
+
+    def run_script(self, restarting: int, attempts: int = 4):
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from sandbox.commands import hosting as hosting_cmd
+        side = hosting_cmd._SideLoad({}, {**validated(shared=("wp-setup",)), "login_service": None},
+                                     {"loopback_port": 18044,
+                                      "compose_project": "sandbox-host-xspeed-hub-demo-sandbox"},
+                                     edge=mock.Mock(), caddy_name="x", previous_route=None,
+                                     previous_entry={}, runtime_dir="/rt")
+        side.shared = ["wp-setup"]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(hosting_cmd._SideLoad, "CONNECT_ATTEMPTS", attempts), \
+                mock.patch.object(hosting_cmd._SideLoad, "CONNECT_DELAY_SECONDS", 0):
+            fake = Path(directory, "docker")
+            fake.write_text(self.FAKE_DOCKER)
+            fake.chmod(0o755)
+            env = {"PATH": f"{directory}:/usr/bin:/bin", "FAKE_STATE": directory,
+                   "FAKE_RESTARTING": str(restarting)}
+            return subprocess.run(["sh", "-c", side.connect_script()], env=env, capture_output=True,
+                                  text=True, timeout=30, check=False)
+
+    def test_a_container_restarting_after_up_joins_once_it_runs(self):
+        result = self.run_script(restarting=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_container_that_never_joins_names_the_service_and_dockers_error(self):
+        result = self.run_script(restarting=99)
+        self.assertEqual(result.returncode, 9)
+        self.assertIn("shared service wp-setup container c1 did not join "
+                      "sandbox-hostside-xspeed-hub-demo-sandbox_net", result.stderr)
+        self.assertIn("is restarting", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

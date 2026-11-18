@@ -970,7 +970,12 @@ login gate are shared automatically. A side-loaded service that mounts data
 to say two copies may run on it. `deploy.strategy: in-place` restores the
 plain recreate; `blue-green` refuses an ineligible apply instead of falling back.
 Init services, a private target, a first apply, or an undeclared stateful service
-mean `auto` recreates in place and prints why. Design, limits and phases:
+mean `auto` recreates in place and prints why. Each shared service's container
+joins the side network under its service name, at side start and again after the
+base recreate; a container between exit and restart (a setup service under a
+restart policy) is retried for about 30 seconds. One that still cannot join fails the
+phase with exit 9 and a `blue-green: shared service <name> container <id> did not join
+<network>: <Docker's error>` line. Design, limits and phases:
 `docs/research/blue-green-stack-apply.md`.
 
 Build context size. `host apply` ships the Git commit plus a capped overlay of

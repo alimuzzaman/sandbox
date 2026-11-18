@@ -2214,18 +2214,37 @@ class _SideLoad:
         """Shared services the side reaches by alias (never the login gate)."""
         return [name for name in self.shared if name != self.gate]
 
+    # A shared service under a restart policy can be between exit and restart
+    # right after `up` (a setup container that exits and comes back), and
+    # Docker refuses to connect a restarting container. Retry for ~30 s.
+    CONNECT_ATTEMPTS = 15
+    CONNECT_DELAY_SECONDS = 2
+
     def connect_script(self) -> str:
         """One && chain: every connected shared service has a running container
-        and that container is on the side network under its service alias."""
+        and that container is on the side network under its service alias.
+
+        Membership is read from the container itself, which also covers one
+        that stopped after joining. A failure exits 9 and names the service,
+        container and Docker's own error on stderr.
+        """
         net = shlex.quote(self.network)
         steps = []
         for name in self._connected():
             alias = shlex.quote(name)
+            joined = ("docker inspect -f '{{json .NetworkSettings.Networks}}' \"$c\" 2>/dev/null"
+                      " | grep -qF " + shlex.quote(f'"{self.network}"'))
             steps.append(
-                "{ ids=$(" + self._base_running(name) + ") && [ -n \"$ids\" ] && "
-                "for c in $ids; do docker network connect --alias " + alias + " " + net + " \"$c\" "
-                "2>/dev/null || docker network inspect -f '{{json .Containers}}' " + net
-                + " | grep -q \"$c\" || exit 9; done; }")
+                "{ ids=$(" + self._base_running(name) + ") && [ -n \"$ids\" ] || "
+                "{ echo " + shlex.quote(f"blue-green: shared service {name} has no running container "
+                                        f"to join {self.network}") + " >&2; exit 9; }; "
+                "for c in $ids; do n=0; "
+                "until err=$(docker network connect --alias " + alias + " " + net + " \"$c\" 2>&1) "
+                "|| " + joined + "; do n=$((n+1)); "
+                f"if [ \"$n\" -ge {self.CONNECT_ATTEMPTS} ]; then "
+                "echo \"blue-green: shared service " + name + " container $c did not join "
+                + self.network + ": $err\" >&2; exit 9; fi; "
+                f"sleep {self.CONNECT_DELAY_SECONDS}; done; done; }}")
         return " && ".join(steps) if steps else "true"
 
     def _load(self, prefix: str, progress) -> bool:

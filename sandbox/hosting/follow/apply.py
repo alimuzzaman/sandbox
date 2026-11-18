@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -149,7 +150,8 @@ def default_predecessor(record: dict, stack: dict | None) -> dict | None:
 
 def default_retire(record: dict, predecessor: dict) -> dict:
     from sandbox.commands.hosting import retire_delivery
-    return retire_delivery(predecessor["validated"], record["remote"], predecessor["request_id"], lock_wait=60)
+    # The host state lock is shared by every apply on the host: wait as an apply does.
+    return retire_delivery(predecessor["validated"], record["remote"], predecessor["request_id"], lock_wait=600)
 
 
 def stack_namespace(record: dict, template: Path, attempt_id: str, *, plan: bool,
@@ -351,10 +353,19 @@ class Attempt:
                                 f"an interrupted delivery this follow did not start fences the stack; run: {command}")
             error.next_command = command
             raise error
+        from sandbox.commands.hosting import RetireCleanupPending
         from sandbox.core._hosting import HostingError
         from sandbox.delivery.models import DeliveryError
         try:
             self.retire(record, found)
+        except RetireCleanupPending:
+            # Retired, but its host state fences stay until an operator checks them.
+            status = shlex.join(["sb", "host", "status", "--name", record["name"], "--remote", record["remote"]])
+            error = FollowError("follow_predecessor_cleanup_pending",
+                                f"retired interrupted delivery {request_id}, but host state cleanup could not "
+                                f"take the state lock; inspect: {status}")
+            error.next_command = status
+            raise error from None
         except (DeliveryError, HostingError, TimeoutError, RuntimeError, OSError) as exc:
             code = getattr(exc, "code", None) or type(exc).__name__
             error = FollowError("follow_predecessor_retire_failed",

@@ -866,6 +866,17 @@ class InterruptedPredecessorTests(AttemptTests):
         self.assertIn(f"--original-request-id {request} --confirm", result["reason"])
         self.assertEqual(self.calls, [])
 
+    def test_a_retirement_whose_host_state_cleanup_timed_out_says_what_to_inspect(self):
+        from sandbox.commands.hosting import RetireCleanupPending
+        request = self.own_interrupted_request()
+        self.predecessor_value = {"request_id": request, "validated": {}}
+        self.retire_error = RetireCleanupPending({"request_id": request})
+        result = self.run_attempt()
+        self.assertTrue(result["reason"].startswith("follow_predecessor_cleanup_pending"), result["reason"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.read("dev")["state"]["last_check"]["next_command"],
+                         "sb host status --name dev --remote xspeed-dev")
+
     def test_a_predecessor_whose_job_still_runs_is_busy_not_failed(self):
         self.predecessor_value = {"busy": "predecessor_delivery_running"}
         result = self.run_attempt()

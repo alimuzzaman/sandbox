@@ -2154,7 +2154,9 @@ follow did not start is never retired: the attempt fails with
 `follow_predecessor_not_owned`, and `status` puts the exact
 `sb host retire-delivery --name ... --original-request-id ... --confirm` command in
 `last_check.reason` and `last_check.next_command`; run it, then `run-now`. A retirement
-that fails names the same command (`follow_predecessor_retire_failed`). A predecessor
+that fails names the same command (`follow_predecessor_retire_failed`); one that closed
+the delivery but could not take the host state lock within 600 s fails
+`follow_predecessor_cleanup_pending` and names `sb host status` for the stack. A predecessor
 whose job still runs makes the attempt `busy`. A canonical stack's apply also runs the stack merge sweep
 (spec 077), as a person's would.
 

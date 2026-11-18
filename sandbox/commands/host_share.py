@@ -461,6 +461,11 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
                  stack: str | None = None, project_dir: str | None = None,
                  environment: str | None = None, entry: str | None = None, caller: str = "cli") -> dict:
     joined = server_share.joined_entry(remote_name, target=target, name=name, stack=stack)
+    if joined is not None and isinstance(link_id, str) and share.LINK_ID_RE.fullmatch(link_id) \
+            and fanout.recorded(remote_name, link_id=link_id):
+        # A link a retained fanout attempt owns is revoked there in full (child
+        # grants, sessions and keys), never only on the parent gate.
+        joined = None
     if joined is not None:
         def run(fields):
             server_share.check_selectors(remote_name=remote_name, target=target, name=name,

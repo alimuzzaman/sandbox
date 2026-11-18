@@ -164,6 +164,18 @@ class JoinedShareTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.gate], ["mint", "list", "revoke"])
         self.assertEqual(self.gate[-1][2], (created["link_id"],))
 
+    def test_a_link_a_retained_fanout_attempt_owns_is_revoked_there_in_full(self):
+        from sandbox.hosting.share import fanout
+        link_id = "l-" + "a" * 12
+        row = SimpleNamespace(parent=SimpleNamespace(
+            stack=SLUG, target=SimpleNamespace(remote=REMOTE, project="p", environment="e")), grants=())
+        with patch.object(fanout, "recorded", return_value=[row]) as recorded, \
+                patch.object(fanout, "revoke_attempt", return_value={"ok": True}) as revoke:
+            self.assertEqual(host_share.revoke_share(REMOTE, link_id, name=SLUG), {"ok": True})
+        recorded.assert_called_with(REMOTE, link_id=link_id)
+        revoke.assert_called_once()
+        self.assertEqual((self.commands, self.gate), ([], []))
+
     def test_without_agent_mint_and_no_terminal_nothing_is_stored(self):
         self.validated = self.terminal_only
         with self.assertRaises(share.ShareRefusal) as raised:

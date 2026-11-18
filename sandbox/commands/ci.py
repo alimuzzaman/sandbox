@@ -583,13 +583,29 @@ def _container_limit_options(limits) -> list[str]:
     return options
 
 
+DEFAULT_OUTPUT_LIMIT = 6000
+
+
+def _output_tail(stdout, stderr, limit: int) -> str:
+    """Join a cell's act stdout and stderr and keep the last ``limit``
+    characters; 0 keeps everything. A ``TimeoutExpired`` carries bytes even
+    under ``text=True``, so bytes are decoded the way ``text=True`` decodes."""
+    import locale
+    encoding = locale.getpreferredencoding(False)
+    stdout, stderr = ((part.decode(encoding, errors="replace")
+                       if isinstance(part, bytes) else part) for part in (stdout, stderr))
+    out = ((stdout or "") + "\n" + (stderr or "")).strip()
+    return out[-limit:] if limit else out
+
+
 def _run_cell_with_act(entry: dict, spec: dict, root: Path,
                        patched_workflow_path: Path, secrets_path: Path,
                        allow_deploy: bool, timeout: int,
                        extra_act_args: list[str] | None = None,
                        *, runtime: str = "sandbox", event: str | None = None,
                        container_limits: tuple[str, ...] | list[str] | None = None,
-                       as_runner: bool = False) -> dict:
+                       as_runner: bool = False,
+                       output_limit: int = DEFAULT_OUTPUT_LIMIT) -> dict:
     """Execute one matrix cell's job via `act` against its own ephemeral
     sandbox instance. `act` handles the FULL step semantics (matrix, if:,
     needs, services:, composite/reusable actions) — this function's only job
@@ -671,17 +687,30 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
         with sc.project_lock(RUNTIME_DIR / ".ci-act"):
             res = subprocess.run(cmd, capture_output=True, text=True,
                                  cwd=str(root), timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return {"status": "failed", "error": f"timed out after {timeout}s",
-                "cmd": " ".join(cmd)}
-    out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+                "cmd": " ".join(cmd),
+                "output": _output_tail(exc.stdout, exc.stderr, output_limit)}
     return {
         "status": "passed" if res.returncode == 0 else "failed",
         "exit_code": res.returncode,
         "matrix": cell, "url": url,
         "cmd": " ".join(cmd),
-        "output": out[-6000:],
+        "output": _output_tail(res.stdout, res.stderr, output_limit),
     }
+
+
+def _output_limit(args) -> int:
+    value = getattr(args, "output_limit", None)
+    return DEFAULT_OUTPUT_LIMIT if value is None else int(value)
+
+
+def _output_limit_argv(args) -> list[str]:
+    """Forward a non-default --output-limit to a re-invoked ``ci run``. The
+    default adds nothing, so a remote runtime without the flag still accepts
+    the argv."""
+    limit = _output_limit(args)
+    return [] if limit == DEFAULT_OUTPUT_LIMIT else ["--output-limit", str(limit)]
 
 
 def _event_matches(on_trigger, event: str) -> bool:
@@ -816,6 +845,7 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 command += ["--container-limit", limit]
             if getattr(args, "as_runner", False):
                 command.append("--as-runner")
+            command += _output_limit_argv(args)
             accepted_compatibility = tuple({"id": value, "accepted": True,
                     "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
                     "detail": "caller accepted compatibility difference"} for value in
@@ -962,6 +992,8 @@ def cmd_ci(cfg, args) -> None:
 
     # action == "run". Refuse a bad --container-limit or --as-runner before any
     # target, secret, temp file, --async launch or remote submission.
+    if _output_limit(args) < 0:
+        die("--output-limit must be 0 (no limit) or a positive number of characters")
     try:
         _container_limit_options(getattr(args, "container_limits", None) or ())
         if getattr(args, "as_runner", False):
@@ -1070,6 +1102,7 @@ def cmd_ci(cfg, args) -> None:
             argv += ["--container-limit", limit]
         if getattr(args, "as_runner", False):
             argv.append("--as-runner")
+        argv += _output_limit_argv(args)
         argv += ["--timeout", str(getattr(args, "timeout", None) or 900)]
         jid = launch_background_job(argv, cwd=ROOT)
         print(json.dumps({"ok": True, "job_id": jid, **_selection(root, args, target)}))
@@ -1207,7 +1240,8 @@ def cmd_ci(cfg, args) -> None:
             worker_fn=lambda entry, spec: _run_cell_with_act(
                 entry, spec, Path(root), patched_path, secrets_path,
                 allow_deploy, timeout, runtime=runtime, event=event,
-                container_limits=container_limits, as_runner=as_runner),
+                container_limits=container_limits, as_runner=as_runner,
+                output_limit=_output_limit(args)),
             concurrency=concurrency, keep_on_fail=keep_on_fail,
             strict_provision=strict_provision, on_progress=_progress,
             provision_instance=provision_instance, teardown_instance=teardown_instance)

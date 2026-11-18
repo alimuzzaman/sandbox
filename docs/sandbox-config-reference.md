@@ -1512,6 +1512,14 @@ unknown key, a malformed value or a repeated key stops the run before anything
 starts. `act` runs one job at a time per host, so a second run waits for the
 first.
 
+Each cell's `output` in the result is the last 6000 characters of its `act`
+stdout and stderr. `--output-limit N` keeps the last N characters instead, and
+`--output-limit 0` keeps all of it; a negative value stops the run before
+anything starts. A cell that hits `--timeout` keeps the output it wrote before
+the deadline. The limit reaches `--async`, every remote durable child and the
+MCP `ci_run` tool (`output_limit`). Children get the flag only when it differs
+from 6000, so a remote installed before this option accepts default runs.
+
 `--as-runner` runs each workflow job as GitHub's runner user (`runner`, uid
 1001, passwordless `sudo`) instead of root, so file permissions behave as on
 GitHub: a directory at `0555` blocks writes. It maps `ubuntu-latest` and

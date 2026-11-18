@@ -46,7 +46,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
           timeout: int = 900, async_: bool = False, local: bool = False,
           remote: str | None = None, workspace: str = "ci",
           accepted_differences: list[str] | None = None,
-          output_profile: str = "smart", runtime: str = "sandbox") -> dict:
+          output_profile: str = "smart", runtime: str = "sandbox",
+          output_limit: int | None = None) -> dict:
     """Execute a GitHub Actions workflow locally via `act` or durably on a
     provisioned remote using isolated retained-log child jobs. Set
     ``runtime="none"`` for workflows that do not need a WordPress/runtime
@@ -76,6 +77,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     allow_deploy: actually attempt deploy-class steps (see SAFETY above).
     keep_on_fail: preserve a failed cell's instance for inspection.
     strict_provision: abort the whole run if any cell's instance fails to boot.
+    output_limit: keep the last N characters of each cell's `output`
+      (default 6000; 0 keeps all of it).
     async_: run detached. Local compatibility runs return {ok, job_id}; durable
       remote runs return {ok, parent_job_id, children}. Inspect remote parents
       and children with job_status/job_output/job_artifacts. The job survives
@@ -131,6 +134,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
         cmd.append("--strict-provision")
     if timeout:
         cmd += ["--timeout", str(timeout)]
+    if output_limit is not None:
+        cmd += ["--output-limit", str(output_limit)]
     if output_profile:
         cmd += ["--output-profile", output_profile]
     if runtime == "none":

@@ -60,7 +60,22 @@ def _http_error(code):
 
 
 def _failed(returncode):
-    return remote._RemoteCommandFailed(returncode, "could not delete remote Sandbox instance")
+    error = RuntimeError("could not delete remote Sandbox instance")
+    error.returncode = returncode
+    return error
+
+
+class RemoteDeleteExitStatusTests(unittest.TestCase):
+    def test_remote_delete_steps_report_the_remote_exit_status(self):
+        reply = subprocess.CompletedProcess([], 3, stdout="", stderr="refused")
+        with patch.object(remote, "ssh_run", return_value=reply), \
+                patch.object(remote, "remote_sb_path", return_value="/srv/sb"), \
+                patch.object(remote, "_require_front_door"):
+            for call in (lambda: remote.delete_remote_instance({}, "inst1"),
+                         lambda: remote.remove_instance_https_route({}, "p1.example.test")):
+                with self.assertRaises(RuntimeError) as caught:
+                    call()
+                self.assertEqual(getattr(caught.exception, "returncode", None), 3)
 
 
 class PreviewDestroyFailureTests(unittest.TestCase):

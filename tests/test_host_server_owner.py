@@ -998,12 +998,31 @@ class ServerSelectionTests(OwnerTargetTests):
 
 class SubmissionBoundaryTests(unittest.TestCase):
     def test_missing_job_outcome_fences_original_request_and_no_new_stack_effects(self):
+        # An unsettled submission stays fenced while its outcome cannot be
+        # established: a recorded job the registry does not show, more than
+        # one admission under its request id, or an unreadable registry.
+        unsettled = ({"status": "acceptance_unknown"}, {"status": "submission_failed"})
+        cases = [({"job_id": "d" * 32}, [])] + [(last, ["e" * 32, "f" * 32]) for last in unsettled]
         with patch.object(host_stack, "job_view", return_value=None):
-            for last in ({"job_id": "d" * 32}, {"status": "acceptance_unknown"},
-                         {"status": "submission_failed"}):
-                with self.subTest(last=last), self.assertRaises(host_stack.StackCommandError) as caught:
+            for last, rows in cases:
+                with self.subTest(last=last), patch.object(host_stack, "_jobs_for_request", return_value=rows), \
+                        self.assertRaises(host_stack.StackCommandError) as caught:
                     host_stack._refuse_if_active({"slug": "old", "last_apply": {"request_id": "original", **last}})
                 self.assertEqual(caught.exception.code, host_stack.SUBMISSION_UNKNOWN)
+            unreadable = host_stack.JobStateUnavailable("unreadable")
+            for last in unsettled:
+                with self.subTest(last=last, registry="unreadable"), \
+                        patch.object(host_stack, "_jobs_for_request", side_effect=unreadable), \
+                        self.assertRaises(host_stack.StackCommandError) as caught:
+                    host_stack._refuse_if_active({"slug": "old", "last_apply": {"request_id": "original", **last}})
+                self.assertEqual(caught.exception.code, host_stack.SUBMISSION_UNKNOWN)
+            # Fable 1118 [1]: no admission row and no job in its worktrees means
+            # the original request was never accepted, so it no longer fences.
+            for last in unsettled:
+                with self.subTest(last=last, registry="no row"), \
+                        patch.object(host_stack, "_jobs_for_request", return_value=[]), \
+                        patch.object(host_stack, "_job_running_from", return_value=False):
+                    host_stack._refuse_if_active({"slug": "old", "last_apply": {"request_id": "original", **last}})
 
     def test_malformed_acceptance_is_unknown_and_never_returns_output(self):
         marker = "synthetic-untrusted-stdout-marker"

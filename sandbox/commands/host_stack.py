@@ -286,7 +286,7 @@ def _jobs_for_request(request_id: str) -> list[str]:
                 (request_id,))]
         finally:
             connection.close()
-    except sqlite3.Error:
+    except Exception:  # noqa: BLE001 -- an unreadable registry is unknown, never "free"
         raise JobStateUnavailable("the local job registry could not be read") from None
 
 

@@ -636,6 +636,7 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
         sources, partial, known, lifetimes = [], [], [], {}
         server_records = None
         server_remote = None
+        instance_mail_ports: list[int] | None = []
         now = int(time.time())
         mail_inventory = None
         if _hosts_control_service():
@@ -659,6 +660,10 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
             except Exception:
                 rows = []
                 partial.append("instance_registry_unavailable")
+                instance_mail_ports = None
+            if instance_mail_ports is not None:
+                instance_mail_ports = [row["mailpit_port"] for row in rows if isinstance(row, dict)
+                                       and type(row.get("mailpit_port")) is int]
             known = panel_view.known_sites(rows, _instance_route_file_names())
         try:
             stack_data = stack_registry.read()
@@ -696,7 +701,8 @@ def _hosting_view(*, bound_host: str | None = None) -> tuple[int, dict]:
             lifetimes.update(_hosting_lifetimes().snapshot(sorted(remotes), now))
         view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
                                      lifetimes=lifetimes, mail_inventory=mail_inventory,
-                                     server_remote=server_remote)
+                                     server_remote=server_remote,
+                                     instance_mail_ports=instance_mail_ports)
         from sandbox.hosting import panel_access
         panel_access.enrich(view, stack_data, host_state, server_records=server_records)
         view["partial_reasons"] = partial + view["partial_reasons"]

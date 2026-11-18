@@ -99,7 +99,7 @@ export type MailAccess =
   | { status: "ready"; url: string; upstream: string }
   | { status: "unavailable"; upstream: string | null; reason:
       "no_port" | "not_same_server" | "inventory_unavailable" | "inventory_partial" |
-      "not_found" | "not_ready" | "ambiguous" | "shared_port" };
+      "not_found" | "not_ready" | "ambiguous" | "shared_port" | "claims_unverified" };
 
 export type RevisionEvidence = "verified" | "unverified" | "not_delivered";
 export interface StackPageAccess {

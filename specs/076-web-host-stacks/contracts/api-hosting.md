@@ -50,8 +50,12 @@ summary with both `stack` and `ports` is refused). Legacy targets and
 controller-sourced targets have `ports: {}` and `no_port`. A name pattern, a
 route hostname or a managed name alone never sets a port. One more code,
 `shared_port`, is checked first for `this-server` rows: when more than one
-stack or target on this server claims the same Mailpit port, every such row is
-unavailable with that upstream. The panel asks the inventory for every
+stack, target or Sandbox instance on this server claims the same Mailpit port,
+every such row is unavailable with that upstream. Then, for a declared target
+port only, `claims_unverified` when this server's target records are partial
+(any reason other than an unreadable or truncated site link) or its instance
+registry could not be read. Declared ports in 18000-19999 and 21000-21999 are
+refused at validation and on read. The panel asks the inventory for every
 declared hosted Mailpit upstream as well as every stack's.
 
 # Contract: `sb deploy --stack <slug>`

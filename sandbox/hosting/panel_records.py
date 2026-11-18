@@ -204,6 +204,15 @@ def _ports(value: object) -> dict[str, int]:
     return dict(sorted(ports.items()))
 
 
+def _declared_ports(value: object) -> dict[str, int]:
+    """A plain target's declared ports, under the manifest's own check."""
+    from sandbox.core._hosting import HostingError, validate_declared_ports
+    try:
+        return validate_declared_ports(value, stack=False)
+    except HostingError as exc:
+        raise RecordError(str(exc)) from None
+
+
 def _route(value: object) -> Route:
     if not isinstance(value, dict):
         raise RecordError("each route must be a mapping")
@@ -294,10 +303,10 @@ def parse_target_summary(data: object) -> TargetSummary:
         "last_apply": _last_apply(data.get("last_apply")),
         "stack": _stack_facts(data["stack"]) if data.get("stack") is not None else None,
     }
-    if data.get("ports"):
+    if data.get("ports") is not None:
         if result["stack"] is not None:
             raise RecordError("a stack's ports belong in stack.ports")
-        result["ports"] = _ports(data["ports"])
+        result["ports"] = _declared_ports(data["ports"])
     if data.get("owner_share") is not None:
         from sandbox.hosting.owner_share_record import parse
         result["owner_share"] = parse(data["owner_share"])

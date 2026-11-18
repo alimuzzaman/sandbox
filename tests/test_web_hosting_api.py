@@ -118,6 +118,10 @@ class HostingViewTest(unittest.TestCase):
         self.assertEqual(read.call_args.kwargs["upstreams"], ["127.0.0.1:18142", "127.0.0.1:8026"])
         (row,) = view["targets"]
         self.assertEqual(row["mail_access"], {"status": "ready", "url": url, "upstream": "127.0.0.1:8026"})
+        with mock.patch("sandbox.hosting.tailnet_names.panel.read_server", return_value=names):
+            code, view = self.view(registry={"k": {"instance": "sandbox-wp-demo", "mailpit_port": 8026}})
+        (row,) = view["targets"]
+        self.assertEqual(row["mail_access"]["reason"], "shared_port")
 
     def test_server_view_carries_this_servers_lifetimes(self):
         write_summary(self.runtime)

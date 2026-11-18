@@ -2779,17 +2779,23 @@ environments:
 
 `ports` maps 1 to 32 names (a lowercase letter, then lowercase letters, digits and
 hyphens) to distinct ports from 1 to 65535. A port in a range Sandbox allocates
-(18000-18999 for targets and stacks, 21000-21999 for login gates) is refused, so a
-site cannot claim a port Sandbox gave another target or stack. A rendered stack
-manifest cannot use it, because its ports come from `stack.ports`. Sandbox does not
-publish, reserve or probe these ports. The next `sb host apply` copies them into the
-target's `summary.json`, and the site's card then shows its Mailpit upstream with the
+(18000-18999 for targets and stacks, 19000-19999 for a side-loaded revision during
+apply, 21000-21999 for login gates) is refused. A rendered stack manifest cannot use
+it, because its ports come from `stack.ports`. Sandbox does not publish, reserve or
+probe these ports. The next `sb host apply` copies them into the target's
+`summary.json`. Once the server runs a Sandbox with this support (an older server's
+panel ignores the field), the site's card shows its Mailpit upstream with the
 same **Open inbox** rules as a stack: one managed tailnet name for that exact upstream
 (`sb host tailnet-name add --remote R <name> --upstream 127.0.0.1:8026`), a matching
 activation, a valid certificate and the panel's tailnet IPv4. Without the declaration
 the card has no Mailpit field, even when a managed name or a hostname looks like the
-site's inbox. When two stacks or sites on the server claim the same Mailpit upstream,
-neither links it (`shared_port`). On a controller the declared port is not recorded,
+site's inbox. A pinned stack port (`--port mailpit=N`) or a Sandbox instance's Mailpit
+port can still equal a declared port, so every claim on the server is counted: when two
+stacks, sites or instances claim the same Mailpit upstream, no row links it
+(`shared_port`). A declared port links only when every claim could be read: if a
+target summary on the server is unreadable, the target scan was truncated or the
+instance registry could not be read, the card reports `claims_unverified` instead. On
+a controller the declared port is not recorded,
 so a controller-only hosted site shows no inbox.
 
 On a server it is built only from files on that server:

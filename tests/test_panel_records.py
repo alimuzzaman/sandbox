@@ -108,13 +108,16 @@ class BuildSummaryTest(unittest.TestCase):
         self.assertNotIn("ports", summary)
         self.assertEqual(summary["stack"]["ports"], {"mailpit": 18142})
         raw = json.loads(pr.encode_record(summary))
-        with self.assertRaisesRegex(pr.RecordError, "stack.ports"):
-            pr.parse_target_summary(dict(raw, ports={"mailpit": 8026}))
+        for ports in ({"mailpit": 8026}, [], {}):
+            with self.subTest(ports=ports), self.assertRaisesRegex(pr.RecordError, "stack.ports"):
+                pr.parse_target_summary(dict(raw, ports=ports))
 
     def test_declared_ports_are_validated_on_read(self):
         raw = json.loads(pr.encode_record(pr.build_target_summary(
             validated(stack=False), "r", RUNTIME, commit=COMMIT, last_apply=LAST)))
-        for ports in ({"Mailpit": 8026}, {"mailpit": 0}, {"mailpit": "8026"}, {"mailpit": True}, ["mailpit"]):
+        for ports in ({"Mailpit": 8026}, {"mailpit": 0}, {"mailpit": "8026"}, {"mailpit": True}, ["mailpit"],
+                      {"mail_pit": 8026}, {"mailpit": 8026, "smtp": 8026}, {"mailpit": 18020},
+                      {"mailpit": 19020}, {}, [], 0, "", False):
             with self.subTest(ports=ports), self.assertRaises(pr.RecordError):
                 pr.parse_target_summary(dict(raw, ports=ports))
 

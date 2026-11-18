@@ -759,6 +759,8 @@ class TestHostingManifest(unittest.TestCase):
             "{mailpit: 70000}": "ports.mailpit must be an integer",
             "{mailpit: 18000}": "managed range 18000-18999",
             "{mailpit: 18142}": "managed range 18000-18999",
+            "{mailpit: 19000}": "managed range 19000-19999",
+            "{mailpit: 19999}": "managed range 19000-19999",
             "{mailpit: 21005}": "managed range 21000-21999",
             "{mailpit: 8026, smtp: 8026}": "same port",
         }
@@ -767,6 +769,13 @@ class TestHostingManifest(unittest.TestCase):
             with self.subTest(value=value), self._write(manifest) as directory:
                 with self.assertRaisesRegex(hosting.HostingError, message):
                     hosting.validate_manifest(directory)
+
+    def test_declared_ports_are_refused_on_a_stack(self):
+        with self.assertRaisesRegex(hosting.HostingError, "stack.ports"):
+            hosting.validate_declared_ports({"mailpit": 8026}, stack=True)
+        self.assertEqual(hosting.validate_declared_ports(None, stack=True), {})
+        self.assertEqual(hosting.validate_declared_ports({"mailpit": 18999 + 1001}, stack=False),
+                         {"mailpit": 20000})
 
     def test_rejects_an_unknown_robots_mode(self):
         manifest = _manifest().replace("    cloudflare:\n", "    robots: sometimes\n    cloudflare:\n")

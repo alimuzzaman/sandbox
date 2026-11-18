@@ -223,7 +223,8 @@ const MAIL_UNAVAILABLE: Record<Extract<HostingStack["mail_access"], { status: "u
   not_found: "No managed tailnet name matches this Mailpit port.",
   not_ready: "The matching name has missing, expired or changed proxy/certificate records.",
   ambiguous: "Multiple managed names match this Mailpit port.",
-  shared_port: "More than one stack or hosted site on this server claims this Mailpit port.",
+  shared_port: "More than one stack, hosted site or instance on this server claims this Mailpit port.",
+  claims_unverified: "Some records on this server could not be read, so this declared Mailpit port cannot be confirmed as this site's own.",
 };
 
 function mailAccess(item: { mail_access?: HostingStack["mail_access"] }): string {

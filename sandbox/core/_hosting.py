@@ -608,18 +608,20 @@ _DECLARED_PORT_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 _DECLARED_PORTS_LIMIT = 32
 
 
-def _declared_ports(value: object, *, stack: bool) -> dict[str, int]:
+def validate_declared_ports(value: object, *, stack: bool) -> dict[str, int]:
     """Named loopback ports a plain target's own Compose publishes (``ports: {mailpit: 8026}``).
 
     Sandbox allocates nothing for them; the panel only shows them, and a Mailpit
     port still needs a managed tailnet name for that exact upstream before it
     links an inbox. A port in a range Sandbox allocates (target, stack and
-    login-gate ports) is refused, so a target cannot claim a port Sandbox gave
-    another target or stack.
+    side-loaded revision and login-gate ports) is refused. A pinned stack port
+    or an instance's Mailpit port can still match; the panel's claim count
+    catches those. The panel reads summaries through this same check.
     """
+    from sandbox.hosting.blue_green import SIDE_OFFSET
     from sandbox.hosting.login_service import GATE_PORT_OFFSET
-    managed = ((_PORT_START, _PORT_START + _PORT_COUNT),
-               (_PORT_START + GATE_PORT_OFFSET, _PORT_START + GATE_PORT_OFFSET + _PORT_COUNT))
+    managed = tuple((_PORT_START + offset, _PORT_START + offset + _PORT_COUNT)
+                    for offset in (0, SIDE_OFFSET, GATE_PORT_OFFSET))
     if value is None:
         return {}
     if stack:
@@ -873,7 +875,7 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     if robots == "allow" and indexing != "public":
         raise HostingError("robots: allow lets crawlers in; it needs `indexing: public` on the "
                            "environment (hosted targets are not indexed by default)")
-    declared_ports = _declared_ports(env.get("ports"), stack=stack is not None)
+    declared_ports = validate_declared_ports(env.get("ports"), stack=stack is not None)
     from sandbox.hosting import login_service
     try:
         login_declaration = login_service.parse_declaration(

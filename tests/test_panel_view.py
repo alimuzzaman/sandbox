@@ -101,11 +101,15 @@ class HostedMailAccessTest(unittest.TestCase):
                 self.assertEqual(row["mail_access"],
                                  {"status": "unavailable", "reason": reason, "upstream": "127.0.0.1:8026"})
 
-    def test_a_controller_row_cannot_use_this_servers_names(self):
-        controller = {"source": "controller", "targets": [plain(declared_ports={"mailpit": 8026})],
-                      "legacy": [], "links": [], "partial_reasons": []}
+    def test_a_controller_row_has_no_declared_port(self):
+        host_state = {"hosts": {"xspeed-dev/setup-plan/production": {
+            "remote": "xspeed-dev", "project": "setup-plan", "environment": "production",
+            "compose_project": "sandbox-host-setup-plan-production", "loopback_port": 18020,
+            "hostnames": ["setup-plan.example.test"], "runtime": {"state": "ready"}, "edge": {"state": "ready"}}}}
+        controller = pv.controller_records({"stacks": {}}, host_state, lambda record: {})
         (row,) = pv.build_view([controller], mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))["targets"]
-        self.assertEqual(row["mail_access"]["reason"], "not_same_server")
+        self.assertEqual((row["source"], row["ports"], row["mailpit_port"]), ("controller", {}, None))
+        self.assertEqual(row["mail_access"], {"status": "unavailable", "reason": "no_port", "upstream": None})
 
     def test_two_rows_claiming_one_port_link_neither(self):
         view = pv.build_view([server([plain(declared_ports={"mailpit": 8026}),
@@ -114,6 +118,41 @@ class HostedMailAccessTest(unittest.TestCase):
                              mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))
         self.assertEqual([row["mail_access"] for row in view["targets"]],
                          [{"status": "unavailable", "reason": "shared_port", "upstream": "127.0.0.1:8026"}] * 2)
+
+    def test_a_pinned_stack_on_the_declared_port_links_neither(self):
+        # `sb host stack up --port mailpit=8026` is outside the refused ranges.
+        view = pv.build_view([server([summary(ports={"mailpit": 8026}), plain(declared_ports={"mailpit": 8026})])],
+                             mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL)))
+        shared = {"status": "unavailable", "reason": "shared_port", "upstream": "127.0.0.1:8026"}
+        self.assertEqual(view["stacks"][0]["mail_access"], shared)
+        self.assertEqual(view["targets"][0]["mail_access"], shared)
+
+    def test_an_instance_mailpit_port_is_a_claim(self):
+        view = pv.build_view([server([plain(declared_ports={"mailpit": 8125})])],
+                             mail_inventory=inventory(("127.0.0.1:8125", MAIL_URL)),
+                             instance_mail_ports=[8125, 8126])
+        self.assertEqual(view["targets"][0]["mail_access"],
+                         {"status": "unavailable", "reason": "shared_port", "upstream": "127.0.0.1:8125"})
+
+    def test_a_declared_port_fails_closed_when_claims_are_unreadable(self):
+        unverified = {"status": "unavailable", "reason": "claims_unverified", "upstream": "127.0.0.1:8026"}
+        names = inventory(("127.0.0.1:8026", MAIL_URL))
+        target = plain(declared_ports={"mailpit": 8026})
+        for partial, ports in ((["target_summary_unreadable:a/b:JSONDecodeError"], ()),
+                               (["hosted_targets_truncated"], ()), ([], None)):
+            with self.subTest(partial=partial, ports=ports):
+                view = pv.build_view([server([target], partial=partial)], mail_inventory=names,
+                                     instance_mail_ports=ports)
+                self.assertEqual(view["targets"][0]["mail_access"], unverified)
+        # An unreadable site link names no port, and a stack's allocated port is unaffected.
+        view = pv.build_view([server([target, summary()], partial=["site_link_unreadable:demo/x.json:OSError"])],
+                             mail_inventory=inventory(("127.0.0.1:8026", MAIL_URL), ("127.0.0.1:18142", MAIL_URL)),
+                             instance_mail_ports=None)
+        self.assertEqual(view["targets"][0]["mail_access"], unverified)
+        self.assertEqual(view["stacks"][0]["mail_access"]["status"], "ready")
+        view = pv.build_view([server([target], partial=["site_link_unreadable:demo/x.json:OSError"])],
+                             mail_inventory=names)
+        self.assertEqual(view["targets"][0]["mail_access"]["status"], "ready")
 
     def test_legacy_rows_have_no_port(self):
         view = pv.build_view([server(legacy=[{"project": "legacy", "environment": "production"}])],

@@ -101,8 +101,7 @@ class NotesClient:
     # -- plumbing -----------------------------------------------------------
 
     def many(self, calls: list[dict], on_batch=None) -> list[dict]:
-        results = (self.transport.call(calls, on_batch=on_batch) if on_batch is not None
-                   else self.transport.call(calls))
+        results = self.transport.call(calls, on_batch=on_batch)
         if len(results) != len(calls):
             raise NotesError("notes_bad_response", "the notes client returned an incomplete batch")
         return results

@@ -119,16 +119,17 @@ a durable job, because job output is retained.
 - A map entry whose file is gone is reported as `orphaned`. Only `--prune`
   deletes its note.
 - Calls go in batches of 25, and the map is saved after each batch. Ctrl-C or
-  a client that dies part way keeps every note that finished. Only if `sb`
-  itself is killed (SIGKILL) can the notes of the unfinished batch be
-  published without a map entry; the next run then publishes them again.
-  Running it again is otherwise always safe.
+  a client that dies part way keeps every note it reported back.
+- If `sb` is killed (SIGKILL, SIGTERM, a closed terminal), or a call is cut off
+  mid-request, a created note can be left without a map entry. The next run
+  then creates a duplicate and the first copy stays on the service; delete it
+  with `sb notes list` and `sb notes delete`.
 - Exit 1 if any file failed. Failures are listed with their error code.
 
 ## `sb mockups`
 
 A mockup is a folder with an `index.html` and the files it uses. It is stored
-as one HTML note plus image assets. Its name (`[a-z0-9-]`, up to 53) is kept as
+as one HTML note plus image assets. Its name (lowercase letters and digits with single inner `-`, up to 53) is kept as
 the note's download filename `mockup-<name>`, which is how the other commands
 find it.
 
@@ -176,7 +177,7 @@ are not passed through.
 | `notes_unauthorized` | The service refused the token (revoked or wrong). Run `login`. |
 | `notes_unreachable` | No connection, e.g. not on the tailnet. |
 | `notes_bad_response` | The service answered with something other than a tool result, including any redirect (never followed, so the token cannot leave). |
-| `notes_incomplete` | The client stopped before a call (killed or timed out); that call did not run. |
+| `notes_incomplete` | The client stopped (killed or timed out) before reporting this call. A call cut off mid-request may still have been applied. |
 | `notes_tool_error` | The service refused the call; the message is the service's own. |
 | `notes_login_untrusted` | The dashboard did not sign this machine in by tailnet trust. |
 | `notes_refused_in_job` | `login` or `share --ttl` inside a durable job. |

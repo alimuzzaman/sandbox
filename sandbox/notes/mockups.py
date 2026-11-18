@@ -24,7 +24,8 @@ from .errors import NotesError
 from .service import NotesClient
 
 # The service cuts download filenames to 60 characters: "mockup-" plus 53 fits.
-NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,52}")
+# Single hyphens only, none at the ends: the service collapses and trims them.
+NAME = re.compile(r"[a-z0-9](?:-?[a-z0-9]){0,52}")
 PREFIX = "mockup-"
 ASSET_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MANIFEST_ID = "sb-mockup"
@@ -44,7 +45,7 @@ _INLINED_SCRIPT = re.compile(r'<script data-sb-src="([^"]+)"([^>]*)>(.*?)</scrip
 def check_name(name: str) -> str:
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise NotesError("notes_input_invalid",
-                         "mockup names use lowercase letters, digits and '-' (max 53)")
+                         "mockup names use lowercase letters, digits and single inner '-' (max 53)")
     return name
 
 

@@ -309,6 +309,14 @@ class SyncTests(FakeCase):
         self.assertEqual([i["code"] for i in report["failed"]], ["notes_incomplete"] * 2)
         self.assertEqual(list(self._map()["notes"]), ["a.md"])
 
+    def test_skipped_calls_after_a_tool_error_are_incomplete_not_the_tool_error(self):
+        bad = {"ok": False, "i": 0, "code": "notes_tool_error", "error": "too big"}
+        results = scripted_transport(self.tmp, [bad]).call(
+            [{"tool": "list_notes", "arguments": {}}] * 30)
+        self.assertEqual(results[0]["code"], "notes_tool_error")
+        self.assertEqual({r["code"] for r in results[1:]}, {"notes_incomplete"})
+        self.assertEqual(len(results), 30)
+
     def test_an_interrupt_keeps_the_notes_the_child_finished(self):
         for name in ("a.md", "b.md"):
             self._write(name, f"# {name}\n")
@@ -430,7 +438,7 @@ class MockupTests(FakeCase):
         self.assertIn('<a href="gone.html">', html)
 
     def test_bad_names_are_refused(self):
-        for name in ("Bad Name", "a" * 54):
+        for name in ("Bad Name", "a" * 54, "foo-", "-foo", "a--b"):
             with self.subTest(name=name), self.assertRaises(NotesError):
                 self.mockups.publish(self.src, name)
         longest = "a" * 53

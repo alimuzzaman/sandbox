@@ -95,8 +95,9 @@ class BrokerTransport:
             # A child that wrote fewer lines than calls stopped early: on a refused
             # token or dead service by itself, or killed (timeout, crash). The
             # missing calls failed; never reuse another call's result for them.
+            # Only a child that stopped by itself names the cause; anything else is incomplete.
             last = got[-1] if got else None
-            code = (last.get("code") if last and not last.get("ok") else "notes_incomplete")
+            code = (last["code"] if last and last.get("code") in _SELF_STOP else "notes_incomplete")
             got.extend({"ok": False, "code": code, "skipped": True, "i": None,
                         "error": "the notes client stopped before this call"}
                        for _ in chunk[len(got):])
@@ -151,6 +152,9 @@ class BrokerTransport:
             return _read(response)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+
+_SELF_STOP = ("notes_unauthorized", "notes_unreachable")
 
 
 class _Interrupted(Exception):

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1117,6 +1118,7 @@ class StackCommandTests(unittest.TestCase):
                 with stack_registry.locked() as registry:
                     record = registry.get("r", "demo")
                     record["last_apply"]["status"] = status
+                    record["last_apply"]["submitted_at"] -= 301  # past the submitting grace
                     record["last_apply"].pop("job_request_id", None)  # a record from before the fix
                     registry.put(record)
                 with patch.object(host_stack, "_submit", return_value="a" * 32):
@@ -1161,7 +1163,8 @@ class StackCommandTests(unittest.TestCase):
             host_stack._up(self.args("up", confirm=True))
         last = stack_registry.read()["stacks"]["r/demo"]["last_apply"]
         self.assertEqual(last["job_request_id"], "nested-" + "1" * 32)
-        with self.assertRaises(host_stack.StackCommandError) as caught:
+        with patch.object(host_stack, "_submit", side_effect=AssertionError("must refuse first")), \
+                self.assertRaises(host_stack.StackCommandError) as caught:
             host_stack._up(self.args("up", confirm=True))
         self.assertEqual(caught.exception.code, "stack_apply_in_progress")
 
@@ -1173,15 +1176,27 @@ class StackCommandTests(unittest.TestCase):
         with patch.object(host_stack, "_submit", side_effect=lose_receipt), \
                 self.assertRaises(host_stack.StackCommandError):
             host_stack._up(self.args("up", confirm=True))
+        first = stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_request_id"]
         with patch.object(host_stack, "_submit", return_value="b" * 32):
             host_stack._up(self.args("up", confirm=True))
         self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["last_apply"]["job_id"], "b" * 32)
+        # Point the record back at the first request, whose admitted job failed.
         with stack_registry.locked() as registry:
             record = registry.get("r", "demo")
-            record["last_apply"].update(job_id=None, status="acceptance_unknown",
-                                        job_request_id=record["last_apply"]["request_id"])
+            record["last_apply"].update(job_id=None, status="acceptance_unknown", job_request_id=first)
             registry.put(record)
-        host_stack._refuse_if_active(stack_registry.read()["stacks"]["r/demo"])  # what `down` checks
+        with patch.object(host_stack, "_job_running_from", side_effect=AssertionError("judged by its row")):
+            host_stack._refuse_if_active(stack_registry.read()["stacks"]["r/demo"])  # what `down` checks
+
+    def test_a_fresh_submitting_record_stays_fenced_until_job_start_could_have_admitted(self):
+        # A killed `up` may leave its job-start child running, not yet admitted.
+        record = {"slug": "demo", "worktrees": [], "last_apply": {
+            "request_id": "r1", "job_id": None, "status": "submitting", "submitted_at": int(time.time())}}
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._refuse_if_active(record)
+        self.assertEqual(caught.exception.code, "stack_submission_unknown")
+        record["last_apply"]["submitted_at"] -= 301
+        host_stack._refuse_if_active(record)
 
     def test_an_unreadable_job_registry_says_retry_not_inspect(self):
         with patch.object(host_stack, "_submit", return_value="c" * 32):

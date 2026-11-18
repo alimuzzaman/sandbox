@@ -264,6 +264,8 @@ def _last_apply_view(record: dict) -> dict:
     return last
 
 
+# _submit's 180 s job-start deadline plus margin.
+_SUBMITTING_GRACE_SECONDS = 300
 _UNSETTLED_SUBMISSIONS = {"submitting", "submitted", "acceptance_unknown", "submission_failed"}
 
 
@@ -334,6 +336,12 @@ def _refuse_if_active(record: dict | None) -> None:
             matches = _jobs_for_request(request_id)
             if not matches:
                 if _job_running_from(record.get("worktrees") or []):
+                    raise unknown
+                # A killed `up` can leave its job-start child running before
+                # it admits; wait out the submission deadline before "free".
+                submitted = last.get("submitted_at")
+                if last.get("status") == "submitting" and (
+                        type(submitted) is not int or time.time() - submitted < _SUBMITTING_GRACE_SECONDS):
                     raise unknown
                 return
             if len(matches) > 1:

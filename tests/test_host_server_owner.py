@@ -1001,8 +1001,10 @@ class SubmissionBoundaryTests(unittest.TestCase):
         # An unsettled submission stays fenced while its outcome cannot be
         # established: a recorded job the registry does not show, more than
         # one admission under its request id, or an unreadable registry.
-        unsettled = ({"status": "acceptance_unknown"}, {"status": "submission_failed"})
-        cases = [({"job_id": "d" * 32}, [])] + [(last, ["e" * 32, "f" * 32]) for last in unsettled]
+        unsettled = ({"status": "acceptance_unknown"}, {"status": "submission_failed"},
+                     {"status": "submitting", "submitted_at": 0})
+        cases = ([({"job_id": "d" * 32}, [])] + [(last, ["e" * 32, "f" * 32]) for last in unsettled]
+                 + [(last, ["e" * 32]) for last in unsettled])  # one row whose job cannot be viewed
         with patch.object(host_stack, "job_view", return_value=None):
             for last, rows in cases:
                 with self.subTest(last=last), patch.object(host_stack, "_jobs_for_request", return_value=rows), \

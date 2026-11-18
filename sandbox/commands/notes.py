@@ -268,7 +268,7 @@ def _notes(cfg, args) -> None:
     elif action == "sync":
         report = client.sync(Path(args.directory), prune=args.prune)
         lines = []
-        for bucket in ("created", "updated", "recreated", "unchanged", "pruned"):
+        for bucket in ("created", "adopted", "updated", "recreated", "unchanged", "pruned"):
             for item in report[bucket]:
                 lines.append(f"{bucket:9}  {item['file']}  {item.get('url') or item.get('slug')}")
         for item in report["orphaned"]:

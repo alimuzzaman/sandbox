@@ -69,18 +69,28 @@ def resolve(cfg: Mapping | None, remote: str | None) -> NotesService:
     block = block if isinstance(block, Mapping) else {}
     services = block.get("services") if isinstance(block.get("services"), Mapping) else {}
     chosen = remote or block.get("default_remote")
+    known = {name: entry["url"] for name, entry in services.items()
+             if isinstance(entry, Mapping) and isinstance(entry.get("url"), str)}
     if not chosen:
+        if len(known) == 1:
+            (name, url), = known.items()
+            hint = f"sb notes login --remote {name} --url {url}"
+        else:
+            hint = "sb notes login --remote NAME --url https://notes.example.com"
         raise NotesError(
             "notes_remote_missing",
-            "no notes service selected: pass --remote NAME or set notes.default_remote "
-            "(`sb notes login --remote NAME --url URL` writes both)")
+            f"no notes service selected (no --remote, no notes.default_remote). "
+            f"Run: {hint}   (it records the service, makes it the default and stores a token)",
+            hint=hint)
     chosen = remote_name(chosen)
     entry = services.get(chosen)
     if not isinstance(entry, Mapping) or not entry.get("url"):
+        hint = f"sb notes login --remote {chosen} --url https://notes.example.com"
         raise NotesError(
             "notes_remote_unknown",
-            f"no notes service is configured for '{chosen}'; run "
-            f"`sb notes login --remote {chosen} --url https://...` or `sb notes config ...`")
+            f"no notes service is configured for '{chosen}'. Run: {hint}   (with the "
+            f"service's real https origin; `sb notes config` records it without a token)",
+            hint=hint)
     token = entry.get("token")
     if token is None:
         source, key = "personal", default_token_key(chosen)

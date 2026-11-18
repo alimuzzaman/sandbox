@@ -73,6 +73,13 @@ def title_for(path: Path, text: str, *, html: bool) -> str:
     return (html_title(text) if html else markdown_title(text)) or Path(path).stem
 
 
+def service_filename(name: str) -> str:
+    """The download filename the service stores for ``name``: its slugify (src/notes.php)."""
+    stem = Path(name).stem
+    slug = re.sub(r"[^a-z0-9]+", "-", stem, flags=re.I).strip("-").lower()[:60]
+    return slug or "note"
+
+
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -118,7 +125,8 @@ class NotesClient:
     def create(self, path: Path, *, title: str | None = None, html: bool = False,
                public: bool = False) -> dict:
         text = read_text(path)
-        arguments = {"title": title or title_for(path, text, html=html), "content": text}
+        arguments = {"title": title or title_for(path, text, html=html), "content": text,
+                     "filename": Path(path).stem}
         if html:
             arguments["format"] = "html"
         if public:
@@ -200,7 +208,7 @@ class NotesClient:
                        # a symlink must not publish a file from outside the folder
                        and p.resolve().parent == root)
         report = {"directory": str(directory), "map": str(map_path), "remote": self.remote,
-                  "created": [], "updated": [], "recreated": [], "unchanged": [],
+                  "created": [], "adopted": [], "updated": [], "recreated": [], "unchanged": [],
                   "orphaned": [], "pruned": [], "failed": []}
         texts = {}
         updates, creates = [], []
@@ -221,6 +229,42 @@ class NotesClient:
         def save():
             write_json_atomic(map_path, state)
 
+        def fail(name, result):
+            report["failed"].append({"file": name, "code": result.get("code"),
+                                     "error": result.get("error")})
+
+        # A file with no map entry may already be published (by another client, or
+        # before the map was lost). Adopt the one existing note with the file's
+        # stored filename, else with the same title, instead of creating a copy.
+        adopts = []
+        if creates:
+            mapped = {e["slug"] for e in entries.values()}
+            existing = [n for n in self.list() if n.get("slug") not in mapped
+                        and n.get("format", "markdown") == "markdown"]
+            claimed: dict[str, str] = {}
+            fresh = []
+            for name in creates:
+                wanted = service_filename(name) + ".md"
+                found = [n for n in existing if n.get("filename") == wanted]
+                if not found:
+                    found = [n for n in existing if n.get("title") == texts[name][1]]
+                if len(found) > 1:
+                    fail(name, {"code": "notes_adopt_ambiguous", "error":
+                                f"{len(found)} existing notes match this file "
+                                f"({', '.join(sorted(n['slug'] for n in found))}); delete the "
+                                f"extra ones, or map the right one in {MAP_FILE}"})
+                elif found and found[0]["slug"] in claimed:
+                    fail(name, {"code": "notes_adopt_ambiguous", "error":
+                                f"note {found[0]['slug']} also matches "
+                                f"{claimed[found[0]['slug']]}; map the right one in {MAP_FILE}"})
+                elif found:
+                    claimed[found[0]["slug"]] = name
+                    entries[name] = {"slug": found[0]["slug"], "url": found[0].get("url")}
+                    adopts.append(name)
+                else:
+                    fresh.append(name)
+            creates = fresh
+
         def each(names, calls, handle):
             """Handle results batch by batch and save the map after each, so an
             interrupted run keeps every note it already published."""
@@ -236,10 +280,6 @@ class NotesClient:
                              "title": title, "sha256": sha256(text)}
             report[bucket].append({"file": name, "slug": data.get("slug"), "url": data.get("url")})
 
-        def fail(name, result):
-            report["failed"].append({"file": name, "code": result.get("code"),
-                                     "error": result.get("error")})
-
         def not_found(result):
             return result.get("code") == "notes_tool_error" and "not found" in str(result.get("error"))
 
@@ -253,14 +293,27 @@ class NotesClient:
             else:
                 fail(name, result)
 
+        def adopted(name, result):
+            if result.get("ok"):
+                record(name, result.get("result") or {}, "adopted")
+            else:
+                del entries[name]
+                fail(name, result)
+
+        def update_calls(names):
+            return [{"tool": "update_note", "arguments": {
+                "slug": entries[name]["slug"], "title": texts[name][1], "content": texts[name][0],
+                "filename": Path(name).stem}} for name in names]
+
+        if adopts:
+            each(adopts, update_calls(adopts), adopted)
         if updates:
-            each(updates, [{"tool": "update_note", "arguments": {
-                "slug": entries[name]["slug"], "title": texts[name][1], "content": texts[name][0]}}
-                for name in updates], updated)
+            each(updates, update_calls(updates), updated)
         creates += sorted(recreate)
         if creates:
             each(creates, [{"tool": "create_note", "arguments": {
-                "title": texts[name][1], "content": texts[name][0]}} for name in creates],
+                "title": texts[name][1], "content": texts[name][0],
+                "filename": Path(name).stem}} for name in creates],
                 lambda name, result: record(name, result.get("result") or {},
                                             "recreated" if name in recreate else "created")
                 if result.get("ok") else fail(name, result))

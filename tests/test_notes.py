@@ -77,6 +77,12 @@ class ScriptedBroker:
         from sandbox.notes.transport import PROFILE
         assert name == PROFILE
         response = Path(self.profile_argv[-1])
+        calls = json.loads(Path(self.profile_argv[-2]).read_text())["calls"]
+        if all(c["tool"] == "list_notes" for c in calls):   # sync's adoption lookup
+            with response.open("a") as handle:
+                for i, _ in enumerate(calls):
+                    handle.write(json.dumps({"ok": True, "i": i, "result": {"notes": []}}) + "\n")
+            return {"ok": True}
         with response.open("a") as handle:
             for line in self.lines:
                 handle.write(json.dumps(line) + "\n")
@@ -130,6 +136,15 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(cfg=cfg), self.assertRaises(NotesError) as caught:
                 notes_config.resolve(cfg, remote)
             self.assertEqual(caught.exception.code, code)
+
+    def test_a_bare_login_prints_a_runnable_command(self):
+        one = {"notes": {"services": {"xspeed-dev": {"url": "https://notes.xspeedcdn.online"}}}}
+        for cfg, hint in ((one, "sb notes login --remote xspeed-dev --url https://notes.xspeedcdn.online"),
+                          ({}, "sb notes login --remote NAME --url https://notes.example.com")):
+            with self.subTest(cfg=cfg), self.assertRaises(NotesError) as caught:
+                notes_config.resolve(cfg, None)
+            self.assertEqual(caught.exception.detail["hint"], hint)
+            self.assertIn(hint, caught.exception.message)
 
     def test_loopback_http_is_accepted_for_local_services(self):
         self.assertEqual(notes_config.service_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080")
@@ -289,7 +304,7 @@ class SyncTests(FakeCase):
     def test_an_interrupted_run_keeps_what_it_published_and_a_rerun_adds_no_duplicates(self):
         for name in ("a.md", "b.md", "c.md"):
             self._write(name, f"# {name}\n")
-        self.client.transport = InProcess(self.fake, fail_after=1)
+        self.client.transport = InProcess(self.fake, fail_after=2)   # the listing and one create
         report = self.client.sync(self.tmp)
         self.assertFalse(report["ok"])
         self.assertEqual(len(report["created"]), 1)
@@ -312,7 +327,7 @@ class SyncTests(FakeCase):
     def test_skipped_calls_after_a_tool_error_are_incomplete_not_the_tool_error(self):
         bad = {"ok": False, "i": 0, "code": "notes_tool_error", "error": "too big"}
         results = scripted_transport(self.tmp, [bad]).call(
-            [{"tool": "list_notes", "arguments": {}}] * 30)
+            [{"tool": "get_note", "arguments": {"slug": "x"}}] * 30)
         self.assertEqual(results[0]["code"], "notes_tool_error")
         self.assertEqual({r["code"] for r in results[1:]}, {"notes_incomplete"})
         self.assertEqual(len(results), 30)
@@ -338,6 +353,43 @@ class SyncTests(FakeCase):
         report = self.client.sync(self.tmp)
         self.assertEqual([i["file"] for i in report["created"]], ["a.md"])
         self.assertNotIn("secret", json.dumps([n["title"] for n in self.fake.notes.values()]))
+
+    def test_without_a_map_an_existing_note_with_the_file_name_is_adopted_not_duplicated(self):
+        # Published earlier by another client (the xspeed-notes MCP) with filename = file stem.
+        old = self.fake.tool("create_note", {"title": "Old title", "content": "old",
+                                             "filename": "11-php-versions-7.4-8.4"})[0]
+        self.assertEqual(old["filename"], "11-php-versions-7-4-8-4.md")
+        self._write("11-php-versions-7.4-8.4.md", "# Test 11: PHP\nnew body\n")
+        report = self.client.sync(self.tmp)
+        self.assertEqual((len(report["created"]), [i["slug"] for i in report["adopted"]]),
+                         (0, [old["slug"]]))
+        self.assertEqual(len(self.fake.notes), 1)
+        note = self.fake.notes[old["slug"]]
+        self.assertEqual((note["title"], note["content"]), ("Test 11: PHP", "# Test 11: PHP\nnew body\n"))
+        self.assertEqual(self._map()["notes"]["11-php-versions-7.4-8.4.md"]["slug"], old["slug"])
+        self.assertEqual(len(self.client.sync(self.tmp)["unchanged"]), 1)
+
+    def test_a_note_with_a_title_derived_filename_is_adopted_by_its_title(self):
+        old = self.fake.tool("create_note", {"title": "Test 13: object cache", "content": "x"})[0]
+        self._write("13-object-cache.md", "# Test 13: object cache\n")
+        report = self.client.sync(self.tmp)
+        self.assertEqual([i["slug"] for i in report["adopted"]], [old["slug"]])
+        self.assertEqual(len(self.fake.notes), 1)
+
+    def test_two_existing_matches_are_refused_and_nothing_is_created(self):
+        for _ in range(2):
+            self.fake.tool("create_note", {"title": "t", "content": "x", "filename": "a"})
+        self._write("a.md", "# A\n")
+        report = self.client.sync(self.tmp)
+        self.assertEqual([i["code"] for i in report["failed"]], ["notes_adopt_ambiguous"])
+        self.assertFalse(report["ok"])
+        self.assertEqual((report["created"], len(self.fake.notes)), ([], 2))
+        self.assertNotIn("a.md", self._map()["notes"])
+
+    def test_new_notes_store_the_source_file_name(self):
+        self._write("11-php-versions-7.4-8.4.md", "# Different title\n")
+        self.client.sync(self.tmp)
+        self.assertEqual([n["filename"] for n in self.fake.notes.values()], ["11-php-versions-7-4-8-4"])
 
     def test_a_map_for_another_remote_is_refused(self):
         (self.tmp / MAP_FILE).write_text(json.dumps({"version": 1, "remote": "elsewhere", "notes": {}}))

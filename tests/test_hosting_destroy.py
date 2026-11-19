@@ -1320,7 +1320,7 @@ class Execution(unittest.TestCase):
             def conditional_state_lock(*args, **kwargs):
                 nonlocal lock_count
                 lock_count += 1
-                if fail_third_lock and lock_count == 3:
+                if fail_third_lock and lock_count >= 3:
                     raise TimeoutError("operation_busy")
                 with real_lock(*args, **kwargs):
                     yield
@@ -1732,7 +1732,18 @@ class LockWaitBudget(unittest.TestCase):
     def test_a_busy_host_state_lock_fails_within_the_wait_and_names_it(self):
         repository = self._repository()
         self._hold(lambda: repository.state_lock(timeout_seconds=5), 30)
-        error, stderr, elapsed = self._execute(repository, 1)
+        lease = []
+
+        @contextlib.contextmanager
+        def recording_lease(*_args):
+            lease.append("taken")
+            try:
+                yield "lease"
+            finally:
+                lease.append("released")
+        with mock.patch.object(destroy, "_target_lease", recording_lease):
+            error, stderr, elapsed = self._execute(repository, 1)
+        self.assertEqual(lease, ["taken", "released"])
         self.assertEqual(error.code, "host_lock_busy")
         self.assertIn("host state lock", str(error))
         self.assertIn("nothing was removed", str(error))
@@ -1752,3 +1763,20 @@ class LockWaitBudget(unittest.TestCase):
         self.assertIn("host state lock", str(error))
         self.assertIn(f"the target lock of {KEY}", stderr)
         self.assertLess(elapsed, 3.5, "the second wait got a fresh budget")
+
+    def test_a_lock_freed_within_the_budget_is_taken(self):
+        import io
+        import time
+        repository = self._repository()
+        self._hold(lambda: repository.state_lock(timeout_seconds=5), 0.4)
+        stderr = io.StringIO()
+        with mock.patch.object(destroy.sys, "stderr", stderr):
+            with destroy._bounded_lock(lambda timeout: repository.state_lock(timeout_seconds=timeout),
+                                       destroy.STATE_LOCK_LABEL, time.monotonic() + 5):
+                pass
+        self.assertIn("host destroy: waiting up to", stderr.getvalue())
+        with self.assertRaises(TimeoutError):
+            self._hold(lambda: repository.state_lock(timeout_seconds=5), 30)
+            with destroy._bounded_lock(lambda timeout: repository.state_lock(timeout_seconds=timeout),
+                                       destroy.STATE_LOCK_LABEL, time.monotonic() + 0.3, after_effects=True):
+                pass

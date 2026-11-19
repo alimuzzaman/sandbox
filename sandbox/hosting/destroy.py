@@ -482,14 +482,16 @@ STATE_LOCK_LABEL = "the host state lock (another stack's apply holds it while it
 
 
 @contextlib.contextmanager
-def _bounded_lock(factory, label: str, deadline: float):
+def _bounded_lock(factory, label: str, deadline: float, *, after_effects: bool = False):
     """Enter ``factory(timeout)`` within the one wait budget a destroy has before teardown.
 
     Destroy takes the target lock, then the host state lock that every apply
     holds for its whole run. Waiting the full lock wait at each in turn outlived
     the stack-down job's deadline with no output (feedback 66252fd8), so all
     waits share ``deadline``, a busy lock is named on stderr, and running out
-    fails with ``host_lock_busy`` before anything is removed.
+    fails with ``host_lock_busy`` before anything is removed. After the
+    teardown (``after_effects``) a wait still names its lock, and running out
+    raises ``TimeoutError`` for the caller's own refusal.
     """
     started = time.monotonic()
     with contextlib.ExitStack() as stack:
@@ -504,6 +506,9 @@ def _bounded_lock(factory, label: str, deadline: float):
                     left = None
                 except TimeoutError:
                     pass
+            if left is not None and after_effects:
+                # The caller names what the teardown already did and what is kept.
+                raise TimeoutError("operation_busy")
             if left is not None:
                 raise DestroyError(f"waited {int(time.monotonic() - started)}s for {label}; "
                                    "nothing was removed, retry when it is free", "host_lock_busy") from None
@@ -613,7 +618,8 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
                       "check it with a dry run, then re-run with --clear-fenced", "state_timeout")
         step = ("another operation held the state lock", kept, "state_lock_timeout")
         try:
-            with repository.state_lock(timeout_seconds=lock_wait):
+            with _bounded_lock(lambda timeout: repository.state_lock(timeout_seconds=timeout),
+                               STATE_LOCK_LABEL, time.monotonic() + lock_wait, after_effects=True):
                 step = local_step
                 # Read again: another target can apply onto one of these records during the
                 # teardown. Apply holds this lock across its provider writes and its save, so

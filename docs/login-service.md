@@ -77,6 +77,7 @@ Remove any other route to the capture service when the gate goes live.
 | Each `deploy.derived_environment` key with `pushed_commit_sha` reaches `sandbox-login` from the apply's environment file, so apply and `sb host status` prove its revision like every other running service. When the gate is declared, a key starting `SANDBOX_LOGIN_` (in any case) is refused | Rendered override and manifest parsing |
 | `sandbox-login` publishes only its managed `127.0.0.1:<port + 3000>` mapping. The capture service publishes only on `127.0.0.1` or `::1`, and never uses host networking | Apply preflight (`login_port_published`, `capture_port_published`) |
 | No Sandbox route targets the capture service | Manifest parsing |
+| The host runs Docker Compose 2.20.2 and Engine 25 or newer: the gate's health check probes every 2 s while it starts (`start_interval`), then once a minute | Apply preflight (`login_service_docker_too_old`) |
 | A left-on service is visible | `sb host status` lists each entry and the expiry |
 
 ## Issuing a link

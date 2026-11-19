@@ -1687,3 +1687,68 @@ class DestroyFenceAdmission(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "operation_busy"):
                 activation_repo.snapshot(KEY)
             self.assertEqual((root / "hosts.json").read_bytes(), before_bytes)
+
+
+class LockWaitBudget(unittest.TestCase):
+    """feedback 66252fd8: a destroy's waits share one budget and name what holds it."""
+
+    def _repository(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        repository = RecoveryRepository(root / "hosts.json", root / "locks")
+        repository._write({"version": 1, "hosts": {KEY: _record(), "r1/keep/sandbox": {"x": 1}}})
+        return repository
+
+    def _hold(self, enter, seconds):
+        import threading
+        held, done = threading.Event(), threading.Event()
+
+        def run():
+            with enter():
+                held.set()
+                done.wait(seconds)
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        held.wait(5)
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(done.set)
+
+    def _execute(self, repository, lock_wait):
+        import io
+        import time
+
+        def no_ssh(*_args, **_kwargs):
+            raise AssertionError("destroy reached the remote while a lock was busy")
+        stderr = io.StringIO()
+        started = time.monotonic()
+        with mock.patch.object(destroy.remote, "ssh_run", no_ssh), \
+                mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository), \
+                mock.patch.object(destroy.sys, "stderr", stderr), \
+                self.assertRaises(destroy.DestroyError) as raised:
+            destroy.execute(ENTRY, "r1", "site", "sandbox", lock_wait=lock_wait)
+        return raised.exception, stderr.getvalue(), time.monotonic() - started
+
+    def test_a_busy_host_state_lock_fails_within_the_wait_and_names_it(self):
+        repository = self._repository()
+        self._hold(lambda: repository.state_lock(timeout_seconds=5), 30)
+        error, stderr, elapsed = self._execute(repository, 1)
+        self.assertEqual(error.code, "host_lock_busy")
+        self.assertIn("host state lock", str(error))
+        self.assertIn("nothing was removed", str(error))
+        self.assertIn("host destroy: waiting up to", stderr)
+        self.assertLess(elapsed, 3)
+        self.assertNotIn("active_operation", repository.load()["hosts"][KEY])
+
+    def test_the_target_and_state_lock_waits_share_one_budget(self):
+        # The incident: the target lock was busy for most of the wait, then the
+        # state lock for a full second wait, past the job's deadline.
+        repository = self._repository()
+        self._hold(lambda: repository.target_mutation_port(
+            "apply", timeout_seconds=5).target_mutation_transaction(KEY), 1.2)
+        self._hold(lambda: repository.state_lock(timeout_seconds=5), 30)
+        error, stderr, elapsed = self._execute(repository, 2)
+        self.assertEqual(error.code, "host_lock_busy")
+        self.assertIn("host state lock", str(error))
+        self.assertIn(f"the target lock of {KEY}", stderr)
+        self.assertLess(elapsed, 3.5, "the second wait got a fresh budget")

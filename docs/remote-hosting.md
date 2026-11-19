@@ -1585,9 +1585,11 @@ shell may still be working) keeps apply, recovery and a second destroy out; re-r
 with `--clear-fenced` once the earlier run has ended. `host retire-delivery` refuses
 while a destroy owns the target. Certificate cleanup also
 reloads nginx, so a retry after an interrupted route removal cannot leave the old
-route loaded. Destroy waits up to
-`--lock-wait` seconds for the shared host state lock, like apply, and never holds
-that lock across an SSH call.
+route loaded. Before the teardown, destroy waits for the target lock and then the shared
+host state lock, which another stack's apply holds for its whole run. Both waits share one
+`--lock-wait` budget (default 600 s), a busy lock is named on stderr while it waits, and
+running out fails `host_lock_busy` with nothing removed. Destroy never holds the state lock
+across an SSH call.
 
 Destroy undoes the first adoption, but only for a record it can verify. For a record saved
 with a snapshot, it reads the record by ID first: one Sandbox created is deleted, and one it

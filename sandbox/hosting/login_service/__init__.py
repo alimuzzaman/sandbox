@@ -677,9 +677,13 @@ def render_service(declaration: dict, gate_port: int | None = None, *, target_di
         f"    command: {json.dumps(['python3', '-c', _LOADER, source])}",
         "    healthcheck:",
         f"      test: {json.dumps(['CMD', 'python3', '-c', probe])}",
-        "      interval: 10s",
+        # Every stack runs one gate: probe every 2 s while it starts, then once a
+        # minute (the setup templates' pattern), not one exec per gate every 10 s.
+        "      interval: 60s",
         "      timeout: 5s",
-        "      retries: 12",
+        "      start_period: 120s",
+        "      start_interval: 2s",
+        "      retries: 3",
     ]
     return "\n".join(lines) + "\n"
 

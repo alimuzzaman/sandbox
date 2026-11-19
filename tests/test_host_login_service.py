@@ -467,6 +467,16 @@ class OverrideTests(unittest.TestCase):
                          "/run/sandbox-login", "expose", "healthcheck", IMAGE):
             self.assertIn(expected, self.override)
 
+    def test_the_gate_health_check_is_fast_at_start_then_once_a_minute(self):
+        # One gate runs in every stack: a 10 s probe was ~2.8 execs/s across 28 stacks.
+        lines = self.override.split("    healthcheck:\n", 1)[1].splitlines()
+        block = "\n".join(line for line in lines[:next(
+            (i for i, line in enumerate(lines) if not line.startswith("      ")), len(lines))])
+        for expected in ("interval: 60s", "start_period: 120s", "start_interval: 2s", "retries: 3",
+                         "timeout: 5s"):
+            self.assertIn(expected, block)
+        self.assertNotIn("interval: 10s", block)
+
     def test_credential_is_passed_by_reference_only(self):
         self.assertIn("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", self.override)
         self.assertIn("${CAPTURE_PASSWORD}", self.override)

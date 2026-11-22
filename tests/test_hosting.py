@@ -3990,7 +3990,8 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("    tls ", fixture.configure_edge.call_args.args[2])
         fixture.edge.assert_called_once_with(fixture.validated["routes"],
             healthcheck_path="/", basic_auth_enabled=False,
-            fresh_hostnames=frozenset(record["hostname"] for record in fixture.runtime["records"]))
+            fresh_hostnames=frozenset(record["hostname"] for record in fixture.runtime["records"]),
+            fresh_since=ANY)
         self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["edge"]["state"], "ready")
 
     @patch("sandbox.commands.hosting.cloudflare.cloudflare_token", return_value="configured")

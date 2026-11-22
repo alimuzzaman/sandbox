@@ -680,8 +680,6 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     unknown acceptance, streams child stdio, or invokes a self remote alias.
     """
     from sandbox.core import _remote
-    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
-    from sandbox.resources.context import authenticated_target_identity
     from sandbox.services.redaction import require_safe_argv
     from sandbox.config.facade import project_identity
     from sandbox.config.runtime import resolve_execution_policy
@@ -713,6 +711,24 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     entry = _remote.get_remote(remote_name)
     if not isinstance(entry, dict) or entry.get('joined') is not True or entry.get('control_transport') != 'tailscale':
         raise ServerCLIUnavailable('server CLI requires an admitted joined Tailnet registration')
+    from sandbox.hosting.phase_timing import PhaseClock, stderr_emit
+    clock = PhaseClock(stderr_emit, scope='dispatch')
+    try:
+        with _remote.remote_home_cache():
+            return _dispatch_server_cli_selected(
+                remote_name, entry, submission, clock=clock, source_ref=source_ref,
+                required_capabilities=required_capabilities,
+                source_branch_bound=source_branch_bound, nested_apply=nested_apply)
+    finally:
+        clock.finish()
+
+
+def _dispatch_server_cli_selected(remote_name, entry, submission, *, clock, source_ref,
+                                  required_capabilities, source_branch_bound, nested_apply):
+    from sandbox.core import _remote
+    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
+    from sandbox.resources.context import authenticated_target_identity
+    clock.lap('identity')
     identity = authenticated_target_identity(remote_name)
     # A fresh identity read may have safely reconnected the observed revision
     # cache. Use that current registration, preserving the original owner pin.
@@ -731,6 +747,8 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     transport = RemoteJobTransport(deploy=deploy,
         ssh_run=_remote.ssh_run, remote_lookup=lambda name: entry if name == remote_name else None,
         remote_sb_path=_remote.remote_sb_path)
+    transport.phase = clock.lap
+    clock.lap('capabilities')
     try:
         observed = transport.control(remote_name, ['job-capabilities'])
     except RemoteJobTransportError:

@@ -684,6 +684,16 @@ def _up(args) -> dict:
         raise StackCommandError(CONFIRMATION_REQUIRED, "stack up needs exactly one of --plan or --confirm")
     if not getattr(args, "template", None):
         raise StackCommandError(CONFIRMATION_REQUIRED, "stack up needs --template")
+    from sandbox.hosting.phase_timing import PhaseClock, stderr_emit
+    clock = PhaseClock(stderr_emit, scope="stack-up")
+    try:
+        return _up_timed(args, plan, confirm, clock)
+    finally:
+        clock.finish()
+
+
+def _up_timed(args, plan: bool, confirm: bool, clock) -> dict:
+    clock.lap("template")
     entry = _entry(getattr(args, "remote", None))
     remote_name = args.remote
     template_path = Path(args.template).expanduser().resolve()
@@ -700,6 +710,7 @@ def _up(args) -> dict:
     caller = _caller(checkout, args)
     repo = naming.repo_identity(checkout)
     store = _store(entry, caller)
+    clock.lap("listing")
     listing = store.list()
     remote_records = _remote_records(listing, remote_name)
     generated = not getattr(args, "name", None)
@@ -808,9 +819,12 @@ def _up(args) -> dict:
         return validated, rendered, hostnames
 
     if plan:
+        clock.lap("ports")
         data = stack_registry.read()
         record, ports, state = prepare(data)
+        clock.lap("preview")
         validated, rendered, hostnames = preview(data, state, ports)
+        clock.lap("check")
         checked = store.call("check", **lifetime_request(record, ports, hostnames))
         missing = _secrets_gate(validated, generate=False, confirm=False)
         future_source = stack_registry.stack_dir(slug) / "source" / f"{ref.commit[:12]}-<token>"
@@ -824,13 +838,18 @@ def _up(args) -> dict:
 
     sweep = None
     with stack_registry.locked() as registry:
+        clock.lap("ports")
         previous, ports, state = prepare(registry.data)
+        clock.lap("preview")
         checked, _rendered, hostnames = preview(registry.data, state, ports)
+        clock.lap("secrets")
         _secrets_gate(checked, generate=bool(getattr(args, "generate_secrets", False)), confirm=True)
         # The remote claim is the last refusal and the first remote change.
+        clock.lap("claim")
         claim_request = lifetime_request(previous, ports, hostnames)
         claimed = store.call("claim", **claim_request)
         stored = claimed["record"]
+        clock.lap("worktree")
         try:
             worktree = _add_worktree(checkout, slug, ref.commit)
         except BaseException:
@@ -894,6 +913,7 @@ def _up(args) -> dict:
             # submission derives its own), so an unknown can be settled later.
             record["last_apply"]["job_request_id"] = options[options.index("--request-id") + 1]
             registry.put(record)
+        clock.lap("submit")
         try:
             job_id = _submit(argv)
         except StackCommandError as exc:
@@ -908,6 +928,7 @@ def _up(args) -> dict:
             _remove_worktree((previous or {}).get("checkout"), path)
         record["worktrees"] = [str(worktree)]
         registry.put(record)
+    clock.finish()
     if record["canonical"]:
         # The dev stack just moved: every temporary copy merged into dev is now
         # eligible. Best effort; the TTL still applies if this cannot run.

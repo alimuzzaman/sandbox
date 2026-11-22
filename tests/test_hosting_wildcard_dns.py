@@ -253,6 +253,46 @@ class CertificateTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, wildcard_cert.WILDCARD_ISSUER_UNAVAILABLE)
 
 
+class ScheduledRenewalTests(unittest.TestCase):
+    def test_only_due_zones_are_issued_and_dns_is_never_touched(self):
+        listing = _result(stdout=f"wildcard-{ZONE}\nwildcard-other.test\nwildcard-bad..name\n")
+        def ssh(entry, command, timeout=60, input_data=None):
+            return listing if "find " in command else _result()
+        def current(entry, zone, ssh=None, min_days=30):
+            return zone == "other.test"
+        with patch.object(wildcard_cert, "certificate_current", side_effect=current), \
+             patch.object(wildcard_cert, "ensure_certificate",
+                          return_value={"state": "issued"}) as ensure:
+            result = wildcard_cert.renew_due(ssh=ssh, issue=MagicMock())
+        self.assertTrue(result["ok"])
+        self.assertEqual({row["zone"]: row["state"] for row in result["zones"]},
+                         {ZONE: "renewed", "other.test": "current"})
+        ensure.assert_called_once()
+        self.assertEqual(ensure.call_args.args[1], ZONE)
+
+    def test_a_failure_is_reported_not_raised(self):
+        listing = _result(stdout=f"wildcard-{ZONE}\n")
+        with patch.object(wildcard_cert, "certificate_current", return_value=False), \
+             patch.object(wildcard_cert, "ensure_certificate",
+                          side_effect=FrontDoorError("wildcard_certificate_failed", "x")):
+            result = wildcard_cert.renew_due(ssh=lambda *a, **k: listing, issue=MagicMock())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["zones"][0]["error"], "wildcard_certificate_failed")
+
+    def test_an_unlistable_host_reports_without_raising(self):
+        result = wildcard_cert.renew_due(ssh=lambda *a, **k: _result(returncode=1), issue=MagicMock())
+        self.assertFalse(result["ok"])
+
+    def test_the_routine_runs_the_renewal_pass(self):
+        from sandbox.resources.cleanup_routine import run as routine
+        with patch("sandbox.hosting.front_door.wildcard_cert.renew_due",
+                   return_value={"ok": True, "zones": []}) as renew:
+            self.assertEqual(routine._wildcard_renewal_pass(), {"ok": True, "zones": []})
+        renew.assert_called_once_with()
+        with patch("sandbox.hosting.front_door.wildcard_cert.renew_due", side_effect=OSError):
+            self.assertFalse(routine._wildcard_renewal_pass()["ok"])
+
+
 class ApplyHelperTests(unittest.TestCase):
     def setUp(self):
         self.validated = _validate(_wildcard())

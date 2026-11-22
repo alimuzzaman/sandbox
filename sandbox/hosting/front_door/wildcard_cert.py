@@ -235,7 +235,8 @@ def issuer_preflight(zone: str) -> None:
             f"{exc}") from None
 
 
-def default_issuer(*, sleep: Callable[[float], None] = None) -> Callable[..., str | None]:
+def default_issuer(*, sleep: Callable[[float], None] = None,
+                   attempts: int = BUSY_ATTEMPTS) -> Callable[..., str | None]:
     """``issue(zone, csr_pem, still_needed) -> chain`` through the tailnet-name lego
     broker; None when ``still_needed()`` turns false while waiting for the broker."""
     import time
@@ -249,14 +250,14 @@ def default_issuer(*, sleep: Callable[[float], None] = None) -> Callable[..., st
             raise FrontDoorError(WILDCARD_ISSUER_UNAVAILABLE,
                                  f"{zone} is not in tailnet_names.zones")
         deps = default_deps(str(state.default_root()))
-        for attempt in range(BUSY_ATTEMPTS):
+        for attempt in range(attempts):
             if attempt and not still_needed():
                 return None
             try:
                 lego = deps.find_lego(config)
                 return deps.issue(config, lego_name(zone), csr_pem, lego)
             except models.TailnetNameError as exc:
-                if exc.code != models.BUSY or attempt == BUSY_ATTEMPTS - 1:
+                if exc.code != models.BUSY or attempt == attempts - 1:
                     raise
                 pause(BUSY_WAIT_SECONDS)
         raise AssertionError("unreachable")
@@ -327,3 +328,69 @@ def ensure(entry: dict, zone: str, zone_id: str, client: Any, *,
         raise FrontDoorError(WILDCARD_DNS_CONFLICT,
                              f"*.{zone} could not be created ({exc}); re-run the apply") from None
     return {"zone": zone, "created_records": created, "certificate": certificate}
+
+
+# ---------------------------------------------------------------------------
+# Scheduled renewal (on the host, from the cleanup routine)
+# ---------------------------------------------------------------------------
+
+LOCAL_ENTRY = {"name": "local"}
+
+
+def local_run(_entry: dict, command: str, *, timeout: int = 60, input_data=None):
+    """Run ``command`` on this host the way ``nginx._ssh`` runs it remotely."""
+    import subprocess
+    try:
+        return subprocess.run(["sh", "-c", command], input=input_data, text=True,
+                              capture_output=True, timeout=timeout, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(["sh"], 124, "", "timed out")
+
+
+def installed_zones(*, ssh: Callable = local_run) -> list[str]:
+    """Zones with a shared certificate directory on this host."""
+    command = nginx._SUDO + (
+        f"$SUDO find {shlex.quote(nginx.CERT_ROOT)} -mindepth 1 -maxdepth 1 -type d "
+        f"-name {shlex.quote(CERT_PREFIX + '*')} -printf '%f\\n'")
+    result = ssh(LOCAL_ENTRY, command, timeout=30)
+    if result.returncode != 0:
+        raise FrontDoorError(WILDCARD_CERTIFICATE_FAILED, "could not list shared certificates")
+    zones = []
+    for line in (result.stdout or "").splitlines():
+        try:
+            zones.append(normalize_zone(line.strip().removeprefix(CERT_PREFIX)))
+        except FrontDoorError:
+            continue
+    return sorted(set(zones))
+
+
+def renew_due(*, ssh: Callable = local_run, issue: Callable | None = None) -> dict:
+    """Renew every shared certificate on this host with RENEW_DAYS or fewer left.
+
+    Never touches DNS (an installed certificate means the zone's record was already
+    handled by an apply) and never raises: each zone reports ``current``,
+    ``renewed`` or ``failed`` with the error code.
+    """
+    import os
+    if ssh is local_run and not os.path.isdir(nginx.CERT_ROOT):
+        return {"ok": True, "zones": []}  # no nginx edge on this host
+    try:
+        zones = installed_zones(ssh=ssh)
+    except Exception as exc:
+        return {"ok": False, "error": getattr(exc, "code", type(exc).__name__), "zones": []}
+    # Inside the routine's bound: a busy broker is left for the next night.
+    issue = issue or default_issuer(attempts=2)
+    rows, ok = [], True
+    for zone in zones:
+        try:
+            if certificate_current(LOCAL_ENTRY, zone, ssh=ssh):
+                rows.append({"zone": zone, "state": "current"})
+                continue
+            result = ensure_certificate(LOCAL_ENTRY, zone, issue=issue, ssh=ssh)
+            rows.append({"zone": zone, "state": "renewed" if result["state"] == "issued"
+                         else "current"})
+        except Exception as exc:
+            ok = False
+            rows.append({"zone": zone, "state": "failed",
+                         "error": str(getattr(exc, "code", type(exc).__name__))[:64]})
+    return {"ok": ok, "zones": rows}

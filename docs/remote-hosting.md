@@ -1257,8 +1257,13 @@ The shared record and certificate belong to the remote, not to a target: destroy
 reaper remove only the target's route and its own certificate directory, and
 `sb remote edge --remove-route wildcard-<zone>` is refused. The wildcard row is
 zone-wide production DNS: Sandbox creates it once and never removes it. The certificate
-renews when any wildcard target on the zone is applied within 30 days of expiry; there
-is no timer yet, so `sb remote edge` reports it overdue like any other. A target's old
+renews when any wildcard target on the zone is applied within 30 days of expiry, and the
+remote's cleanup routine (`sb resources routine`) renews every due shared certificate on
+the host each run, before its reclaim pass, when at least 20 minutes of its bound remain.
+That pass never touches DNS, uses the host's own `tailnet_names` block and broker, leaves
+a busy broker for the next run, and records each zone as `current`, `renewed` or `failed`
+under `wildcard_renewal` in the run record. `sb remote edge` still reports an overdue
+certificate like any other. A target's old
 certbot certificate is left until the target is destroyed. Spec 070 zone coverage is not
 used for these targets.
 

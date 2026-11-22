@@ -235,6 +235,11 @@ def run_descriptor(path: str | Path) -> int:
         last_progress_monotonic = time.monotonic()
         last_progress_at = _iso()
         last_state_probe = 0.0
+        # A stalled job's heartbeat is written once a second, not on every
+        # 50 ms pass: each write moves the registry WAL, and a registry that
+        # changes faster than a snapshot reads it refuses every nested apply's
+        # admission (recovery_context_invalid, xspeed-dev 2026-11-22).
+        next_stall_beat = 0.0
         leader_alive, group_running, active_descendants = True, True, []
         streams_eof = False
         stopped = True
@@ -277,7 +282,8 @@ def run_descriptor(path: str | Path) -> int:
 
             stall_seconds = int(descriptor.get("stall_seconds", 300))
             stalled = group_running and (time.monotonic() - last_progress_monotonic >= stall_seconds)
-            if stalled:
+            if stalled and time.monotonic() >= next_stall_beat:
+                next_stall_beat = time.monotonic() + 1
                 repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
                     "process_alive": True, "stalled": True,
                     "cancel_on_stall": bool(descriptor.get("cancel_on_stall", False)),

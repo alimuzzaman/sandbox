@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -102,6 +103,31 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(state["lifecycle"], "cancelled", state)
             self.assertEqual(state["termination_reason"], "cancelled_on_stall")
             repository.close()
+
+    def test_a_stalled_job_writes_its_heartbeat_once_a_second_not_every_pass(self):
+        # Every pass used to write one, about 20 a second, and the registry
+        # never held still long enough for a nested apply's admission read.
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), components=None)
+            submitted = service.submit(JobSubmission("test", temp, "p", "local", "quiet",
+                ("/bin/sh", "-c", "sleep 4"), 20, SourceIdentity("source"), stall_seconds=1))
+            # The stored row, not service.get's classified view of it.
+            reader = sqlite3.connect(f"file:{Path(temp) / 'registry.sqlite'}?mode=ro", uri=True)
+            beats = set()
+            until = time.monotonic() + 3.5
+            while time.monotonic() < until:
+                row = reader.execute("SELECT supervisor_at, health_evidence_json FROM heartbeats WHERE job_id=?",
+                                     (submitted["job_id"],)).fetchone()
+                if row and (json.loads(row[1] or "{}")).get("stalled"):
+                    beats.add(row[0])
+                time.sleep(.01)
+            reader.close()
+            state = self._wait_terminal(service, submitted["job_id"])
+            self.assertEqual(state["lifecycle"], "succeeded", state)
+            repository.close()
+        self.assertGreaterEqual(len(beats), 1, "the stall is still recorded")
+        self.assertLessEqual(len(beats), 5, sorted(beats))
 
     def test_deadline_terminates_the_owned_process_group_and_records_timeout(self):
         with tempfile.TemporaryDirectory() as temp:

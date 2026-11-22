@@ -437,10 +437,11 @@ class JobScheduler:
             "('succeeded','failed','timed_out','cancelled','interrupted')",
         ).fetchall()
         ids = [row[0] for row in rows]
-        from .slot_handover import release_slot
+        from .slot_handover import adopt_uncovered, release_slot
         for job_id in ids:
             release_slot(connection, job_id)
             connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
+        adopt_uncovered(connection, now.isoformat())
         return ids
 
     def release(self, job_id: str) -> None:

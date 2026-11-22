@@ -177,6 +177,23 @@ class NestedSlotTests(unittest.TestCase):
         with self.assertRaises(WorkspaceBusy):
             self.scheduler.acquire(self.accept("unrelated"))
 
+    def test_a_borrower_left_uncovered_by_an_older_client_gets_a_counted_slot(self):
+        parent = self.running_parent()
+        child = self.accept("inner", parent["job_id"])
+        self.scheduler.acquire(child)
+        self.repo.transition(child["job_id"], Lifecycle.RUNNING)
+        self.repo.transition(parent["job_id"], Lifecycle.SUCCEEDED)
+        # A client from before the handover drops the holder's leases outright.
+        with self.repo.transaction(immediate=True) as connection:
+            connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (parent["job_id"],))
+            connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (parent["job_id"],))
+        with self.assertRaises(WorkspaceBusy) as raised:
+            self.scheduler.acquire(self.accept("other"))
+        self.assertEqual(raised.exception.kind, "capacity")
+        self.scheduler.reconcile_stale()
+        self.assertTrue(self.scheduler.holds_slot(child["job_id"]))
+        self.assertEqual(self.scheduler.free_slots(), 0)
+
     def test_a_handover_stops_at_a_descendant_with_its_own_slot(self):
         self.scheduler.max_parallel = 2
         root = self.running_parent()

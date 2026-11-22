@@ -9,6 +9,10 @@ The holder can end first (a stack ``up`` submits its apply and returns), so
 every path that drops a job's slot calls :func:`release_slot`, which moves the
 slot to the nearest active job of its line instead of deleting it. A nested job
 that ends without a slot changes nothing: the holder still covers the rest.
+
+A client from before the handover deletes an ending holder's slot outright, which
+leaves its borrowing line running uncovered. :func:`adopt_uncovered` gives each
+such job a slot of its own so it keeps counting against the limit.
 """
 from __future__ import annotations
 
@@ -87,3 +91,28 @@ def release_slot(connection, job_id: str) -> None:
                            (line[0], job_id))
         return
     connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
+
+
+def adopt_uncovered(connection, timestamp: str) -> list[str]:
+    """Give a slot to each active admitted job that no slot holder covers.
+
+    The slot may sit above the limit; it still counts, so no new job is
+    admitted until enough running ones finish."""
+    rows = connection.execute(
+        "SELECT j.job_id FROM jobs j JOIN workspace_leases l ON l.job_id=j.job_id "
+        "WHERE j.lifecycle IN (?,?,?,?) AND NOT EXISTS "
+        "(SELECT 1 FROM host_capacity_leases h WHERE h.job_id=j.job_id) "
+        "ORDER BY j.accepted_at, j.job_id", ACTIVE).fetchall()
+    adopted = []
+    for (job_id,) in rows:
+        job_id = str(job_id)
+        if _holder_path(connection, job_id)[0] is not None:
+            continue
+        held = {int(r[0]) for r in connection.execute(
+            "SELECT slot FROM host_capacity_leases").fetchall()}
+        slot = next(n for n in range(1, len(held) + 2) if n not in held)
+        connection.execute(
+            "INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) "
+            "VALUES(?,?,?,?)", (slot, job_id, timestamp, timestamp))
+        adopted.append(job_id)
+    return adopted

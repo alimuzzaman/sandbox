@@ -14,6 +14,7 @@ import socket
 import ssl
 import stat
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -5666,25 +5667,56 @@ def _verify_edge(
             time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS - waited)
     checks = [route for route in routes if not route["hostname"].startswith("*.")]
 
+    stop = threading.Event()
+
     def check(route: dict) -> None:
-        _verify_route(opener, route, healthcheck_path=healthcheck_path,
-                      basic_auth_enabled=basic_auth_enabled,
-                      basic_auth_credentials=basic_auth_credentials,
-                      gate_hostnames=gate_hostnames, private_hostnames=private_hostnames,
-                      route_tag=route_tag)
+        try:
+            _verify_route(opener, route, healthcheck_path=healthcheck_path,
+                          basic_auth_enabled=basic_auth_enabled,
+                          basic_auth_credentials=basic_auth_credentials,
+                          gate_hostnames=gate_hostnames, private_hostnames=private_hostnames,
+                          route_tag=route_tag, stop=stop)
+        except _EdgeVerifyStopped:
+            raise
+        except Exception:
+            # One failed route fails the apply: the others stop at their next
+            # retry, so rollback is not held back by a slow sibling (each can
+            # otherwise retry for ~12 minutes).
+            stop.set()
+            raise
 
     if len(checks) <= 1 or _EDGE_VERIFY_WORKERS <= 1:
         for route in checks:
             check(route)
         return
     # Each route is an independent read-only probe; run them together and report
-    # the first failure in declaration order, as the serial loop did.
+    # the first real failure in declaration order, as the serial loop did.
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(_EDGE_VERIFY_WORKERS, len(checks)),
-                            thread_name_prefix="sandbox-edge-verify") as pool:
+    pool = ThreadPoolExecutor(max_workers=min(_EDGE_VERIFY_WORKERS, len(checks)),
+                              thread_name_prefix="sandbox-edge-verify")
+    try:
         futures = [pool.submit(check, route) for route in checks]
-    for future in futures:
-        future.result()
+        errors = [future.exception() for future in futures]
+    except BaseException:
+        stop.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    for error in errors:
+        if error is not None and not isinstance(error, _EdgeVerifyStopped):
+            raise error
+
+
+class _EdgeVerifyStopped(Exception):
+    """A sibling route failed first; this probe stopped without a verdict."""
+
+
+def _edge_retry_pause(stop: "threading.Event | None") -> None:
+    if stop is not None and stop.is_set():
+        raise _EdgeVerifyStopped()
+    time.sleep(10)
+    if stop is not None and stop.is_set():
+        raise _EdgeVerifyStopped()
 
 
 # Routes verified at once by _verify_edge; 1 restores the serial order.
@@ -5694,15 +5726,16 @@ _EDGE_VERIFY_WORKERS = 8
 def _verify_route(opener, route: dict, *, healthcheck_path: str, basic_auth_enabled: bool,
                   basic_auth_credentials: tuple[str, str] | None,
                   gate_hostnames: frozenset[str], private_hostnames: frozenset[str],
-                  route_tag: str | None) -> None:
+                  route_tag: str | None, stop: "threading.Event | None" = None) -> None:
     """Prove one route answers as declared (see ``_verify_edge``)."""
     if route["hostname"] in gate_hostnames:
         _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True,
                                route_tag=route_tag, basic_auth_enabled=basic_auth_enabled,
-                               basic_auth_credentials=basic_auth_credentials)
+                               basic_auth_credentials=basic_auth_credentials, stop=stop)
         return
     if route["hostname"] in private_hostnames:
-        _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag)
+        _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag,
+                               stop=stop)
         return
     path = healthcheck_path if route.get("mode") == "serve" else "/"
     endpoint = f"https://{route['hostname']}{path}"
@@ -5727,7 +5760,7 @@ def _verify_route(opener, route: dict, *, healthcheck_path: str, basic_auth_enab
             last_error = exc
         except Exception as exc:  # Edge propagation is external and transient.
             last_error = exc
-        time.sleep(10)
+        _edge_retry_pause(stop)
     if last_error:
         # Do not stringify an exception carrying a request object: some
         # urllib implementations include its headers in ``repr``.  The
@@ -5778,7 +5811,8 @@ def _header_values(headers, name: str) -> list[str]:
 
 def _verify_private_answer(opener, hostname: str, path: str, *, gate: bool,
                            route_tag: str | None = None, basic_auth_enabled: bool = False,
-                           basic_auth_credentials: tuple[str, str] | None = None) -> None:
+                           basic_auth_credentials: tuple[str, str] | None = None,
+                           stop: "threading.Event | None" = None) -> None:
     """Wait for ``hostname`` to answer ``path`` with 404 (from the gate when ``gate``).
 
     Any 2xx or 3xx answer means the application (or a redirect to it) is reachable
@@ -5825,7 +5859,7 @@ def _verify_private_answer(opener, hostname: str, path: str, *, gate: bool,
                 last_error = exc
         except Exception as exc:  # Edge propagation is external and transient.
             last_error = exc
-        time.sleep(10)
+        _edge_retry_pause(stop)
     raise RuntimeError(
         f"edge verification failed for {hostname}: {_edge_failure_detail(last_error)}")
 

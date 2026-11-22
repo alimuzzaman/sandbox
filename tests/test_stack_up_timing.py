@@ -181,16 +181,57 @@ class TestEdgeVerification(unittest.TestCase):
 
     @patch("sandbox.commands.hosting.urllib.request.build_opener")
     def test_the_first_failure_in_declared_order_is_reported(self, build_opener):
+        # Both failing routes finish their retries; wp is declared first but
+        # fails last, so completion order alone would report admin.
+        admin_done = threading.Event()
+
         def open_(request, timeout=None):
-            if "wp." in request.full_url:
-                time.sleep(0.05)  # the earlier route fails last
             if "hub." in request.full_url:
                 return _ok_response()
+            if "wp." in request.full_url:
+                admin_done.wait(5)
             raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO())
         build_opener.return_value.open.side_effect = open_
-        with patch("sandbox.commands.hosting.time.sleep"):
+        real_check = hosting_cmd._verify_route
+
+        def tracked(opener, route, **kwargs):
+            kwargs["stop"] = None  # let both finish: this test is about the order
+            try:
+                real_check(opener, route, **kwargs)
+            finally:
+                if route["hostname"].startswith("admin."):
+                    admin_done.set()
+        with patch("sandbox.commands.hosting.time.sleep"), \
+                patch.object(hosting_cmd, "_verify_route", tracked):
             with self.assertRaisesRegex(RuntimeError, "edge verification failed for wp.example.test"):
                 hosting_cmd._verify_edge(self.routes)
+
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_one_failure_stops_the_other_probes(self, build_opener):
+        # A still-retrying route must not hold back rollback (~12 min before).
+        attempts = {"wp": 0}
+        shared = {}
+
+        def open_(request, timeout=None):
+            if "hub." in request.full_url:
+                return _ok_response()
+            if "wp." in request.full_url:
+                attempts["wp"] += 1
+                # Wait until the admin failure has raised the shared stop.
+                self.assertTrue(shared["stop"].wait(5))
+                raise urllib.error.URLError("certificate not active yet")
+            raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO())
+        build_opener.return_value.open.side_effect = open_
+        real_check = hosting_cmd._verify_route
+
+        def tracked(opener, route, **kwargs):
+            shared["stop"] = kwargs["stop"]
+            real_check(opener, route, **kwargs)
+        with patch("sandbox.commands.hosting.time.sleep"), \
+                patch.object(hosting_cmd, "_verify_route", tracked):
+            with self.assertRaisesRegex(RuntimeError, "edge verification failed for admin.example.test"):
+                hosting_cmd._verify_edge(self.routes)
+        self.assertEqual(attempts["wp"], 1)
 
     @patch("sandbox.commands.hosting.urllib.request.build_opener")
     def test_dns_grace_counts_the_time_since_the_records_were_written(self, build_opener):

@@ -332,6 +332,33 @@ def _validate_all_environments(project_dir: str | Path) -> list[dict]:
     return results
 
 
+class _ZoneLookup:
+    """One apply's zone lookups, each candidate asked once.
+
+    Only a definite "no such zone" answer is remembered; any other provider
+    error is asked again, as before.
+    """
+
+    def __init__(self, client) -> None:
+        self._client = client
+        self._found: dict[str, dict] = {}
+        self._missing: dict[str, str] = {}
+
+    def zone(self, name: str) -> dict:
+        if name in self._found:
+            return self._found[name]
+        if name in self._missing:
+            raise cloudflare.CloudflareError(self._missing[name], "zone_not_found")
+        try:
+            zone = self._client.zone(name)
+        except cloudflare.CloudflareError as exc:
+            if getattr(exc, "code", None) == "zone_not_found":
+                self._missing[name] = str(exc)
+            raise
+        self._found[name] = zone
+        return zone
+
+
 def _zone_for_hostname(client, hostname: str) -> dict:
     """Find the closest Cloudflare zone without assuming a public suffix list."""
     labels = hostname.removeprefix("*.").split(".")
@@ -5609,6 +5636,7 @@ def _verify_edge(
     gate_hostnames: frozenset[str] = frozenset(),
     private_hostnames: frozenset[str] = frozenset(),
     route_tag: str | None = None,
+    fresh_since: float | None = None,
 ) -> None:
     """Prove each route answers as declared.
 
@@ -5631,78 +5659,111 @@ def _verify_edge(
 
     opener = urllib.request.build_opener(_NoRedirect, *handlers)
     if any(route["hostname"] in fresh_hostnames for route in routes):
-        time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
-    for route in routes:
-        if route["hostname"].startswith("*."):
-            continue
-        if route["hostname"] in gate_hostnames:
-            _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True,
-                                   route_tag=route_tag, basic_auth_enabled=basic_auth_enabled,
-                                   basic_auth_credentials=basic_auth_credentials)
-            continue
-        if route["hostname"] in private_hostnames:
-            _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag)
-            continue
-        path = healthcheck_path if route.get("mode") == "serve" else "/"
-        endpoint = f"https://{route['hostname']}{path}"
-        request_headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)",
-        }
-        request = urllib.request.Request(endpoint, method="GET", headers=request_headers)
-        last_error = None
-        # Cloudflare can need several minutes to activate edge certificates after
-        # proxying a previously DNS-only alias for the first time.
-        for _ in range(30):
-            try:
-                with opener.open(request, timeout=15) as response:
-                    if 200 <= response.status < 400:
-                        last_error = None
-                        break
-            except urllib.error.HTTPError as exc:
-                if (300 <= exc.code < 400
-                        or (basic_auth_enabled and route.get("mode") == "serve" and exc.code == 401)):
+        # ``fresh_since`` is when the apply wrote the records (time.monotonic());
+        # the certificate and route work since then already counts as waiting.
+        waited = 0.0 if fresh_since is None else max(0.0, time.monotonic() - fresh_since)
+        if waited < _NEW_DNS_RECORD_GRACE_SECONDS:
+            time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS - waited)
+    checks = [route for route in routes if not route["hostname"].startswith("*.")]
+
+    def check(route: dict) -> None:
+        _verify_route(opener, route, healthcheck_path=healthcheck_path,
+                      basic_auth_enabled=basic_auth_enabled,
+                      basic_auth_credentials=basic_auth_credentials,
+                      gate_hostnames=gate_hostnames, private_hostnames=private_hostnames,
+                      route_tag=route_tag)
+
+    if len(checks) <= 1 or _EDGE_VERIFY_WORKERS <= 1:
+        for route in checks:
+            check(route)
+        return
+    # Each route is an independent read-only probe; run them together and report
+    # the first failure in declaration order, as the serial loop did.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(_EDGE_VERIFY_WORKERS, len(checks)),
+                            thread_name_prefix="sandbox-edge-verify") as pool:
+        futures = [pool.submit(check, route) for route in checks]
+    for future in futures:
+        future.result()
+
+
+# Routes verified at once by _verify_edge; 1 restores the serial order.
+_EDGE_VERIFY_WORKERS = 8
+
+
+def _verify_route(opener, route: dict, *, healthcheck_path: str, basic_auth_enabled: bool,
+                  basic_auth_credentials: tuple[str, str] | None,
+                  gate_hostnames: frozenset[str], private_hostnames: frozenset[str],
+                  route_tag: str | None) -> None:
+    """Prove one route answers as declared (see ``_verify_edge``)."""
+    if route["hostname"] in gate_hostnames:
+        _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True,
+                               route_tag=route_tag, basic_auth_enabled=basic_auth_enabled,
+                               basic_auth_credentials=basic_auth_credentials)
+        return
+    if route["hostname"] in private_hostnames:
+        _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag)
+        return
+    path = healthcheck_path if route.get("mode") == "serve" else "/"
+    endpoint = f"https://{route['hostname']}{path}"
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)",
+    }
+    request = urllib.request.Request(endpoint, method="GET", headers=request_headers)
+    last_error = None
+    # Cloudflare can need several minutes to activate edge certificates after
+    # proxying a previously DNS-only alias for the first time.
+    for _ in range(30):
+        try:
+            with opener.open(request, timeout=15) as response:
+                if 200 <= response.status < 400:
                     last_error = None
                     break
-                last_error = exc
-            except Exception as exc:  # Edge propagation is external and transient.
-                last_error = exc
-            time.sleep(10)
-        if last_error:
-            # Do not stringify an exception carrying a request object: some
-            # urllib implementations include its headers in ``repr``.  The
-            # public error is intentionally bounded and credential-free.
-            detail = _edge_failure_detail(last_error)
+        except urllib.error.HTTPError as exc:
+            if (300 <= exc.code < 400
+                    or (basic_auth_enabled and route.get("mode") == "serve" and exc.code == 401)):
+                last_error = None
+                break
+            last_error = exc
+        except Exception as exc:  # Edge propagation is external and transient.
+            last_error = exc
+        time.sleep(10)
+    if last_error:
+        # Do not stringify an exception carrying a request object: some
+        # urllib implementations include its headers in ``repr``.  The
+        # public error is intentionally bounded and credential-free.
+        detail = _edge_failure_detail(last_error)
+        raise RuntimeError(
+            f"edge verification failed for {route['hostname']}: {detail}"
+        )
+    if basic_auth_credentials and route.get("mode") == "serve":
+        username, password = basic_auth_credentials
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise RuntimeError("Basic Auth verification credentials are unavailable")
+        # The credential is obtained only through _secret_status() (the
+        # registered personal secret broker) and exists in memory for this
+        # request.  It is never part of a URL, subprocess argv, or log.
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        auth_request = urllib.request.Request(
+            endpoint,
+            method="GET",
+            headers={**request_headers, "Authorization": f"Basic {encoded}"},
+        )
+        auth_error = None
+        try:
+            with opener.open(auth_request, timeout=15) as response:
+                if 200 <= response.status < 400:
+                    auth_error = None
+                else:
+                    auth_error = f"HTTP {response.status}"
+        except urllib.error.HTTPError as exc:
+            auth_error = f"HTTP {exc.code}"
+        except Exception:
+            auth_error = "route unavailable"
+        if auth_error:
             raise RuntimeError(
-                f"edge verification failed for {route['hostname']}: {detail}"
+                f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
             )
-        if basic_auth_credentials and route.get("mode") == "serve":
-            username, password = basic_auth_credentials
-            if not isinstance(username, str) or not isinstance(password, str):
-                raise RuntimeError("Basic Auth verification credentials are unavailable")
-            # The credential is obtained only through _secret_status() (the
-            # registered personal secret broker) and exists in memory for this
-            # request.  It is never part of a URL, subprocess argv, or log.
-            encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
-            auth_request = urllib.request.Request(
-                endpoint,
-                method="GET",
-                headers={**request_headers, "Authorization": f"Basic {encoded}"},
-            )
-            auth_error = None
-            try:
-                with opener.open(auth_request, timeout=15) as response:
-                    if 200 <= response.status < 400:
-                        auth_error = None
-                    else:
-                        auth_error = f"HTTP {response.status}"
-            except urllib.error.HTTPError as exc:
-                auth_error = f"HTTP {exc.code}"
-            except Exception:
-                auth_error = "route unavailable"
-            if auth_error:
-                raise RuntimeError(
-                    f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
-                )
 
 
 def _header_values(headers, name: str) -> list[str]:
@@ -6239,6 +6300,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
         'ordinary_recovery_admission_v1', 'ordinary_source_artifact_v1'])
+    from sandbox.hosting.phase_timing import PhaseClock
+    # Phase names are fixed identifiers, so the unredacted progress is safe here.
+    clock = PhaseClock(progress)
     if local_images_digest is not None:
         if active_image_lease is None:
             raise hosting.HostingError("local image engine lock is unavailable")
@@ -6252,6 +6316,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     broker_guard = (personal_secrets.hosting_binding_broker_lock()
                     if recovery_repository is not None else nullcontext())
     with broker_guard:
+        clock.lap("secrets")
         secret_values, missing = _secret_status(validated)
         if missing:
             raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
@@ -6269,6 +6334,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             # Internal unit seams never authorize recovery or touch broker state.
             binding_key, key_version = b"\0" * 32, "test-unavailable"
             publish_binding_key = False
+        clock.lap("source_artifact")
         base_commit = _resolve_host_source_commit(validated["project_root"])
         source_artifact, source_checkout = _prepare_host_source_artifact(validated, base_commit)
         published_commit = source_artifact['revision']
@@ -6283,6 +6349,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             max_bytes=_HOST_SOURCE_SNAPSHOT_MAX_BYTES)
         source_state_identity = source_snapshot["identity"]
         source_state_clean = not bool(diff or untracked)
+        clock.lap("admission")
         home = remote.resolve_sandbox_home(entry)
         runtime["environment"] = hosting.render_env_file(
             validated, secret_values, pushed_commit_sha=published_commit)
@@ -6341,6 +6408,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             "use deploy.strategy auto or in-place")
     if before_effects is not None:
         before_effects()
+    clock.lap("edge_preflight")
     client = cloudflare.Client()
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
     edge = _host_edge(entry)
@@ -6359,6 +6427,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     # any source, space or state effect, so a refused read changes nothing.
     previous_caddy = (private_closure["baseline"] if private_closure is not None
                       else edge.read_previous(caddy_name))
+    clock.lap("source_push")
     attempt.checkpoint('source', 'source_publish')
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -6415,6 +6484,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             "revision/config; "
             "refusing before target reset, observation, Compose, or initializer mutation"
         )
+    clock.lap("source_reset")
     remote.update_target_to(
         entry, target, sha,
         project_root=None if require_clean else validated["project_root"],
@@ -6532,6 +6602,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             )
         )
         exact_runtime_proven = False
+        clock.lap("runtime_evidence")
         if may_replay:
             try:
                 observation = _observe_host_runtime(
@@ -6593,6 +6664,8 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                     observation=classified, save_state=durable_save):
                 raise RuntimeError("exact runtime reconciliation evidence was rejected")
         else:
+            # Compose writes its own phase markers to apply.log.
+            clock.finish()
             attempt.checkpoint('initializer', 'runtime_apply')
             _run_compose(
                 entry, validated, target, runtime_dir, runtime,
@@ -6606,7 +6679,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             _mark_hosting_init_complete(
                 state, key, entry=entry, runtime_dir=runtime_dir,
                 save_state=durable_save)
+            clock.lap("runtime_health")
             health_receipt = _verify_remote_health(entry, runtime, stream_progress)
+            clock.lap("runtime_observation")
             try:
                 observation, classified = _poll_post_compose_host_observation(
                     validated, entry, target, runtime_dir, sha,
@@ -6644,9 +6719,11 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             durable_save(state)
         attempt.checkpoint('runtime', 'runtime_apply', state='observed')
         attempt.checkpoint('edge', 'edge_apply')
+        clock.lap("edge_certificate")
         proxied = validated["cloudflare"]["proxied"]
         cert_path, key_path, certificate = edge.certificate(
             proxied, validated, runtime, previous_entry, client, home, caddy_name)
+        clock.lap("edge_route")
         route_tag = _route_tag(validated)
         render_validated = {**validated, "route_tag": route_tag} if route_tag else validated
         rendered = edge.render(
@@ -6660,14 +6737,16 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
         edge_live["new"] = True
+        clock.lap("edge_dns")
         zones: dict[str, dict] = {}
+        zone_lookup = _ZoneLookup(client)
         fresh_hostnames: set[str] = set()
         drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule"))
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]
             zone = zones.get(hostname)
             if zone is None:
-                zone = _zone_for_hostname(client, hostname)
+                zone = _zone_for_hostname(zone_lookup, hostname)
                 zones[hostname] = zone
             if proxied:
                 current = client.current_ssl_mode(zone["id"])
@@ -6723,9 +6802,19 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                                     "created_id": (existing or {}).get("id"),
                                     "applied": _applied_record(existing)})
                     continue
+            if cloudflare.address_record_current(previous, wanted["address"], proxied=proxied):
+                # Already exactly what upsert_address would write: no provider write,
+                # and a rollback restores this same record.
+                changes.append({"zone_id": zone["id"], "previous": previous,
+                                "created_id": previous.get("id"),
+                                "applied": _applied_record(previous)})
+                continue
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id"),
                             "applied": _applied_record(created)})
+        # The new-record DNS grace runs from the last write, not from verification.
+        dns_written_at = time.monotonic()
+        clock.lap("edge_after_dns")
         certificate = edge.after_dns(
             render_validated, runtime["loopback_port"], secret_values, cert_path, certificate,
             caddy_name, log_path=apply_log)
@@ -6742,9 +6831,11 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             verify_kwargs["route_tag"] = route_tag
         if fresh_hostnames:
             verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
+            verify_kwargs["fresh_since"] = dns_written_at
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         evidence = None
+        clock.lap("edge_verify")
         dns_cov = validated.get("dns_coverage") or {}
         if dns_cov.get("mode") == "shared":
             evidence = targets.verify_shared(
@@ -6755,6 +6846,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             )
         else:
             _verify_edge(validated["routes"], **verify_kwargs)
+        clock.lap("edge_finalize")
         cache_policy = (validated.get("cloudflare") or {}).get("cache_purge") or {}
         if cache_policy.get("on_deploy") is True or purge_edge_cache:
             if cache_policy.get("enabled") is not True:
@@ -6842,6 +6934,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         durable_save(state)
 
     hosting.apply_with_rollback(apply, rollback)
+    clock.lap("delivery_record")
     attempt.checkpoint('edge', 'edge_apply', state='observed')
     generation = (state['hosts'][key].get('hosting_operation') or {}).get('starting_generation')
     observed_revision = state['hosts'][key].get('observed_runtime_revision')
@@ -6875,7 +6968,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     if summary_recorder is not None:
         summary_recorder.finished((delivery or {}).get("delivery_succeeded") is not False)
     _record_stack_delivery(validated, remote_name, delivery)
+    clock.lap("mail_name")
     mail_name = _ensure_stack_mail_name(validated, remote_name, delivery)
+    clock.finish()
     if mail_name is not None:
         result["mail_name"] = mail_name
     return result

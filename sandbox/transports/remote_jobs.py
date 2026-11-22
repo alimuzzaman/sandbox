@@ -578,6 +578,8 @@ class RemoteJobTransport:
                  sync_submit: Callable | None = None,
                  readiness: Callable | None = None) -> None:
         self.deploy = deploy
+        # Optional lap timer (PhaseClock.lap) for submit_server_cli's phases.
+        self.phase: Callable[[str], None] | None = None
         # Spec 063 US2: ``readiness(project_root, remote_name)`` refuses with
         # sandbox.readiness.errors.RemoteNotReadyError before any transfer. Submission sites pass
         # ``sandbox.readiness.gate.require_ready``; control-only calls do not.
@@ -660,6 +662,10 @@ class RemoteJobTransport:
             if 'job.source-content.v1' not in observed['capabilities']:
                 raise RemoteJobTransportError('installed measured-source capability is unavailable; no job submitted', retryable=False)
         return remote
+
+    def _lap(self, phase: str) -> None:
+        if self.phase is not None:
+            self.phase(phase)
 
     def _deploy(self, remote: dict, project_root: str,
                 *, deployment_timeout: int | None = None) -> dict:
@@ -811,6 +817,7 @@ class RemoteJobTransport:
                if key in observed}})
         provenance['server_cli.target_metadata'] = json.dumps(routing, sort_keys=True, separators=(',', ':'))
         submission = replace(submission, execution_policy_provenance=provenance)
+        self._lap('source_upload')
         try:
             deployed = self._deploy(remote, submission.project_root,
                                     deployment_timeout=submission.deadline_seconds)
@@ -999,6 +1006,7 @@ class RemoteJobTransport:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         expected_source = deployed_source(deployed)
+        self._lap('workspace')
         workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label,
             source_proof=deployed, request_id=submission.request_id, project_identity=submission.project_identity)
         args = ["job-start", "--local", "--project-dir", workspace_path,
@@ -1086,6 +1094,7 @@ class RemoteJobTransport:
             argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]
         unknown = {'acceptance': 'unknown', 'request_id': submission.request_id}
+        self._lap('job_submit')
         try:
             result = self._run(remote, self._remote_command(remote, args), timeout=30)
         except RemoteJobTransportError:

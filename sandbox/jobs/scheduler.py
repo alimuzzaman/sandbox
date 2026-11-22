@@ -177,31 +177,15 @@ def older_candidate(connection, row) -> str | None:
 
 
 def borrows_parent_slot(connection, row) -> bool:
-    """A nested job runs on its parent's host slot instead of taking another.
+    """A nested job runs on its waiting parent's host slot instead of taking another.
 
-    A parent that holds a slot (or itself runs on one it borrowed) and waits on
-    its child would otherwise deadlock the host once every slot is held by such
-    parents. Only one active child per parent borrows at a time, so a chain of
-    nested jobs still occupies one slot, and a parent fanning out children in
-    parallel takes slots for the rest.
+    Parents that hold every slot while waiting on their children would otherwise
+    deadlock the host. One slot covers one line of nested jobs (see
+    ``slot_handover``), so a parent fanning out children in parallel still takes
+    slots for the rest.
     """
-    parent_id = dict(row).get("parent_job_id")
-    if not parent_id:
-        return False
-    parent = connection.execute(
-        "SELECT lifecycle FROM jobs WHERE job_id=?", (parent_id,)).fetchone()
-    # A cancelling parent is about to stop waiting; its child takes a slot.
-    if parent is None or parent[0] != "running":
-        return False
-    if connection.execute("SELECT 1 FROM workspace_leases WHERE job_id=?",
-                          (parent_id,)).fetchone() is None:
-        return False
-    other = connection.execute(
-        "SELECT 1 FROM jobs c JOIN workspace_leases l ON l.job_id=c.job_id "
-        "WHERE c.parent_job_id=? AND c.job_id<>? AND c.lifecycle IN (?,?,?,?) "
-        "AND NOT EXISTS (SELECT 1 FROM host_capacity_leases h WHERE h.job_id=c.job_id) "
-        "LIMIT 1", (parent_id, dict(row)["job_id"], *_ACTIVE)).fetchone()
-    return other is None
+    from .slot_handover import may_borrow
+    return may_borrow(connection, row)
 
 
 class JobScheduler:

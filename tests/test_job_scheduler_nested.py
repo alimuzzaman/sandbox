@@ -159,6 +159,38 @@ class NestedSlotTests(unittest.TestCase):
         self.scheduler.acquire(child)
         self.assertTrue(slot_held(self.repo, child["job_id"]))
 
+    def run_child(self, parent, label):
+        child = self.accept(label, parent["job_id"])
+        self.scheduler.acquire(child)
+        self.repo.transition(child["job_id"], Lifecycle.RUNNING)
+        return child
+
+    def test_a_new_child_cannot_share_the_slot_with_an_orphaned_grandchild(self):
+        root = self.running_parent()
+        child = self.run_child(root, "inner")
+        grandchild = self.run_child(child, "deeper")
+        self.finish(child)
+        with self.assertRaises(WorkspaceBusy):
+            self.scheduler.acquire(self.accept("second-inner", root["job_id"]))
+        self.finish(root)
+        self.assertEqual(self.held(), {grandchild["job_id"]})
+        with self.assertRaises(WorkspaceBusy):
+            self.scheduler.acquire(self.accept("unrelated"))
+
+    def test_a_handover_stops_at_a_descendant_with_its_own_slot(self):
+        self.scheduler.max_parallel = 2
+        root = self.running_parent()
+        borrower = self.run_child(root, "inner")
+        own = self.run_child(root, "inner-own")  # a second child: takes its own slot
+        self.assertTrue(self.scheduler.holds_slot(own["job_id"]))
+        nested = self.run_child(own, "inner-own-child")  # borrows own's slot
+        self.finish(borrower)
+        self.finish(root)
+        self.assertEqual(self.held(), {own["job_id"]})
+        self.assertEqual(self.scheduler.free_slots(), 1)
+        self.finish(own)
+        self.assertEqual(self.held(), {nested["job_id"]})
+
 
 if __name__ == "__main__":
     unittest.main()

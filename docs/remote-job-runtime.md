@@ -264,7 +264,9 @@ and `queue.position` counts exactly those, host-wide.
 
 A nested job (one with a parent job, such as the apply a `server-cli` stack job
 submits) runs on its parent's slot when the parent is running with a slot of its own
-or a borrowed one, and no other active child of that parent is borrowing it. It then
+or a borrowed one. One slot covers one line of nested jobs: a new nested job may
+join only when every active job already running on that slot is one of its own
+ancestors. It then
 takes no slot and does not wait behind older queued jobs, so parents that hold every
 slot while waiting on their children can no longer deadlock the host. A parent's
 second concurrent child, and the child of a cancelling parent, take a slot as usual.

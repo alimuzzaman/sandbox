@@ -148,7 +148,7 @@ class CertificateTests(unittest.TestCase):
         issue = MagicMock(return_value=CHAIN)
         result = wildcard_cert.ensure_certificate(ENTRY, ZONE, issue=issue, ssh=ssh)
         self.assertEqual(result["state"], "issued")
-        issue.assert_called_once_with(ZONE, CSR)
+        self.assertEqual(issue.call_args.args[:2], (ZONE, CSR))
         csr_command = ssh.call_args_list[1].args[1]
         self.assertIn("subjectAltName=DNS:*.", csr_command)
         self.assertIn("umask 077", csr_command)
@@ -165,6 +165,26 @@ class CertificateTests(unittest.TestCase):
         result = wildcard_cert.ensure_certificate(ENTRY, ZONE, issue=MagicMock(return_value=CHAIN),
                                                   ssh=ssh)
         self.assertEqual(result["state"], "current")
+
+    def test_a_certificate_installed_while_waiting_is_used_instead_of_issuing(self):
+        current = _result(stdout=f"DNS:*.{ZONE}")
+        ssh = MagicMock(side_effect=[_result(returncode=1), _result(stdout=_hex_read(CSR)), current])
+        issue = MagicMock(side_effect=lambda zone, csr, still_needed: None if not still_needed() else CHAIN)
+        result = wildcard_cert.ensure_certificate(ENTRY, ZONE, issue=issue, ssh=ssh)
+        self.assertEqual(result["state"], "current")
+        self.assertEqual(ssh.call_count, 3)  # no install
+
+    def test_busy_broker_rechecks_the_remote_before_each_retry(self):
+        from sandbox.hosting.tailnet_names import models
+        config = SimpleNamespace(zones=(ZONE,))
+        deps = MagicMock()
+        deps.issue.side_effect = models.TailnetNameError(models.BUSY, "busy")
+        checks = iter([True, False])
+        with patch.object(models.TailnetNameConfig, "load", return_value=config), \
+             patch("sandbox.commands.host_tailnet_name.default_deps", return_value=deps):
+            issue = wildcard_cert.default_issuer(sleep=lambda _s: None)
+            self.assertIsNone(issue(ZONE, CSR, lambda: next(checks)))
+        self.assertEqual(deps.issue.call_count, 2)
 
     def test_issue_failure_installs_nothing(self):
         ssh = MagicMock(side_effect=[_result(returncode=1), _result(stdout=_hex_read(CSR))])
@@ -205,6 +225,15 @@ class CertificateTests(unittest.TestCase):
                           side_effect=lambda *a, **k: order.append("cert") or {}):
             wildcard_cert.ensure(ENTRY, ZONE, "z1", client)
         self.assertEqual(order, ["cert", "dns"])
+
+    def test_a_row_written_during_issuance_is_not_written_again(self):
+        client = MagicMock()
+        row = {"id": "g", "type": "A", "content": ORIGIN, "proxied": False}
+        client.records.side_effect = [[], [row]]
+        with patch.object(wildcard_cert, "ensure_certificate", return_value={}):
+            result = wildcard_cert.ensure(ENTRY, ZONE, "z1", client)
+        client.create_address.assert_not_called()
+        self.assertEqual(result["created_records"], [])
 
     def test_failed_issuance_writes_no_record(self):
         client = MagicMock()
@@ -315,6 +344,25 @@ class RetireRecordTests(unittest.TestCase):
         kept = hosting_cmd._retire_wildcard_records(state, self.KEY, client)
         client.restore_record.assert_called_once_with("z1", None, "mine")
         self.assertEqual({row["created_id"] for row in kept}, {"changed", "adopted", "shared"})
+
+    def test_a_name_is_retired_whole_or_not_at_all_and_aaaa_goes_first(self):
+        def pair(name, aaaa_changed=False):
+            a = {"zone_id": "z1", "created_id": f"{name}-a", "previous": None,
+                 "applied": {"name": f"{name}.{ZONE}", "type": "A", "content": ORIGIN}}
+            aaaa = {"zone_id": "z1", "created_id": f"{name}-aaaa", "previous": None,
+                    "applied": {"name": f"{name}.{ZONE}", "type": "AAAA", "content": "2001:db8::10"}}
+            return a, aaaa
+        ok_a, ok_aaaa = pair("ok")
+        split_a, split_aaaa = pair("split")
+        split_aaaa = {**split_aaaa, "previous": {"id": "split-aaaa"}}  # not ours to delete
+        state = {"hosts": {self.KEY: {"records": [ok_a, ok_aaaa, split_a, split_aaaa]}}}
+        client = MagicMock()
+        rows = {row["created_id"]: row["applied"] for row in (ok_a, ok_aaaa, split_a, split_aaaa)}
+        client.record.side_effect = lambda zone_id, record_id: rows.get(record_id)
+        kept = hosting_cmd._retire_wildcard_records(state, self.KEY, client)
+        deleted = [call.args[2] for call in client.restore_record.call_args_list]
+        self.assertEqual(deleted, ["ok-aaaa", "ok-a"])
+        self.assertEqual({row["created_id"] for row in kept}, {"split-a", "split-aaaa"})
 
     def test_a_provider_failure_keeps_every_row(self):
         from sandbox.core import _cloudflare as cloudflare

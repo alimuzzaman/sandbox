@@ -1241,15 +1241,17 @@ Apply then:
    the key, with bounded `nginx -t` and reload. On failure the previous chain comes back,
    or with none the new one is removed. The challenge's TXT record needs one free slot
    in the zone's record quota;
-2. creates the missing `*.<zone>` row (only now, so a failed issuance leaves no
-   zone-wide record);
+2. reads `*.<zone>` again and creates the missing row (only now, so a failed issuance
+   leaves no zone-wide record; a failure after this step keeps it, since it is shared
+   and never removed);
 3. serves the route with the shared certificate; it writes no per-name record and asks
    certbot for nothing;
 4. after verification, deletes the per-name records this target created under an
    earlier `exact` or `auto` apply. A record is deleted only when the target created
    it, it still holds exactly what Sandbox wrote, and no other target on this controller
-   saved it; every other row stays in state for `host destroy`. A recovered edge keeps
-   the rows for the next apply.
+   saved it, and a name is retired only when all its saved rows qualify (AAAA first),
+   so no name is left with an address of one family only; every other row stays in
+   state for `host destroy`. A recovered edge keeps the rows for the next apply.
 
 The shared record and certificate belong to the remote, not to a target: destroy and the
 reaper remove only the target's route and its own certificate directory, and

@@ -4716,31 +4716,45 @@ def _wildcard_certificate(entry: dict, validated: dict, state_entry, client):
 def _retire_wildcard_records(state: dict, key: str, client) -> list[dict]:
     """After a verified wildcard apply: delete the per-name records this target wrote
     before it switched to the shared wildcard. Only a record it created, still holding
-    exactly what it wrote and not saved by another target, is deleted; every other
-    row stays saved so destroy still sees it."""
+    exactly what it wrote and not saved by another target, is deleted, and a name is
+    retired only when every saved row at it can be: by RFC 4592 a name left with one
+    AAAA would stop the wildcard answering its A queries. AAAA goes first. Every
+    other row stays saved so destroy still sees it."""
     from sandbox.hosting import destroy as host_destroy
     prior = (state.get("hosts", {}).get(key) or {}).get("records") or []
     held = host_destroy._records_held_elsewhere(state, key)
-    retire, keep = [], []
-    for row in prior:
-        if (isinstance(row, dict) and row.get("created_id") and not row.get("previous")
+
+    def eligible(row) -> bool:
+        return (isinstance(row, dict) and bool(row.get("created_id")) and not row.get("previous")
                 and isinstance(row.get("applied"), dict)
                 and not host_destroy._snapshot_untrusted(row)
-                and not (host_destroy._record_identities(row) & held)):
-            retire.append(row)
-        else:
-            keep.append(row)
-    if not retire:
-        return keep
-    try:
-        results = host_destroy._remove_cloudflare({"_records": retire}, client)
-    except cloudflare.CloudflareError as exc:
-        print(f"warning: old per-name DNS records were kept ({exc}); destroy still "
-              "removes them", file=sys.stderr)
-        return prior
-    for row, outcome in zip(retire, results):
-        if outcome.get("state") not in {"removed", "already_absent"}:
-            keep.append(row)
+                and not (host_destroy._record_identities(row) & held))
+
+    def name_of(row) -> str | None:
+        applied = row.get("applied") if isinstance(row, dict) else None
+        name = applied.get("name") if isinstance(applied, dict) else None
+        return str(name).rstrip(".").lower() if name else None
+
+    by_name: dict = {}
+    for row in prior:
+        by_name.setdefault(name_of(row), []).append(row)
+    keep = []
+    for name, rows in by_name.items():
+        if name is None or not all(eligible(row) for row in rows):
+            keep.extend(rows)
+            continue
+        ordered = sorted(rows, key=lambda row: 0 if row["applied"].get("type") == "AAAA" else 1)
+        for index, row in enumerate(ordered):
+            try:
+                outcome = host_destroy._remove_cloudflare({"_records": [row]}, client)[0]
+            except cloudflare.CloudflareError as exc:
+                print(f"warning: old DNS records for {name} were kept ({exc}); destroy "
+                      "still removes them", file=sys.stderr)
+                keep.extend(ordered[index:])
+                break
+            if outcome.get("state") not in {"removed", "already_absent"}:
+                keep.extend(ordered[index:])
+                break
     return keep
 
 

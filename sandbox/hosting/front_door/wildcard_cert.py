@@ -39,8 +39,10 @@ WILDCARD_DNS_CONFLICT = "wildcard_dns_conflict"
 WILDCARD_CERTIFICATE_FAILED = "wildcard_certificate_failed"
 WILDCARD_NAME_INELIGIBLE = "wildcard_name_ineligible"
 WILDCARD_ISSUER_UNAVAILABLE = "wildcard_issuer_unavailable"
-BUSY_ATTEMPTS = 4
-BUSY_WAIT_SECONDS = 20.0
+# lego may hold the broker for up to its 900 s budget; wait that long, re-checking
+# the remote each time so a certificate another apply installed meanwhile is used.
+BUSY_ATTEMPTS = 32
+BUSY_WAIT_SECONDS = 30.0
 _KEY_MISMATCH_EXIT = 76
 
 
@@ -168,7 +170,8 @@ def _csr_command(zone: str) -> str:
     keygen = (f"umask 077; tmp=$(mktemp {shlex.quote(base)}/.key.XXXXXX) && "
               f"openssl ecparam -name prime256v1 -genkey -noout -out \"$tmp\" && "
               f"ln \"$tmp\" {shlex.quote(key_path)} 2>/dev/null; rm -f \"$tmp\"")
-    request = (f"umask 077; tmp=$(mktemp {shlex.quote(base)}/.csr.XXXXXX) && "
+    request = (f"umask 077; tmp=$(mktemp {shlex.quote(base)}/.csr.XXXXXX) || exit 1; "
+               "trap 'rm -f \"$tmp\"' EXIT; "
                f"openssl req -new -key {shlex.quote(key_path)} "
                f"-subj {shlex.quote('/CN=' + wildcard)} "
                f"-addext {shlex.quote('subjectAltName=DNS:' + wildcard)} -out \"$tmp\" && "
@@ -232,20 +235,23 @@ def issuer_preflight(zone: str) -> None:
             f"{exc}") from None
 
 
-def default_issuer(*, sleep: Callable[[float], None] = None) -> Callable[[str, str], str]:
-    """``issue(zone, csr_pem) -> chain`` through the tailnet-name lego broker."""
+def default_issuer(*, sleep: Callable[[float], None] = None) -> Callable[..., str | None]:
+    """``issue(zone, csr_pem, still_needed) -> chain`` through the tailnet-name lego
+    broker; None when ``still_needed()`` turns false while waiting for the broker."""
     import time
     from sandbox.commands.host_tailnet_name import default_deps
     from sandbox.hosting.tailnet_names import models, state
     pause = sleep or time.sleep
 
-    def issue(zone: str, csr_pem: str) -> str:
+    def issue(zone: str, csr_pem: str, still_needed: Callable[[], bool] = lambda: True):
         config = models.TailnetNameConfig.load()
         if normalize_zone(zone) not in config.zones:
             raise FrontDoorError(WILDCARD_ISSUER_UNAVAILABLE,
                                  f"{zone} is not in tailnet_names.zones")
         deps = default_deps(str(state.default_root()))
         for attempt in range(BUSY_ATTEMPTS):
+            if attempt and not still_needed():
+                return None
             try:
                 lego = deps.find_lego(config)
                 return deps.issue(config, lego_name(zone), csr_pem, lego)
@@ -274,17 +280,23 @@ def ensure_certificate(entry: dict, zone: str, *, issue: Callable[[str, str], st
         raise FrontDoorError(WILDCARD_CERTIFICATE_FAILED,
                              f"could not create the *.{zone} key/CSR on the remote: "
                              + nginx._diagnostic(entry, result))
+    def still_needed() -> bool:
+        return not certificate_current(entry, zone, ssh=run)
     try:
-        chain = (issue or default_issuer())(zone, csr)
+        chain = (issue or default_issuer())(zone, csr, still_needed)
     except FrontDoorError:
         raise
     except Exception as exc:
         code = getattr(exc, "code", type(exc).__name__)
         raise FrontDoorError(WILDCARD_CERTIFICATE_FAILED,
                              f"*.{zone} certificate was not issued ({code}): {exc}") from None
-    if "BEGIN CERTIFICATE" not in (chain or ""):
+    if chain is None:
+        # Another apply installed a current certificate while this one waited.
+        return {"state": "current", "cert_path": cert_path, "key_path": key_path}
+    if "BEGIN CERTIFICATE" not in chain:
         raise FrontDoorError(WILDCARD_CERTIFICATE_FAILED, f"*.{zone}: no certificate chain returned")
-    installed = run(entry, _install_command(zone), timeout=nginx.LOCK_WAIT_SECONDS + 180,
+    # Lock wait, then test+reload and a restore pass, each bounded at 65 s.
+    installed = run(entry, _install_command(zone), timeout=nginx.LOCK_WAIT_SECONDS + 300,
                     input_data=chain)
     if installed.returncode == _KEY_MISMATCH_EXIT and certificate_current(entry, zone, ssh=run):
         # Another apply installed a chain for the final key while this one issued.
@@ -303,8 +315,15 @@ def ensure(entry: dict, zone: str, zone_id: str, client: Any, *,
            issue: Callable[[str, str], str] | None = None, ssh: Callable = None) -> dict:
     """Check the wildcard record (read-only), install the certificate, then write
     the missing wildcard rows: a failed issuance leaves no zone-wide record behind."""
+    from sandbox.core import _cloudflare as cloudflare
     zone = normalize_zone(zone)
-    missing = check_record(client, zone_id, zone, entry)
+    check_record(client, zone_id, zone, entry)
     certificate = ensure_certificate(entry, zone, issue=issue, ssh=ssh)
-    created = create_missing_records(client, zone_id, zone, missing)
+    # Read again: issuance can take minutes, and another apply may have written it.
+    try:
+        created = create_missing_records(client, zone_id, zone,
+                                         check_record(client, zone_id, zone, entry))
+    except cloudflare.CloudflareError as exc:
+        raise FrontDoorError(WILDCARD_DNS_CONFLICT,
+                             f"*.{zone} could not be created ({exc}); re-run the apply") from None
     return {"zone": zone, "created_records": created, "certificate": certificate}

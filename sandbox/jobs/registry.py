@@ -229,6 +229,13 @@ def read_trace_job_evidence(path, job_id, *, role, request_id, control_root_dige
             connection.close()
 
 
+# Rows read_resource_index returns at most. The reclaim probe treats a full
+# page as incomplete evidence and then removes nothing, so this must stay far
+# above any real registry: xspeed-dev passed the old 10,000 on 2026-11-19 and
+# its nightly cleanup refused every run after that.
+RESOURCE_INDEX_LIMIT = 200_000
+
+
 def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:
     """Read bounded job/workspace/artifact retention evidence without writes."""
     database = Path(path).expanduser().resolve()
@@ -253,7 +260,7 @@ def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:
                 "SELECT job_id, project_root, project_identity, target_kind, "
                 f"remote_name, lifecycle, {workspace_id_column}, workspace_label, workspace_mode, "
                 "cleanup_policy, cleanup_state, finished_at "
-                "FROM jobs ORDER BY job_id LIMIT 10000"
+                "FROM jobs ORDER BY job_id LIMIT ?", (RESOURCE_INDEX_LIMIT,)
             )
         ]
         artifacts = [
@@ -262,7 +269,7 @@ def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:
                 "a.display_name, a.size_bytes, a.expires_at, a.status, "
                 "j.lifecycle AS job_lifecycle "
                 "FROM artifacts a JOIN jobs j ON j.job_id=a.job_id "
-                "ORDER BY a.artifact_id LIMIT 10000"
+                "ORDER BY a.artifact_id LIMIT ?", (RESOURCE_INDEX_LIMIT,)
             )
         ]
         return {"jobs": jobs, "artifacts": artifacts}

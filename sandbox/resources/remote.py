@@ -659,10 +659,34 @@ def docker_inventory():
             parsed = _json_rows(inspected)
             if parsed is not None:
                 rows.extend(parsed)
-            if code != 0 or parsed is None or len(parsed) < len(batch):
-                inspect_failed = True
             if code == 124:
                 inspect_timed_out = True
+                inspect_failed = True
+            elif code != 0 or parsed is None or len(parsed) < len(batch):
+                # Usually an object removed between the listing and this
+                # inspect (CI jobs create and remove containers all the time).
+                # One gone object must not mark the whole engine inventory
+                # incomplete, which leaves every workspace UNKNOWN; ask for
+                # each missing one alone and accept only "no such object".
+                found = set()
+                for row in parsed or ():
+                    for field in ("Id", "Name"):
+                        value = str(row.get(field) or "")
+                        found.add(value[7:] if value.startswith("sha256:") else value)
+                found.discard("")
+                for identifier in batch:
+                    if any(value == identifier or value.startswith(identifier) for value in found):
+                        continue
+                    one_code, one_out, one_err = run(inspect_argv + [identifier], 10)
+                    one = _json_rows(one_out)
+                    if one_code == 0 and one:
+                        rows.extend(one)
+                    elif one_code != 124 and "no such" in (one_err or "").lower():
+                        continue
+                    else:
+                        inspect_failed = True
+                        if one_code == 124:
+                            inspect_timed_out = True
         inventory[key] = rows
         if not inspect_failed and not list_failed:
             status = "complete"
@@ -1809,15 +1833,15 @@ def lifecycle_evidence():
     job_list_error = None
     index_complete = False
     try:
-        from sandbox.jobs.registry import read_resource_index
+        from sandbox.jobs import registry as job_registry
 
-        job_index = read_resource_index(
+        job_index = job_registry.read_resource_index(
             RUNTIME / "jobs" / "registry.sqlite3"
         )
         rows = job_index.get("jobs")
         if not isinstance(rows, list):
             raise ValueError("invalid job index")
-        index_complete = len(rows) < 10000
+        index_complete = len(rows) < getattr(job_registry, "RESOURCE_INDEX_LIMIT", 10000)
         if not index_complete:
             jobs_ok = False
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
@@ -2335,7 +2359,12 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
                     pending.append(child)
             except OSError:
                 continue
-        index_paths(pending, budget_share(0.8), count_links=True)
+        try:
+            index_paths(pending, budget_share(0.8), count_links=True)
+        except Exception:
+            # A speed-up only: entries it could not index are measured one
+            # by one below, never left to fail the whole inventory.
+            pass
     for child in children:
         if time.monotonic() >= deadline:
             block["truncated"] = True
@@ -2695,10 +2724,11 @@ def reclaim_run():
                 # since the plan; re-read the registry and keep it if so, or
                 # if the registry cannot be read.
                 try:
-                    from sandbox.jobs.registry import read_resource_index
-                    current = read_resource_index(RUNTIME / "jobs" / "registry.sqlite3")
+                    from sandbox.jobs import registry as job_registry
+                    current = job_registry.read_resource_index(RUNTIME / "jobs" / "registry.sqlite3")
                     rows = current.get("jobs")
-                    if (not isinstance(rows, list) or len(rows) >= 10000 or
+                    limit = getattr(job_registry, "RESOURCE_INDEX_LIMIT", 10000)
+                    if (not isinstance(rows, list) or len(rows) >= limit or
                             any(not isinstance(job, dict) or
                                 not isinstance(job.get("project_root"), str) or
                                 not Path(job["project_root"]).is_absolute() or

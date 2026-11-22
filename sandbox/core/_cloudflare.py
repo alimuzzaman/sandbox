@@ -146,6 +146,14 @@ class Client:
         path = f"/zones/{zone_id}/dns_records?name={urllib.parse.quote(hostname)}"
         return list(self._request("GET", path).get("result") or [])
 
+    def records_under(self, zone_id: str, hostname: str) -> list[dict]:
+        """Records strictly below ``hostname`` (one page is enough to know any exist)."""
+        path = (f"/zones/{zone_id}/dns_records?per_page=5&name.endswith="
+                + urllib.parse.quote("." + hostname))
+        rows = list(self._request("GET", path).get("result") or [])
+        suffix = "." + hostname.lower()
+        return [row for row in rows if str(row.get("name") or "").lower().endswith(suffix)]
+
     def zone_records(self, zone_id: str, *, per_page: int = 100, max_pages: int = 50) -> list[dict]:
         """List all DNS records for a zone with pagination, bounded."""
         records: list[dict] = []

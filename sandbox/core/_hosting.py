@@ -590,6 +590,40 @@ def _external_dns(cf: dict, routes: list[dict], *, proxied: bool) -> list[str] |
     return sorted(names)
 
 
+def _validate_wildcard_dns(routes: list[dict], *, public_acme: bool,
+                           external_dns: list[str] | None) -> None:
+    """``cloudflare.dns: wildcard``: every name is ``<label>.<zone>`` of one zone, DNS-only ACME."""
+    if not public_acme:
+        raise HostingError("cloudflare.dns: wildcard requires DNS-only ACME "
+                           "(proxied: false, tls: acme)")
+    if external_dns:
+        raise HostingError("cloudflare.dns: wildcard cannot be combined with "
+                           "cloudflare.external_dns")
+    zones = set()
+    for route in routes:
+        label, _, zone = route["hostname"].partition(".")
+        if not label or "*" in label or zone.count(".") < 1:
+            raise HostingError(
+                f"cloudflare.dns: wildcard covers <label>.<zone> names only; "
+                f"{route['hostname']} is not one")
+        zones.add(zone)
+    if len(zones) != 1:
+        raise HostingError("cloudflare.dns: wildcard needs every host name under one zone; "
+                           "found " + ", ".join(sorted(zones)))
+
+
+def dns_mode(validated: dict) -> str:
+    """``cloudflare.dns`` as declared: ``auto`` (default), ``exact`` or ``wildcard``."""
+    return str((validated.get("cloudflare") or {}).get("dns") or "auto")
+
+
+def wildcard_zone(validated: dict) -> str | None:
+    """The zone a ``cloudflare.dns: wildcard`` target is served under, else None."""
+    if dns_mode(validated) != "wildcard":
+        return None
+    return validated["routes"][0]["hostname"].partition(".")[2]
+
+
 def external_dns_hostnames(validated: dict) -> list[str]:
     """Route hostnames whose DNS records are managed outside Sandbox."""
     return list((validated.get("cloudflare") or {}).get("external_dns") or [])
@@ -843,11 +877,13 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         )
     cf_dns = cf.get("dns")
     if "dns" in cf:
-        if not isinstance(cf_dns, str) or cf_dns not in {"auto", "exact"}:
-            raise HostingError("cloudflare.dns must be auto or exact")
+        if not isinstance(cf_dns, str) or cf_dns not in {"auto", "exact", "wildcard"}:
+            raise HostingError("cloudflare.dns must be auto, exact or wildcard")
     if public_acme and any(route["hostname"].startswith("*.") for route in routes):
         raise HostingError("public ACME does not support wildcard routes without a DNS challenge")
     external_dns = _external_dns(cf, routes, proxied=bool(cf.get("proxied")))
+    if cf_dns == "wildcard":
+        _validate_wildcard_dns(routes, public_acme=public_acme, external_dns=external_dns)
     basic_auth = _basic_auth(env)
     if public_acme and basic_auth and basic_auth.get("bypass_ips"):
         raise HostingError("basic_auth.bypass_ips requires Cloudflare proxied hosting")
@@ -889,6 +925,9 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         raise HostingError("login_service_invalid: share.private needs cloudflare.proxied: false, "
                            "so no Cloudflare cache can keep serving pages from before the site went "
                            "private")
+    if cf.get("dns") == "wildcard" and login_service.is_private(login_declaration):
+        raise HostingError("cloudflare.dns: wildcard does not support a private login "
+                           "service yet; use cloudflare.dns: exact")
     if external_dns and login_service.is_private(login_declaration):
         # Sandbox cannot see what serves an externally managed name, so it cannot
         # promise that no cache keeps serving pages from before the site went private.
@@ -1447,7 +1486,8 @@ def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | No
     addresses = [a for a in [origin_ipv4, origin_ipv6] if a]
     proxied = validated["cloudflare"]["proxied"]
     external = set(external_dns_hostnames(validated))
-    if (validated.get("dns_coverage") or {}).get("mode") == "shared":
+    if (validated.get("dns_coverage") or {}).get("mode") == "shared" or \
+            dns_mode(validated) == "wildcard":
         records = []
     else:
         records = [{"hostname": r["hostname"], "address": a, "proxied": proxied,

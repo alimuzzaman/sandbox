@@ -1190,10 +1190,10 @@ cloudflare:
   proxied: true
   tls: origin-ca
   ssl_mode: strict
-  dns: auto # auto (default) | exact
+  dns: auto # auto (default) | exact | wildcard
 ```
 
-Omit `dns` for the default, or set it to `auto` or `exact`; an explicit `null` is invalid.
+Omit `dns` for the default, or set it to `auto`, `exact` or `wildcard`; an explicit `null` is invalid.
 
 - `auto` (default): Uses shared zone coverage whenever the remote has an nginx front door with an active covered zone matching the target hostname. If no zone covers the target or the remote uses Caddy, it falls back to creating an exact DNS record.
 - `exact`: Forces creation of an individual DNS record on Cloudflare. Required when:
@@ -1202,6 +1202,63 @@ Omit `dns` for the default, or set it to `auto` or `exact`; an explicit `null` i
   - The target declares multiple routes (`routes` has > 1 entry).
   - Using image activation (`host image ...`).
   - The operator explicitly wants a dedicated per-target DNS record.
+- `wildcard`: DNS-only ACME targets (`proxied: false`, `tls: acme`) on an nginx front
+  door share one record and one certificate per zone; see the next section.
+
+#### DNS-only wildcard hosting (`cloudflare.dns: wildcard`)
+
+For a busy zone of short-lived DNS-only stacks, where per-name records fill the zone's
+record quota and per-target certificates use up Let's Encrypt's weekly limit:
+
+```yaml
+cloudflare:
+  proxied: false
+  tls: acme
+  dns: wildcard
+```
+
+Every host name (primary and aliases, any number of routes) must be `<label>.<zone>` of
+one Cloudflare zone, and the zone must be listed in `tailnet_names.zones` in
+`sandbox.local.yml`: the certificate is issued with that block's DNS-01 token and pinned
+`lego`. Before any source or runtime change, apply refuses when:
+
+- the front door is not nginx (`front_door_capability_unavailable`), or the target uses
+  image activation or a private login service;
+- the zone is not a Cloudflare zone apex the hosting token can manage;
+- a host name has any record the target did not create, or names exist below it: by RFC
+  4592 the wildcard would not answer for it (`wildcard_name_ineligible`);
+- `*.<zone>` holds anything but exactly one DNS-only row per origin address family: a
+  proxied row, another address, a second row, a CNAME, or an AAAA when the remote has no
+  IPv6 (`wildcard_dns_conflict`). Sandbox never rewrites this record.
+
+Apply then:
+
+1. makes sure the remote has a current `*.<zone>` certificate in
+   `/etc/sandbox-edge/certs/wildcard-<zone>/`. The key is generated once on the remote
+   (root 0600, never copied off it). With fewer than 30 days left, or none, the
+   controller obtains a chain with a DNS-01 challenge (retrying while another issuance
+   holds the broker), and the remote installs it under the edge lock only if it matches
+   the key, with bounded `nginx -t` and reload. On failure the previous chain comes back,
+   or with none the new one is removed. The challenge's TXT record needs one free slot
+   in the zone's record quota;
+2. creates the missing `*.<zone>` row (only now, so a failed issuance leaves no
+   zone-wide record);
+3. serves the route with the shared certificate; it writes no per-name record and asks
+   certbot for nothing;
+4. after verification, deletes the per-name records this target created under an
+   earlier `exact` or `auto` apply. A record is deleted only when the target created
+   it, it still holds exactly what Sandbox wrote, and no other target on this controller
+   saved it; every other row stays in state for `host destroy`. A recovered edge keeps
+   the rows for the next apply.
+
+The shared record and certificate belong to the remote, not to a target: destroy and the
+reaper remove only the target's route and its own certificate directory, and
+`sb remote edge --remove-route wildcard-<zone>` is refused. The wildcard row is
+zone-wide production DNS: Sandbox creates it once and never removes it. The certificate
+renews when any wildcard target on the zone is applied within 30 days of expiry; there
+is no timer yet, so `sb remote edge` reports it overdue like any other. A target's old
+certbot certificate is left until the target is destroyed. Spec 070 zone coverage is not
+used for these targets.
 
 #### Hostnames with DNS managed elsewhere (`cloudflare.external_dns`)
 

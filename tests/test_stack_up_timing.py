@@ -26,7 +26,7 @@ class _Ticks:
 class TestPhaseClock(unittest.TestCase):
     def test_lap_finishes_the_running_phase_with_its_elapsed_time(self):
         lines = []
-        clock = PhaseClock(lines.append, scope="apply", monotonic=_Ticks(10.0, 12.5, 13.0),
+        clock = PhaseClock(lines.append, scope="apply", monotonic=_Ticks(10.0, 12.5, 12.5, 13.0),
                            stamp=lambda: "T")
         clock.lap("edge_dns")
         clock.lap("edge_verify")

@@ -312,13 +312,15 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     try:
         if deep:
             storage_probe = LocalProbeAdapter().observe_reclaim(
-                budget_seconds=30, directory_cache="refresh")
+                budget_seconds=30, directory_cache="refresh", deep=True)
             _record_slow_probe(LocalProbeAdapter, storage_probe)
             storage_state, storage_age = "ok", 0
         else:
             storage_state, storage_probe, storage_age = _cached_slow_probe(
                 LocalProbeAdapter, lambda: LocalProbeAdapter().observe_reclaim(
-                    budget_seconds=8, directory_cache="cache_only"))
+                    # Runs in the background, so a slow host only delays the
+                    # value; xspeed-dev with ~1,000 workspaces needs about 34 s.
+                    budget_seconds=45, directory_cache="cache_only", deep=True))
         if storage_state == "ok":
             storage = {
                 "status": "partial" if any(
@@ -328,8 +330,8 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
                 ) else "complete",
                 "capacity": storage_probe.get("capacity"),
                 "capacity_scope_id": storage_probe.get("capacity_scope_id"),
-                "attribution_status": (
-                    "available" if storage_probe.get("deep_attribution") else "unknown"
+                "attribution_status": str(
+                    (storage_probe.get("deep_attribution") or {}).get("status") or "unknown"
                 ),
                 "category_outcomes": list(storage_probe.get("category_outcomes") or ())[:50],
                 "observed_age_seconds": storage_age,

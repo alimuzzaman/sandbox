@@ -62,6 +62,15 @@ def _hostname(value):
     return len(labels) >= 2 and all(_LABEL.fullmatch(label) for label in labels)
 
 
+def _error_code_suffix(exc):
+    try:
+        payload = json.loads(exc.read(65536) or b"{}")
+        code = (payload.get("errors") or [{}])[0].get("code")
+    except Exception:  # noqa: BLE001 - a missing or odd body only loses the detail
+        return ""
+    return "_cf%d" % code if isinstance(code, int) and not isinstance(code, bool) and 0 < code < 10**7 else ""
+
+
 def _call(token, method, path, body=None, *, opener):
     request = urllib.request.Request(
         API_BASE + path, method=method,
@@ -74,7 +83,12 @@ def _call(token, method, path, body=None, *, opener):
     except ApiError:
         raise
     except urllib.error.HTTPError as exc:
-        raise ApiError("not_found" if exc.code == 404 else "http_%d" % exc.code) from None
+        if exc.code == 404:
+            raise ApiError("not_found") from None
+        # Keep Cloudflare's numeric error code (never its message): a bare
+        # "http_400" hid why an inbox name was never created (feedback
+        # dff42562), e.g. 81045 for a full record quota.
+        raise ApiError("http_%d%s" % (exc.code, _error_code_suffix(exc))) from None
     except (urllib.error.URLError, OSError, ValueError):
         raise ApiError("unreachable") from None
     if not isinstance(payload, dict) or payload.get("success") is not True:

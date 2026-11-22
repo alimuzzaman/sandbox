@@ -167,6 +167,15 @@ class ChildTests(unittest.TestCase):
         self.assertEqual((result["result"], result["code"], code), ("error", "http_403", 1))
         self.assertNotIn(TOKEN, json.dumps(result))
 
+    def test_http_errors_keep_only_cloudflares_numeric_code(self):
+        def opener(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(
+                b'{"errors":[{"code":81045,"message":"' + TOKEN.encode() + b'"}]}'))
+        result, code = child.run({"op": "inspect", "zone": "example.test", "name": FQDN,
+                                  "ip": IP}, TOKEN, opener=opener)
+        self.assertEqual((result["code"], code), ("http_400_cf81045", 1))
+        self.assertNotIn(TOKEN, json.dumps(result))
+
     def test_main_reads_token_from_environment_only(self):
         out = io.StringIO()
         code = child.main(["child", "/nonexistent"], environ={}, stdout=out)

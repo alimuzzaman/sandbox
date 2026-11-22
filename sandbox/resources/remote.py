@@ -2245,6 +2245,10 @@ def bounded_entry_size(path):
     indexed = indexed_size(path)
     if indexed is not None:
         return "measured", indexed
+    if str(path) in UNREACHED_PATHS:
+        # The shared walk ran out of time inside this subtree; a second du
+        # would spend the rest of the budget on it again.
+        return "timed_out", None
     if FAST or DEADLINE - time.monotonic() < 4:
         return "not_measured", None
     code, out, _err = run(["du", "-sx", "-sk", str(path)], 5)
@@ -2291,6 +2295,9 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
         },
         "index_available": bool(index_ok),
         "truncated": False,
+        # Every deploy-src entry was listed. An unmeasured size is not a
+        # missing entry: it only keeps that one entry out of a plan.
+        "deployment_inventory_complete": True,
         "unmeasured_count": 0,
         # Whether the *container* inventory is trustworthy is a different
         # question from whether every directory could be measured.  One
@@ -2314,10 +2321,25 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
     except OSError:
         block["status"] = "unavailable"
         block["reason"] = "deployment_root_unreadable"
+        block["deployment_inventory_complete"] = False
         return block
+    if not FAST:
+        # One streamed du for every unindexed entry instead of one du per
+        # entry with a 5 s cap: a ~1 GB workspace (node_modules) cannot finish
+        # in 5 s on a busy host, so it stayed unmeasured, and so outside every
+        # plan, on every run.
+        pending = []
+        for child in children:
+            try:
+                if child.is_dir() and not child.is_symlink() and indexed_size(child) is None:
+                    pending.append(child)
+            except OSError:
+                continue
+        index_paths(pending, budget_share(0.8), count_links=True)
     for child in children:
         if time.monotonic() >= deadline:
             block["truncated"] = True
+            block["deployment_inventory_complete"] = False
             if block["status"] == "complete":
                 block["status"] = "partial"
             break

@@ -203,7 +203,7 @@ export function hostedTargetsSection(remote: string, hosted: HostedTargets | und
     <td class="p-3 text-[12px]">${row.stack_slug ? esc(row.stack_slug) : `<span class="${theme.quiet}">—</span>`}</td>
     <td class="p-3 text-[12px]">${row.lifetime ? `${lifetimeBadge(row.lifetime)}${owner}` : `<span class="${theme.quiet}" title="This host's runtime predates lifetimes in its inventory.">not reported</span>`}</td>
     <td class="p-3 text-[12px]">${expiryCell(row.lifetime)}</td>
-    <td class="p-3 text-[12px]">${row.running ? "running" : `<span class="${theme.quiet}">no running containers</span>`}</td>
+    <td class="p-3 text-[12px]">${row.running ? "running" : row.running === null ? `<span class="${theme.quiet}">checking…</span>` : `<span class="${theme.quiet}">no running containers</span>`}</td>
     <td class="p-3 text-[12px] tabular-nums">${esc(String(row.container_count))}</td>
     <td class="p-3 text-[12px] tabular-nums">${esc(usageBytes(row.memory_used_bytes))}</td>
     <td class="p-3 text-[12px] tabular-nums" title="${esc(CPU_TITLE)}">${esc(String(row.cpu_percent))}%</td>

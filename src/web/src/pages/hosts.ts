@@ -131,7 +131,7 @@ export function localHostView(): string {
   const devEmpty = instances.length === 0;
   const stats: Array<[string, string | number]> = [];
   if (server) stats.push(["Hosted apps", hosted ? hosted.total : inventory ? "unknown" : "…"],
-    ["Hosted running", hosted ? hosted.running : inventory ? "unknown" : "…"]);
+    ["Hosted running", hosted ? (hosted.running ?? "checking…") : inventory ? "unknown" : "…"]);
   stats.push(["Dev instances", instances.length], ["Dev running", running]);
   if (!server || !devEmpty) stats.push(["Stopped", stopped], ["Pending", pending]);
   const rows = instances.length ? instances.map(instance => `<a href="${instancePath(instance.name)}" data-link class="flex items-center gap-3 border-t border-neutral-200 px-4 py-3 first:border-t-0 hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 dark:border-neutral-800 dark:hover:bg-neutral-800/50">

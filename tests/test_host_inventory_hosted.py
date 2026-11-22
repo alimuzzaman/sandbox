@@ -79,6 +79,16 @@ class AttributionTest(unittest.TestCase):
         self.assertEqual((usage[0]["attribution_status"], usage[0]["running"], claimed),
                          ("unknown", False, set()))
 
+    def test_running_is_unknown_while_the_containers_are_still_being_read(self):
+        # The panel showed "22 hosted apps · 0 running" on its first load
+        # while 18 were up: the container listing had not arrived yet.
+        records = {"targets": [], "legacy": [{"project": "a", "environment": "b"}]}
+        usage, _claimed = host_inventory._hosted_target_usage(records, [], containers_known=False)
+        self.assertIsNone(usage[0]["running"])
+        usage, _claimed = host_inventory._hosted_target_usage(
+            records, [container("sandbox-host-a-b-web-1")], containers_known=False)
+        self.assertIs(usage[0]["running"], True)
+
 
 class LifetimeRowsTest(unittest.TestCase):
     """Spec 076 follow-up: rows carry the host's own lifetime view and stack fallback."""

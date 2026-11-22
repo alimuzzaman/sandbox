@@ -468,7 +468,8 @@ def fake_run(argv, timeout):
     if argv == ["docker", "volume", "ls", "-q"] and fixture["volumes"]:
         return 0, "\n".join(fixture["volumes"]), ""
     if argv[:3] == ["docker", "volume", "inspect"]:
-        return 0, json.dumps([{"Name": name} for name in argv[3:]]), ""
+        labels = fixture.get("volume_labels") or {}
+        return 0, json.dumps([{"Name": name, "Labels": labels.get(name)} for name in argv[3:]]), ""
     # Synthetic empty engine listings let the real teardown code continue
     # without contacting an engine. All other commands are denied.
     if argv in (["docker", "ps", "-aq"], ["docker", "volume", "ls", "-q"],
@@ -505,11 +506,12 @@ class IsolatedProbeRunner:
         self.index_error = False
         self.legacy = {"ok": True, "jobs": []}
         self.volumes = []
+        self.volume_labels = {}
 
     def __call__(self, request, timeout):
         fixture = {"program": _program(request), "index": self.index,
                    "index_error": self.index_error, "legacy": self.legacy,
-                   "volumes": self.volumes}
+                   "volumes": self.volumes, "volume_labels": self.volume_labels}
         # Override every compatibility key so no host paths, locale, or native
         # environment values reach the child. No shell or project imports.
         overrides = {key: "" for key in ("USERPROFILE", "LANG", "LC_ALL", "LC_CTYPE",
@@ -777,6 +779,23 @@ class TestGeneratedJobEvidence(unittest.TestCase):
                     row = next(row for row in selected.skipped if row["locator"] == str(other))
                     self.assertEqual(row["class"], "UNKNOWN")
                 self.assert_selection(block, other, volume, available=False)
+
+    def test_a_removed_checkout_is_planned_only_while_its_stack_remains(self):
+        # 339 such checkouts with nothing left took a whole routine run.
+        gone = self.home / "deploy-src" / "gone-workspace-abcdef12345678"
+        old = datetime.fromtimestamp(time.time() - 30 * DAY, timezone.utc).isoformat()
+        self.runner.index = {"jobs": [dict(self.job("succeeded", old), project_root=str(gone))],
+                             "artifacts": []}
+        block = self.observe_block()
+        self.assertTrue(block["engine_complete"])
+        self.assertNotIn(str(gone), {row["path"] for row in block["entries"]})
+        volume = "sandbox-gone-workspace-abcdef12345678_db"
+        self.runner.volumes = [volume]
+        self.runner.volume_labels = {volume: {
+            "com.docker.compose.project": "sandbox-gone-workspace-abcdef12345678"}}
+        block = self.observe_block()
+        entry = next(row for row in block["entries"] if row["path"] == str(gone))
+        self.assertTrue(entry["finished_job_idle"])
 
     def test_observe_job_index_cap_is_conservative_at_10000(self):
         other, volume = self.prepare_observe()

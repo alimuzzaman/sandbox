@@ -2429,11 +2429,24 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
         })
     # Retained terminal jobs also identify source checkouts already removed
     # by a previous partial cleanup. Keep their remaining stack reapable.
+    # Only when something of that stack is still in the engine: a checkout
+    # with nothing left was planned on every run and cost a full engine
+    # listing each (339 of them took the whole 30 min run on 2026-11-22).
     present = {entry["path"] for entry in block["entries"]}
+    engine_projects = set()
+    for item in list(inventory.get("containers") or ()) + list(inventory.get("volumes") or ()):
+        labels = (item.get("Config") or {}).get("Labels") if "Config" in item else item.get("Labels")
+        project = labels.get("com.docker.compose.project") if isinstance(labels, dict) else None
+        if isinstance(project, str) and project:
+            engine_projects.add(project)
     for canonical, references in protected_paths.items():
         path = Path(canonical)
         if (canonical in present or path.exists() or path.parent != DEPLOY
                 or "finished_job_idle" not in references or "retained_job" in references):
+            continue
+        leftover = any(owns_compose_project(path.name, project) for project in engine_projects) \
+            or any(source == canonical or source.startswith(canonical + "/") for source in binds)
+        if engine_complete and not leftover:
             continue
         block["entries"].append({
             "name": path.name, "path": canonical, "size_bytes": 0,

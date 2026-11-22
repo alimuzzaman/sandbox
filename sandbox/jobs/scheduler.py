@@ -176,6 +176,33 @@ def older_candidate(connection, row) -> str | None:
     return next(_older_candidates(connection, row), None)
 
 
+def borrows_parent_slot(connection, row) -> bool:
+    """A nested job runs on its parent's host slot instead of taking another.
+
+    A parent that holds a slot (or itself runs on one it borrowed) and waits on
+    its child would otherwise deadlock the host once every slot is held by such
+    parents. Only one active child per parent borrows at a time, so a chain of
+    nested jobs still occupies one slot, and a parent fanning out children in
+    parallel takes slots for the rest.
+    """
+    parent_id = dict(row).get("parent_job_id")
+    if not parent_id:
+        return False
+    parent = connection.execute(
+        "SELECT lifecycle FROM jobs WHERE job_id=?", (parent_id,)).fetchone()
+    if parent is None or parent[0] not in ("running", "cancelling"):
+        return False
+    if connection.execute("SELECT 1 FROM workspace_leases WHERE job_id=?",
+                          (parent_id,)).fetchone() is None:
+        return False
+    other = connection.execute(
+        "SELECT 1 FROM jobs c JOIN workspace_leases l ON l.job_id=c.job_id "
+        "WHERE c.parent_job_id=? AND c.job_id<>? AND c.lifecycle IN (?,?,?,?) "
+        "AND NOT EXISTS (SELECT 1 FROM host_capacity_leases h WHERE h.job_id=c.job_id) "
+        "LIMIT 1", (parent_id, dict(row)["job_id"], *_ACTIVE)).fetchone()
+    return other is None
+
+
 class JobScheduler:
     def __init__(self, repository, *, max_parallel: int = DEFAULT_POLICY.max_parallel,
                  min_free_memory_mb: int = DEFAULT_POLICY.min_free_memory_mb,
@@ -275,16 +302,21 @@ class JobScheduler:
             if not workspace_compatible(connection, row, parallel_safe=parallel_safe):
                 raise self._refuse(WorkspaceBusy(
                     f"workspace {row['workspace_label']!r} is busy; use an isolated label or wait"))
-            if older_candidate(connection, row) is not None:
+            borrow = borrows_parent_slot(connection, row)
+            if not borrow and older_candidate(connection, row) is not None:
                 raise self._refuse(WorkspaceBusy(
                     "an older queued job is waiting for this host", kind="order"))
-            slots = {int(value[0]) for value in connection.execute("SELECT slot FROM host_capacity_leases").fetchall()}
-            # Count held slots rather than probing 1..max: after the limit is
-            # lowered, high-numbered slots still held must keep counting.
-            if len(slots) >= self.max_parallel:
-                raise self._refuse(WorkspaceBusy(
-                    "host capacity is busy; retry when a running job finishes", kind="capacity"))
-            slot = next(candidate for candidate in itertools.count(1) if candidate not in slots)
+            slot = None
+            if not borrow:
+                slots = {int(value[0]) for value in connection.execute(
+                    "SELECT slot FROM host_capacity_leases").fetchall()}
+                # Count held slots rather than probing 1..max: after the limit is
+                # lowered, high-numbered slots still held must keep counting.
+                if len(slots) >= self.max_parallel:
+                    raise self._refuse(WorkspaceBusy(
+                        "host capacity is busy; retry when a running job finishes",
+                        kind="capacity"))
+                slot = next(candidate for candidate in itertools.count(1) if candidate not in slots)
             lease_id = secrets.token_hex(16)
             timestamp = now.isoformat()
             connection.execute(
@@ -294,8 +326,10 @@ class JobScheduler:
                  row.get("sync_generation_id"), row.get("source_access"),
                  timestamp, expiry, timestamp),
             )
-            connection.execute("INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) VALUES(?,?,?,?)",
-                               (slot, row["job_id"], timestamp, timestamp))
+            if slot is not None:
+                connection.execute(
+                    "INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) "
+                    "VALUES(?,?,?,?)", (slot, row["job_id"], timestamp, timestamp))
 
     def queued_in_order(self, *, after: tuple[str, str] | None = None,
                         limit: int = 500) -> list[tuple[str, str]]:
@@ -338,9 +372,20 @@ class JobScheduler:
         if snapshot.get("sync_relationship_id") is None and snapshot.get("queue_reason"):
             self.record_queue_reason(snapshot["job_id"], snapshot["queue_reason"])
 
+    def can_borrow(self, job_id: str) -> bool:
+        """The queued job would run on its parent's slot (see borrows_parent_slot)."""
+        row = self.repository.connection.execute(
+            "SELECT job_id, parent_job_id FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        return row is not None and borrows_parent_slot(self.repository.connection, row)
+
     def holds_slot(self, job_id: str) -> bool:
         return self.repository.connection.execute(
             "SELECT 1 FROM host_capacity_leases WHERE job_id=?", (job_id,)).fetchone() is not None
+
+    def is_admitted(self, job_id: str) -> bool:
+        """The job holds a workspace lease (with its own slot or a borrowed one)."""
+        return self.repository.connection.execute(
+            "SELECT 1 FROM workspace_leases WHERE job_id=?", (job_id,)).fetchone() is not None
 
     def is_queued(self, job_id: str) -> bool:
         row = self.repository.connection.execute(

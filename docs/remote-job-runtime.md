@@ -262,9 +262,17 @@ normal sharing rules), one waiting on a dependency or a sync generation, or a ma
 plan parent. A younger job waits only for older jobs that could take a free slot now,
 and `queue.position` counts exactly those, host-wide.
 
+A nested job (one with a parent job, such as the apply a `server-cli` stack job
+submits) runs on its parent's slot when the parent is running with a slot of its own
+or a borrowed one, and no other active child of that parent is borrowing it. It then
+takes no slot and does not wait behind older queued jobs, so parents that hold every
+slot while waiting on their children can no longer deadlock the host. A parent's
+second concurrent child takes a slot as usual.
+
 Admission does not wait for anyone to read a status. A drain offers free slots to
 queued jobs in order and stops at the first host-wide refusal (no slot, the resource
-floor, an invalid policy). It runs:
+floor, an invalid policy); with no slot free it still starts nested jobs that can run
+on their parent's slot. It runs:
 
 - when a job's supervisor finishes and releases its slot;
 - when a status read or a cancel releases a slot;

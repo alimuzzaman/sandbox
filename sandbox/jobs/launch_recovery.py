@@ -64,9 +64,13 @@ def _waiting_on_own_input(row: dict, now: datetime) -> bool:
 
 
 def slot_held(repository, job_id: str) -> bool:
-    """Whether ``job_id`` holds a host capacity slot (sandbox.jobs.scheduler)."""
-    return repository.connection.execute(
+    """Whether ``job_id`` was admitted: it holds a host slot, or runs on its
+    parent's (a workspace lease with no slot of its own, sandbox.jobs.scheduler)."""
+    connection = repository.connection
+    return (connection.execute(
         "SELECT 1 FROM host_capacity_leases WHERE job_id=?", (job_id,)).fetchone() is not None
+        or connection.execute(
+            "SELECT 1 FROM workspace_leases WHERE job_id=?", (job_id,)).fetchone() is not None)
 
 
 def lost_launch_result() -> str:

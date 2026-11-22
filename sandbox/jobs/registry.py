@@ -1391,8 +1391,9 @@ class JobRepository:
                     "SELECT 1 FROM job_events WHERE job_id=? AND kind='supervisor_stop_uncertain' LIMIT 1",
                     (job_id,)).fetchone():
                 raise ValueError("owned work cessation is uncertain; retain job authority")
+            from .slot_handover import release_slot
+            release_slot(connection, job_id)
             connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
-            connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
 
     def mark_retained_metadata_unavailable(self, job_id: str, *, logs: bool = False,
                                            artifacts: bool = False,

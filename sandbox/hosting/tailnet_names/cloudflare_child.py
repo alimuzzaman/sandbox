@@ -127,7 +127,7 @@ def _summary(result, row=None, code=None):
     return out
 
 
-def _valid(request):
+def _valid(request, allowed_parents=()):
     if not isinstance(request, dict) or request.get("op") not in (
             "ensure", "inspect", "delete", "ensure_wildcard"):
         return False
@@ -135,10 +135,11 @@ def _valid(request):
     if not (_hostname(zone) and _hostname(name) and name.endswith("." + zone)):
         return False
     if request["op"] == "ensure_wildcard":
-        # One label directly under a parent that is itself below the zone.
+        # One label directly under a configured parent that is itself below the zone.
         parent = request.get("parent")
         if not (_hostname(parent) and parent.endswith("." + zone)
-                and name.partition(".")[2] == parent):
+                and name.partition(".")[2] == parent
+                and parent in (allowed_parents or ())):
             return False
     try:
         if ipaddress.IPv4Address(ip) not in _TAILNET:
@@ -151,14 +152,18 @@ def _valid(request):
 
 
 def _names_below(token, zone_id, name, opener):
-    """Records strictly below ``name`` (any one makes it an empty non-terminal)."""
+    """Records strictly below ``name`` (any one makes it an empty non-terminal).
+
+    A returned row outside the suffix proves the filter was not applied, so the
+    answer is unknown rather than "nothing below"."""
     rows = _call(token, "GET", f"/zones/{zone_id}/dns_records?"
-                 + urllib.parse.urlencode({"name.endswith": "." + name, "per_page": 5}),
+                 + urllib.parse.urlencode({"name.endswith": "." + name, "per_page": 50}),
                  opener=opener)
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or not all(
+            isinstance(row, dict) and str(row.get("name") or "").endswith("." + name)
+            for row in rows):
         raise ApiError("api_error")
-    return [row for row in rows if isinstance(row, dict)
-            and str(row.get("name") or "").endswith("." + name)]
+    return rows
 
 
 def _ensure_wildcard(token, zone_id, request, opener):
@@ -175,8 +180,19 @@ def _ensure_wildcard(token, zone_id, request, opener):
         if len(rows) == 1 and _is_ours(rows[0], ip):
             return _summary("exists", rows[0]), 0
         return _summary("conflict", rows[0], code="other_record"), 3
-    if _names_below(token, zone_id, name, opener):
-        return _summary("conflict", code="names_below"), 3
+    below = _names_below(token, zone_id, name, opener)
+    challenge = "_acme-challenge." + name
+    if below and all(row.get("name") == challenge and row.get("type") == "TXT" for row in below):
+        # The caller holds the name's lease, under which every DNS-01 challenge for
+        # this name runs, so a challenge TXT here was left by an interrupted run.
+        for row in below:
+            if not _ID.fullmatch(str(row.get("id"))):
+                raise ApiError("api_error")
+            _call(token, "DELETE", f"/zones/{zone_id}/dns_records/{row['id']}", opener=opener)
+        below = []
+    if below:
+        row = dict(below[0], content=below[0].get("name"))
+        return _summary("conflict", row, code="names_below"), 3
     wildcard = "*." + request["parent"]
     rows = _record_set(token, zone_id, wildcard, opener)
     if len(rows) > 1:
@@ -191,9 +207,12 @@ def _ensure_wildcard(token, zone_id, request, opener):
     return _summary("covered", row if isinstance(row, dict) else {}), 0
 
 
-def run(request, token, *, opener=_OPENER.open):
-    """Return ``(result, exit_status)``; never raises for API failures."""
-    if not _valid(request):
+def run(request, token, *, opener=_OPENER.open, allowed_parents=()):
+    """Return ``(result, exit_status)``; never raises for API failures.
+
+    ``allowed_parents`` comes from the use profile's fixed argv (the configured
+    ``tailnet_names.wildcard_parents``), never from the request file."""
+    if not _valid(request, allowed_parents):
         return _summary("error", code="request_invalid"), 1
     try:
         zone_id = _zone_id(token, request["zone"], opener)
@@ -255,8 +274,10 @@ def main(argv=None, environ=None, stdout=None):
     if not token:
         result, status = _summary("error", code="token_missing"), 1
     else:
-        request = _read_request(argv[1]) if len(argv) == 2 else None
-        result, status = run(request, token)
+        request = _read_request(argv[1]) if len(argv) in (2, 3) else None
+        parents = tuple(item for item in (argv[2].split(",") if len(argv) == 3 else [])
+                        if _hostname(item))
+        result, status = run(request, token, allowed_parents=parents)
     stdout.write(json.dumps(result, sort_keys=True) + "\n")
     stdout.flush()
     return status

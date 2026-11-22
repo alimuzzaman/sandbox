@@ -416,3 +416,20 @@ class RetireRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecordsUnderTests(unittest.TestCase):
+    def client(self, rows):
+        from sandbox.core import _cloudflare as cloudflare
+        client = cloudflare.Client(token="t")
+        client._request = MagicMock(return_value={"result": rows})
+        return client
+
+    def test_rows_below_the_name_are_returned(self):
+        rows = [{"name": "x.app.example.test"}]
+        self.assertEqual(self.client(rows).records_under("z", "app.example.test"), rows)
+
+    def test_an_unapplied_filter_raises_rather_than_reporting_nothing_below(self):
+        from sandbox.core import _cloudflare as cloudflare
+        with self.assertRaises(cloudflare.CloudflareError):
+            self.client([{"name": "other.example.test"}]).records_under("z", "app.example.test")

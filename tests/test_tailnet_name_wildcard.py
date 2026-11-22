@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
+import unittest.mock
 import urllib.parse
 
 from sandbox.hosting.tailnet_names import cloudflare_child as child
@@ -28,6 +29,8 @@ class Api:
     def __init__(self, records=()):
         self.records = [dict(row) for row in records]
         self.writes = []
+        self.deleted = []
+        self.unfiltered = False
 
     def __call__(self, request, timeout=None):
         url = urllib.parse.urlsplit(request.full_url)
@@ -37,9 +40,15 @@ class Api:
         elif request.get_method() == "GET":
             if "name.endswith" in query:
                 suffix = query["name.endswith"][0]
-                result = [r for r in self.records if r["name"].endswith(suffix)]
+                result = list(self.records) if self.unfiltered else [
+                    r for r in self.records if r["name"].endswith(suffix)]
             else:
                 result = [r for r in self.records if r["name"] == query["name"][0]]
+        elif request.get_method() == "DELETE":
+            rid = url.path.rsplit("/", 1)[1]
+            self.deleted.append(rid)
+            self.records = [r for r in self.records if r["id"] != rid]
+            result = {"id": rid}
         else:
             body = json.loads(request.data)
             self.writes.append(body)
@@ -52,10 +61,10 @@ def _row(name, content=TAILNET_IP, kind="A", proxied=False, rid="2" * 32):
     return {"id": rid, "name": name, "type": kind, "content": content, "proxied": proxied}
 
 
-def _run(api, **request):
+def _run(api, allowed=(PARENT,), **request):
     body = {"op": "ensure_wildcard", "zone": "example.test", "name": NAME, "ip": TAILNET_IP,
             "parent": PARENT, **request}
-    return child.run(body, "tok", opener=api)
+    return child.run(body, "tok", opener=api, allowed_parents=allowed)
 
 
 class ChildTests(unittest.TestCase):
@@ -80,7 +89,7 @@ class ChildTests(unittest.TestCase):
     def test_refusals_write_nothing(self):
         cases = {
             "other_record": [_row(NAME, kind="TXT", content="v=1")],
-            "names_below": [_row("_acme-challenge." + NAME, kind="TXT", content="x")],
+            "names_below": [_row("x." + NAME)],
             "wildcard_other_record": [_row(f"*.{PARENT}", content="100.64.0.99")],
             "multiple_wildcard_records": [_row(f"*.{PARENT}"), _row(f"*.{PARENT}", rid="3" * 32)],
         }
@@ -91,6 +100,41 @@ class ChildTests(unittest.TestCase):
                 self.assertEqual((result["result"], result.get("code"), status),
                                  ("conflict", code, 3))
                 self.assertEqual(api.writes, [])
+
+    def test_a_stale_challenge_txt_is_deleted_and_the_name_covered(self):
+        stale = _row("_acme-challenge." + NAME, kind="TXT", content="token", rid="4" * 32)
+        api = Api([stale, _row(f"*.{PARENT}")])
+        self.assertEqual(_run(api)[0]["result"], "covered")
+        self.assertEqual(api.deleted, ["4" * 32])
+
+    def test_a_challenge_beside_another_name_below_is_not_deleted(self):
+        api = Api([_row("_acme-challenge." + NAME, kind="TXT", rid="4" * 32), _row("x." + NAME)])
+        result, _ = _run(api)
+        self.assertEqual(result["code"], "names_below")
+        self.assertEqual(api.deleted, [])
+
+    def test_an_unapplied_name_filter_is_an_error_not_nothing_below(self):
+        api = Api([_row("unrelated.example.test")])
+        api.unfiltered = True
+        self.assertEqual(_run(api)[0], {"result": "error", "code": "api_error"})
+        self.assertEqual(api.writes, [])
+
+    def test_a_parent_not_given_by_the_profile_is_invalid(self):
+        self.assertEqual(_run(Api(), allowed=())[0]["code"], "request_invalid")
+        self.assertEqual(_run(Api(), allowed=("other.example.test",))[0]["code"], "request_invalid")
+
+    def test_main_reads_the_allowed_parents_from_argv(self):
+        import os
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+            json.dump({"op": "ensure_wildcard", "zone": "example.test", "name": NAME,
+                       "ip": TAILNET_IP, "parent": PARENT}, handle)
+        os.chmod(handle.name, 0o600)
+        self.addCleanup(os.unlink, handle.name)
+        out = io.StringIO()
+        with unittest.mock.patch.object(child, "run", return_value=({"result": "covered"}, 0)) as run:
+            child.main(["child", handle.name, PARENT], {child.TOKEN_ENV: "tok"}, out)
+        self.assertEqual(run.call_args.kwargs["allowed_parents"], (PARENT,))
 
     def test_a_proxied_wildcard_is_refused(self):
         api = Api([_row(f"*.{PARENT}", proxied=True)])
@@ -150,6 +194,22 @@ class ServiceTests(ServiceTestCase):
         ops = [row["op"] for row in self.dns.requests]
         self.assertNotIn("delete", ops)
         self.assertNotIn(NAME, self.store.load())
+
+    def test_a_deeper_name_under_a_parent_is_refused_before_any_dns_call(self):
+        self.name = m.TailnetName(f"a.{NAME}", "example.test")
+        result = self.add()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, m.DNS_CONFLICT)
+        self.assertEqual(self.dns.requests, [])
+
+    def test_the_dns_profile_carries_the_configured_parents(self):
+        from pathlib import Path
+        from sandbox.hosting.tailnet_names.broker import DNS_PROFILE, Broker
+        broker = Broker(lambda profiles: None, acme_root=Path(self.tmp.name) / "acme")
+        argv = broker.profiles(config(wildcard_parents=[PARENT]), None)[DNS_PROFILE]["argv"]
+        self.assertEqual(argv[-1], PARENT)
+        plain = broker.profiles(config(), None)[DNS_PROFILE]["argv"]
+        self.assertTrue(plain[-1].endswith("dns-request.json"))
 
     def test_names_outside_the_parents_keep_their_own_record(self):
         self.name = m.TailnetName("app.example.test", "example.test")

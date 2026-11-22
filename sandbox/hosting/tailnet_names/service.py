@@ -548,6 +548,15 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                 # DNS (FR-007, FR-008)
                 _hold(run, "dns", deps, ctx, name.fqdn, token)
                 parent = wildcard_parent(ctx.config, name.fqdn)
+                if parent is None and any(
+                        name.fqdn.endswith("." + covered)
+                        for covered in (ctx.config.wildcard_parents if ctx.config else ())):
+                    # A deeper name would make its covered ancestor an empty
+                    # non-terminal, and the wildcard would stop answering for it.
+                    rec.save("dns", "refused")
+                    run.stop("dns", DNS_CONFLICT,
+                             "names more than one label below a tailnet_names.wildcard_parents "
+                             "entry are not supported", "refused")
                 request = {"op": "ensure", "zone": name.zone, "name": name.fqdn,
                            "ip": target.tailnet_ip}
                 if parent:

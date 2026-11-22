@@ -440,6 +440,7 @@ def read_index(_path):
         raise OSError("synthetic unavailable index")
     return fixture["index"]
 registry.read_resource_index = read_index
+registry.RESOURCE_INDEX_LIMIT = fixture.get("index_limit", 10000)
 class Lifecycle(enum.Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"

@@ -97,6 +97,68 @@ class NestedSlotTests(unittest.TestCase):
         self.assertTrue(self.scheduler.is_admitted(child["job_id"]))
         self.assertEqual(self.repo.get(waiting["job_id"])["lifecycle"], "queued")
 
+    def finish(self, job):
+        self.repo.transition(job["job_id"], Lifecycle.SUCCEEDED)
+        self.repo.release_leases(job["job_id"])
+
+    def held(self):
+        return {row[0] for row in self.repo.connection.execute(
+            "SELECT job_id FROM host_capacity_leases").fetchall()}
+
+    def test_a_parent_that_ends_first_hands_its_slot_to_the_child(self):
+        parent = self.running_parent()
+        child = self.accept("inner", parent["job_id"])
+        self.scheduler.acquire(child)
+        self.repo.transition(child["job_id"], Lifecycle.RUNNING)
+        self.finish(parent)
+        self.assertEqual(self.held(), {child["job_id"]})
+        self.assertEqual(self.scheduler.free_slots(), 0)
+        with self.assertRaises(WorkspaceBusy):
+            self.scheduler.acquire(self.accept("other"))
+        self.finish(child)
+        self.assertEqual(self.held(), set())
+
+    def test_repeated_detached_parents_never_exceed_the_limit(self):
+        for index in range(5):
+            if self.held():
+                with self.assertRaises(WorkspaceBusy):
+                    self.scheduler.acquire(self.accept(f"outer-{index}"))
+                continue
+            parent = self.running_parent(f"outer-{index}")
+            child = self.accept(f"inner-{index}", parent["job_id"])
+            self.scheduler.acquire(child)
+            self.repo.transition(child["job_id"], Lifecycle.RUNNING)
+            self.finish(parent)
+        running = self.repo.connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE lifecycle='running'").fetchone()[0]
+        self.assertEqual(running, 1)
+
+    def test_a_grandchild_is_covered_after_its_parent_and_then_the_root_end(self):
+        root = self.running_parent()
+        child = self.accept("inner", root["job_id"])
+        self.scheduler.acquire(child)
+        self.repo.transition(child["job_id"], Lifecycle.RUNNING)
+        grandchild = self.accept("deeper", child["job_id"])
+        self.scheduler.acquire(grandchild)
+        self.repo.transition(grandchild["job_id"], Lifecycle.RUNNING)
+        self.finish(child)
+        self.assertEqual(self.held(), {root["job_id"]})  # the root still covers it
+        self.finish(root)
+        self.assertEqual(self.held(), {grandchild["job_id"]})
+
+    def test_a_cancelling_parent_lends_nothing(self):
+        parent = self.running_parent()
+        self.repo.transition(parent["job_id"], Lifecycle.CANCELLING)
+        with self.assertRaises(WorkspaceBusy):
+            self.scheduler.acquire(self.accept("inner", parent["job_id"]))
+
+    def test_a_borrowing_child_counts_as_admitted_for_launch_recovery(self):
+        from sandbox.jobs.launch_recovery import slot_held
+        parent = self.running_parent()
+        child = self.accept("inner", parent["job_id"])
+        self.scheduler.acquire(child)
+        self.assertTrue(slot_held(self.repo, child["job_id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

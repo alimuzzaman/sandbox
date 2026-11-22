@@ -190,7 +190,8 @@ def borrows_parent_slot(connection, row) -> bool:
         return False
     parent = connection.execute(
         "SELECT lifecycle FROM jobs WHERE job_id=?", (parent_id,)).fetchone()
-    if parent is None or parent[0] not in ("running", "cancelling"):
+    # A cancelling parent is about to stop waiting; its child takes a slot.
+    if parent is None or parent[0] != "running":
         return False
     if connection.execute("SELECT 1 FROM workspace_leases WHERE job_id=?",
                           (parent_id,)).fetchone() is None:
@@ -372,6 +373,12 @@ class JobScheduler:
         if snapshot.get("sync_relationship_id") is None and snapshot.get("queue_reason"):
             self.record_queue_reason(snapshot["job_id"], snapshot["queue_reason"])
 
+    def is_nested(self, job_id: str) -> bool:
+        """The job has a parent (one indexed lookup; the cheap pre-check of a full drain)."""
+        row = self.repository.connection.execute(
+            "SELECT parent_job_id FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        return row is not None and row[0] is not None
+
     def can_borrow(self, job_id: str) -> bool:
         """The queued job would run on its parent's slot (see borrows_parent_slot)."""
         row = self.repository.connection.execute(
@@ -446,9 +453,10 @@ class JobScheduler:
             "('succeeded','failed','timed_out','cancelled','interrupted')",
         ).fetchall()
         ids = [row[0] for row in rows]
+        from .slot_handover import release_slot
         for job_id in ids:
+            release_slot(connection, job_id)
             connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
-            connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
         return ids
 
     def release(self, job_id: str) -> None:

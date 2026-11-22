@@ -1293,8 +1293,10 @@ class JobService:
                 for accepted_at, job_id in page:
                     if (accepted_at, job_id) > newest:
                         return changed
-                    borrowing = scheduler.can_borrow(job_id)
-                    if scheduler.free_slots() <= 0 and not borrowing:
+                    full = scheduler.free_slots() <= 0
+                    borrowing = scheduler.can_borrow(job_id) if (
+                        not full or scheduler.is_nested(job_id)) else False
+                    if full and not borrowing:
                         # No slot for this one, but a nested job further on may
                         # still run on its waiting parent's slot.
                         continue

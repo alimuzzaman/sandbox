@@ -267,7 +267,10 @@ submits) runs on its parent's slot when the parent is running with a slot of its
 or a borrowed one, and no other active child of that parent is borrowing it. It then
 takes no slot and does not wait behind older queued jobs, so parents that hold every
 slot while waiting on their children can no longer deadlock the host. A parent's
-second concurrent child takes a slot as usual.
+second concurrent child, and the child of a cancelling parent, take a slot as usual.
+When the parent ends first (a stack `up` submits its apply and returns), its slot
+passes to the borrowing child, or to the nearest borrowing descendant, instead of
+being freed, so a running job always counts against `max_parallel`.
 
 Admission does not wait for anyone to read a status. A drain offers free slots to
 queued jobs in order and stops at the first host-wide refusal (no slot, the resource

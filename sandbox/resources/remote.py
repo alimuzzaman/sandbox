@@ -4297,7 +4297,7 @@ class LocalProbeAdapter:
         )
 
     def observe_reclaim(self, *, budget_seconds: float = 30,
-                        directory_cache: str = "auto") -> dict:
+                        directory_cache: str = "auto", deep: bool = False) -> dict:
         response = self._run({
             "action": "observe",
             "thorough": False,
@@ -4307,8 +4307,9 @@ class LocalProbeAdapter:
             "focus": None,
             # Reclaim planning needs lifecycle, workspace, engine, and
             # deployment inventory. Capacity deep-attribution is unrelated
-            # and can consume the shared deadline before deploy-src is read.
-            "deep": False,
+            # and can consume the shared deadline before deploy-src is read,
+            # so only the host dashboard, which reports attribution, asks.
+            "deep": bool(deep),
             "directory_cache": directory_cache,
         }, budget_seconds + 5)
         payload = _salvage_payload(response.stdout) or {}

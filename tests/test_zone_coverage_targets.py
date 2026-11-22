@@ -1138,7 +1138,7 @@ environments:
             hosting.validate_manifest(str(fixture.manifest_root))
         for setting in ("      dns: null\n", "      dns: invalid\n"):
             path.write_text(original + setting)
-            with self.assertRaisesRegex(hosting.HostingError, "cloudflare.dns must be auto or exact"):
+            with self.assertRaisesRegex(hosting.HostingError, "cloudflare.dns must be auto, exact or wildcard"):
                 hosting.validate_manifest(str(fixture.manifest_root))
 
     def test_image_preflight_covered_exact_and_adopted_controls(self):

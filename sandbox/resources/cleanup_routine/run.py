@@ -31,6 +31,7 @@ TRIGGER = "scheduled_routine"
 _PLAN_BUDGET_CAP = 900.0
 _PLAN_SHARE = 0.6
 _MIN_REMOVAL_BUDGET = 5.0
+_RENEWAL_MIN_BUDGET = 1200.0
 
 
 def _inventory_actionable(data: Mapping) -> bool:
@@ -162,6 +163,12 @@ def run_routine(
     record["skipped_reasons"] = dict(hosted_skipped)
     record["skipped"] = sum(hosted_skipped.values())
     store.write_run(record)
+    # Shared wildcard certificates (cloudflare.dns: wildcard) renew here too, so they
+    # never depend on some target being applied in their last 30 days. Only due
+    # certificates do any work; one issuance can take most of lego's 900 s budget.
+    if bound - (monotonic() - started) > _RENEWAL_MIN_BUDGET:
+        record["wildcard_renewal"] = _wildcard_renewal_pass()
+        store.write_run(record)
     exclusions = effective_exclusions(
         routine, _host_config() if host_config is None else host_config,
     )
@@ -232,6 +239,15 @@ def _hosted_pass(runtime: Path, run_id: str, remaining: float) -> dict[str, Any]
                                budget_seconds=max(min(remaining / 2, 1500.0), 1.0))
     except Exception as exc:  # the workspace pass must still run
         return {"ok": False, "status": "failed", "error": type(exc).__name__, "outcomes": []}
+
+
+def _wildcard_renewal_pass() -> dict[str, Any]:
+    """Renew due shared wildcard certificates on this host; never raises."""
+    try:
+        from sandbox.hosting.front_door import wildcard_cert
+        return wildcard_cert.renew_due()
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__, "zones": []}
 
 
 __all__ = ["TRIGGER", "effective_exclusions", "run_routine"]

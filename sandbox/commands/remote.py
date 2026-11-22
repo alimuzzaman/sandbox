@@ -2159,6 +2159,9 @@ def _cmd_edge(args, as_json: bool) -> None:
     if route:
         if route.startswith("coverage-") or nginx_edge.is_coverage_fallback_file(nginx_edge.route_file(route)):
             die("this route is the zone coverage fallback; removing it is not available yet")
+        if route.startswith("wildcard-"):
+            die("this name is the remote's shared wildcard certificate; every "
+                "cloudflare.dns: wildcard route uses it, so it is never removed here")
         if not _arg_true(args, "confirm"):
             die("removing a Sandbox nginx route is protected; re-run with --confirm")
         try:

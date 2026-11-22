@@ -1507,6 +1507,8 @@ class _NginxHostEdge:
                     state_entry: dict, client, home: str, name: str):
         hostnames = list(runtime["certificate_hostnames"])
         route = self.route_name(name)
+        if hosting.wildcard_zone(validated):
+            return _wildcard_certificate(self.entry, validated, state_entry, client)
         if proxied:
             cert_path, key_path, certificate = self.nginx.ensure_origin_certificate(
                 self.entry, route, hostnames, client)
@@ -1540,7 +1542,12 @@ class _NginxHostEdge:
         """Check only (spec 084): a certificate covering every name, never issued here."""
         hostnames = sorted({route["hostname"] for route in validated["routes"]})
         route = self.route_name(name)
-        if proxied:
+        zone = hosting.wildcard_zone(validated)
+        if zone:
+            from sandbox.hosting.front_door import wildcard_cert
+            present = wildcard_cert.certificate_current(self.entry, zone, min_days=0)
+            paths = wildcard_cert.paths(zone)
+        elif proxied:
             present = self.nginx.origin_certificate_present(self.entry, route, hostnames)
             paths = self.nginx.origin_paths(route)
         else:
@@ -1602,6 +1609,9 @@ class _NginxHostEdge:
 def _host_edge_preflight(validated: dict, entry: dict) -> None:
     """Refuse an nginx-fronted apply before any remote change (Caddy: no call)."""
     from sandbox.hosting.front_door import front_door_mode
+    if hosting.wildcard_zone(validated) and front_door_mode(entry) != "nginx":
+        raise hosting.HostingError("front_door_capability_unavailable: cloudflare.dns: wildcard "
+                                   "needs the nginx front door")
     if front_door_mode(entry) == "caddy":
         return
     name = f"sandbox-host-{validated['project']}-{validated['environment']}"
@@ -4640,6 +4650,114 @@ def _applied_record(record) -> dict:
     return {key: record.get(key) for key in _APPLIED_FIELDS}
 
 
+def _owned_record_ids(rows) -> set:
+    """Record ids this target created itself (no record existed before it)."""
+    return {row.get("created_id") for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and row.get("created_id") and not row.get("previous")}
+
+
+def _wildcard_preflight(entry: dict, validated: dict, state_entry, client) -> dict:
+    """``cloudflare.dns: wildcard``, read-only, before any source or runtime change.
+
+    Returns the zone row. Refuses unless the front door is nginx, the zone is a
+    Cloudflare zone apex, the issuer is configured for it, the ``*.<zone>`` record
+    is absent or exactly right, and the wildcard can answer every host name: a name
+    with any record this target did not create (RFC 4592: any type at the name
+    stops the wildcard), or with names below it (an empty non-terminal), is refused.
+    """
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode, wildcard_cert
+    zone = hosting.wildcard_zone(validated)
+    if front_door_mode(entry) != "nginx":
+        raise hosting.HostingError("front_door_capability_unavailable: cloudflare.dns: wildcard "
+                                   "needs the nginx front door")
+    try:
+        zone_row = client.zone(zone)
+    except cloudflare.CloudflareError:
+        raise hosting.HostingError(
+            f"cloudflare.dns: wildcard: {zone} is not a Cloudflare zone this token can "
+            "manage; every host name must sit directly under the zone") from None
+    if zone_row.get("name") != zone:
+        raise hosting.HostingError(f"cloudflare.dns: wildcard: {zone} is not a zone apex")
+    owned = _owned_record_ids((state_entry or {}).get("records")
+                              if isinstance(state_entry, dict) else None)
+    for hostname in sorted({route["hostname"] for route in validated["routes"]}):
+        for row in client.records(zone_row["id"], hostname):
+            if not (row.get("type") in {"A", "AAAA"} and row.get("id") in owned):
+                raise hosting.HostingError(
+                    f"{wildcard_cert.WILDCARD_NAME_INELIGIBLE}: {hostname} has its own "
+                    f"{row.get('type')} record that this target did not create, so the "
+                    "wildcard would not answer for it; remove it or use cloudflare.dns: exact")
+        if client.records_under(zone_row["id"], hostname):
+            raise hosting.HostingError(
+                f"{wildcard_cert.WILDCARD_NAME_INELIGIBLE}: names exist below {hostname}, so "
+                "the wildcard would not answer for it; use cloudflare.dns: exact")
+    try:
+        wildcard_cert.check_record(client, zone_row["id"], zone, entry)
+        wildcard_cert.issuer_preflight(zone)
+    except FrontDoorError as exc:
+        raise hosting.HostingError(str(exc)) from None
+    return zone_row
+
+
+def _wildcard_certificate(entry: dict, validated: dict, state_entry, client):
+    """The remote's shared ``*.<zone>`` certificate (issued when due), then its record."""
+    from sandbox.hosting.front_door import FrontDoorError, wildcard_cert
+    zone = hosting.wildcard_zone(validated)
+    zone_row = _wildcard_preflight(entry, validated, state_entry, client)
+    try:
+        shared = wildcard_cert.ensure(entry, zone, zone_row["id"], client)
+    except FrontDoorError as exc:
+        raise hosting.HostingError(str(exc)) from None
+    certificate = {"id": None, "issuer": "wildcard-acme", "zone": zone,
+                   "hostnames": sorted({route["hostname"] for route in validated["routes"]})}
+    return shared["certificate"]["cert_path"], shared["certificate"]["key_path"], certificate
+
+
+def _retire_wildcard_records(state: dict, key: str, client) -> list[dict]:
+    """After a verified wildcard apply: delete the per-name records this target wrote
+    before it switched to the shared wildcard. Only a record it created, still holding
+    exactly what it wrote and not saved by another target, is deleted, and a name is
+    retired only when every saved row at it can be: by RFC 4592 a name left with one
+    AAAA would stop the wildcard answering its A queries. AAAA goes first. Every
+    other row stays saved so destroy still sees it."""
+    from sandbox.hosting import destroy as host_destroy
+    prior = (state.get("hosts", {}).get(key) or {}).get("records") or []
+    held = host_destroy._records_held_elsewhere(state, key)
+
+    def eligible(row) -> bool:
+        return (isinstance(row, dict) and bool(row.get("created_id")) and not row.get("previous")
+                and isinstance(row.get("applied"), dict)
+                and not host_destroy._snapshot_untrusted(row)
+                and not (host_destroy._record_identities(row) & held))
+
+    def name_of(row) -> str | None:
+        applied = row.get("applied") if isinstance(row, dict) else None
+        name = applied.get("name") if isinstance(applied, dict) else None
+        return str(name).rstrip(".").lower() if name else None
+
+    by_name: dict = {}
+    for row in prior:
+        by_name.setdefault(name_of(row), []).append(row)
+    keep = []
+    for name, rows in by_name.items():
+        if name is None or not all(eligible(row) for row in rows):
+            keep.extend(rows)
+            continue
+        ordered = sorted(rows, key=lambda row: 0 if row["applied"].get("type") == "AAAA" else 1)
+        for index, row in enumerate(ordered):
+            try:
+                outcome = host_destroy._remove_cloudflare({"_records": [row]}, client)[0]
+            except cloudflare.CloudflareError as exc:
+                print(f"warning: old DNS records for {name} were kept ({exc}); destroy "
+                      "still removes them", file=sys.stderr)
+                keep.extend(ordered[index:])
+                break
+            if outcome.get("state") not in {"removed", "already_absent"}:
+                keep.extend(ordered[index:])
+                break
+    return keep
+
+
 def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
     """Records for host destroy: keep what the first apply found, per managed record.
 
@@ -4796,7 +4914,11 @@ def _continue_host_edge_only_unleased(validated: dict, entry: dict, remote_name:
             edge_state["evidence"] = evidence
         result["record"] = {
             "certificate": certificate,
-            "records": _first_adoption_records(recorded.get("records"), changes),
+            # A wildcard target writes no rows here; keep the per-name rows it saved
+            # so the next apply retires them and destroy still sees them.
+            "records": (list(recorded.get("records") or [])
+                        if hosting.wildcard_zone(validated)
+                        else _first_adoption_records(recorded.get("records"), changes)),
             "caddy_name": caddy_name, "edge": edge_state,
             "front_door_declaration": front_door_refresh.declaration_digest(validated),
         }
@@ -6447,6 +6569,8 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
     edge = _host_edge(entry)
     edge.preflight(validated, caddy_name)
+    if hosting.wildcard_zone(validated):
+        _wildcard_preflight(entry, validated, state["hosts"].get(runtime["key"]), client)
     # Spec 081: before any source reaches the remote (a push to the checked-out branch
     # updates the working tree), a private target's names are DNS-only and answer 404
     # behind a confirmed deny route.
@@ -6942,11 +7066,15 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         edge_state = {"state": "ready"}
         if evidence is not None:
             edge_state["evidence"] = evidence
+        if hosting.wildcard_zone(validated) and edge.mode == "nginx":
+            saved_records = _retire_wildcard_records(state, key, client)
+        else:
+            saved_records = _first_adoption_records(state["hosts"][key].get("records"), changes)
         state["hosts"][key].update({
             "loopback_port": runtime["loopback_port"],
             "compose_project": runtime["compose_project"],
             "certificate": certificate,
-            "records": _first_adoption_records(state["hosts"][key].get("records"), changes),
+            "records": saved_records,
             "commit": sha,
             "recorded_revision": sha,
             "caddy_name": caddy_name,
@@ -7350,6 +7478,9 @@ class _HostImageEdgeAdapter:
     def preflight(self, entry, remote_name):
         """Check known provider failures before runtime; origin proof follows it."""
         import copy
+        if isinstance(self.validated, dict) and hosting.wildcard_zone(self.validated):
+            raise hosting.HostingError("cloudflare.dns: wildcard does not support image "
+                                       "activation yet; use host apply")
         val_copy = copy.deepcopy(self.validated)
         state = hosting.load_host_state()
         target_key = hosting.state_key(remote_name, self.validated) if (isinstance(self.validated, dict) and "project" in self.validated and "environment" in self.validated) else None

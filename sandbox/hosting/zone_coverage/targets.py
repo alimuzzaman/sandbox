@@ -115,6 +115,11 @@ def decide(
     Follows the decision table from Spec 070 research R6 in order, stopping at
     the first matching rule.
     """
+    # DNS-only wildcard hosting (``cloudflare.dns: wildcard``) owns no per-name record
+    # and never joins spec 070 coverage, which serves proxied targets only.
+    if hosting.dns_mode(validated) == "wildcard":
+        return {"mode": "exact"}
+
     # 1. Front door lacks ZONE_COVERAGE: {"mode": "exact"} with no store, SSH or provider call.
     decl = declaration(front_door_mode(entry))
     if ZONE_COVERAGE not in decl.capabilities or (

@@ -148,11 +148,16 @@ class Client:
 
     def records_under(self, zone_id: str, hostname: str) -> list[dict]:
         """Records strictly below ``hostname`` (one page is enough to know any exist)."""
-        path = (f"/zones/{zone_id}/dns_records?per_page=5&name.endswith="
+        path = (f"/zones/{zone_id}/dns_records?per_page=50&name.endswith="
                 + urllib.parse.quote("." + hostname))
         rows = list(self._request("GET", path).get("result") or [])
         suffix = "." + hostname.lower()
-        return [row for row in rows if str(row.get("name") or "").lower().endswith(suffix)]
+        if not all(isinstance(row, dict) and str(row.get("name") or "").lower().endswith(suffix)
+                   for row in rows):
+            # A row outside the suffix proves the filter was not applied.
+            raise CloudflareError("Cloudflare did not apply the name.endswith filter",
+                                  "provider_response_invalid")
+        return rows
 
     def zone_records(self, zone_id: str, *, per_page: int = 100, max_pages: int = 50) -> list[dict]:
         """List all DNS records for a zone with pagination, bounded."""

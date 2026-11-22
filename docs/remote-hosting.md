@@ -2434,6 +2434,30 @@ published name changes nothing.
    type). Exactly one identical record is adopted; anything else (another
    address, a proxied record, another type, several records) is refused
    (`tailnet_name_dns_conflict`) and never changed.
+   A name exactly one label below a `tailnet_names.wildcard_parents` entry
+   (`mail-x.tn.example.com` under `tn.example.com`) gets no record of its own:
+   the helper makes sure one DNS-only `*.<parent>` A record points at the
+   tailnet IPv4 (adopted when it is the only row and identical, created when
+   absent, never changed otherwise) and that nothing else answers for the name.
+   A record of any type at the name other than an identical A of its own, or
+   any name below it, is refused, since either stops the wildcard answering
+   (RFC 4592), except a leftover `_acme-challenge.<name>` TXT: every DNS-01
+   challenge for the name runs under its lease, which this step holds, so such a
+   TXT is stale and is deleted. A name more than one label below a parent is
+   refused, since it would hide its covered ancestor. The name keeps its own
+   certificate, so every activation and removal proof below is unchanged;
+   removal deletes no DNS record and never touches the shared one. During a
+   DNS-01 challenge the wildcard does not answer for the name, so on a renewal
+   the inbox can be unreachable for a few minutes (plus negative caching). A
+   name published before its parent was configured keeps its own record until
+   it is removed and added again, or renamed. When a stack's
+   `stack.mail_hostname` changes, the next apply removes the stack's earlier
+   names, and their records, once the new name is published.
+   One `*.<parent>` row points at one remote's tailnet address: a second remote
+   using the same parent is refused (`wildcard_other_record`), so give each
+   remote its own parent. The parent itself then exists in DNS, so a zone-level
+   `*.<zone>` record no longer answers for the parent name, and an NS
+   delegation at the parent is not detected.
 4. **Certificate**: the remote generates an EC P-256 key in
    `/etc/nginx/sandbox-tailnet/<fqdn>/privkey.pem` (root, 0600) and a signing
    request; `openssl` reads and writes only through stdin and stdout. `lego`

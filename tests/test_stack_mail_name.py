@@ -43,6 +43,24 @@ class StackMailTests(ServiceTestCase):
         self.assertEqual(len(self.issued), issued, "a rerun reuses the certificate")
         self.assertEqual(len(self.dns.records), 1)
 
+    def test_a_renamed_inbox_retires_the_stack_s_old_name_after_the_new_one_is_ready(self):
+        self.ensure(fqdn=MAIL)
+        renamed = "mail-demo2.example.test"
+        report = self.ensure(fqdn=renamed)
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["retired"], [{"fqdn": MAIL, "status": "removed"}])
+        self.assertNotIn(MAIL, self.store.load())
+        self.assertNotIn(MAIL, self.dns.records)
+        self.assertIn(renamed, self.store.load())
+
+    def test_a_failed_new_name_keeps_the_old_one(self):
+        self.ensure(fqdn=MAIL)
+        self.dns.fail = True
+        report = self.ensure(fqdn="mail-demo2.example.test")
+        self.assertEqual(report["status"], "failed")
+        self.assertNotIn("retired", report)
+        self.assertIn(MAIL, self.store.load())
+
     def test_a_changed_mailpit_port_replaces_the_upstream(self):
         self.ensure(port=18188)
         self.assertEqual(self.ensure(port=18190)["status"], "ready")

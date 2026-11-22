@@ -121,6 +121,17 @@ def ensure(remote_name: str, slug: str, fqdn: str, port: int, *, context: Callab
     report = _report(fqdn, "ready") if result.ok else _report(fqdn, "failed", result.code, result.error)
     if swept:
         report["swept"] = swept
+    if result.ok:
+        # The template's mail_hostname changed (for example to a name under a
+        # tailnet wildcard): the stack's earlier names, and their DNS records, go
+        # once the new one is published. A failure is retried by the next apply.
+        try:
+            retired = [_remove(ctx, deps, record, sleep) for record in store.load().values()
+                       if record.stack == slug and record.fqdn != name.fqdn]
+        except Exception as exc:
+            retired = [_report(None, "failed", "tailnet_name_internal_error", type(exc).__name__)]
+        if retired:
+            report["retired"] = retired
     try:
         renewed = _renew_due(ctx, deps, exclude=name.fqdn, slugs=slugs)
     except Exception:  # renewal is retried by the next apply

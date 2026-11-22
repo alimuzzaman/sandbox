@@ -187,6 +187,12 @@ class TailnetNameConfig:
                     "zone, such as tn.example.com")
             if parent not in parents:
                 parents.append(parent)
+        for parent in parents:
+            if any(parent.endswith("." + other) for other in parents):
+                raise TailnetNameError(
+                    CONFIG_INVALID,
+                    f"tailnet_names.wildcard_parents entry {parent} sits below another entry; "
+                    "a nested wildcard would hide the names it replaces")
         return cls(tuple(zones), source, key, email, server, lego, digest, tuple(parents))
 
     @classmethod

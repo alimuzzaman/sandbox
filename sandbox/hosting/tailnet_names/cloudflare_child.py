@@ -180,11 +180,20 @@ def _ensure_wildcard(token, zone_id, request, opener):
         if len(rows) == 1 and _is_ours(rows[0], ip):
             return _summary("exists", rows[0]), 0
         return _summary("conflict", rows[0], code="other_record"), 3
+    # The wildcard first: a row for another address means another remote, whose
+    # lease this caller does not hold, so nothing below the name is touched.
+    wildcard = "*." + request["parent"]
+    wild = _record_set(token, zone_id, wildcard, opener)
+    if len(wild) > 1:
+        return _summary("conflict", wild[0], code="multiple_wildcard_records"), 3
+    if wild and not _is_ours(wild[0], ip):
+        return _summary("conflict", wild[0], code="wildcard_other_record"), 3
     below = _names_below(token, zone_id, name, opener)
     challenge = "_acme-challenge." + name
-    if below and all(row.get("name") == challenge and row.get("type") == "TXT" for row in below):
-        # The caller holds the name's lease, under which every DNS-01 challenge for
-        # this name runs, so a challenge TXT here was left by an interrupted run.
+    if below and len(below) < 50 and all(
+            row.get("name") == challenge and row.get("type") == "TXT" for row in below):
+        # The caller holds this remote's lease on the name, under which every
+        # DNS-01 challenge for it runs, so a challenge TXT here is stale.
         for row in below:
             if not _ID.fullmatch(str(row.get("id"))):
                 raise ApiError("api_error")
@@ -193,14 +202,8 @@ def _ensure_wildcard(token, zone_id, request, opener):
     if below:
         row = dict(below[0], content=below[0].get("name"))
         return _summary("conflict", row, code="names_below"), 3
-    wildcard = "*." + request["parent"]
-    rows = _record_set(token, zone_id, wildcard, opener)
-    if len(rows) > 1:
-        return _summary("conflict", rows[0], code="multiple_wildcard_records"), 3
-    if rows:
-        if _is_ours(rows[0], ip):
-            return _summary("covered", rows[0]), 0
-        return _summary("conflict", rows[0], code="wildcard_other_record"), 3
+    if wild:
+        return _summary("covered", wild[0]), 0
     row = _call(token, "POST", f"/zones/{zone_id}/dns_records",
                 {"type": "A", "name": wildcard, "content": ip, "ttl": 1, "proxied": False,
                  "comment": "sandbox tailnet-name wildcard"}, opener=opener)

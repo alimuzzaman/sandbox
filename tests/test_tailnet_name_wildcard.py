@@ -107,6 +107,12 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(_run(api)[0]["result"], "covered")
         self.assertEqual(api.deleted, ["4" * 32])
 
+    def test_a_challenge_under_another_remote_s_wildcard_is_left_alone(self):
+        api = Api([_row("_acme-challenge." + NAME, kind="TXT", rid="4" * 32),
+                   _row(f"*.{PARENT}", content="100.64.0.99")])
+        self.assertEqual(_run(api)[0]["code"], "wildcard_other_record")
+        self.assertEqual(api.deleted, [])
+
     def test_a_challenge_beside_another_name_below_is_not_deleted(self):
         api = Api([_row("_acme-challenge." + NAME, kind="TXT", rid="4" * 32), _row("x." + NAME)])
         result, _ = _run(api)
@@ -151,7 +157,8 @@ class ConfigTests(unittest.TestCase):
     def test_parents_must_sit_below_a_listed_zone(self):
         self.assertEqual(config(wildcard_parents=[PARENT]).wildcard_parents, (PARENT,))
         self.assertEqual(config().wildcard_parents, ())
-        for value in (["example.test"], ["tn.other.test"], "tn.example.test", ["*.x.example.test"]):
+        for value in (["example.test"], ["tn.other.test"], "tn.example.test", ["*.x.example.test"],
+                      [PARENT, f"b.{PARENT}"]):
             with self.subTest(value=value):
                 with self.assertRaises(m.TailnetNameError):
                     config(wildcard_parents=value)
@@ -201,6 +208,7 @@ class ServiceTests(ServiceTestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.code, m.DNS_CONFLICT)
         self.assertEqual(self.dns.requests, [])
+        self.assertNotIn(f"a.{NAME}", self.store.load(), "refused before anything is recorded")
 
     def test_the_dns_profile_carries_the_configured_parents(self):
         from pathlib import Path

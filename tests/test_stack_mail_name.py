@@ -213,10 +213,34 @@ class TemplateTests(unittest.TestCase):
                 forged = {**rendered, stack_template.INSTANCE_KEY: {**block, "mail_hostname": bad}}
                 with self.subTest(bad=bad), self.assertRaises(stack_template.StackTemplateError):
                     stack_template.rendered_instance(forged, path, root)
-        plain = stack_template.parse_template({**TEMPLATE, "stack": {"slug": "^[a-z]+$", "ports": ["mailpit"]}})
-        rendered = stack_template.render(plain, slug="demo", ref=ref, ports={"mailpit": 18188},
+        opted_out = stack_template.parse_template(
+            {**TEMPLATE, "stack": {"slug": "^[a-z]+$", "ports": ["mailpit"], "mail_hostname": False}})
+        rendered = stack_template.render(opted_out, slug="demo", ref=ref, ports={"mailpit": 18188},
                                          source_root="/src", template_path="/src/t.yml")
         self.assertNotIn("mail_hostname", rendered[stack_template.INSTANCE_KEY])
+
+    def test_a_mailpit_port_publishes_mail_slug_by_default(self):
+        ref = stack_template.StackRef(ref="main", commit="a" * 40, ref_branch="main")
+        def render(primary, ports=("mailpit",), slug="demo"):
+            template = stack_template.parse_template({
+                **TEMPLATE, "stack": {"slug": "^[a-z-]+$", "ports": list(ports)},
+                "environments": {"dev": {"host": {"primary": primary}}}})
+            return stack_template.render(template, slug=slug, ref=ref,
+                                         ports={name: 18188 for name in ports},
+                                         source_root="/src", template_path="/src/t.yml")
+        block = render("hub-{slug}.xspeedcdn.online", slug="guided-return")[stack_template.INSTANCE_KEY]
+        self.assertEqual(block["mail_hostname"], "mail-guided-return.xspeedcdn.online")
+        self.assertEqual(render("example.test")[stack_template.INSTANCE_KEY]["mail_hostname"],
+                         "mail-demo.example.test")
+        # No mailpit port, or a default that is the stack's own route: no inbox name.
+        self.assertNotIn("mail_hostname", render("{slug}.example.test", ports=())[stack_template.INSTANCE_KEY])
+        self.assertNotIn("mail_hostname", render("mail-{slug}.example.test")[stack_template.INSTANCE_KEY])
+        # The rendered default passes the same provenance check as an explicit name.
+        rendered = render("{slug}.example.test")
+        root = Path("/stacks")
+        with mock.patch.object(Path, "resolve", lambda self: self):
+            self.assertEqual(stack_template.rendered_instance(
+                rendered, root / "demo" / stack_template.MANIFEST_NAME, root)["mail_hostname"], MAIL)
 
 
 class ServerHeldTests(unittest.TestCase):

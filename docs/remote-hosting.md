@@ -1634,7 +1634,7 @@ project: xspeed-hub-{slug}
 stack:
   slug: '^[a-z0-9][a-z0-9-]{1,30}$'   # the stack name must fully match
   ports: [mailpit]                     # named ports, allocated per stack
-  mail_hostname: mail-{slug}.example.test   # optional tailnet-only inbox name
+  mail_hostname: mail-{slug}.example.test   # optional; mail-{slug}.<zone> is the default
 environments:
   sandbox:
     host:
@@ -1788,8 +1788,13 @@ port in Compose through the value, for example
 `"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
 private `environment.env` file apply passes with `--env-file`.
 
-**Inbox name (`stack.mail_hostname`).** A hostname with exactly one `{slug}`,
-allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
+**Inbox name (`stack.mail_hostname`).** On by default: a stack whose `stack.ports`
+declares `mailpit` gets `mail-{slug}.<zone>`, where the zone is its rendered
+`host.primary` without the first label (`hub-{slug}.example.test` gives
+`mail-{slug}.example.test`). No default is made when no environment names a
+primary or the default equals one of the stack's own hostnames, and
+`mail_hostname: false` opts out. An explicit value wins: a hostname with exactly
+one `{slug}`, allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
 equals one of the stack's routes or a hostname another target holds. After every
 completed apply of the stack, Sandbox publishes the rendered name as a
 [tailnet-only name](#tailnet-only-hostnames-sb-host-tailnet-name-spec-078) at

@@ -665,6 +665,10 @@ class ProbeCase(unittest.TestCase):
                       if item["name"] == "seen-workspace-1")
         self.assertTrue(record["is_workspace"])
         self.assertIsNotNone(record["mtime"])
+        # Sizes come from one shared du walk, and the listing says on its
+        # own whether every entry was read, apart from how many were sized.
+        self.assertEqual(record["size_state"], "measured")
+        self.assertIs(block["deployment_inventory_complete"], True)
 
     def test_local_reclaim_inventory_does_not_request_deep_attribution(self):
         calls = []

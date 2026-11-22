@@ -224,6 +224,37 @@ class ReclaimingRun(RunCase):
         self.assertTrue(self.paths["old-workspace-1"].exists())
         self.assertFalse(self.docker_log.exists())
 
+    def test_an_unmeasured_size_skips_only_its_own_entry(self):
+        # xspeed-dev, 2026-11-19..22: 798 slow sizes made the whole inventory
+        # "partial" and four nightly runs removed nothing.
+        old = time.time() - 11 * DAY
+        path = self.deploy / "slow-workspace-6"
+        path.mkdir()
+        os.utime(path, (old, old))
+        self.block["entries"].append(self.entry(
+            "slow-workspace-6", old, size_state="timed_out", size_bytes=None))
+        self.block.update(status="partial", unmeasured_count=1,
+                          deployment_inventory_complete=True)
+        payload = self.run_once()
+        record = payload["run"]
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(record["outcome"], "reclaimed")
+        self.assertFalse(self.paths["old-workspace-1"].exists())
+        self.assertTrue(path.exists())
+        self.assertEqual(record["skipped_reasons"].get("size_unmeasured"), 1)
+
+    def test_an_unlisted_or_truncated_deployment_root_is_still_refused(self):
+        for change in ({"deployment_inventory_complete": False},
+                       {"deployment_inventory_complete": True, "truncated": True},
+                       {"deployment_inventory_complete": True, "engine_complete": False}):
+            with self.subTest(change=change):
+                self.block.update(status="partial", **change)
+                record = self.run_once()["run"]
+                self.assertEqual((record["outcome"], record["reason"]),
+                                 ("refused", "inventory_incomplete"))
+                self.assertTrue(self.paths["old-workspace-1"].exists())
+                self.block.update(truncated=False, engine_complete=True)
+
     def test_guard_held_is_skipped_busy_before_inventory(self):
         with try_reclaim_guard(runtime=self.runtime) as acquired:
             self.assertTrue(acquired)

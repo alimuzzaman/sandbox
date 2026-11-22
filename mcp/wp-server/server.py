@@ -720,9 +720,14 @@ def _run_streamable_http(bind: str, port: int, token: str,
             snapshot.update(await asyncio.to_thread(_diagnostic_process_snapshot))
         return JSONResponse(snapshot)
 
+    _RESOURCE_BODY_LIMIT = 2 * 1024 * 1024
+
     async def resources(request):
         body_bytes = await request.body()
-        if len(body_bytes) > 64 * 1024:
+        # A reviewed reclaim set travels in one request at ~360 bytes per
+        # candidate; 64 KiB refused any plan over ~180 entries (feedback
+        # c7556b3f). 2 MiB still bounds memory and fits ~5,000 candidates.
+        if len(body_bytes) > _RESOURCE_BODY_LIMIT:
             return JSONResponse({"ok": False, "error": "resource request is too large"},
                                 status_code=413)
         try:

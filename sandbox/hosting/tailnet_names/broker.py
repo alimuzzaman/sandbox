@@ -190,6 +190,13 @@ class Broker:
             out[LEGO_PROFILE] = dict(common, timeoutSeconds=ISSUE_TIMEOUT_SECONDS, argv=[
                 lego, "run", "--accept-tos", "--email", config.acme_email,
                 "--server", config.acme_server, "--dns", "cloudflare",
+                # Wait for Cloudflare's own name servers only. The server's
+                # resolver caches the empty answer a *.tn wildcard gives the
+                # challenge name before its TXT exists, so a recursive check
+                # never sees the record and issuance fails (xspeed-dev
+                # 2026-11-22, mail-access-1112.tn). The CA reads the
+                # authoritative servers, which lego still waits for.
+                "--dns.propagation.disable-rns",
                 "--csr", str(self._csr_path()), "--path", str(self.acme_root)])
         return out
 

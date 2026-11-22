@@ -118,6 +118,9 @@ class TailnetNameConfig:
     acme_server: str = ACME_SERVERS["letsencrypt"]
     lego_path: str | None = None
     lego_sha256: str | None = None
+    # Parents (``tn.example.com``) whose names are covered by one DNS-only
+    # ``*.<parent>`` record at the tailnet address instead of a record per name.
+    wildcard_parents: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, block: object) -> "TailnetNameConfig":
@@ -166,11 +169,25 @@ class TailnetNameConfig:
             raise TailnetNameError(CONFIG_INVALID,
                                    "tailnet_names.lego_sha256 must be 64 lowercase hex digits")
         unknown = set(block) - {"zones", "cloudflare_token", "acme_email", "acme_server", "lego",
-                                "lego_sha256"}
+                                "lego_sha256", "wildcard_parents"}
         if unknown:
             raise TailnetNameError(CONFIG_INVALID,
                                    "tailnet_names has unknown keys: " + ", ".join(sorted(unknown)))
-        return cls(tuple(zones), source, key, email, server, lego, digest)
+        raw_parents = block.get("wildcard_parents", [])
+        if not isinstance(raw_parents, (list, tuple)):
+            raise TailnetNameError(CONFIG_INVALID, "tailnet_names.wildcard_parents must be a list")
+        parents: list[str] = []
+        for item in raw_parents:
+            parent = hostname(item)
+            if parent is None or parent in zones or not any(
+                    parent.endswith("." + zone) for zone in zones):
+                raise TailnetNameError(
+                    CONFIG_INVALID,
+                    "each tailnet_names.wildcard_parents entry must be a name below a listed "
+                    "zone, such as tn.example.com")
+            if parent not in parents:
+                parents.append(parent)
+        return cls(tuple(zones), source, key, email, server, lego, digest, tuple(parents))
 
     @classmethod
     def load(cls) -> "TailnetNameConfig":
@@ -180,6 +197,12 @@ class TailnetNameConfig:
 
     def with_acme_server(self, value: str | None) -> "TailnetNameConfig":
         return self if value is None else replace(self, acme_server=acme_directory(value))
+
+
+def wildcard_parent(config: "TailnetNameConfig | None", fqdn: str) -> str | None:
+    """The configured parent whose ``*.<parent>`` record covers ``fqdn``, if any."""
+    parent = fqdn.partition(".")[2]
+    return parent if config is not None and parent in config.wildcard_parents else None
 
 
 @dataclass(frozen=True)
@@ -384,7 +407,7 @@ class RemoteInventoryEntry:
         )
 
 
-DnsResultKind = Literal["created", "exists", "absent", "deleted", "conflict", "error"]
+DnsResultKind = Literal["created", "exists", "covered", "absent", "deleted", "conflict", "error"]
 
 
 @dataclass(frozen=True)
@@ -398,7 +421,7 @@ class DnsResult:
 
     @classmethod
     def parse(cls, row: object) -> "DnsResult":
-        kinds = ("created", "exists", "absent", "deleted", "conflict", "error")
+        kinds = ("created", "exists", "covered", "absent", "deleted", "conflict", "error")
         if not isinstance(row, Mapping) or row.get("result") not in kinds:
             raise TailnetNameError(DNS_FAILED, "the DNS helper returned no result")
         proxied = row.get("proxied")

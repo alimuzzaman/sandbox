@@ -128,11 +128,18 @@ def _summary(result, row=None, code=None):
 
 
 def _valid(request):
-    if not isinstance(request, dict) or request.get("op") not in ("ensure", "inspect", "delete"):
+    if not isinstance(request, dict) or request.get("op") not in (
+            "ensure", "inspect", "delete", "ensure_wildcard"):
         return False
     zone, name, ip = request.get("zone"), request.get("name"), request.get("ip")
     if not (_hostname(zone) and _hostname(name) and name.endswith("." + zone)):
         return False
+    if request["op"] == "ensure_wildcard":
+        # One label directly under a parent that is itself below the zone.
+        parent = request.get("parent")
+        if not (_hostname(parent) and parent.endswith("." + zone)
+                and name.partition(".")[2] == parent):
+            return False
     try:
         if ipaddress.IPv4Address(ip) not in _TAILNET:
             return False
@@ -143,12 +150,55 @@ def _valid(request):
     return True
 
 
+def _names_below(token, zone_id, name, opener):
+    """Records strictly below ``name`` (any one makes it an empty non-terminal)."""
+    rows = _call(token, "GET", f"/zones/{zone_id}/dns_records?"
+                 + urllib.parse.urlencode({"name.endswith": "." + name, "per_page": 5}),
+                 opener=opener)
+    if not isinstance(rows, list):
+        raise ApiError("api_error")
+    return [row for row in rows if isinstance(row, dict)
+            and str(row.get("name") or "").endswith("." + name)]
+
+
+def _ensure_wildcard(token, zone_id, request, opener):
+    """Cover ``name`` with one DNS-only ``*.<parent>`` A record at ``ip``.
+
+    A name with its own record keeps it when the record is exactly ours
+    (``exists``); any other record at the name, or names below it, would stop
+    the wildcard answering (RFC 4592), so they refuse. The wildcard row is
+    adopted when it is the only one and exactly ours, created when absent, and
+    never changed otherwise."""
+    name, ip = request["name"], request["ip"]
+    rows = _record_set(token, zone_id, name, opener)
+    if rows:
+        if len(rows) == 1 and _is_ours(rows[0], ip):
+            return _summary("exists", rows[0]), 0
+        return _summary("conflict", rows[0], code="other_record"), 3
+    if _names_below(token, zone_id, name, opener):
+        return _summary("conflict", code="names_below"), 3
+    wildcard = "*." + request["parent"]
+    rows = _record_set(token, zone_id, wildcard, opener)
+    if len(rows) > 1:
+        return _summary("conflict", rows[0], code="multiple_wildcard_records"), 3
+    if rows:
+        if _is_ours(rows[0], ip):
+            return _summary("covered", rows[0]), 0
+        return _summary("conflict", rows[0], code="wildcard_other_record"), 3
+    row = _call(token, "POST", f"/zones/{zone_id}/dns_records",
+                {"type": "A", "name": wildcard, "content": ip, "ttl": 1, "proxied": False,
+                 "comment": "sandbox tailnet-name wildcard"}, opener=opener)
+    return _summary("covered", row if isinstance(row, dict) else {}), 0
+
+
 def run(request, token, *, opener=_OPENER.open):
     """Return ``(result, exit_status)``; never raises for API failures."""
     if not _valid(request):
         return _summary("error", code="request_invalid"), 1
     try:
         zone_id = _zone_id(token, request["zone"], opener)
+        if request["op"] == "ensure_wildcard":
+            return _ensure_wildcard(token, zone_id, request, opener)
         name, ip = request["name"], request["ip"]
         rows = _record_set(token, zone_id, name, opener)
         if len(rows) > 1:

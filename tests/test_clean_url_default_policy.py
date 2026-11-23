@@ -28,6 +28,17 @@ class TestProxyHelperIsUsable(unittest.TestCase):
                          text.lower(),
                          "proxy-helper.sh was replaced by a refusal stub again")
 
+    def test_owner_check_picks_the_stat_form_by_os(self):
+        # GNU stat reads `-f` as --file-system, so `stat -f ... || stat -c ...`
+        # captured file-system lines and every Linux privileged action refused
+        # with "installed helper must be owned by root".
+        text = HELPER.read_text()
+        check = text[text.index("require_installed_helper() {"):]
+        check = check[:check.index("\n}\n")]
+        self.assertNotRegex(check, r"stat -f[^\n]*\|\|")
+        self.assertIn('if [ "$OS" = "Linux" ]; then', check)
+        self.assertIn("stat -c '%u %a'", check)
+
     def test_privileged_target_is_the_root_owned_copy_not_the_checkout(self):
         text = HELPER.read_text()
         self.assertIn(f"INSTALLED_HELPER={INSTALLED}", text)

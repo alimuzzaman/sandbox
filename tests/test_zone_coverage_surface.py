@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -984,15 +985,25 @@ http {{
         t_res = subprocess.run([nginx_bin, "-t", "-c", main_conf, "-p", td], capture_output=True, text=True, env=env)
         self.assertEqual(t_res.returncode, 0, f"nginx -t failed:\n{t_res.stderr}")
 
+        # Its own session, so teardown can signal the master and its workers
+        # together: on GitHub runners the master alone was seen to outlive
+        # SIGTERM and SIGKILL while waiting in sigsuspend.
         proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td], env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+
+        def _signal_group(sig):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                pass
 
         def _stop():
-            proc.terminate()
+            _signal_group(signal.SIGTERM)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _signal_group(signal.SIGKILL)
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:

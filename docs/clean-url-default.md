@@ -108,6 +108,12 @@ Both live in `tools/proxy-helper.sh`, and the NOPASSWD rule never names the chec
    so a stale rule pointing at a writable checkout is inert.
 3. The pre-2026-08 rule at `/etc/sudoers.d/sandbox-proxy` is revoked on first setup.
 
+Linux helpers installed before d83bd15 (2026-11-23) fail their own owner check: GNU `stat`
+read `-f` as `--file-system`, so `require_installed_helper` always refused with
+`installed helper must be owned by root` and every instance fell back to
+`http://localhost:<port>`. Re-run `sudo tools/proxy-helper.sh install` once after updating;
+`sudo -n /usr/local/libexec/sandbox-proxy-helper installed-status` then prints `ready`.
+
 This is the fix for the escalation risk that motivated the 2026-08-02 retirement — the
 answer was to move the privileged target out of the checkout, not to remove clean URLs.
 

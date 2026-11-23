@@ -1084,14 +1084,15 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     }
     if pconf.get("multisite"):
         block["multisite"] = pconf["multisite"]
-    # Published ports stay on loopback unless the project (or its gitignored
-    # override) asks for every interface. Rebuilt from the project on every
-    # ensure/apply, so removing the key turns exposure back off.
-    _expose = pconf.get("exposeToNetwork")
-    if _expose is not None and not isinstance(_expose, bool):
-        die("exposeToNetwork must be true or false (it publishes the instance's "
-            "WordPress, database and Mailpit ports on every network interface).")
-    if _expose is True:
+    # Published ports stay on loopback unless the project (or its override)
+    # asks for every interface. The project loader validates the value and
+    # drops machine-wide and deployed-copy values before anything is written
+    # (`resolve_expose_to_network`, sandbox/config/wordpress.py); only an
+    # explicit true counts.
+    # The block is rebuilt when ensure creates or resumes an instance and on
+    # every `sb apply`; an `sb ensure` of an instance that is already up
+    # returns before this, so a change takes effect through `sb apply`.
+    if pconf.get("exposeToNetwork") is True:
         block["expose_to_network"] = True
     # Local proxy TLD (sandbox.config.json `tld`, default tst). Persisted so the
     # MCP server + every `sb` invocation match a domain against its own TLD.

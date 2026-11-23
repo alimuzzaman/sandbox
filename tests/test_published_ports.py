@@ -198,11 +198,12 @@ class TestInstanceBlock(unittest.TestCase):
         block = self._block({}, previous={"expose_to_network": True})
         self.assertNotIn("expose_to_network", block)
 
-    def test_a_non_boolean_value_fails_the_apply(self):
+    def test_a_non_boolean_value_never_exposes(self):
+        """The loader refuses it first (TestOptInIsProjectOwned); the block
+        builder itself only ever honours an explicit true."""
         for value in ("yes", 1, "0.0.0.0"):
-            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    self._block({"exposeToNetwork": value})
+            with self.subTest(value=value):
+                self.assertNotIn("expose_to_network", self._block({"exposeToNetwork": value}))
 
 
 def _ps_rows(*rows) -> str:
@@ -358,6 +359,77 @@ class TestStatusShowsExposure(unittest.TestCase):
         text = self._text(self._instance(expose_to_network=True), OLD_WILDCARD_ROWS)
         self.assertIn("Ports: published on every network interface (exposeToNetwork: true)",
                       text)
+
+
+class TestOptInIsProjectOwned(unittest.TestCase):
+    """M2 + S1 + S4: where `exposeToNetwork` may come from, and when it is checked."""
+
+    def _load(self, project_doc, *, user_doc=None, under=None, override_doc=None):
+        base = Path(tempfile.mkdtemp(dir=Path.home(), prefix="sb-expose-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        root = base / (under or "") / "proj"
+        root.mkdir(parents=True)
+        (root / "sandbox.config.json").write_text(json.dumps(project_doc))
+        if override_doc is not None:
+            (root / "sandbox.config.override.json").write_text(json.dumps(override_doc))
+        user = base / "user-global.json"
+        user.write_text(json.dumps(user_doc or {}))
+        from sandbox.config import wordpress as wordpress_schema
+        wordpress_schema._EXPOSE_NOTICES.clear()
+        err = io.StringIO()
+        env = {"SANDBOX_USER_CONFIG": str(user), "SANDBOX_HOME": str(base / "home")}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err):
+            result = sandbox_core.load_project_config(root)
+        return result, err.getvalue(), base
+
+    def test_machine_wide_value_is_ignored_with_one_line(self):
+        result, err, _ = self._load({}, user_doc={"exposeToNetwork": True})
+        self.assertNotIn("exposeToNetwork", result)
+        self.assertIn("exposeToNetwork", err)
+        self.assertIn("ignored", err)
+
+    def test_project_override_value_is_honoured(self):
+        result, _, _ = self._load({}, override_doc={"exposeToNetwork": True})
+        self.assertIs(result["exposeToNetwork"], True)
+
+    def test_a_non_boolean_value_is_refused_by_the_loader(self):
+        with self.assertRaises((sandbox_core.ConfigError, ValueError)) as raised:
+            self._load({"exposeToNetwork": "yes"})
+        self.assertEqual(getattr(raised.exception, "code", None), "expose_to_network_invalid")
+
+    def test_ensure_refuses_a_bad_value_before_writing_anything(self):
+        base = Path(tempfile.mkdtemp(dir=Path.home(), prefix="sb-expose-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        root = base / "proj"
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(json.dumps({"exposeToNetwork": "yes"}))
+        user = base / "user-global.json"
+        user.write_text("{}")
+        runtime = base / "runtime"
+        runtime.mkdir()
+        env = {"SANDBOX_USER_CONFIG": str(user), "SANDBOX_RUNTIME": str(runtime)}
+        with mock.patch.dict(os.environ, env):
+            with self.assertRaises((sandbox_core.ConfigError, ValueError)) as raised:
+                core.ensure_instance({}, str(root))
+            self.assertEqual(raised.exception.code, "expose_to_network_invalid")
+            self.assertEqual(sandbox_core.registry_all(), {})
+
+    def test_a_deployed_copy_never_exposes(self):
+        base = Path(tempfile.mkdtemp(dir=Path.home(), prefix="sb-expose-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        home = base / "home"
+        root = home / "deploy-src" / "proj"
+        root.mkdir(parents=True)
+        (root / "sandbox.config.json").write_text(json.dumps({"exposeToNetwork": True}))
+        user = base / "user-global.json"
+        user.write_text("{}")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"SANDBOX_USER_CONFIG": str(user),
+                                          "SANDBOX_HOME": str(home)}), \
+                contextlib.redirect_stderr(err):
+            result = sandbox_core.load_project_config(root)
+        self.assertNotIn("exposeToNetwork", result)
+        self.assertIn("deployed", err.getvalue())
 
 
 class TestLinuxGatewayLookup(_RenderCase):

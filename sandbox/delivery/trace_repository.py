@@ -43,6 +43,7 @@ class TraceRepository:
     @contextlib.contextmanager
     def _connection(self,write=False,budget=None,initialize=True):
         conn=None
+        bounded=False
         try:
             if budget: budget.check()
             if not write and not self.path.exists():
@@ -53,6 +54,7 @@ class TraceRepository:
                 for path in (self.path,Path(str(self.path)+'-journal')):
                     if path.exists() and path.stat().st_size>DB_BYTES: fail('trace_capacity')
             timeout=min(2.0,budget.remaining_seconds()) if budget else 2.0
+            bounded=budget is not None and timeout<2.0
             uri=self.path.resolve().as_uri()+('?mode=rw' if write and not initialize else '?mode=rwc' if write else '?mode=ro')
             conn=sqlite3.connect(uri,uri=True,timeout=timeout,isolation_level=None)
             conn.row_factory=sqlite3.Row
@@ -83,7 +85,10 @@ class TraceRepository:
                 if conn.execute('PRAGMA page_count').fetchone()[0]*conn.execute('PRAGMA page_size').fetchone()[0]>DB_BYTES-1024*1024: fail('trace_capacity')
                 conn.execute('COMMIT')
         except sqlite3.Error as exc:
-            if budget and budget.expired: fail('budget_exhausted')
+            # SQLite gets the busy timeout in whole milliseconds, so a wait
+            # capped by the budget can end just before its deadline.
+            busy=((getattr(exc,'sqlite_errorcode',0) or 0)&0xff) in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED)
+            if budget and (budget.expired or (bounded and busy)): fail('budget_exhausted')
             fail('trace_capacity' if getattr(exc,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL else 'trace_store_unavailable')
         except OSError:
             fail('trace_store_unavailable')

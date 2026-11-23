@@ -993,7 +993,20 @@ http {{
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait(timeout=5)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Seen intermittently on GitHub runners; say what the
+                    # process was doing so the next failure explains itself.
+                    state = []
+                    for name in ("status", "wchan"):
+                        try:
+                            text = pathlib.Path(f"/proc/{proc.pid}/{name}").read_text()
+                        except OSError as exc:
+                            text = type(exc).__name__
+                        state.append(" ".join(line for line in text.splitlines()
+                                              if name == "wchan" or line.startswith(("State:", "PPid:"))))
+                    raise AssertionError(f"nginx {proc.pid} survived SIGKILL: {'; '.join(state)}")
         self.addCleanup(_stop)
 
         deadline = time.time() + 10

@@ -49,3 +49,13 @@ jobs:
       # PyYAML and other runtime deps are fetched on demand by `sb`.
       - name: Run smoke test
         run: ./sb smoke
+
+      - name: Clean-URL host diagnostics
+        if: failure()
+        run: |
+          ls -l /etc/resolv.conf; cat /etc/resolv.conf
+          sudo -n /usr/local/libexec/sandbox-proxy-helper installed-status || true
+          ls -l /etc/sudoers.d/ || true
+          ss -ltnu | grep ':53 ' || true
+          getent hosts sb-smoke-probe.tst || echo "sb-smoke-probe.tst does not resolve"
+          docker ps -a --format '{{.Names}} {{.Status}} {{.Ports}}'

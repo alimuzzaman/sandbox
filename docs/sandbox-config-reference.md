@@ -1031,11 +1031,13 @@ an instance through `host.docker.internal`. Docker Desktop and OrbStack
 forward that name to the host's loopback, so `127.0.0.1` is enough there.
 
 On Linux the name resolves to the gateway of Docker's `docker0` bridge
-(usually `172.17.0.1`), so the ports are also published on that address when
-this host owns it. In a default Docker setup the address is not reachable
-from the LAN; a neighbour that routes it to this host could still try, so do
-not treat it as a firewall. Sandbox leaves the gateway out, keeps the ports on
-`127.0.0.1` only and prints one `note:` line saying why, when:
+(usually `172.17.0.1`), so the web server port (`wordpress_port`) is also
+published on that address when this host owns it. MariaDB, Mailpit and the
+OpenLiteSpeed console stay on `127.0.0.1` only: nothing reaches them through
+`host.docker.internal`. In a default Docker setup the gateway address is not
+reachable from the LAN; a neighbour that routes it to this host could still
+try, so do not treat it as a firewall. Sandbox leaves the gateway out, keeps
+the web port on `127.0.0.1` only and prints one `note:` line saying why, when:
 
 - the default bridge uses another interface (dockerd `"bridge": "br0"`, which
   usually carries the LAN address),
@@ -1048,6 +1050,10 @@ through `host.docker.internal`; use `http://localhost:<port>` on the host. A
 daemon with a custom `host-gateway-ip` points `host.docker.internal` at an
 address Sandbox does not publish on, with the same effect. The lookup runs at
 most once a minute per process.
+
+Docker Engine before 28.0 lets a host on the same layer-2 segment reach ports
+published on `127.0.0.1` too (Docker's own port-publishing notes). Update the
+engine for the loopback binding to keep LAN neighbours out.
 
 ### Opting in
 

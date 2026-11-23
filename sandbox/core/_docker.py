@@ -297,7 +297,7 @@ def _default_bridge_facts() -> tuple[str, str] | None:
     try:
         result = subprocess.run(
             ["docker", "network", "inspect", "bridge", "--format",
-             '{{range .IPAM.Config}}{{.Gateway}}{{end}} '
+             '{{range .IPAM.Config}}{{.Gateway}},{{end}} '
              '{{index .Options "com.docker.network.bridge.name"}}'],
             capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired):
@@ -307,9 +307,15 @@ def _default_bridge_facts() -> tuple[str, str] | None:
     parts = (result.stdout or "").split()
     if not parts:
         return None
-    try:
-        gateway = ipaddress.IPv4Address(parts[0])
-    except ValueError:
+    # One gateway per IPAM entry; a dual-stack bridge also lists an IPv6 one.
+    gateway = None
+    for candidate in parts[0].split(","):
+        try:
+            gateway = ipaddress.IPv4Address(candidate)
+            break
+        except ValueError:
+            continue
+    if gateway is None:
         return None
     private = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
     if not any(gateway in ipaddress.ip_network(net) for net in private):
@@ -389,17 +395,25 @@ def publish_hosts(inst_cfg: dict) -> list[str]:
 
 
 def _port_lines(inst_cfg: dict, mappings: list[tuple[object, object]],
-                indent: int = 6) -> str:
+                indent: int = 6, *, gateway: bool = False) -> str:
     """Compose `ports:` entries for (host_port, container_port) pairs.
 
     By default each pair is published on loopback (plus the Linux Docker
     gateway, see `_loopback_publish_hosts`), never on the LAN. With the
     `exposeToNetwork` opt-in the lines are the historical address-less
     form, which Docker publishes on every interface. An empty host port keeps
-    Docker's random host port (`"127.0.0.1::1025"`)."""
+    Docker's random host port (`"127.0.0.1::1025"`).
+
+    Only the web port, which containers reach as `host.docker.internal`,
+    passes ``gateway=True``. The database, Mailpit and the OLS console stay
+    on 127.0.0.1: a LAN host that routes to the gateway address could reach
+    anything published there."""
     pad = " " * indent
     lines = []
-    for host_ip in publish_hosts(inst_cfg):
+    hosts = publish_hosts(inst_cfg)
+    if not gateway:
+        hosts = [host for host in hosts if host in ("", "127.0.0.1")]
+    for host_ip in hosts:
         for host_port, container_port in mappings:
             if host_ip:
                 spec = f"{host_ip}:{host_port}:{container_port}"
@@ -426,7 +440,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       db:
         condition: service_healthy
     ports:
-{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)])}
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)], gateway=True)}
     # The official wordpress:latest image ships Apache with
     # `AllowOverride None` for /var/www/, which silently breaks pretty
     # permalinks (wp-json/ 404s). Patch the conf on every start, then
@@ -519,7 +533,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     depends_on:
       - wp
     ports:
-{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)])}
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)], gateway=True)}
     volumes:
       # Same WP files nginx serves statically + computes $document_root from.
       - {RUNTIME_DIR}/wp-{instance}:/var/www/html:ro
@@ -569,8 +583,8 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
         condition: service_healthy
     # Second pair: the OLS WebAdmin console.
     ports:
-{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80),
-                        (inst_cfg["wordpress_port"] + 1000, 7080)])}
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)], gateway=True)}
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"] + 1000, 7080)])}
     environment:
       TZ: UTC
       # wp-cli runs here via `exec -u www-data` (HOME=/var/www, unwritable) — point

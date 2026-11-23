@@ -112,10 +112,20 @@ class TestDefaultBindsLoopback(_RenderCase):
                 mock.patch.object(docker, "_host_address_is_local", return_value=True):
             published = _published(self._render("nginx"))
         self.assertEqual(published["nginx"], ["127.0.0.1:8300:80", "172.17.0.1:8300:80"])
-        self.assertEqual(published["db"], ["127.0.0.1:3500:3306", "172.17.0.1:3500:3306"])
-        self.assertEqual(published["mailpit"], [
-            "127.0.0.1:8301:8025", "127.0.0.1::1025",
-            "172.17.0.1:8301:8025", "172.17.0.1::1025"])
+        # Only the web port is reached through host.docker.internal; the
+        # database and Mailpit never get the gateway address.
+        self.assertEqual(published["db"], ["127.0.0.1:3500:3306"])
+        self.assertEqual(published["mailpit"], ["127.0.0.1:8301:8025", "127.0.0.1::1025"])
+
+    def test_litespeed_console_stays_on_loopback_with_the_gateway(self):
+        with mock.patch.object(docker.sys, "platform", "linux"), \
+                mock.patch.object(docker, "local_runtime_remote_only", return_value=False), \
+                mock.patch.object(docker, "_default_bridge_facts",
+                                  return_value=("172.17.0.1", "docker0")), \
+                mock.patch.object(docker, "_host_address_is_local", return_value=True):
+            services = self._render("litespeed")["services"]
+        self.assertEqual(services["wp"]["ports"], [
+            "127.0.0.1:8300:80", "172.17.0.1:8300:80", "127.0.0.1:9300:7080"])
 
     def test_linux_gateway_the_host_does_not_own_is_left_out(self):
         with mock.patch.object(docker.sys, "platform", "linux"), \
@@ -493,6 +503,17 @@ class TestLinuxGatewayLookup(_RenderCase):
         with p[0], p[1], p[2], p[3], contextlib.redirect_stderr(err):
             self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
         self.assertIn("br0", err.getvalue())
+
+    def test_dual_stack_bridge_yields_its_ipv4_gateway(self):
+        completed = mock.Mock(returncode=0, stdout="fd00:dead::1,172.17.0.1, docker0\n")
+        with mock.patch.object(docker.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(docker._default_bridge_facts(), ("172.17.0.1", "docker0"))
+        self.assertIn("{{.Gateway}},", run.call_args.args[0][-1])
+
+    def test_bridge_without_an_ipv4_gateway_is_a_miss(self):
+        completed = mock.Mock(returncode=0, stdout="fd00:dead::1, docker0\n")
+        with mock.patch.object(docker.subprocess, "run", return_value=completed):
+            self.assertIsNone(docker._default_bridge_facts())
 
     def test_docker0_gateway_is_used(self):
         p = self._patches(("172.17.0.1", "docker0"))

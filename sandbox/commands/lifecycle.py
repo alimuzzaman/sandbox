@@ -30,7 +30,8 @@ from sandbox.core import (
     _write_mail_muplugin, _write_loopback_muplugin, _write_ondemand_muplugin,
     _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
-    info, mcp_server_name, ok, plugins_dir,
+    announce_port_binding, info, instance_exposed_to_network, mcp_server_name, ok, plugins_dir,
+    publish_hosts,
     proxy_available, proxy_start_lease, resolve_instances, run,
     save_local_app_password, stop_proxy_if_idle, local_runtime_selection,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
@@ -573,6 +574,7 @@ def cmd_up(cfg: dict, args) -> None:
             _compose_up(inst, services, quiet=True, json_output=True)
         else:
             _compose_up(inst, services)
+        announce_port_binding(inst, inst_cfg)
         if clean_domain:
             with _suppress_progress_stdout(json_output):
                 _ensure_proxy_up(cfg)
@@ -795,6 +797,13 @@ def cmd_status(cfg, args) -> None:
     srv = mcp_server_name(inst)
     ok(f"Instance: {inst}  (Claude tools: mcp__{srv}__*)")
     ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'nginx')}")
+    exposure = _port_exposure(
+        resolve_instances(cfg)[inst],
+        None if _is_herd_instance(inst) else _read_containers(inst), instance=inst)
+    if exposure is not None:
+        line = _port_exposure_line(exposure)
+        (ok if exposure["in_sync"] and exposure["configured"]["scope"] == "loopback"
+         else info)(line)
     if owner and owner.get("root"):
         ok(f"Project: {owner['root']}")
     if runtime_data is not None:
@@ -947,9 +956,11 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False,
 
     instance_cfg = (resolve_instances(cfg).get(inst) or {})
     containers = []
+    containers_read = False
     if not _is_herd_instance(inst) and instance_cfg:
         ps = compose("ps", "--format", "json", instance=inst,
                      check=False, capture=True)
+        containers_read = getattr(ps, "returncode", 1) == 0
         for line in (getattr(ps, "stdout", "") or "").splitlines():
             try:
                 containers.append(json.loads(line))
@@ -968,6 +979,10 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False,
         "reachable": reachable,
         "containers": containers,
     }
+    exposure = _port_exposure(instance_cfg, containers if containers_read else None,
+                              instance=inst)
+    if exposure is not None:
+        payload["port_exposure"] = exposure
     if runtime_data is not None:
         payload["runtime"] = runtime_data
     if runtime_error is not None:
@@ -981,6 +996,131 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False,
         payload["ok"] = bool(payload["ok"] and extension_data.get("ok"))
         payload["exit_code"] = 0 if payload["ok"] else 1
     return payload
+
+
+_WILDCARD_ADDRESSES = frozenset({"", "0.0.0.0", "::", "[::]", "*"})
+
+
+def _read_containers(inst: str) -> list | None:
+    """Running containers of the instance (`compose ps --format json`), or
+    None when they could not be read."""
+    try:
+        ps = compose("ps", "--format", "json", instance=inst, check=False, capture=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    stdout = getattr(ps, "stdout", None)
+    if getattr(ps, "returncode", 1) != 0 or not isinstance(stdout, str):
+        return None
+    rows: list = []
+    for line in stdout.splitlines():
+        try:
+            rows.append(json.loads(line))
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
+def _published_ports(containers) -> list[dict] | None:
+    """Every host-published port of the running containers, or None when there
+    is nothing to read (no rows: stopped, or not readable)."""
+    if not containers:
+        return None
+    rows = []
+    for item in containers:
+        rows.extend(item if isinstance(item, list) else [item])
+    ports = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        for publisher in row.get("Publishers") or []:
+            if not isinstance(publisher, Mapping):
+                continue
+            published = publisher.get("PublishedPort")
+            if not isinstance(published, int) or published <= 0:
+                continue
+            ports.append({"service": str(row.get("Service") or ""),
+                          "host_ip": str(publisher.get("URL") or ""),
+                          "host_port": published,
+                          "container_port": publisher.get("TargetPort")})
+    return ports or None
+
+
+def _port_exposure(instance_cfg: Mapping, containers=None, *,
+                   instance: str) -> dict | None:
+    """What the config asks for and what the running containers publish.
+
+    ``configured.scope`` is ``network`` only with the ``exposeToNetwork``
+    opt-in, else ``loopback``. ``published.scope`` comes from the containers'
+    own publishers: ``loopback`` (every port on a configured local address),
+    ``network`` (every port on every interface or another address),
+    ``mixed``, or ``unknown`` when no running container could be read.
+    Containers created before the loopback default, or before the opt-in
+    changed, keep their old binding until they are recreated; ``in_sync`` is
+    then false and ``next_command`` recreates web, database and Mailpit.
+    Herd serves through the host and publishes nothing, so it has no entry."""
+    if not instance_cfg or instance_cfg.get("server") == "herd":
+        return None
+    exposed = instance_exposed_to_network(instance_cfg)
+    local_hosts = [] if exposed else publish_hosts(instance_cfg)
+    configured = {"scope": "network" if exposed else "loopback",
+                  "hosts": ["*"] if exposed else list(local_hosts)}
+    ports = _published_ports(containers)
+    if ports is None:
+        published = {"scope": "unknown", "ports": []}
+        in_sync = None
+    else:
+        local = {"127.0.0.1", "::1", *local_hosts}
+        kinds = set()
+        for port in ports:
+            address = port["host_ip"]
+            if address in _WILDCARD_ADDRESSES:
+                port["scope"] = "network"
+            elif address in local or address.startswith("127."):
+                port["scope"] = "loopback"
+            else:
+                port["scope"] = "network"
+            kinds.add(port["scope"])
+        scope = kinds.pop() if len(kinds) == 1 else "mixed"
+        published = {"scope": scope, "ports": ports}
+        if exposed:
+            in_sync = all(port["host_ip"] in _WILDCARD_ADDRESSES for port in ports)
+        else:
+            in_sync = scope == "loopback"
+    return {
+        "configured": configured,
+        "published": published,
+        "expose_to_network": exposed,
+        "in_sync": in_sync,
+        "next_command": None if in_sync is not False else f"./sb up --instance {instance}",
+    }
+
+
+def _port_exposure_line(exposure: Mapping) -> str:
+    """One plain status line for ``_port_exposure``."""
+    configured = exposure["configured"]
+    published = exposure["published"]
+    wanted = ("every network interface (exposeToNetwork: true)"
+              if configured["scope"] == "network"
+              else f"local only ({', '.join(configured['hosts'])})")
+    if exposure["in_sync"] is None:
+        return (f"Ports: not known (no running containers could be read); "
+                f"configured: {wanted}")
+    if exposure["in_sync"]:
+        if configured["scope"] == "network":
+            return ("Ports: published on every network interface (exposeToNetwork: true); "
+                    "other machines on the network can reach this site, its database and Mailpit")
+        return f"Ports: local only ({', '.join(configured['hosts'])})"
+    if configured["scope"] == "loopback":
+        wide = [f"{port['service']} {port['host_port']}" for port in published["ports"]
+                if port["scope"] == "network"]
+        found = f"still publish {', '.join(wide)} on every network interface"
+    else:
+        narrow = [f"{port['service']} {port['host_port']} ({port['host_ip']})"
+                  for port in published["ports"] if port["host_ip"] not in _WILDCARD_ADDRESSES]
+        found = f"still publish {', '.join(narrow)} on that address only"
+    return (f"Ports: configured {wanted}, but the running containers {found}. "
+            f"Run {exposure['next_command']} to recreate the web server, database and "
+            "Mailpit with the configured binding (data is kept).")
 
 
 def _render_container_stats(instance: str) -> None:

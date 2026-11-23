@@ -18,7 +18,9 @@ manifests.
   unavailable (no Docker, a foreign listener on the required endpoints, declined sudo).
   `sb ensure` then says so, and when `http://<domain>:<port>` answers on this machine it
   names that as an alternative. It is only offered, never adopted, because the name
-  resolves only where Sandbox DNS is installed.
+  resolves only where Sandbox DNS is installed. Since instance ports are published on
+  `127.0.0.1` only, that alternative no longer answers for a rebound instance and is not
+  offered (`docs/sandbox-config-reference.md`, "Network exposure").
 - Docker Compose stays the default runtime. Selecting Herd/Valet or managed-native is the
   explicit opt-in that hands ingress to that product.
 

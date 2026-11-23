@@ -150,6 +150,11 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             value = inst.get(extension_key, runtime.get(extension_key))
             if value is not None:
                 resolved[extension_key] = _json_safe_php_extensions(value)
+        # Network exposure is opt-in. Only an explicit true is carried, so the
+        # default resolved mapping keeps its historical shape and the compose
+        # renderer publishes on loopback (see `publish_hosts`).
+        if inst.get("expose_to_network") is True:
+            resolved["expose_to_network"] = True
         if inst.get("instance_incarnation_id") is not None:
             resolved["instance_incarnation_id"] = inst.get("instance_incarnation_id")
         if inst.get("server_config_mount_id") is not None:
@@ -1079,6 +1084,16 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     }
     if pconf.get("multisite"):
         block["multisite"] = pconf["multisite"]
+    # Published ports stay on loopback unless the project (or its override)
+    # asks for every interface. The project loader validates the value and
+    # drops machine-wide and deployed-copy values before anything is written
+    # (`resolve_expose_to_network`, sandbox/config/wordpress.py); only an
+    # explicit true counts.
+    # The block is rebuilt when ensure creates or resumes an instance and on
+    # every `sb apply`; an `sb ensure` of an instance that is already up
+    # returns before this, so a change takes effect through `sb apply`.
+    if pconf.get("exposeToNetwork") is True:
+        block["expose_to_network"] = True
     # Local proxy TLD (sandbox.config.json `tld`, default tst). Persisted so the
     # MCP server + every `sb` invocation match a domain against its own TLD.
     block["tld"] = pconf.get("tld") or PROXY_TLD
@@ -2133,6 +2148,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
                     raise RuntimeError(f"web reconcile failed: {detail[:240]}")
                 if not _wait_reachable(inst_cfg):
                     raise RuntimeError("web reconcile did not become reachable")
+                announce_port_binding(name, inst_cfg)
                 if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
                     extension_status = php_extension_status(inst_cfg, instance=name)
                     drift = (extension_status or {}).get("drift", {})

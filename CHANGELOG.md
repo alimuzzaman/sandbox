@@ -176,6 +176,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`commands`, `remedy`, `skipped`); 15 added quarantine and 16 added persistent
   operation reservations. Their lifecycle corrections ship under 17; 18 added retention sweep cursor continuation envelope fields; 20 adds read keys for cleanup state kind and the structured per-candidate outcomes of retention sweeps (19 was never released); 21 adds the recorded CI archive retirement attempt. 22 records the read-only storage inspection payload.
 
+### Security
+- WordPress instance ports are published on `127.0.0.1` instead of every network interface: the web server, MariaDB, the Mailpit inbox and its SMTP port, and the OpenLiteSpeed console. On Linux the web server port is also published on Docker's `docker0` gateway when the host owns it (the database, Mailpit and the console stay on loopback), so `host.docker.internal` from the clean-URL proxy, `sb ci` jobs and the loopback mu-plugin keeps working; when it cannot be (another bridge, rootless or VM engines, engine down) one `note:` line says so. Containers still reach each other by service name. Existing instances move to the new binding when their containers are recreated (`sb up --instance NAME`); volumes are kept. Remote hosts get it after `sb remote service migrate`. The checked-in `docker-compose.yml` binds loopback too.
+- `exposeToNetwork: true` in a project's own config (best in `sandbox.config.override.json`) publishes that instance's ports on every interface as before, for testing from another device. The machine-wide config cannot set it, a copy deployed under `$SANDBOX_HOME/deploy-src/` never exposes, and a non-boolean value is refused when the config is read, before anything is written (`sb ensure --json` reports `expose_to_network_invalid`). `sb up` and `sb apply` print a line for an exposed instance.
+- `sb status` (text and `--json` `port_exposure`) compares the configured binding with what the running containers publish, says "not known" when they cannot be read, and names `./sb up --instance NAME` when they differ.
+
 ### Added
 - Opt-in local-image v2 receipts (`--receipt-version v2`) bind one shared raw
   save bundle, with closed image membership and version-aware apply readers.

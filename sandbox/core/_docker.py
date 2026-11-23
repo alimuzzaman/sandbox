@@ -262,10 +262,173 @@ def _env_config_lines(inst_cfg: dict, docroot: str = "/var/www/html",
             f"{pad}WORDPRESS_CONFIG_EXTRA: |\n{body}")
 
 
+# Per-process result of the Linux gateway lookup: {"hosts": [...], "at": t}.
+# A found gateway is kept for the process; a miss is kept for
+# _GATEWAY_MISS_TTL seconds, so `write_compose_files` (which renders every
+# instance on most commands) asks the engine once, while a long-running MCP
+# server still picks the gateway up once the engine is ready.
+_PUBLISH_GATEWAY_CACHE: dict = {}
+_GATEWAY_MISS_TTL = 60.0
+_DOCKER_DEFAULT_BRIDGE = "docker0"
+
+
+def _host_address_is_local(address: str) -> bool:
+    """True when this host owns `address` (a socket can bind to it).
+
+    Docker refuses to publish on an address the host does not have, which
+    would fail the whole `compose up`. Rootless engines and VM-backed
+    engines keep their bridge gateway inside another network namespace, so
+    the address is checked here instead of assumed."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind((address, 0))
+        return True
+    except OSError:
+        return False
+
+
+def _default_bridge_facts() -> tuple[str, str] | None:
+    """(gateway, host interface) of Docker's default `bridge` network, or None.
+
+    One bounded `docker network inspect`; the gateway must be a private IPv4
+    address, as for the `sb web` bridge (`_bridge_hosts`)."""
+    import ipaddress
+    try:
+        result = subprocess.run(
+            ["docker", "network", "inspect", "bridge", "--format",
+             '{{range .IPAM.Config}}{{.Gateway}},{{end}} '
+             '{{index .Options "com.docker.network.bridge.name"}}'],
+            capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    parts = (result.stdout or "").split()
+    if not parts:
+        return None
+    # One gateway per IPAM entry; a dual-stack bridge also lists an IPv6 one.
+    gateway = None
+    for candidate in parts[0].split(","):
+        try:
+            gateway = ipaddress.IPv4Address(candidate)
+            break
+        except ValueError:
+            continue
+    if gateway is None:
+        return None
+    private = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    if not any(gateway in ipaddress.ip_network(net) for net in private):
+        return None
+    return str(gateway), (parts[1] if len(parts) > 1 else "")
+
+
+def _gateway_miss(reason: str) -> list[str]:
+    print(f"note: instance ports are published on 127.0.0.1 only: {reason}. "
+          "host.docker.internal from a container (clean-URL proxy, sb ci) cannot "
+          "reach them; see docs/sandbox-config-reference.md \"Network exposure\".",
+          file=sys.stderr)
+    return []
+
+
+def _lookup_gateway() -> list[str]:
+    facts = _default_bridge_facts()
+    if facts is None:
+        return _gateway_miss("the Docker bridge gateway could not be read")
+    gateway, bridge = facts
+    if bridge != _DOCKER_DEFAULT_BRIDGE:
+        # dockerd `"bridge": "<existing bridge>"` reuses a host bridge that
+        # usually carries the LAN address; publishing there would be the LAN.
+        return _gateway_miss(f"the default bridge network uses {bridge or 'an unnamed interface'}, "
+                             f"not {_DOCKER_DEFAULT_BRIDGE}")
+    if not _host_address_is_local(gateway):
+        return _gateway_miss(f"this host does not own the gateway {gateway} "
+                             "(rootless or VM-backed engine)")
+    return [gateway]
+
+
+def _loopback_publish_hosts() -> list[str]:
+    """Host addresses an instance's ports are published on by default.
+
+    Always 127.0.0.1. On Linux, also the gateway of Docker's own `docker0`
+    bridge, which is what `host.docker.internal` (`host-gateway`) resolves to
+    there by default: the clean-URL Caddy proxy, `sb ci` job containers and
+    the loopback mu-plugin fallback reach an instance through that name. In a
+    default Docker setup that address is not reachable from the LAN. A
+    gateway on another bridge (dockerd `"bridge": ...`) or one this host does
+    not own is left out, with one stderr line. Docker Desktop and OrbStack
+    forward `host.docker.internal` to the host's loopback, so 127.0.0.1 is
+    enough there. A remote-only controller never asks the engine."""
+    import time
+    hosts = ["127.0.0.1"]
+    if not sys.platform.startswith("linux") or local_runtime_remote_only():
+        return hosts
+    cached = _PUBLISH_GATEWAY_CACHE.get("hosts")
+    fresh = cached is not None and (
+        cached or time.monotonic() - _PUBLISH_GATEWAY_CACHE.get("at", 0.0) < _GATEWAY_MISS_TTL)
+    if not fresh:
+        cached = _lookup_gateway()
+        _PUBLISH_GATEWAY_CACHE.update(hosts=cached, at=time.monotonic())
+    return hosts + [host for host in cached if host not in hosts]
+
+
+def announce_port_binding(instance: str, inst_cfg: dict) -> None:
+    """One stderr line when an instance is started or recreated on every
+    interface, so a committed opt-in never goes unnoticed in a clone."""
+    if instance_exposed_to_network(inst_cfg):
+        print(f"note: {instance}: ports are published on every network interface "
+              "(exposeToNetwork: true); other machines on the network can reach "
+              "this site, its database and Mailpit.", file=sys.stderr)
+
+
+def instance_exposed_to_network(inst_cfg: dict) -> bool:
+    """True when the instance opted in to publishing on every interface."""
+    return inst_cfg.get("expose_to_network") is True
+
+
+def publish_hosts(inst_cfg: dict) -> list[str]:
+    """Host addresses for this instance's published ports. An empty string
+    means no address, i.e. every interface (the `exposeToNetwork` opt-in)."""
+    if instance_exposed_to_network(inst_cfg):
+        return [""]
+    return _loopback_publish_hosts()
+
+
+def _port_lines(inst_cfg: dict, mappings: list[tuple[object, object]],
+                indent: int = 6, *, gateway: bool = False) -> str:
+    """Compose `ports:` entries for (host_port, container_port) pairs.
+
+    By default each pair is published on loopback (plus the Linux Docker
+    gateway, see `_loopback_publish_hosts`), never on the LAN. With the
+    `exposeToNetwork` opt-in the lines are the historical address-less
+    form, which Docker publishes on every interface. An empty host port keeps
+    Docker's random host port (`"127.0.0.1::1025"`).
+
+    Only the web port, which containers reach as `host.docker.internal`,
+    passes ``gateway=True``. The database, Mailpit and the OLS console stay
+    on 127.0.0.1: a LAN host that routes to the gateway address could reach
+    anything published there."""
+    pad = " " * indent
+    lines = []
+    hosts = publish_hosts(inst_cfg)
+    if not gateway:
+        hosts = [host for host in hosts if host in ("", "127.0.0.1")]
+    for host_ip in hosts:
+        for host_port, container_port in mappings:
+            if host_ip:
+                spec = f"{host_ip}:{host_port}:{container_port}"
+            elif host_port:
+                spec = f"{host_port}:{container_port}"
+            else:
+                spec = f"{container_port}"
+            lines.append(f'{pad}- "{spec}"')
+    return "\n".join(lines)
+
+
 def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     """The original single-service Apache + mod_php web tier (default).
-    Kept byte-identical to the pre-multi-server template so existing
-    instances regenerate unchanged."""
+    Kept byte-identical to the pre-multi-server template, apart from the
+    published port's host address (loopback unless `exposeToNetwork`)."""
     image = _instance_web_image("apache", inst_cfg)
     return f"""  wp:
     image: {image}
@@ -277,7 +440,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       db:
         condition: service_healthy
     ports:
-      - "{inst_cfg["wordpress_port"]}:80"
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)], gateway=True)}
     # The official wordpress:latest image ships Apache with
     # `AllowOverride None` for /var/www/, which silently breaks pretty
     # permalinks (wp-json/ 404s). Patch the conf on every start, then
@@ -370,7 +533,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     depends_on:
       - wp
     ports:
-      - "{inst_cfg["wordpress_port"]}:80"
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)], gateway=True)}
     volumes:
       # Same WP files nginx serves statically + computes $document_root from.
       - {RUNTIME_DIR}/wp-{instance}:/var/www/html:ro
@@ -418,9 +581,10 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     depends_on:
       db:
         condition: service_healthy
+    # Second pair: the OLS WebAdmin console.
     ports:
-      - "{inst_cfg["wordpress_port"]}:80"
-      - "{inst_cfg["wordpress_port"] + 1000}:7080"  # OLS WebAdmin console
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)], gateway=True)}
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"] + 1000, 7080)])}
     environment:
       TZ: UTC
       # wp-cli runs here via `exec -u www-data` (HOME=/var/www, unwritable) — point
@@ -518,7 +682,7 @@ services:
       MARIADB_PASSWORD: wp
       MARIADB_ROOT_PASSWORD: root
     ports:
-      - "{inst_cfg["db_port"]}:3306"
+{_port_lines(inst_cfg, [(inst_cfg["db_port"], 3306)])}
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
@@ -528,9 +692,10 @@ services:
 
   mailpit:
     image: axllent/mailpit
+    # 8025 is the web inbox. 1025 (SMTP) gets a random host port; WordPress
+    # sends to mailpit:1025 over the Compose network, not through it.
     ports:
-      - "{inst_cfg["mailpit_port"]}:8025"
-      - "1025"
+{_port_lines(inst_cfg, [(inst_cfg["mailpit_port"], 8025), ("", 1025)])}
 
 {wpcli_svc}
 volumes:

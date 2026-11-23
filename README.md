@@ -1232,6 +1232,21 @@ New apply-log entries include UTC phase timestamps and exit codes. See the
 
 There is **no central project catalog** — each plugin self-describes.
 
+### Network exposure
+
+A WordPress instance's ports (web server, MariaDB, Mailpit, and the OpenLiteSpeed
+console) are published on `127.0.0.1` only. On Linux the web server port is also
+published on Docker's `docker0` gateway so `host.docker.internal` keeps working; when that is not
+possible (rootless Docker, a VM engine), Sandbox says so in one line. To open one
+instance to the network on purpose, for testing from a phone or a shared demo, set
+`"exposeToNetwork": true` in the project's own `sandbox.config.override.json` (the
+machine-wide config cannot set it, and deployed copies on a remote never expose), then
+run `./sb apply --project-dir DIR` and `./sb up --instance NAME`. Existing instances
+move to the loopback binding only when their containers are recreated
+(`./sb up --instance NAME`; data is kept). `./sb status` compares the configured
+binding with what the running containers publish and names that command when they
+differ. See [network exposure](docs/sandbox-config-reference.md#network-exposure-exposetonetwork).
+
 ### Clean URLs and host ingress
 
 Host ingress adoption is the opt-in alternative to the default Docker/Caddy provider

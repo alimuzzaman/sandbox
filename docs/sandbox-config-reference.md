@@ -535,6 +535,10 @@ file path.
   // Preferred WordPress port. null → auto-assigned from the free range.
   "port": null,
 
+  // Publish the instance's ports on every network interface instead of
+  // 127.0.0.1 only. Off by default. See "Network exposure" below.
+  "exposeToNetwork": false,
+
   // Test environment. auto selects unit only for unambiguous Brain/Monkey-only
   // evidence; unknown, mixed, and WordPress-marked projects use integration.
   "tests": { "suite": "auto" }   // auto | unit | integration
@@ -1005,6 +1009,174 @@ non-destructive alternative to `recreate_instance` / `./sb instance delete` +
 tier is force-recreated against the new image, and a `wpVersion` change (or a
 REMOVED pin) lands because apply reconciles WordPress core itself. See
 **In-place reconcile (`sb apply`)** below.
+
+## Network exposure (`exposeToNetwork`)
+
+Every port a WordPress instance publishes is bound to `127.0.0.1` by default,
+so only this machine can reach it:
+
+| Service | Host port | Container port |
+|---|---|---|
+| WordPress web server (`wp` on apache/litespeed, `nginx` on nginx) | `wordpress_port` | 80 |
+| OpenLiteSpeed WebAdmin console (litespeed only) | `wordpress_port` + 1000 | 7080 |
+| MariaDB (`db`) | `db_port` | 3306 |
+| Mailpit web inbox (`mailpit`) | `mailpit_port` | 8025 |
+| Mailpit SMTP (`mailpit`) | random | 1025 |
+
+Generic Compose instances (`kind: "compose"`) already publish their web
+service on `127.0.0.1` and ignore `exposeToNetwork`. Herd serves through the
+host and publishes nothing.
+
+Containers in the stack still talk to each other by service name (`db:3306`,
+`mailpit:1025`, `wp:9000`) on the stack's own Docker network; that does not go
+through a published port and is unchanged.
+
+### Linux and `host.docker.internal`
+
+The clean-URL proxy, `sb ci` job containers and the loopback mu-plugin reach
+an instance through `host.docker.internal`. Docker Desktop and OrbStack
+forward that name to the host's loopback, so `127.0.0.1` is enough there.
+
+On Linux the name resolves to the gateway of Docker's `docker0` bridge
+(usually `172.17.0.1`), so the web server port (`wordpress_port`) is also
+published on that address when this host owns it. MariaDB, Mailpit and the
+OpenLiteSpeed console stay on `127.0.0.1` only: nothing reaches them through
+`host.docker.internal`. In a default Docker setup the gateway address is not
+reachable from the LAN; a neighbour that routes it to this host could still
+try, so do not treat it as a firewall. Sandbox leaves the gateway out, keeps
+the web port on `127.0.0.1` only and prints one `note:` line saying why, when:
+
+- the default bridge uses another interface (dockerd `"bridge": "br0"`, which
+  usually carries the LAN address),
+- the host does not own the gateway (rootless Docker, Docker Desktop on Linux,
+  WSL2 with Docker Desktop, Colima and other VM engines), or
+- the gateway cannot be read (the engine is not running).
+
+In those cases the clean-URL proxy and `sb ci` cannot reach the instance
+through `host.docker.internal`; use `http://localhost:<port>` on the host. A
+daemon with a custom `host-gateway-ip` points `host.docker.internal` at an
+address Sandbox does not publish on, with the same effect. The lookup runs at
+most once a minute per process.
+
+Docker Engine before 28.0 lets a host on the same layer-2 segment reach ports
+published on `127.0.0.1` too (Docker's own port-publishing notes). Update the
+engine for the loopback binding to keep LAN neighbours out.
+
+### Opting in
+
+To let other machines on the network reach one instance (a phone on the same
+Wi-Fi, a shared demo), the project opts in:
+
+```jsonc
+// sandbox.config.override.json (keep it out of Git), or sandbox.config.json
+{ "exposeToNetwork": true }
+```
+
+- Only the project's own files count: `sandbox.config.json`, its override and
+  its label files. The machine-wide `$SANDBOX_HOME/config.json` cannot turn it
+  on; a value there is ignored with one `note:` line.
+- The value must be `true` or `false`. Anything else is refused when the
+  project config is read, before `ensure` or `apply` writes anything;
+  `sb ensure --json` and the MCP `ensure_instance` tool report it as
+  `expose_to_network_invalid`. Every other command that reads that project's
+  config (status, test, MCP tools) fails the same way until it is fixed.
+- A copy that `sb deploy` placed on a remote host (under
+  `$SANDBOX_HOME/deploy-src/`) never exposes, even with `true` in the
+  committed file: on a server, every interface usually includes the internet.
+  There is no separate way to ask for that.
+- Sandbox does not add the override file to the project's `.gitignore`; make
+  sure the project ignores it, or the setting is committed for every clone.
+
+With `true`, the ports are published without a host address, which Docker
+opens on every interface, as Sandbox did before this default. That includes
+the database (user `wp`, password `wp`; root password `root`) and the Mailpit
+inbox, so use it only on a network you trust. `sb up` and `sb apply` print a
+`note:` line whenever they start or recreate an exposed instance.
+
+WordPress still builds its links from its stored site address, usually
+`http://localhost:<port>` or a `.tst` name. A device that opens
+`http://<this-machine's-address>:<port>` can be redirected to that address,
+which it cannot resolve. That is WordPress behavior and is not changed by the
+opt-in.
+
+### What `sb status` shows
+
+`sb status` compares what the config asks for with what the running
+containers publish (`compose ps`):
+
+- `Ports: local only (127.0.0.1)`: configured for loopback and every running
+  port is on a local address.
+- `Ports: published on every network interface (exposeToNetwork: true)`:
+  the opt-in, and the containers match it.
+- `Ports: configured ..., but the running containers still publish db <port>,
+  ... on every network interface. Run ./sb up --instance NAME ...`: the
+  containers were created before this default or before the setting changed.
+- `Ports: not known (...)`: no running container could be read (stopped, or
+  Docker unavailable). It never says "local only" without reading them.
+
+`sb status --json` carries `port_exposure`: `configured` (`scope` `loopback`
+or `network`, `hosts`), `published` (`scope` `loopback`, `network`, `mixed` or
+`unknown`, and each port with its service, host address and host port),
+`in_sync` (`true`, `false`, or `null` when unknown) and `next_command`.
+
+### Applying it
+
+The binding is part of the generated Compose file, so it takes effect when
+Sandbox (re)creates the containers:
+
+- A new instance gets it when `sb ensure` first boots it.
+- An existing instance keeps its current binding until its containers are
+  recreated, however long that takes. `sb ensure` on an instance that is
+  already up returns it as it is, does not rebind and does not read a changed
+  `exposeToNetwork`. `sb up --instance NAME` recreates every service whose
+  binding changed (web, database, Mailpit). The named volume `db_data` and the
+  `runtime/wp-<instance>` bind mount are kept, so the database and uploads are
+  unchanged.
+- After adding or removing `exposeToNetwork`, run `sb apply --project-dir DIR`
+  to record it and rebind the web tier, then `sb up --instance NAME` to rebind
+  the database and Mailpit. `sb apply` recreates only the web tier, by design;
+  until `sb up` runs, `sb status` reports the difference.
+
+### IPv6 and the `<domain>:<port>` alternative
+
+Ports are published on IPv4 loopback only. Clients that try every address of
+`localhost` (browsers, curl, Python, Node 20 and later) fall back to
+`127.0.0.1`, and Node 16 and older try IPv4 first. A client that tries only
+`::1` (Node 17 to 19 `http`/`fetch`) gets "connection refused" for
+`http://localhost:<port>`; use `http://127.0.0.1:<port>` there.
+`[::1]:<port>` is no longer held by the
+instance, so another program can listen on it.
+
+The `http://<domain>:<port>` alternative that `sb ensure` names when the
+clean-URL proxy is unavailable dials the proxy's address (`127.0.0.77`), where
+the instance port is no longer published, so it is no longer offered.
+
+### Remote and hosted sites
+
+A remote host gets the loopback default once its runtime runs this revision
+(`sb remote service migrate <remote> --confirm`), and each instance there once
+it is recreated (`sb up --instance NAME` on that host, or a deploy that
+recreates it). The routes into a remote instance do not use the published
+ports from outside the host:
+
+- `sb deploy --expose`, aliases and previews: the remote's Caddy front door
+  runs on the host and proxies to `127.0.0.1:<port>`.
+- `sb host` targets and stacks: their own generated override already
+  publishes the web service on `127.0.0.1`. The ports a target's own Compose
+  declares are the project's to choose and are not changed.
+- Tailnet names: the remote's nginx listens on the tailnet address and
+  proxies to the upstream the name was added with. A `127.0.0.1:<port>`
+  upstream keeps working. A name added with the host's own LAN or tailnet
+  address and an instance's port stops answering once that instance is
+  rebound; point it at loopback with `sb host tailnet-name add FQDN --remote R
+  --upstream 127.0.0.1:<port> --replace-upstream`.
+- Host ingress adapters (Herd/Valet, system Caddy and others) proxy to
+  `127.0.0.1:<port>`.
+- The remote's own clean-URL proxy and `sb ci` jobs use `host.docker.internal`
+  and follow the Linux rules above.
+
+`exposeToNetwork` is ignored for deployed copies (see above), so a remote
+instance cannot be opened to every interface of its host through this key.
 
 ## Aliases (extra hostnames)
 

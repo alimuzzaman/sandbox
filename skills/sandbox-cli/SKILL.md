@@ -986,6 +986,23 @@ sb test
 sb deploy --remote <name> --ensure --expose
 ```
 
+### Clean URLs on Linux: reinstall the helper once
+
+A Linux machine that set up clean URLs (`*.tst`) before commit d83bd15
+(2026-11-23) has a broken copy of the root-owned helper
+`/usr/local/libexec/sandbox-proxy-helper`. That copy refuses every privileged
+action with `installed helper must be owned by root`, so `sb ensure` silently
+gives `http://localhost:<port>` instead of the clean URL. After updating the
+checkout, run once in your own terminal:
+
+```bash
+sudo tools/proxy-helper.sh install
+```
+
+Check it with `sudo -n /usr/local/libexec/sandbox-proxy-helper installed-status`
+(prints `ready`). macOS is not affected. Agents cannot run this for the user:
+it needs the user's sudo.
+
 Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.

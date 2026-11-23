@@ -1063,8 +1063,10 @@ Wi-Fi, a shared demo), the project opts in:
   its label files. The machine-wide `$SANDBOX_HOME/config.json` cannot turn it
   on; a value there is ignored with one `note:` line.
 - The value must be `true` or `false`. Anything else is refused when the
-  project config is read (`expose_to_network_invalid`, also in `--json`),
-  before `ensure` or `apply` writes anything.
+  project config is read, before `ensure` or `apply` writes anything;
+  `sb ensure --json` and the MCP `ensure_instance` tool report it as
+  `expose_to_network_invalid`. Every other command that reads that project's
+  config (status, test, MCP tools) fails the same way until it is fixed.
 - A copy that `sb deploy` placed on a remote host (under
   `$SANDBOX_HOME/deploy-src/`) never exposes, even with `true` in the
   committed file: on a server, every interface usually includes the internet.
@@ -1126,9 +1128,10 @@ Sandbox (re)creates the containers:
 
 Ports are published on IPv4 loopback only. Clients that try every address of
 `localhost` (browsers, curl, Python, Node 20 and later) fall back to
-`127.0.0.1`. A client that tries only `::1` (Node 19 and older `http`/`fetch`)
-gets "connection refused" for `http://localhost:<port>`; use
-`http://127.0.0.1:<port>` there. `[::1]:<port>` is no longer held by the
+`127.0.0.1`, and Node 16 and older try IPv4 first. A client that tries only
+`::1` (Node 17 to 19 `http`/`fetch`) gets "connection refused" for
+`http://localhost:<port>`; use `http://127.0.0.1:<port>` there.
+`[::1]:<port>` is no longer held by the
 instance, so another program can listen on it.
 
 The `http://<domain>:<port>` alternative that `sb ensure` names when the

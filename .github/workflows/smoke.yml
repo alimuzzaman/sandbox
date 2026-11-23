@@ -31,6 +31,20 @@ jobs:
           docker --version
           docker compose version
 
+      # The smoke checks the default clean URL, which needs the one-time
+      # clean-URL setup an operator does interactively, and `proxy-helper.sh
+      # dns-up` serves only a plain /etc/resolv.conf (it declines one owned by
+      # systemd-resolved, as on these runners). Give the runner both.
+      - name: Prepare clean-URL host
+        run: |
+          command -v dnsmasq >/dev/null || sudo apt-get install -y --no-install-recommends dnsmasq-base
+          sudo ./tools/proxy-helper.sh install
+          if [ -L /etc/resolv.conf ]; then
+            upstream=$(readlink -f /run/systemd/resolve/resolv.conf)
+            sudo rm /etc/resolv.conf
+            sudo cp "$upstream" /etc/resolv.conf
+          fi
+
       # Docker is already running on ubuntu-latest runners.
       # PyYAML and other runtime deps are fetched on demand by `sb`.
       - name: Run smoke test

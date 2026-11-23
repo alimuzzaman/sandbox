@@ -1232,6 +1232,19 @@ New apply-log entries include UTC phase timestamps and exit codes. See the
 
 There is **no central project catalog** — each plugin self-describes.
 
+### Network exposure
+
+An instance's ports (WordPress, MariaDB, Mailpit, and the OpenLiteSpeed console)
+are published on `127.0.0.1` only, plus the Docker bridge gateway on Linux so
+`host.docker.internal` keeps working. Other machines on the network cannot reach
+them. To open one instance to the network on purpose, for testing from a phone
+or a shared demo, set `"exposeToNetwork": true` in the project's gitignored
+`sandbox.config.override.json`, then run `./sb apply --project-dir DIR` and
+`./sb up --instance NAME`.
+Existing instances move to the loopback binding the next time their containers
+are recreated (`./sb up --instance NAME`); data is kept. See
+[network exposure](docs/sandbox-config-reference.md#network-exposure-exposetonetwork).
+
 ### Clean URLs and host ingress
 
 Host ingress adoption is the opt-in alternative to the default Docker/Caddy provider

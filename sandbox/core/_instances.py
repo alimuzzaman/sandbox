@@ -150,6 +150,11 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             value = inst.get(extension_key, runtime.get(extension_key))
             if value is not None:
                 resolved[extension_key] = _json_safe_php_extensions(value)
+        # Network exposure is opt-in. Only an explicit true is carried, so the
+        # default resolved mapping keeps its historical shape and the compose
+        # renderer publishes on loopback (see `publish_hosts`).
+        if inst.get("expose_to_network") is True:
+            resolved["expose_to_network"] = True
         if inst.get("instance_incarnation_id") is not None:
             resolved["instance_incarnation_id"] = inst.get("instance_incarnation_id")
         if inst.get("server_config_mount_id") is not None:
@@ -1079,6 +1084,15 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     }
     if pconf.get("multisite"):
         block["multisite"] = pconf["multisite"]
+    # Published ports stay on loopback unless the project (or its gitignored
+    # override) asks for every interface. Rebuilt from the project on every
+    # ensure/apply, so removing the key turns exposure back off.
+    _expose = pconf.get("exposeToNetwork")
+    if _expose is not None and not isinstance(_expose, bool):
+        die("exposeToNetwork must be true or false (it publishes the instance's "
+            "WordPress, database and Mailpit ports on every network interface).")
+    if _expose is True:
+        block["expose_to_network"] = True
     # Local proxy TLD (sandbox.config.json `tld`, default tst). Persisted so the
     # MCP server + every `sb` invocation match a domain against its own TLD.
     block["tld"] = pconf.get("tld") or PROXY_TLD

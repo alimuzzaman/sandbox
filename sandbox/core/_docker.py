@@ -262,10 +262,88 @@ def _env_config_lines(inst_cfg: dict, docroot: str = "/var/www/html",
             f"{pad}WORDPRESS_CONFIG_EXTRA: |\n{body}")
 
 
+_PUBLISH_GATEWAY_CACHE: list[str] = []
+
+
+def _host_address_is_local(address: str) -> bool:
+    """True when this host owns `address` (a socket can bind to it).
+
+    Docker refuses to publish on an address the host does not have, which
+    would fail the whole `compose up`. Rootless engines and VM-backed
+    engines keep their bridge gateway inside another network namespace, so
+    the address is checked here instead of assumed."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind((address, 0))
+        return True
+    except OSError:
+        return False
+
+
+def _loopback_publish_hosts() -> list[str]:
+    """Host addresses an instance's ports are published on by default.
+
+    Always 127.0.0.1. On Linux, also the Docker bridge gateway, which is what
+    `host.docker.internal` (`host-gateway`) resolves to there: the clean-URL
+    Caddy proxy, `sb ci` job containers and the loopback mu-plugin fallback
+    reach an instance through that name. It is a private bridge address, not
+    a LAN or public one. Docker Desktop and OrbStack forward
+    `host.docker.internal` to the host's loopback, so 127.0.0.1 is enough
+    there. The same rule keeps the `sb web` bridge off public addresses
+    (`_bridge_hosts`). A remote-only controller never asks the engine."""
+    hosts = ["127.0.0.1"]
+    if not sys.platform.startswith("linux") or local_runtime_remote_only():
+        return hosts
+    if not _PUBLISH_GATEWAY_CACHE:
+        # Only a found gateway is cached: an engine that is not up yet must
+        # not pin this process to loopback-only for its whole life.
+        gateways = [host for host in _bridge_hosts() if host != "127.0.0.1"
+                    and _host_address_is_local(host)]
+        _PUBLISH_GATEWAY_CACHE.extend(gateways)
+    return hosts + [host for host in _PUBLISH_GATEWAY_CACHE if host not in hosts]
+
+
+def instance_exposed_to_network(inst_cfg: dict) -> bool:
+    """True when the instance opted in to publishing on every interface."""
+    return inst_cfg.get("expose_to_network") is True
+
+
+def publish_hosts(inst_cfg: dict) -> list[str]:
+    """Host addresses for this instance's published ports. An empty string
+    means no address, i.e. every interface (the `exposeToNetwork` opt-in)."""
+    if instance_exposed_to_network(inst_cfg):
+        return [""]
+    return _loopback_publish_hosts()
+
+
+def _port_lines(inst_cfg: dict, mappings: list[tuple[object, object]],
+                indent: int = 6) -> str:
+    """Compose `ports:` entries for (host_port, container_port) pairs.
+
+    By default each pair is published on loopback (plus the Linux Docker
+    gateway, see `_loopback_publish_hosts`), never on the LAN. With the
+    `exposeToNetwork` opt-in the lines are the historical address-less
+    form, which Docker publishes on every interface. An empty host port keeps
+    Docker's random host port (`"127.0.0.1::1025"`)."""
+    pad = " " * indent
+    lines = []
+    for host_ip in publish_hosts(inst_cfg):
+        for host_port, container_port in mappings:
+            if host_ip:
+                spec = f"{host_ip}:{host_port}:{container_port}"
+            elif host_port:
+                spec = f"{host_port}:{container_port}"
+            else:
+                spec = f"{container_port}"
+            lines.append(f'{pad}- "{spec}"')
+    return "\n".join(lines)
+
+
 def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     """The original single-service Apache + mod_php web tier (default).
-    Kept byte-identical to the pre-multi-server template so existing
-    instances regenerate unchanged."""
+    Kept byte-identical to the pre-multi-server template, apart from the
+    published port's host address (loopback unless `exposeToNetwork`)."""
     image = _instance_web_image("apache", inst_cfg)
     return f"""  wp:
     image: {image}
@@ -277,7 +355,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       db:
         condition: service_healthy
     ports:
-      - "{inst_cfg["wordpress_port"]}:80"
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)])}
     # The official wordpress:latest image ships Apache with
     # `AllowOverride None` for /var/www/, which silently breaks pretty
     # permalinks (wp-json/ 404s). Patch the conf on every start, then
@@ -370,7 +448,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     depends_on:
       - wp
     ports:
-      - "{inst_cfg["wordpress_port"]}:80"
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80)])}
     volumes:
       # Same WP files nginx serves statically + computes $document_root from.
       - {RUNTIME_DIR}/wp-{instance}:/var/www/html:ro
@@ -418,9 +496,10 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     depends_on:
       db:
         condition: service_healthy
+    # Second pair: the OLS WebAdmin console.
     ports:
-      - "{inst_cfg["wordpress_port"]}:80"
-      - "{inst_cfg["wordpress_port"] + 1000}:7080"  # OLS WebAdmin console
+{_port_lines(inst_cfg, [(inst_cfg["wordpress_port"], 80),
+                        (inst_cfg["wordpress_port"] + 1000, 7080)])}
     environment:
       TZ: UTC
       # wp-cli runs here via `exec -u www-data` (HOME=/var/www, unwritable) — point
@@ -518,7 +597,7 @@ services:
       MARIADB_PASSWORD: wp
       MARIADB_ROOT_PASSWORD: root
     ports:
-      - "{inst_cfg["db_port"]}:3306"
+{_port_lines(inst_cfg, [(inst_cfg["db_port"], 3306)])}
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
@@ -528,9 +607,10 @@ services:
 
   mailpit:
     image: axllent/mailpit
+    # 8025 is the web inbox. 1025 (SMTP) gets a random host port; WordPress
+    # sends to mailpit:1025 over the Compose network, not through it.
     ports:
-      - "{inst_cfg["mailpit_port"]}:8025"
-      - "1025"
+{_port_lines(inst_cfg, [(inst_cfg["mailpit_port"], 8025), ("", 1025)])}
 
 {wpcli_svc}
 volumes:

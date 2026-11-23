@@ -1,0 +1,204 @@
+"""Published ports: loopback by default, every interface only on opt-in.
+
+Covers the three places the setting has to reach: the instance block built
+from the project's `exposeToNetwork` and the rendered per-instance Compose file
+(every published port of every server).
+
+    .cli-venv/bin/python -m unittest tests.test_published_ports -v
+"""
+import contextlib
+import io
+import json
+import os
+import shutil
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import sandbox.cli  # noqa: E402,F401  (registers command modules on import)
+import sandbox.core as core  # noqa: E402
+import sandbox.core._docker as docker  # noqa: E402
+import sandbox.core._instances as instances  # noqa: E402
+import sandbox_core  # noqa: E402
+
+SERVERS = ("apache", "nginx", "litespeed")
+PORTS = {"wordpress_port": 8300, "db_port": 3500, "mailpit_port": 8301}
+
+
+def _published(document: dict) -> dict[str, list[str]]:
+    return {name: service["ports"] for name, service in document["services"].items()
+            if service.get("ports")}
+
+
+class _RenderCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sb-ports-")
+        self.old = os.environ.get("SANDBOX_RUNTIME")
+        os.environ["SANDBOX_RUNTIME"] = self.tmp
+        docker._PUBLISH_GATEWAY_CACHE.clear()
+        self.addCleanup(docker._PUBLISH_GATEWAY_CACHE.clear)
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("SANDBOX_RUNTIME", None)
+        else:
+            os.environ["SANDBOX_RUNTIME"] = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _inst_cfg(self, server: str, **extra) -> dict:
+        sandbox_core.registry_put(str(Path(self.tmp) / f"proj-{server}"), instance="ti",
+                                  server=server, **PORTS)
+        cfg = core.resolve_instances({})["ti"]
+        cfg.update(extra)
+        return cfg
+
+    def _render(self, server: str, **extra) -> dict:
+        return yaml.safe_load(core.render_compose(
+            "ti", self._inst_cfg(server, **extra), Path("/tmp/plugins-host")))
+
+
+class TestDefaultBindsLoopback(_RenderCase):
+    def test_every_published_port_of_every_server_is_on_loopback(self):
+        expected_web = {"apache": "wp", "nginx": "nginx", "litespeed": "wp"}
+        with mock.patch.object(docker.sys, "platform", "darwin"):
+            for server in SERVERS:
+                with self.subTest(server=server):
+                    published = _published(self._render(server))
+                    self.assertEqual(set(published),
+                                     {expected_web[server], "db", "mailpit"})
+                    for ports in published.values():
+                        for entry in ports:
+                            self.assertTrue(entry.startswith("127.0.0.1:"), entry)
+                    web = ["127.0.0.1:8300:80"]
+                    if server == "litespeed":
+                        web.append("127.0.0.1:9300:7080")
+                    self.assertEqual(published[expected_web[server]], web)
+                    self.assertEqual(published["db"], ["127.0.0.1:3500:3306"])
+                    self.assertEqual(published["mailpit"],
+                                     ["127.0.0.1:8301:8025", "127.0.0.1::1025"])
+
+    def test_php_fpm_still_publishes_nothing(self):
+        with mock.patch.object(docker.sys, "platform", "darwin"):
+            self.assertNotIn("ports", self._render("nginx")["services"]["wp"])
+
+    def test_containers_keep_host_gateway_and_service_names(self):
+        """Loopback publishing does not change container-to-container or
+        container-to-host wiring: services still reach db:3306 and
+        mailpit:1025 on the Compose network, and host.docker.internal."""
+        with mock.patch.object(docker.sys, "platform", "darwin"):
+            for server in SERVERS:
+                with self.subTest(server=server):
+                    services = self._render(server)["services"]
+                    self.assertIn("host.docker.internal:host-gateway",
+                                  services["wp"]["extra_hosts"])
+                    if server != "litespeed":
+                        self.assertEqual(
+                            services["wp"]["environment"]["WORDPRESS_DB_HOST"], "db:3306")
+
+    def test_linux_adds_the_docker_bridge_gateway_and_nothing_wider(self):
+        with mock.patch.object(docker.sys, "platform", "linux"), \
+                mock.patch.object(docker, "local_runtime_remote_only", return_value=False), \
+                mock.patch.object(docker, "_bridge_hosts",
+                                  return_value=["127.0.0.1", "172.17.0.1"]), \
+                mock.patch.object(docker, "_host_address_is_local", return_value=True):
+            published = _published(self._render("nginx"))
+        self.assertEqual(published["nginx"], ["127.0.0.1:8300:80", "172.17.0.1:8300:80"])
+        self.assertEqual(published["db"], ["127.0.0.1:3500:3306", "172.17.0.1:3500:3306"])
+        self.assertEqual(published["mailpit"], [
+            "127.0.0.1:8301:8025", "127.0.0.1::1025",
+            "172.17.0.1:8301:8025", "172.17.0.1::1025"])
+
+    def test_linux_gateway_the_host_does_not_own_is_left_out(self):
+        with mock.patch.object(docker.sys, "platform", "linux"), \
+                mock.patch.object(docker, "local_runtime_remote_only", return_value=False), \
+                mock.patch.object(docker, "_bridge_hosts",
+                                  return_value=["127.0.0.1", "172.17.0.1"]), \
+                mock.patch.object(docker, "_host_address_is_local", return_value=False):
+            self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
+        # A miss is not cached: a later lookup may still find the gateway.
+        self.assertEqual(docker._PUBLISH_GATEWAY_CACHE, [])
+
+    def test_remote_only_controller_never_asks_the_engine(self):
+        with mock.patch.object(docker.sys, "platform", "linux"), \
+                mock.patch.object(docker, "local_runtime_remote_only", return_value=True), \
+                mock.patch.object(docker, "_bridge_hosts") as bridge_hosts:
+            self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
+        bridge_hosts.assert_not_called()
+
+
+class TestExposeToNetworkOptIn(_RenderCase):
+    def test_opt_in_publishes_as_before_on_every_interface(self):
+        expected_web = {"apache": "wp", "nginx": "nginx", "litespeed": "wp"}
+        with mock.patch.object(docker, "_loopback_publish_hosts") as loopback:
+            for server in SERVERS:
+                with self.subTest(server=server):
+                    published = _published(self._render(server, expose_to_network=True))
+                    web = ["8300:80"] + (["9300:7080"] if server == "litespeed" else [])
+                    self.assertEqual(published[expected_web[server]], web)
+                    self.assertEqual(published["db"], ["3500:3306"])
+                    self.assertEqual(published["mailpit"], ["8301:8025", "1025"])
+        loopback.assert_not_called()
+
+    def test_only_an_explicit_true_counts(self):
+        for value in (None, False, "true", 1):
+            with self.subTest(value=value):
+                self.assertFalse(core.instance_exposed_to_network(
+                    {"expose_to_network": value}))
+        self.assertTrue(core.instance_exposed_to_network({"expose_to_network": True}))
+
+    def test_resolved_instance_carries_the_flag_only_when_on(self):
+        sandbox_core.registry_put(str(Path(self.tmp) / "proj"), instance="ti",
+                                  server="nginx", **PORTS)
+        self.assertNotIn("expose_to_network", core.resolve_instances({})["ti"])
+        cfg = {"instances": {"ti": {"expose_to_network": True}}}
+        self.assertIs(core.resolve_instances(cfg)["ti"]["expose_to_network"], True)
+        cfg = {"instances": {"ti": {"expose_to_network": False}}}
+        self.assertNotIn("expose_to_network", core.resolve_instances(cfg)["ti"])
+
+
+class TestInstanceBlock(unittest.TestCase):
+    """`exposeToNetwork` is rebuilt from the project on every ensure/apply."""
+
+    def _block(self, pconf, previous=None):
+        local = {"instances": {"project": previous}} if previous else {}
+        with mock.patch.object(instances, "_local_yaml", return_value=local):
+            return instances._build_instance_block(
+                {}, "project", "/tmp/project", {"root": "/tmp/project", **pconf},
+                dict(PORTS), "nginx")
+
+    def test_declared_true_lands_in_the_block(self):
+        self.assertIs(self._block({"exposeToNetwork": True})["expose_to_network"], True)
+
+    def test_omitted_or_false_leaves_it_out(self):
+        self.assertNotIn("expose_to_network", self._block({}))
+        self.assertNotIn("expose_to_network", self._block({"exposeToNetwork": False}))
+
+    def test_removing_the_key_turns_exposure_off_again(self):
+        block = self._block({}, previous={"expose_to_network": True})
+        self.assertNotIn("expose_to_network", block)
+
+    def test_a_non_boolean_value_fails_the_apply(self):
+        for value in ("yes", 1, "0.0.0.0"):
+            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self._block({"exposeToNetwork": value})
+
+
+class TestLegacyComposeFile(unittest.TestCase):
+    def test_checked_in_compose_publishes_on_loopback(self):
+        document = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+        for name, ports in _published(document).items():
+            for entry in ports:
+                self.assertTrue(entry.startswith("127.0.0.1:"), f"{name}: {entry}")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

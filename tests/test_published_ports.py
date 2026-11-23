@@ -205,12 +205,116 @@ class TestInstanceBlock(unittest.TestCase):
                     self._block({"exposeToNetwork": value})
 
 
+def _ps_rows(*rows) -> str:
+    """`compose ps --format json` lines: (service, url, published, target)."""
+    out = []
+    for service, url, published, target in rows:
+        out.append(json.dumps({"Service": service, "State": "running", "Publishers": [
+            {"URL": url, "TargetPort": target, "PublishedPort": published, "Protocol": "tcp"}]}))
+    return "\n".join(out)
+
+
+OLD_WILDCARD_ROWS = (("nginx", "0.0.0.0", 8300, 80), ("db", "0.0.0.0", 3500, 3306),
+                     ("mailpit", "0.0.0.0", 8301, 8025))
+LOOPBACK_ROWS = (("nginx", "127.0.0.1", 8300, 80), ("db", "127.0.0.1", 3500, 3306),
+                 ("mailpit", "127.0.0.1", 8301, 8025))
+
+
+class TestStatusReadsRunningContainers(unittest.TestCase):
+    """M1: status reports what the running containers publish, not only config."""
+
+    def _containers(self, rows):
+        return [json.loads(line) for line in _ps_rows(*rows).splitlines()]
+
+    def test_old_containers_on_every_interface_are_reported_not_hidden(self):
+        exposure = lifecycle._port_exposure(
+            {"server": "nginx", **PORTS}, self._containers(OLD_WILDCARD_ROWS), instance="fixture")
+        self.assertEqual(exposure["configured"]["scope"], "loopback")
+        self.assertEqual(exposure["published"]["scope"], "network")
+        self.assertIs(exposure["in_sync"], False)
+        self.assertEqual(exposure["next_command"], "./sb up --instance fixture")
+
+    def test_matching_loopback_containers_are_in_sync(self):
+        with mock.patch.object(lifecycle, "publish_hosts", return_value=["127.0.0.1"]):
+            exposure = lifecycle._port_exposure(
+                {"server": "nginx", **PORTS}, self._containers(LOOPBACK_ROWS), instance="fixture")
+        self.assertEqual(exposure["published"]["scope"], "loopback")
+        self.assertIs(exposure["in_sync"], True)
+        self.assertIsNone(exposure["next_command"])
+
+    def test_no_container_data_is_unknown_never_local_only(self):
+        for containers in (None, []):
+            with self.subTest(containers=containers):
+                exposure = lifecycle._port_exposure(
+                    {"server": "nginx", **PORTS}, containers, instance="fixture")
+                self.assertEqual(exposure["published"]["scope"], "unknown")
+                self.assertIsNone(exposure["in_sync"])
+
+    def test_opt_in_not_yet_applied_is_reported(self):
+        exposure = lifecycle._port_exposure(
+            {"server": "nginx", "expose_to_network": True, **PORTS},
+            self._containers(LOOPBACK_ROWS), instance="fixture")
+        self.assertEqual(exposure["configured"]["scope"], "network")
+        self.assertEqual(exposure["published"]["scope"], "loopback")
+        self.assertIs(exposure["in_sync"], False)
+
+    def test_json_status_uses_the_container_rows(self):
+        ps = types.SimpleNamespace(stdout=_ps_rows(*OLD_WILDCARD_ROWS), returncode=0)
+        with mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
+                    registry_find_instance=lambda _name: None)), \
+                mock.patch.object(lifecycle, "_is_herd_instance", return_value=False), \
+                mock.patch.object(lifecycle, "resolve_instances",
+                                  return_value={"fixture": {"server": "nginx", **PORTS}}), \
+                mock.patch.object(lifecycle, "compose", return_value=ps), \
+                mock.patch.object(lifecycle, "site_url", return_value="http://localhost:8300"), \
+                mock.patch.object(lifecycle, "php_extension_status", return_value=None):
+            payload = lifecycle._status_json_payload({}, "fixture")
+        self.assertEqual(payload["port_exposure"]["published"]["scope"], "network")
+        self.assertIs(payload["port_exposure"]["in_sync"], False)
+
+    def _text(self, instance_cfg, ps_stdout):
+        args = types.SimpleNamespace(json=False, resolved_instance="fixture")
+        output = io.StringIO()
+        missing = Path(tempfile.gettempdir()) / "sb-ports-no-such-focus-file"
+        ps = types.SimpleNamespace(stdout=ps_stdout, returncode=0)
+        with mock.patch.object(lifecycle, "_remote_lifecycle", return_value=None), \
+                mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
+                    registry_find_instance=lambda _name: None)), \
+                mock.patch.object(lifecycle, "_is_herd_instance", return_value=False), \
+                mock.patch.object(lifecycle, "resolve_instances", return_value=instance_cfg), \
+                mock.patch.object(lifecycle, "compose", return_value=ps), \
+                mock.patch.object(lifecycle, "active_project_file", return_value=missing), \
+                mock.patch.object(lifecycle, "focus_file", return_value=missing), \
+                mock.patch.object(lifecycle, "mcp_server_name", return_value="sandbox"), \
+                mock.patch.object(lifecycle, "_bridge_token_for", return_value=None), \
+                mock.patch.object(lifecycle, "php_extension_status", return_value=None), \
+                mock.patch.object(lifecycle, "publish_hosts", return_value=["127.0.0.1"]), \
+                contextlib.redirect_stdout(output):
+            lifecycle.cmd_status({}, args)
+        return output.getvalue()
+
+    def test_text_status_names_the_mismatch_and_the_command(self):
+        text = self._text({"fixture": {"server": "nginx", **PORTS}},
+                          _ps_rows(*OLD_WILDCARD_ROWS))
+        self.assertNotIn("Ports: local only", text)
+        self.assertIn("still publish", text)
+        self.assertIn("on every network interface", text)
+        self.assertIn("./sb up --instance fixture", text)
+
+    def test_text_status_says_not_known_without_container_data(self):
+        text = self._text({"fixture": {"server": "nginx", **PORTS}}, "")
+        self.assertNotIn("Ports: local only", text)
+        self.assertIn("Ports: not known", text)
+
+
 class TestStatusShowsExposure(unittest.TestCase):
+    """In-sync cases: config and running containers agree."""
+
     def _instance(self, **extra):
         return {"fixture": {"server": "nginx", **PORTS, **extra}}
 
-    def _json(self, instance_cfg):
-        ps = types.SimpleNamespace(stdout="", returncode=0)
+    def _json(self, instance_cfg, rows):
+        ps = types.SimpleNamespace(stdout=_ps_rows(*rows), returncode=0)
         with mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
                     registry_find_instance=lambda _name: None)), \
                 mock.patch.object(lifecycle, "_is_herd_instance", return_value=False), \
@@ -222,47 +326,36 @@ class TestStatusShowsExposure(unittest.TestCase):
             return lifecycle._status_json_payload({}, "fixture")
 
     def test_json_reports_loopback_by_default(self):
-        self.assertEqual(self._json(self._instance())["port_exposure"], {
-            "scope": "loopback", "expose_to_network": False, "hosts": ["127.0.0.1"]})
+        exposure = self._json(self._instance(), LOOPBACK_ROWS)["port_exposure"]
+        self.assertEqual(exposure["configured"], {"scope": "loopback", "hosts": ["127.0.0.1"]})
+        self.assertEqual(exposure["published"]["scope"], "loopback")
+        self.assertEqual(len(exposure["published"]["ports"]), 3)
+        self.assertIs(exposure["in_sync"], True)
 
     def test_json_reports_the_opt_in(self):
-        exposure = self._json(self._instance(expose_to_network=True))["port_exposure"]
-        self.assertEqual(exposure, {"scope": "network", "expose_to_network": True,
-                                    "hosts": ["*"]})
+        exposure = self._json(self._instance(expose_to_network=True),
+                              OLD_WILDCARD_ROWS)["port_exposure"]
+        self.assertEqual(exposure["configured"], {"scope": "network", "hosts": ["*"]})
+        self.assertEqual(exposure["published"]["scope"], "network")
+        self.assertIs(exposure["in_sync"], True)
 
     def test_public_status_json_keeps_the_field(self):
-        payload = self._json(self._instance(expose_to_network=True))
-        self.assertEqual(lifecycle._public_status_json(payload)["port_exposure"]["scope"],
-                         "network")
+        payload = self._json(self._instance(expose_to_network=True), OLD_WILDCARD_ROWS)
+        public = lifecycle._public_status_json(payload)["port_exposure"]
+        self.assertEqual(public["configured"]["scope"], "network")
 
     def test_herd_has_no_published_ports(self):
-        self.assertIsNone(lifecycle._port_exposure({"server": "herd"}))
+        self.assertIsNone(lifecycle._port_exposure({"server": "herd"}, [], instance="h"))
 
-    def _text(self, instance_cfg):
-        args = types.SimpleNamespace(json=False, resolved_instance="fixture")
-        output = io.StringIO()
-        missing = Path(tempfile.gettempdir()) / "sb-ports-no-such-focus-file"
-        with mock.patch.object(lifecycle, "_remote_lifecycle", return_value=None), \
-                mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
-                    registry_find_instance=lambda _name: None)), \
-                mock.patch.object(lifecycle, "_is_herd_instance", return_value=False), \
-                mock.patch.object(lifecycle, "resolve_instances", return_value=instance_cfg), \
-                mock.patch.object(lifecycle, "compose"), \
-                mock.patch.object(lifecycle, "active_project_file", return_value=missing), \
-                mock.patch.object(lifecycle, "focus_file", return_value=missing), \
-                mock.patch.object(lifecycle, "mcp_server_name", return_value="sandbox"), \
-                mock.patch.object(lifecycle, "_bridge_token_for", return_value=None), \
-                mock.patch.object(lifecycle, "php_extension_status", return_value=None), \
-                mock.patch.object(lifecycle, "publish_hosts", return_value=["127.0.0.1"]), \
-                contextlib.redirect_stdout(output):
-            lifecycle.cmd_status({}, args)
-        return output.getvalue()
+    def _text(self, instance_cfg, rows):
+        return TestStatusReadsRunningContainers._text(self, instance_cfg, _ps_rows(*rows))
 
     def test_text_status_says_local_only_by_default(self):
-        self.assertIn("Ports: local only (127.0.0.1)", self._text(self._instance()))
+        self.assertIn("Ports: local only (127.0.0.1)",
+                      self._text(self._instance(), LOOPBACK_ROWS))
 
     def test_text_status_names_the_opt_in(self):
-        text = self._text(self._instance(expose_to_network=True))
+        text = self._text(self._instance(expose_to_network=True), OLD_WILDCARD_ROWS)
         self.assertIn("Ports: published on every network interface (exposeToNetwork: true)",
                       text)
 

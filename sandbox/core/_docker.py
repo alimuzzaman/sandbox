@@ -262,7 +262,14 @@ def _env_config_lines(inst_cfg: dict, docroot: str = "/var/www/html",
             f"{pad}WORDPRESS_CONFIG_EXTRA: |\n{body}")
 
 
-_PUBLISH_GATEWAY_CACHE: list[str] = []
+# Per-process result of the Linux gateway lookup: {"hosts": [...], "at": t}.
+# A found gateway is kept for the process; a miss is kept for
+# _GATEWAY_MISS_TTL seconds, so `write_compose_files` (which renders every
+# instance on most commands) asks the engine once, while a long-running MCP
+# server still picks the gateway up once the engine is ready.
+_PUBLISH_GATEWAY_CACHE: dict = {}
+_GATEWAY_MISS_TTL = 60.0
+_DOCKER_DEFAULT_BRIDGE = "docker0"
 
 
 def _host_address_is_local(address: str) -> bool:
@@ -281,27 +288,91 @@ def _host_address_is_local(address: str) -> bool:
         return False
 
 
+def _default_bridge_facts() -> tuple[str, str] | None:
+    """(gateway, host interface) of Docker's default `bridge` network, or None.
+
+    One bounded `docker network inspect`; the gateway must be a private IPv4
+    address, as for the `sb web` bridge (`_bridge_hosts`)."""
+    import ipaddress
+    try:
+        result = subprocess.run(
+            ["docker", "network", "inspect", "bridge", "--format",
+             '{{range .IPAM.Config}}{{.Gateway}}{{end}} '
+             '{{index .Options "com.docker.network.bridge.name"}}'],
+            capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    parts = (result.stdout or "").split()
+    if not parts:
+        return None
+    try:
+        gateway = ipaddress.IPv4Address(parts[0])
+    except ValueError:
+        return None
+    private = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    if not any(gateway in ipaddress.ip_network(net) for net in private):
+        return None
+    return str(gateway), (parts[1] if len(parts) > 1 else "")
+
+
+def _gateway_miss(reason: str) -> list[str]:
+    print(f"note: instance ports are published on 127.0.0.1 only: {reason}. "
+          "host.docker.internal from a container (clean-URL proxy, sb ci) cannot "
+          "reach them; see docs/sandbox-config-reference.md \"Network exposure\".",
+          file=sys.stderr)
+    return []
+
+
+def _lookup_gateway() -> list[str]:
+    facts = _default_bridge_facts()
+    if facts is None:
+        return _gateway_miss("the Docker bridge gateway could not be read")
+    gateway, bridge = facts
+    if bridge != _DOCKER_DEFAULT_BRIDGE:
+        # dockerd `"bridge": "<existing bridge>"` reuses a host bridge that
+        # usually carries the LAN address; publishing there would be the LAN.
+        return _gateway_miss(f"the default bridge network uses {bridge or 'an unnamed interface'}, "
+                             f"not {_DOCKER_DEFAULT_BRIDGE}")
+    if not _host_address_is_local(gateway):
+        return _gateway_miss(f"this host does not own the gateway {gateway} "
+                             "(rootless or VM-backed engine)")
+    return [gateway]
+
+
 def _loopback_publish_hosts() -> list[str]:
     """Host addresses an instance's ports are published on by default.
 
-    Always 127.0.0.1. On Linux, also the Docker bridge gateway, which is what
-    `host.docker.internal` (`host-gateway`) resolves to there: the clean-URL
-    Caddy proxy, `sb ci` job containers and the loopback mu-plugin fallback
-    reach an instance through that name. It is a private bridge address, not
-    a LAN or public one. Docker Desktop and OrbStack forward
-    `host.docker.internal` to the host's loopback, so 127.0.0.1 is enough
-    there. The same rule keeps the `sb web` bridge off public addresses
-    (`_bridge_hosts`). A remote-only controller never asks the engine."""
+    Always 127.0.0.1. On Linux, also the gateway of Docker's own `docker0`
+    bridge, which is what `host.docker.internal` (`host-gateway`) resolves to
+    there by default: the clean-URL Caddy proxy, `sb ci` job containers and
+    the loopback mu-plugin fallback reach an instance through that name. In a
+    default Docker setup that address is not reachable from the LAN. A
+    gateway on another bridge (dockerd `"bridge": ...`) or one this host does
+    not own is left out, with one stderr line. Docker Desktop and OrbStack
+    forward `host.docker.internal` to the host's loopback, so 127.0.0.1 is
+    enough there. A remote-only controller never asks the engine."""
+    import time
     hosts = ["127.0.0.1"]
     if not sys.platform.startswith("linux") or local_runtime_remote_only():
         return hosts
-    if not _PUBLISH_GATEWAY_CACHE:
-        # Only a found gateway is cached: an engine that is not up yet must
-        # not pin this process to loopback-only for its whole life.
-        gateways = [host for host in _bridge_hosts() if host != "127.0.0.1"
-                    and _host_address_is_local(host)]
-        _PUBLISH_GATEWAY_CACHE.extend(gateways)
-    return hosts + [host for host in _PUBLISH_GATEWAY_CACHE if host not in hosts]
+    cached = _PUBLISH_GATEWAY_CACHE.get("hosts")
+    fresh = cached is not None and (
+        cached or time.monotonic() - _PUBLISH_GATEWAY_CACHE.get("at", 0.0) < _GATEWAY_MISS_TTL)
+    if not fresh:
+        cached = _lookup_gateway()
+        _PUBLISH_GATEWAY_CACHE.update(hosts=cached, at=time.monotonic())
+    return hosts + [host for host in cached if host not in hosts]
+
+
+def announce_port_binding(instance: str, inst_cfg: dict) -> None:
+    """One stderr line when an instance is started or recreated on every
+    interface, so a committed opt-in never goes unnoticed in a clone."""
+    if instance_exposed_to_network(inst_cfg):
+        print(f"note: {instance}: ports are published on every network interface "
+              "(exposeToNetwork: true); other machines on the network can reach "
+              "this site, its database and Mailpit.", file=sys.stderr)
 
 
 def instance_exposed_to_network(inst_cfg: dict) -> bool:

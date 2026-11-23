@@ -107,8 +107,8 @@ class TestDefaultBindsLoopback(_RenderCase):
     def test_linux_adds_the_docker_bridge_gateway_and_nothing_wider(self):
         with mock.patch.object(docker.sys, "platform", "linux"), \
                 mock.patch.object(docker, "local_runtime_remote_only", return_value=False), \
-                mock.patch.object(docker, "_bridge_hosts",
-                                  return_value=["127.0.0.1", "172.17.0.1"]), \
+                mock.patch.object(docker, "_default_bridge_facts",
+                                  return_value=("172.17.0.1", "docker0")), \
                 mock.patch.object(docker, "_host_address_is_local", return_value=True):
             published = _published(self._render("nginx"))
         self.assertEqual(published["nginx"], ["127.0.0.1:8300:80", "172.17.0.1:8300:80"])
@@ -120,19 +120,31 @@ class TestDefaultBindsLoopback(_RenderCase):
     def test_linux_gateway_the_host_does_not_own_is_left_out(self):
         with mock.patch.object(docker.sys, "platform", "linux"), \
                 mock.patch.object(docker, "local_runtime_remote_only", return_value=False), \
-                mock.patch.object(docker, "_bridge_hosts",
-                                  return_value=["127.0.0.1", "172.17.0.1"]), \
-                mock.patch.object(docker, "_host_address_is_local", return_value=False):
+                mock.patch.object(docker, "_default_bridge_facts",
+                                  return_value=("172.17.0.1", "docker0")), \
+                mock.patch.object(docker, "_host_address_is_local", return_value=False), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
-        # A miss is not cached: a later lookup may still find the gateway.
-        self.assertEqual(docker._PUBLISH_GATEWAY_CACHE, [])
+        self.assertIn("does not own the gateway 172.17.0.1", err.getvalue())
+
+    def test_a_miss_expires_so_a_later_engine_is_found(self):
+        with mock.patch.object(docker.sys, "platform", "linux"), \
+                mock.patch.object(docker, "local_runtime_remote_only", return_value=False), \
+                mock.patch.object(docker, "_host_address_is_local", return_value=True), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with mock.patch.object(docker, "_default_bridge_facts", return_value=None):
+                self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
+            docker._PUBLISH_GATEWAY_CACHE["at"] -= docker._GATEWAY_MISS_TTL + 1
+            with mock.patch.object(docker, "_default_bridge_facts",
+                                   return_value=("172.17.0.1", "docker0")):
+                self.assertEqual(docker.publish_hosts({}), ["127.0.0.1", "172.17.0.1"])
 
     def test_remote_only_controller_never_asks_the_engine(self):
         with mock.patch.object(docker.sys, "platform", "linux"), \
                 mock.patch.object(docker, "local_runtime_remote_only", return_value=True), \
-                mock.patch.object(docker, "_bridge_hosts") as bridge_hosts:
+                mock.patch.object(docker, "_default_bridge_facts") as facts:
             self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
-        bridge_hosts.assert_not_called()
+        facts.assert_not_called()
 
 
 class TestExposeToNetworkOptIn(_RenderCase):
@@ -253,6 +265,54 @@ class TestStatusShowsExposure(unittest.TestCase):
         text = self._text(self._instance(expose_to_network=True))
         self.assertIn("Ports: published on every network interface (exposeToNetwork: true)",
                       text)
+
+
+class TestLinuxGatewayLookup(_RenderCase):
+    """S2 + S3 + S6: the gateway lookup is cached, said out loud, and Docker's own."""
+
+    def _patches(self, facts, local=True):
+        return (mock.patch.object(docker.sys, "platform", "linux"),
+                mock.patch.object(docker, "local_runtime_remote_only", return_value=False),
+                mock.patch.object(docker, "_default_bridge_facts", return_value=facts),
+                mock.patch.object(docker, "_host_address_is_local", return_value=local))
+
+    def test_a_miss_is_cached_and_said_once(self):
+        p = self._patches(None)
+        err = io.StringIO()
+        with p[0], p[1], p[2] as facts, p[3], contextlib.redirect_stderr(err):
+            self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
+            self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
+        self.assertEqual(facts.call_count, 1)
+        self.assertEqual(err.getvalue().count("host.docker.internal"), 1)
+
+    def test_a_gateway_on_a_non_docker_bridge_is_skipped(self):
+        p = self._patches(("192.168.1.10", "br0"))
+        err = io.StringIO()
+        with p[0], p[1], p[2], p[3], contextlib.redirect_stderr(err):
+            self.assertEqual(docker.publish_hosts({}), ["127.0.0.1"])
+        self.assertIn("br0", err.getvalue())
+
+    def test_docker0_gateway_is_used(self):
+        p = self._patches(("172.17.0.1", "docker0"))
+        with p[0], p[1], p[2], p[3]:
+            self.assertEqual(docker.publish_hosts({}), ["127.0.0.1", "172.17.0.1"])
+
+
+class TestExposureIsAnnounced(unittest.TestCase):
+    """S7: an exposed instance is announced when it is started or recreated."""
+
+    def test_exposed_instance_prints_one_line_on_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            docker.announce_port_binding("ti", {"expose_to_network": True})
+        self.assertIn("ti", err.getvalue())
+        self.assertIn("every network interface", err.getvalue())
+
+    def test_loopback_instance_prints_nothing(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            docker.announce_port_binding("ti", {})
+        self.assertEqual(err.getvalue(), "")
 
 
 class TestLegacyComposeFile(unittest.TestCase):

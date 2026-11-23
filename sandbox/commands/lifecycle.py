@@ -30,7 +30,7 @@ from sandbox.core import (
     _write_mail_muplugin, _write_loopback_muplugin, _write_ondemand_muplugin,
     _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
-    info, instance_exposed_to_network, mcp_server_name, ok, plugins_dir,
+    announce_port_binding, info, instance_exposed_to_network, mcp_server_name, ok, plugins_dir,
     publish_hosts,
     proxy_available, proxy_start_lease, resolve_instances, run,
     save_local_app_password, stop_proxy_if_idle, local_runtime_selection,
@@ -574,6 +574,7 @@ def cmd_up(cfg: dict, args) -> None:
             _compose_up(inst, services, quiet=True, json_output=True)
         else:
             _compose_up(inst, services)
+        announce_port_binding(inst, inst_cfg)
         if clean_domain:
             with _suppress_progress_stdout(json_output):
                 _ensure_proxy_up(cfg)

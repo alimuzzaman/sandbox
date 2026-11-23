@@ -2147,6 +2147,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
                     raise RuntimeError(f"web reconcile failed: {detail[:240]}")
                 if not _wait_reachable(inst_cfg):
                     raise RuntimeError("web reconcile did not become reachable")
+                announce_port_binding(name, inst_cfg)
                 if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
                     extension_status = php_extension_status(inst_cfg, instance=name)
                     drift = (extension_status or {}).get("drift", {})

@@ -1,8 +1,8 @@
 """Published ports: loopback by default, every interface only on opt-in.
 
 Covers the three places the setting has to reach: the instance block built
-from the project's `exposeToNetwork` and the rendered per-instance Compose file
-(every published port of every server).
+from the project's `exposeToNetwork`, the rendered per-instance Compose file
+(every published port of every server), and `sb status`.
 
     .cli-venv/bin/python -m unittest tests.test_published_ports -v
 """
@@ -28,6 +28,7 @@ import sandbox.core as core  # noqa: E402
 import sandbox.core._docker as docker  # noqa: E402
 import sandbox.core._instances as instances  # noqa: E402
 import sandbox_core  # noqa: E402
+from sandbox.commands import lifecycle  # noqa: E402
 
 SERVERS = ("apache", "nginx", "litespeed")
 PORTS = {"wordpress_port": 8300, "db_port": 3500, "mailpit_port": 8301}
@@ -190,6 +191,68 @@ class TestInstanceBlock(unittest.TestCase):
             with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     self._block({"exposeToNetwork": value})
+
+
+class TestStatusShowsExposure(unittest.TestCase):
+    def _instance(self, **extra):
+        return {"fixture": {"server": "nginx", **PORTS, **extra}}
+
+    def _json(self, instance_cfg):
+        ps = types.SimpleNamespace(stdout="", returncode=0)
+        with mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
+                    registry_find_instance=lambda _name: None)), \
+                mock.patch.object(lifecycle, "_is_herd_instance", return_value=False), \
+                mock.patch.object(lifecycle, "resolve_instances", return_value=instance_cfg), \
+                mock.patch.object(lifecycle, "compose", return_value=ps), \
+                mock.patch.object(lifecycle, "site_url", return_value="http://localhost:8300"), \
+                mock.patch.object(lifecycle, "php_extension_status", return_value=None), \
+                mock.patch.object(lifecycle, "publish_hosts", return_value=["127.0.0.1"]):
+            return lifecycle._status_json_payload({}, "fixture")
+
+    def test_json_reports_loopback_by_default(self):
+        self.assertEqual(self._json(self._instance())["port_exposure"], {
+            "scope": "loopback", "expose_to_network": False, "hosts": ["127.0.0.1"]})
+
+    def test_json_reports_the_opt_in(self):
+        exposure = self._json(self._instance(expose_to_network=True))["port_exposure"]
+        self.assertEqual(exposure, {"scope": "network", "expose_to_network": True,
+                                    "hosts": ["*"]})
+
+    def test_public_status_json_keeps_the_field(self):
+        payload = self._json(self._instance(expose_to_network=True))
+        self.assertEqual(lifecycle._public_status_json(payload)["port_exposure"]["scope"],
+                         "network")
+
+    def test_herd_has_no_published_ports(self):
+        self.assertIsNone(lifecycle._port_exposure({"server": "herd"}))
+
+    def _text(self, instance_cfg):
+        args = types.SimpleNamespace(json=False, resolved_instance="fixture")
+        output = io.StringIO()
+        missing = Path(tempfile.gettempdir()) / "sb-ports-no-such-focus-file"
+        with mock.patch.object(lifecycle, "_remote_lifecycle", return_value=None), \
+                mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
+                    registry_find_instance=lambda _name: None)), \
+                mock.patch.object(lifecycle, "_is_herd_instance", return_value=False), \
+                mock.patch.object(lifecycle, "resolve_instances", return_value=instance_cfg), \
+                mock.patch.object(lifecycle, "compose"), \
+                mock.patch.object(lifecycle, "active_project_file", return_value=missing), \
+                mock.patch.object(lifecycle, "focus_file", return_value=missing), \
+                mock.patch.object(lifecycle, "mcp_server_name", return_value="sandbox"), \
+                mock.patch.object(lifecycle, "_bridge_token_for", return_value=None), \
+                mock.patch.object(lifecycle, "php_extension_status", return_value=None), \
+                mock.patch.object(lifecycle, "publish_hosts", return_value=["127.0.0.1"]), \
+                contextlib.redirect_stdout(output):
+            lifecycle.cmd_status({}, args)
+        return output.getvalue()
+
+    def test_text_status_says_local_only_by_default(self):
+        self.assertIn("Ports: local only (127.0.0.1)", self._text(self._instance()))
+
+    def test_text_status_names_the_opt_in(self):
+        text = self._text(self._instance(expose_to_network=True))
+        self.assertIn("Ports: published on every network interface (exposeToNetwork: true)",
+                      text)
 
 
 class TestLegacyComposeFile(unittest.TestCase):

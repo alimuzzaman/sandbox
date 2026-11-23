@@ -1240,7 +1240,7 @@ are published on `127.0.0.1` only, plus the Docker bridge gateway on Linux so
 them. To open one instance to the network on purpose, for testing from a phone
 or a shared demo, set `"exposeToNetwork": true` in the project's gitignored
 `sandbox.config.override.json`, then run `./sb apply --project-dir DIR` and
-`./sb up --instance NAME`.
+`./sb up --instance NAME`. `./sb status` shows which binding an instance has.
 Existing instances move to the loopback binding the next time their containers
 are recreated (`./sb up --instance NAME`); data is kept. See
 [network exposure](docs/sandbox-config-reference.md#network-exposure-exposetonetwork).

@@ -30,7 +30,8 @@ from sandbox.core import (
     _write_mail_muplugin, _write_loopback_muplugin, _write_ondemand_muplugin,
     _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
-    info, mcp_server_name, ok, plugins_dir,
+    info, instance_exposed_to_network, mcp_server_name, ok, plugins_dir,
+    publish_hosts,
     proxy_available, proxy_start_lease, resolve_instances, run,
     save_local_app_password, stop_proxy_if_idle, local_runtime_selection,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
@@ -795,6 +796,13 @@ def cmd_status(cfg, args) -> None:
     srv = mcp_server_name(inst)
     ok(f"Instance: {inst}  (Claude tools: mcp__{srv}__*)")
     ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'nginx')}")
+    exposure = _port_exposure(resolve_instances(cfg)[inst])
+    if exposure is not None:
+        if exposure["scope"] == "network":
+            info("Ports: published on every network interface (exposeToNetwork: true); "
+                 "other machines on the network can reach this site, its database and Mailpit")
+        else:
+            ok(f"Ports: local only ({', '.join(exposure['hosts'])})")
     if owner and owner.get("root"):
         ok(f"Project: {owner['root']}")
     if runtime_data is not None:
@@ -968,6 +976,9 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False,
         "reachable": reachable,
         "containers": containers,
     }
+    exposure = _port_exposure(instance_cfg)
+    if exposure is not None:
+        payload["port_exposure"] = exposure
     if runtime_data is not None:
         payload["runtime"] = runtime_data
     if runtime_error is not None:
@@ -981,6 +992,20 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False,
         payload["ok"] = bool(payload["ok"] and extension_data.get("ok"))
         payload["exit_code"] = 0 if payload["ok"] else 1
     return payload
+
+
+def _port_exposure(instance_cfg: Mapping) -> dict | None:
+    """Where this instance's ports are published, for status output.
+
+    ``scope`` is ``network`` only with the ``exposeToNetwork`` opt-in; the
+    default is ``loopback`` with the exact host addresses used. Herd serves
+    through the host and publishes nothing, so it has no entry."""
+    if not instance_cfg or instance_cfg.get("server") == "herd":
+        return None
+    if instance_exposed_to_network(instance_cfg):
+        return {"scope": "network", "expose_to_network": True, "hosts": ["*"]}
+    return {"scope": "loopback", "expose_to_network": False,
+            "hosts": publish_hosts(instance_cfg)}
 
 
 def _render_container_stats(instance: str) -> None:

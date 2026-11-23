@@ -217,7 +217,7 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 18. wp-cli via `docker compose exec` on web; falls back to `compose run --rm wpcli` when web is down.
 19. Baked-path artifacts (compose, herd shims, Caddyfile, venv) REGENERATE on relocate; data moves cleanly.
 20. Agent Notes (`sb notes`, `sb mockups`, `docs/agent-notes.md`): the bearer token lives in a secrets-broker source (default `personal:SANDBOX_NOTES_TOKEN_<REMOTE>`) and is used only inside the `sandbox-notes-mcp` use-profile child (`sandbox/notes/child.py`, stdlib only, run with `-I`); never read it into the parent, put it in argv, or print it. `sb notes login` mints it over the service's tailnet trust; the owner runs it once per machine. `login` and share-link creation refuse inside a durable job.
-21. Published ports are loopback-only: `_port_lines` in `sandbox/core/_docker.py` binds every instance port to `127.0.0.1` (plus the Docker bridge gateway on Linux, for `host.docker.internal`). Render new ports through it, never as a bare `"<host>:<container>"` string. `exposeToNetwork: true` (project config) is the only way to publish on every interface.
+21. Published ports are loopback-only: `_port_lines` in `sandbox/core/_docker.py` binds every instance port to `127.0.0.1` (plus the Docker bridge gateway on Linux, for `host.docker.internal`). Render new ports through it, never as a bare `"<host>:<container>"` string. `exposeToNetwork: true` (project config) is the only way to publish on every interface; `sb status` shows it.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan

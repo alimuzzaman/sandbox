@@ -1043,6 +1043,11 @@ default. That includes the database (user `wp`, password `wp`; root password
 `root`) and the Mailpit inbox, so use it only on a network you trust.
 Prefer the gitignored override file, so the setting stays on your machine.
 
+`sb status` shows the binding: `Ports: local only (127.0.0.1)` by default, and
+`Ports: published on every network interface (exposeToNetwork: true)` when
+the opt-in is on. `sb status --json` carries the same as `port_exposure`
+(`scope` is `loopback` or `network`, and `hosts` lists the addresses).
+
 WordPress still builds its links from its stored site address, usually
 `http://localhost:<port>` or a `.tst` name. A device that opens
 `http://<this-machine's-address>:<port>` can be redirected to that address,

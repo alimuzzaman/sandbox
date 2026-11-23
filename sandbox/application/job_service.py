@@ -1266,7 +1266,9 @@ class JobService:
         """Offer free host slots to queued jobs, oldest first (spec 083).
 
         Each job goes through the normal admission path of ``get``. The pass
-        stops at the first host-wide refusal (no slot, floor, policy) and
+        stops at the first host-wide refusal (no slot, floor, policy), except
+        that with no slot free it keeps looking for nested jobs that run on
+        their waiting parent's slot, and
         continues past refusals that concern one job (its workspace, an older
         job first, already admitted, a dependency wait, a launch failure).
         Re-entrant calls in the same thread are no-ops. Returns the ids of the
@@ -1289,18 +1291,27 @@ class JobService:
                 if not page:
                     return changed
                 for accepted_at, job_id in page:
-                    if (accepted_at, job_id) > newest or scheduler.free_slots() <= 0:
+                    if (accepted_at, job_id) > newest:
                         return changed
+                    full = scheduler.free_slots() <= 0
+                    borrowing = scheduler.can_borrow(job_id) if (
+                        not full or scheduler.is_nested(job_id)) else False
+                    if full and not borrowing:
+                        # No slot for this one, but a nested job further on may
+                        # still run on its waiting parent's slot.
+                        continue
                     scheduler.last_refusal = None
-                    held_before = scheduler.holds_slot(job_id)
+                    held_before = scheduler.holds_slot(job_id) or scheduler.is_admitted(job_id)
                     try:
                         self.get(job_id, reconcile=False)
                     except Exception:
                         pass  # that job failed; the next one may still start
-                    if ((scheduler.holds_slot(job_id) and not held_before)
-                            or not scheduler.is_queued(job_id)):
+                    if (((scheduler.holds_slot(job_id) or scheduler.is_admitted(job_id))
+                            and not held_before) or not scheduler.is_queued(job_id)):
                         changed.append(job_id)
-                    if scheduler.last_refusal in HOST_WIDE_REFUSALS:
+                    if scheduler.last_refusal in HOST_WIDE_REFUSALS and not borrowing:
+                        if scheduler.last_refusal == "capacity":
+                            continue  # only nested jobs on a waiting parent's slot can start
                         return changed
                 after = page[-1]
         finally:

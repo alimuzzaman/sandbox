@@ -202,6 +202,26 @@ class JobRegistryTests(unittest.TestCase):
         self.assertIsNone(indexed[0]["remote_name"])
         self.assertEqual(indexed[0]["workspace_id"], workspace_id)
 
+    def test_resource_index_reads_past_ten_thousand_jobs(self):
+        # The reclaim probe refuses on a full page; 10,000 was reached in prod.
+        import sqlite3
+        from sandbox.jobs import registry
+
+        repo = self.repository()
+        row, _ = repo.accept(submission())
+        connection = sqlite3.connect(self.path)
+        columns = [item[1] for item in connection.execute("PRAGMA table_info(jobs)")]
+        self.assertEqual(columns[0], "job_id")
+        others = ", ".join(columns[1:])
+        copied = ", ".join("NULL" if name == "request_id" else name for name in columns[1:])
+        connection.executemany(
+            f"INSERT INTO jobs (job_id, {others}) SELECT ?, {copied} FROM jobs WHERE job_id=?",
+            [("%032x" % number, row["job_id"]) for number in range(1, 10_001)])
+        connection.commit()
+        connection.close()
+        self.assertEqual(len(registry.read_resource_index(self.path)["jobs"]), 10_001)
+        self.assertGreater(registry.RESOURCE_INDEX_LIMIT, 10_001)
+
     def test_heartbeat_updates_preserve_prior_observation_timestamps(self):
         repo = self.repository()
         row, _ = repo.accept(submission())

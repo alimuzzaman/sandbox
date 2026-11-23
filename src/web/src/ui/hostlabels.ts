@@ -86,7 +86,8 @@ export function showBulkActions(devInstances: number): boolean {
 
 export function hostedCountText(total: number | null | undefined, running: number | null | undefined): string {
   if (!total) return "";
-  return `${total} hosted app${total === 1 ? "" : "s"} · ${running ?? 0} running`;
+  // null: the host is still reading its containers, so nothing is known yet.
+  return `${total} hosted app${total === 1 ? "" : "s"} · ${running == null ? "checking…" : running} running`;
 }
 
 // The same order the server uses for /hosting: temporary copies first,

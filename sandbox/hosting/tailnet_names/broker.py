@@ -182,12 +182,21 @@ class Broker:
         common = {"source": config.token_source, "key": config.token_key,
                   "destination": DNS_TOKEN_DESTINATION, "maxOutputBytes": 1_048_576,
                   "mcp": False}
-        out = {DNS_PROFILE: dict(common, timeoutSeconds=DNS_TIMEOUT_SECONDS, argv=[
-            self.executable, "-I", cloudflare_child.__file__, str(self._dns_request_path())])}
+        argv = [self.executable, "-I", cloudflare_child.__file__, str(self._dns_request_path())]
+        if config.wildcard_parents:
+            argv.append(",".join(config.wildcard_parents))
+        out = {DNS_PROFILE: dict(common, timeoutSeconds=DNS_TIMEOUT_SECONDS, argv=argv)}
         if lego is not None:
             out[LEGO_PROFILE] = dict(common, timeoutSeconds=ISSUE_TIMEOUT_SECONDS, argv=[
                 lego, "run", "--accept-tos", "--email", config.acme_email,
                 "--server", config.acme_server, "--dns", "cloudflare",
+                # Wait for Cloudflare's own name servers only. The server's
+                # resolver caches the empty answer a *.tn wildcard gives the
+                # challenge name before its TXT exists, so a recursive check
+                # never sees the record and issuance fails (xspeed-dev
+                # 2026-11-22, mail-access-1112.tn). The CA reads the
+                # authoritative servers, which lego still waits for.
+                "--dns.propagation.disable-rns",
                 "--csr", str(self._csr_path()), "--path", str(self.acme_root)])
         return out
 

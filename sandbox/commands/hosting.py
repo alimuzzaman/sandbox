@@ -14,6 +14,7 @@ import socket
 import ssl
 import stat
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -330,6 +331,33 @@ def _validate_all_environments(project_dir: str | Path) -> list[dict]:
         except hosting.HostingError as exc:
             results.append({"ok": False, "environment": name, "error": str(exc)})
     return results
+
+
+class _ZoneLookup:
+    """One apply's zone lookups, each candidate asked once.
+
+    Only a definite "no such zone" answer is remembered; any other provider
+    error is asked again, as before.
+    """
+
+    def __init__(self, client) -> None:
+        self._client = client
+        self._found: dict[str, dict] = {}
+        self._missing: dict[str, str] = {}
+
+    def zone(self, name: str) -> dict:
+        if name in self._found:
+            return self._found[name]
+        if name in self._missing:
+            raise cloudflare.CloudflareError(self._missing[name], "zone_not_found")
+        try:
+            zone = self._client.zone(name)
+        except cloudflare.CloudflareError as exc:
+            if getattr(exc, "code", None) == "zone_not_found":
+                self._missing[name] = str(exc)
+            raise
+        self._found[name] = zone
+        return zone
 
 
 def _zone_for_hostname(client, hostname: str) -> dict:
@@ -1479,6 +1507,8 @@ class _NginxHostEdge:
                     state_entry: dict, client, home: str, name: str):
         hostnames = list(runtime["certificate_hostnames"])
         route = self.route_name(name)
+        if hosting.wildcard_zone(validated):
+            return _wildcard_certificate(self.entry, validated, state_entry, client)
         if proxied:
             cert_path, key_path, certificate = self.nginx.ensure_origin_certificate(
                 self.entry, route, hostnames, client)
@@ -1512,7 +1542,12 @@ class _NginxHostEdge:
         """Check only (spec 084): a certificate covering every name, never issued here."""
         hostnames = sorted({route["hostname"] for route in validated["routes"]})
         route = self.route_name(name)
-        if proxied:
+        zone = hosting.wildcard_zone(validated)
+        if zone:
+            from sandbox.hosting.front_door import wildcard_cert
+            present = wildcard_cert.certificate_current(self.entry, zone, min_days=0)
+            paths = wildcard_cert.paths(zone)
+        elif proxied:
             present = self.nginx.origin_certificate_present(self.entry, route, hostnames)
             paths = self.nginx.origin_paths(route)
         else:
@@ -1574,6 +1609,9 @@ class _NginxHostEdge:
 def _host_edge_preflight(validated: dict, entry: dict) -> None:
     """Refuse an nginx-fronted apply before any remote change (Caddy: no call)."""
     from sandbox.hosting.front_door import front_door_mode
+    if hosting.wildcard_zone(validated) and front_door_mode(entry) != "nginx":
+        raise hosting.HostingError("front_door_capability_unavailable: cloudflare.dns: wildcard "
+                                   "needs the nginx front door")
     if front_door_mode(entry) == "caddy":
         return
     name = f"sandbox-host-{validated['project']}-{validated['environment']}"
@@ -3782,7 +3820,8 @@ def _refresh_hosting_operation(state: dict, key: str, *, classified: dict,
         return
     save_state = save_state or hosting.save_host_state
     with personal_secrets.hosting_binding_broker_lock():
-        binding_metadata = personal_secrets.read_hosting_binding_metadata(key)
+        # Another target's generated secrets rewrite the shared file mid-apply.
+        binding_metadata = personal_secrets.read_hosting_binding_metadata(key, compare_values=True)
         if (binding_metadata.get("metadata_id") !=
                 evidence.get("secret_binding_metadata_id") or
                 binding_metadata.get("revision") != evidence.get("secret_binding_revision")):
@@ -4611,6 +4650,114 @@ def _applied_record(record) -> dict:
     return {key: record.get(key) for key in _APPLIED_FIELDS}
 
 
+def _owned_record_ids(rows) -> set:
+    """Record ids this target created itself (no record existed before it)."""
+    return {row.get("created_id") for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and row.get("created_id") and not row.get("previous")}
+
+
+def _wildcard_preflight(entry: dict, validated: dict, state_entry, client) -> dict:
+    """``cloudflare.dns: wildcard``, read-only, before any source or runtime change.
+
+    Returns the zone row. Refuses unless the front door is nginx, the zone is a
+    Cloudflare zone apex, the issuer is configured for it, the ``*.<zone>`` record
+    is absent or exactly right, and the wildcard can answer every host name: a name
+    with any record this target did not create (RFC 4592: any type at the name
+    stops the wildcard), or with names below it (an empty non-terminal), is refused.
+    """
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode, wildcard_cert
+    zone = hosting.wildcard_zone(validated)
+    if front_door_mode(entry) != "nginx":
+        raise hosting.HostingError("front_door_capability_unavailable: cloudflare.dns: wildcard "
+                                   "needs the nginx front door")
+    try:
+        zone_row = client.zone(zone)
+    except cloudflare.CloudflareError:
+        raise hosting.HostingError(
+            f"cloudflare.dns: wildcard: {zone} is not a Cloudflare zone this token can "
+            "manage; every host name must sit directly under the zone") from None
+    if zone_row.get("name") != zone:
+        raise hosting.HostingError(f"cloudflare.dns: wildcard: {zone} is not a zone apex")
+    owned = _owned_record_ids((state_entry or {}).get("records")
+                              if isinstance(state_entry, dict) else None)
+    for hostname in sorted({route["hostname"] for route in validated["routes"]}):
+        for row in client.records(zone_row["id"], hostname):
+            if not (row.get("type") in {"A", "AAAA"} and row.get("id") in owned):
+                raise hosting.HostingError(
+                    f"{wildcard_cert.WILDCARD_NAME_INELIGIBLE}: {hostname} has its own "
+                    f"{row.get('type')} record that this target did not create, so the "
+                    "wildcard would not answer for it; remove it or use cloudflare.dns: exact")
+        if client.records_under(zone_row["id"], hostname):
+            raise hosting.HostingError(
+                f"{wildcard_cert.WILDCARD_NAME_INELIGIBLE}: names exist below {hostname}, so "
+                "the wildcard would not answer for it; use cloudflare.dns: exact")
+    try:
+        wildcard_cert.check_record(client, zone_row["id"], zone, entry)
+        wildcard_cert.issuer_preflight(zone)
+    except FrontDoorError as exc:
+        raise hosting.HostingError(str(exc)) from None
+    return zone_row
+
+
+def _wildcard_certificate(entry: dict, validated: dict, state_entry, client):
+    """The remote's shared ``*.<zone>`` certificate (issued when due), then its record."""
+    from sandbox.hosting.front_door import FrontDoorError, wildcard_cert
+    zone = hosting.wildcard_zone(validated)
+    zone_row = _wildcard_preflight(entry, validated, state_entry, client)
+    try:
+        shared = wildcard_cert.ensure(entry, zone, zone_row["id"], client)
+    except FrontDoorError as exc:
+        raise hosting.HostingError(str(exc)) from None
+    certificate = {"id": None, "issuer": "wildcard-acme", "zone": zone,
+                   "hostnames": sorted({route["hostname"] for route in validated["routes"]})}
+    return shared["certificate"]["cert_path"], shared["certificate"]["key_path"], certificate
+
+
+def _retire_wildcard_records(state: dict, key: str, client) -> list[dict]:
+    """After a verified wildcard apply: delete the per-name records this target wrote
+    before it switched to the shared wildcard. Only a record it created, still holding
+    exactly what it wrote and not saved by another target, is deleted, and a name is
+    retired only when every saved row at it can be: by RFC 4592 a name left with one
+    AAAA would stop the wildcard answering its A queries. AAAA goes first. Every
+    other row stays saved so destroy still sees it."""
+    from sandbox.hosting import destroy as host_destroy
+    prior = (state.get("hosts", {}).get(key) or {}).get("records") or []
+    held = host_destroy._records_held_elsewhere(state, key)
+
+    def eligible(row) -> bool:
+        return (isinstance(row, dict) and bool(row.get("created_id")) and not row.get("previous")
+                and isinstance(row.get("applied"), dict)
+                and not host_destroy._snapshot_untrusted(row)
+                and not (host_destroy._record_identities(row) & held))
+
+    def name_of(row) -> str | None:
+        applied = row.get("applied") if isinstance(row, dict) else None
+        name = applied.get("name") if isinstance(applied, dict) else None
+        return str(name).rstrip(".").lower() if name else None
+
+    by_name: dict = {}
+    for row in prior:
+        by_name.setdefault(name_of(row), []).append(row)
+    keep = []
+    for name, rows in by_name.items():
+        if name is None or not all(eligible(row) for row in rows):
+            keep.extend(rows)
+            continue
+        ordered = sorted(rows, key=lambda row: 0 if row["applied"].get("type") == "AAAA" else 1)
+        for index, row in enumerate(ordered):
+            try:
+                outcome = host_destroy._remove_cloudflare({"_records": [row]}, client)[0]
+            except cloudflare.CloudflareError as exc:
+                print(f"warning: old DNS records for {name} were kept ({exc}); destroy "
+                      "still removes them", file=sys.stderr)
+                keep.extend(ordered[index:])
+                break
+            if outcome.get("state") not in {"removed", "already_absent"}:
+                keep.extend(ordered[index:])
+                break
+    return keep
+
+
 def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
     """Records for host destroy: keep what the first apply found, per managed record.
 
@@ -4767,7 +4914,11 @@ def _continue_host_edge_only_unleased(validated: dict, entry: dict, remote_name:
             edge_state["evidence"] = evidence
         result["record"] = {
             "certificate": certificate,
-            "records": _first_adoption_records(recorded.get("records"), changes),
+            # A wildcard target writes no rows here; keep the per-name rows it saved
+            # so the next apply retires them and destroy still sees them.
+            "records": (list(recorded.get("records") or [])
+                        if hosting.wildcard_zone(validated)
+                        else _first_adoption_records(recorded.get("records"), changes)),
             "caddy_name": caddy_name, "edge": edge_state,
             "front_door_declaration": front_door_refresh.declaration_digest(validated),
         }
@@ -5192,6 +5343,9 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
     return result
 
 
+REGISTER_MEMORY_LIMIT = "1024M"
+
+
 def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
                           state: dict, ttl_seconds: int | None,
                           save_state=None, *, run=None, home: str | None = None,
@@ -5250,7 +5404,11 @@ def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
     run(f"{prefix} exec -T {service} test -s {shlex.quote(target)}", 30)
     from sandbox.hosting.autologin import register_script
     registration = register_script(target, token_hash, config["user"], issued_at, expires_at)
-    run(f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", 60)
+    # The image's CLI memory_limit (256M in the official WordPress image) is too
+    # small to boot a site with many heavy plugins; registration then dies in
+    # wp-load.php before it runs.
+    run(f"{prefix} exec -T {service} php -d memory_limit={REGISTER_MEMORY_LIMIT} "
+        f"-r {shlex.quote(registration)}", 60)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
     (save_state or hosting.save_host_state)(state)
     link = {"url": f"{login_base}#{token}"} if token is not None else {"login_base": login_base}
@@ -5608,6 +5766,7 @@ def _verify_edge(
     gate_hostnames: frozenset[str] = frozenset(),
     private_hostnames: frozenset[str] = frozenset(),
     route_tag: str | None = None,
+    fresh_since: float | None = None,
 ) -> None:
     """Prove each route answers as declared.
 
@@ -5630,78 +5789,143 @@ def _verify_edge(
 
     opener = urllib.request.build_opener(_NoRedirect, *handlers)
     if any(route["hostname"] in fresh_hostnames for route in routes):
-        time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
-    for route in routes:
-        if route["hostname"].startswith("*."):
-            continue
-        if route["hostname"] in gate_hostnames:
-            _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True,
-                                   route_tag=route_tag, basic_auth_enabled=basic_auth_enabled,
-                                   basic_auth_credentials=basic_auth_credentials)
-            continue
-        if route["hostname"] in private_hostnames:
-            _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag)
-            continue
-        path = healthcheck_path if route.get("mode") == "serve" else "/"
-        endpoint = f"https://{route['hostname']}{path}"
-        request_headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)",
-        }
-        request = urllib.request.Request(endpoint, method="GET", headers=request_headers)
-        last_error = None
-        # Cloudflare can need several minutes to activate edge certificates after
-        # proxying a previously DNS-only alias for the first time.
-        for _ in range(30):
-            try:
-                with opener.open(request, timeout=15) as response:
-                    if 200 <= response.status < 400:
-                        last_error = None
-                        break
-            except urllib.error.HTTPError as exc:
-                if (300 <= exc.code < 400
-                        or (basic_auth_enabled and route.get("mode") == "serve" and exc.code == 401)):
+        # ``fresh_since`` is when the apply wrote the records (time.monotonic());
+        # the certificate and route work since then already counts as waiting.
+        waited = 0.0 if fresh_since is None else max(0.0, time.monotonic() - fresh_since)
+        if waited < _NEW_DNS_RECORD_GRACE_SECONDS:
+            time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS - waited)
+    checks = [route for route in routes if not route["hostname"].startswith("*.")]
+
+    stop = threading.Event()
+
+    def check(route: dict) -> None:
+        try:
+            _verify_route(opener, route, healthcheck_path=healthcheck_path,
+                          basic_auth_enabled=basic_auth_enabled,
+                          basic_auth_credentials=basic_auth_credentials,
+                          gate_hostnames=gate_hostnames, private_hostnames=private_hostnames,
+                          route_tag=route_tag, stop=stop)
+        except _EdgeVerifyStopped:
+            raise
+        except Exception:
+            # One failed route fails the apply: the others stop at their next
+            # retry, so rollback is not held back by a slow sibling (each can
+            # otherwise retry for ~12 minutes).
+            stop.set()
+            raise
+
+    if len(checks) <= 1 or _EDGE_VERIFY_WORKERS <= 1:
+        for route in checks:
+            check(route)
+        return
+    # Each route is an independent read-only probe; run them together and report
+    # the first real failure in declaration order, as the serial loop did.
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=min(_EDGE_VERIFY_WORKERS, len(checks)),
+                              thread_name_prefix="sandbox-edge-verify")
+    try:
+        futures = [pool.submit(check, route) for route in checks]
+        errors = [future.exception() for future in futures]
+    except BaseException:
+        stop.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    for error in errors:
+        if error is not None and not isinstance(error, _EdgeVerifyStopped):
+            raise error
+
+
+class _EdgeVerifyStopped(Exception):
+    """A sibling route failed first; this probe stopped without a verdict."""
+
+
+def _edge_retry_pause(stop: "threading.Event | None") -> None:
+    if stop is not None and stop.is_set():
+        raise _EdgeVerifyStopped()
+    time.sleep(10)
+    if stop is not None and stop.is_set():
+        raise _EdgeVerifyStopped()
+
+
+# Routes verified at once by _verify_edge; 1 restores the serial order.
+_EDGE_VERIFY_WORKERS = 8
+
+
+def _verify_route(opener, route: dict, *, healthcheck_path: str, basic_auth_enabled: bool,
+                  basic_auth_credentials: tuple[str, str] | None,
+                  gate_hostnames: frozenset[str], private_hostnames: frozenset[str],
+                  route_tag: str | None, stop: "threading.Event | None" = None) -> None:
+    """Prove one route answers as declared (see ``_verify_edge``)."""
+    if route["hostname"] in gate_hostnames:
+        _verify_private_answer(opener, route["hostname"], _GATE_CHECK_PATH, gate=True,
+                               route_tag=route_tag, basic_auth_enabled=basic_auth_enabled,
+                               basic_auth_credentials=basic_auth_credentials, stop=stop)
+        return
+    if route["hostname"] in private_hostnames:
+        _verify_private_answer(opener, route["hostname"], "/", gate=False, route_tag=route_tag,
+                               stop=stop)
+        return
+    path = healthcheck_path if route.get("mode") == "serve" else "/"
+    endpoint = f"https://{route['hostname']}{path}"
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)",
+    }
+    request = urllib.request.Request(endpoint, method="GET", headers=request_headers)
+    last_error = None
+    # Cloudflare can need several minutes to activate edge certificates after
+    # proxying a previously DNS-only alias for the first time.
+    for _ in range(30):
+        try:
+            with opener.open(request, timeout=15) as response:
+                if 200 <= response.status < 400:
                     last_error = None
                     break
-                last_error = exc
-            except Exception as exc:  # Edge propagation is external and transient.
-                last_error = exc
-            time.sleep(10)
-        if last_error:
-            # Do not stringify an exception carrying a request object: some
-            # urllib implementations include its headers in ``repr``.  The
-            # public error is intentionally bounded and credential-free.
-            detail = _edge_failure_detail(last_error)
+        except urllib.error.HTTPError as exc:
+            if (300 <= exc.code < 400
+                    or (basic_auth_enabled and route.get("mode") == "serve" and exc.code == 401)):
+                last_error = None
+                break
+            last_error = exc
+        except Exception as exc:  # Edge propagation is external and transient.
+            last_error = exc
+        _edge_retry_pause(stop)
+    if last_error:
+        # Do not stringify an exception carrying a request object: some
+        # urllib implementations include its headers in ``repr``.  The
+        # public error is intentionally bounded and credential-free.
+        detail = _edge_failure_detail(last_error)
+        raise RuntimeError(
+            f"edge verification failed for {route['hostname']}: {detail}"
+        )
+    if basic_auth_credentials and route.get("mode") == "serve":
+        username, password = basic_auth_credentials
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise RuntimeError("Basic Auth verification credentials are unavailable")
+        # The credential is obtained only through _secret_status() (the
+        # registered personal secret broker) and exists in memory for this
+        # request.  It is never part of a URL, subprocess argv, or log.
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        auth_request = urllib.request.Request(
+            endpoint,
+            method="GET",
+            headers={**request_headers, "Authorization": f"Basic {encoded}"},
+        )
+        auth_error = None
+        try:
+            with opener.open(auth_request, timeout=15) as response:
+                if 200 <= response.status < 400:
+                    auth_error = None
+                else:
+                    auth_error = f"HTTP {response.status}"
+        except urllib.error.HTTPError as exc:
+            auth_error = f"HTTP {exc.code}"
+        except Exception:
+            auth_error = "route unavailable"
+        if auth_error:
             raise RuntimeError(
-                f"edge verification failed for {route['hostname']}: {detail}"
+                f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
             )
-        if basic_auth_credentials and route.get("mode") == "serve":
-            username, password = basic_auth_credentials
-            if not isinstance(username, str) or not isinstance(password, str):
-                raise RuntimeError("Basic Auth verification credentials are unavailable")
-            # The credential is obtained only through _secret_status() (the
-            # registered personal secret broker) and exists in memory for this
-            # request.  It is never part of a URL, subprocess argv, or log.
-            encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
-            auth_request = urllib.request.Request(
-                endpoint,
-                method="GET",
-                headers={**request_headers, "Authorization": f"Basic {encoded}"},
-            )
-            auth_error = None
-            try:
-                with opener.open(auth_request, timeout=15) as response:
-                    if 200 <= response.status < 400:
-                        auth_error = None
-                    else:
-                        auth_error = f"HTTP {response.status}"
-            except urllib.error.HTTPError as exc:
-                auth_error = f"HTTP {exc.code}"
-            except Exception:
-                auth_error = "route unavailable"
-            if auth_error:
-                raise RuntimeError(
-                    f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
-                )
 
 
 def _header_values(headers, name: str) -> list[str]:
@@ -5716,7 +5940,8 @@ def _header_values(headers, name: str) -> list[str]:
 
 def _verify_private_answer(opener, hostname: str, path: str, *, gate: bool,
                            route_tag: str | None = None, basic_auth_enabled: bool = False,
-                           basic_auth_credentials: tuple[str, str] | None = None) -> None:
+                           basic_auth_credentials: tuple[str, str] | None = None,
+                           stop: "threading.Event | None" = None) -> None:
     """Wait for ``hostname`` to answer ``path`` with 404 (from the gate when ``gate``).
 
     Any 2xx or 3xx answer means the application (or a redirect to it) is reachable
@@ -5763,7 +5988,7 @@ def _verify_private_answer(opener, hostname: str, path: str, *, gate: bool,
                 last_error = exc
         except Exception as exc:  # Edge propagation is external and transient.
             last_error = exc
-        time.sleep(10)
+        _edge_retry_pause(stop)
     raise RuntimeError(
         f"edge verification failed for {hostname}: {_edge_failure_detail(last_error)}")
 
@@ -6238,6 +6463,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
         'ordinary_recovery_admission_v1', 'ordinary_source_artifact_v1'])
+    from sandbox.hosting.phase_timing import PhaseClock
+    # Phase names are fixed identifiers, so the unredacted progress is safe here.
+    clock = PhaseClock(progress)
     if local_images_digest is not None:
         if active_image_lease is None:
             raise hosting.HostingError("local image engine lock is unavailable")
@@ -6251,6 +6479,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     broker_guard = (personal_secrets.hosting_binding_broker_lock()
                     if recovery_repository is not None else nullcontext())
     with broker_guard:
+        clock.lap("secrets")
         secret_values, missing = _secret_status(validated)
         if missing:
             raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
@@ -6268,6 +6497,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             # Internal unit seams never authorize recovery or touch broker state.
             binding_key, key_version = b"\0" * 32, "test-unavailable"
             publish_binding_key = False
+        clock.lap("source_artifact")
         base_commit = _resolve_host_source_commit(validated["project_root"])
         source_artifact, source_checkout = _prepare_host_source_artifact(validated, base_commit)
         published_commit = source_artifact['revision']
@@ -6282,6 +6512,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             max_bytes=_HOST_SOURCE_SNAPSHOT_MAX_BYTES)
         source_state_identity = source_snapshot["identity"]
         source_state_clean = not bool(diff or untracked)
+        clock.lap("admission")
         home = remote.resolve_sandbox_home(entry)
         runtime["environment"] = hosting.render_env_file(
             validated, secret_values, pushed_commit_sha=published_commit)
@@ -6340,10 +6571,13 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             "use deploy.strategy auto or in-place")
     if before_effects is not None:
         before_effects()
+    clock.lap("edge_preflight")
     client = cloudflare.Client()
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
     edge = _host_edge(entry)
     edge.preflight(validated, caddy_name)
+    if hosting.wildcard_zone(validated):
+        _wildcard_preflight(entry, validated, state["hosts"].get(runtime["key"]), client)
     # Spec 081: before any source reaches the remote (a push to the checked-out branch
     # updates the working tree), a private target's names are DNS-only and answer 404
     # behind a confirmed deny route.
@@ -6358,6 +6592,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     # any source, space or state effect, so a refused read changes nothing.
     previous_caddy = (private_closure["baseline"] if private_closure is not None
                       else edge.read_previous(caddy_name))
+    clock.lap("source_push")
     attempt.checkpoint('source', 'source_publish')
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -6414,6 +6649,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             "revision/config; "
             "refusing before target reset, observation, Compose, or initializer mutation"
         )
+    clock.lap("source_reset")
     remote.update_target_to(
         entry, target, sha,
         project_root=None if require_clean else validated["project_root"],
@@ -6531,6 +6767,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             )
         )
         exact_runtime_proven = False
+        clock.lap("runtime_evidence")
         if may_replay:
             try:
                 observation = _observe_host_runtime(
@@ -6592,6 +6829,8 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                     observation=classified, save_state=durable_save):
                 raise RuntimeError("exact runtime reconciliation evidence was rejected")
         else:
+            # Compose writes its own phase markers to apply.log.
+            clock.finish()
             attempt.checkpoint('initializer', 'runtime_apply')
             _run_compose(
                 entry, validated, target, runtime_dir, runtime,
@@ -6605,7 +6844,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             _mark_hosting_init_complete(
                 state, key, entry=entry, runtime_dir=runtime_dir,
                 save_state=durable_save)
+            clock.lap("runtime_health")
             health_receipt = _verify_remote_health(entry, runtime, stream_progress)
+            clock.lap("runtime_observation")
             try:
                 observation, classified = _poll_post_compose_host_observation(
                     validated, entry, target, runtime_dir, sha,
@@ -6643,9 +6884,11 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             durable_save(state)
         attempt.checkpoint('runtime', 'runtime_apply', state='observed')
         attempt.checkpoint('edge', 'edge_apply')
+        clock.lap("edge_certificate")
         proxied = validated["cloudflare"]["proxied"]
         cert_path, key_path, certificate = edge.certificate(
             proxied, validated, runtime, previous_entry, client, home, caddy_name)
+        clock.lap("edge_route")
         route_tag = _route_tag(validated)
         render_validated = {**validated, "route_tag": route_tag} if route_tag else validated
         rendered = edge.render(
@@ -6659,14 +6902,16 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
         edge_live["new"] = True
+        clock.lap("edge_dns")
         zones: dict[str, dict] = {}
+        zone_lookup = _ZoneLookup(client)
         fresh_hostnames: set[str] = set()
         drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule"))
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]
             zone = zones.get(hostname)
             if zone is None:
-                zone = _zone_for_hostname(client, hostname)
+                zone = _zone_for_hostname(zone_lookup, hostname)
                 zones[hostname] = zone
             if proxied:
                 current = client.current_ssl_mode(zone["id"])
@@ -6722,9 +6967,19 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
                                     "created_id": (existing or {}).get("id"),
                                     "applied": _applied_record(existing)})
                     continue
+            if cloudflare.address_record_current(previous, wanted["address"], proxied=proxied):
+                # Already exactly what upsert_address would write: no provider write,
+                # and a rollback restores this same record.
+                changes.append({"zone_id": zone["id"], "previous": previous,
+                                "created_id": previous.get("id"),
+                                "applied": _applied_record(previous)})
+                continue
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id"),
                             "applied": _applied_record(created)})
+        # The new-record DNS grace runs from the last write, not from verification.
+        dns_written_at = time.monotonic()
+        clock.lap("edge_after_dns")
         certificate = edge.after_dns(
             render_validated, runtime["loopback_port"], secret_values, cert_path, certificate,
             caddy_name, log_path=apply_log)
@@ -6741,9 +6996,11 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             verify_kwargs["route_tag"] = route_tag
         if fresh_hostnames:
             verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
+            verify_kwargs["fresh_since"] = dns_written_at
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         evidence = None
+        clock.lap("edge_verify")
         dns_cov = validated.get("dns_coverage") or {}
         if dns_cov.get("mode") == "shared":
             evidence = targets.verify_shared(
@@ -6754,6 +7011,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
             )
         else:
             _verify_edge(validated["routes"], **verify_kwargs)
+        clock.lap("edge_finalize")
         cache_policy = (validated.get("cloudflare") or {}).get("cache_purge") or {}
         if cache_policy.get("on_deploy") is True or purge_edge_cache:
             if cache_policy.get("enabled") is not True:
@@ -6815,11 +7073,15 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         edge_state = {"state": "ready"}
         if evidence is not None:
             edge_state["evidence"] = evidence
+        if hosting.wildcard_zone(validated) and edge.mode == "nginx":
+            saved_records = _retire_wildcard_records(state, key, client)
+        else:
+            saved_records = _first_adoption_records(state["hosts"][key].get("records"), changes)
         state["hosts"][key].update({
             "loopback_port": runtime["loopback_port"],
             "compose_project": runtime["compose_project"],
             "certificate": certificate,
-            "records": _first_adoption_records(state["hosts"][key].get("records"), changes),
+            "records": saved_records,
             "commit": sha,
             "recorded_revision": sha,
             "caddy_name": caddy_name,
@@ -6841,6 +7103,7 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         durable_save(state)
 
     hosting.apply_with_rollback(apply, rollback)
+    clock.lap("delivery_record")
     attempt.checkpoint('edge', 'edge_apply', state='observed')
     generation = (state['hosts'][key].get('hosting_operation') or {}).get('starting_generation')
     observed_revision = state['hosts'][key].get('observed_runtime_revision')
@@ -6874,7 +7137,9 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
     if summary_recorder is not None:
         summary_recorder.finished((delivery or {}).get("delivery_succeeded") is not False)
     _record_stack_delivery(validated, remote_name, delivery)
+    clock.lap("mail_name")
     mail_name = _ensure_stack_mail_name(validated, remote_name, delivery)
+    clock.finish()
     if mail_name is not None:
         result["mail_name"] = mail_name
     return result
@@ -7220,6 +7485,9 @@ class _HostImageEdgeAdapter:
     def preflight(self, entry, remote_name):
         """Check known provider failures before runtime; origin proof follows it."""
         import copy
+        if isinstance(self.validated, dict) and hosting.wildcard_zone(self.validated):
+            raise hosting.HostingError("cloudflare.dns: wildcard does not support image "
+                                       "activation yet; use host apply")
         val_copy = copy.deepcopy(self.validated)
         state = hosting.load_host_state()
         target_key = hosting.state_key(remote_name, self.validated) if (isinstance(self.validated, dict) and "project" in self.validated and "environment" in self.validated) else None

@@ -186,6 +186,11 @@ def _run_now(args) -> dict:
             raise FollowError("follow_paused", f"follow {name} is paused; resume it first")
         state["retry"] = True
     payload = _set_state(args, "run_now", change)
+    owner = args._follow_context.owner
+    store = _store()
+    # A timer installed by an earlier release would run this poll on that release.
+    with store.units_lock():
+        payload["timer"] = units.refresh(sb_path=owner.executable, sandbox_home=owner.sandbox_home)
     payload["poll_started"] = units.start_now()
     return payload
 

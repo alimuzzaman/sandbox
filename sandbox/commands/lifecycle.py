@@ -2192,8 +2192,12 @@ def cmd_smoke(cfg, args) -> None:
                 else 'ensure_failed')
         if str(entry.get('url', '')).startswith('http://localhost:'):
             from sandbox.core._remote import redact_text
-            for line in result.stdout.splitlines():
-                if any(marker in line for marker in ('proxy is running but', 'proxy startup failed', 'proxy container did not start')):
+            # Every gate of the clean-URL path says why it fell back; show
+            # each one, not only the Caddy start failures.
+            markers = ('proxy is running but', 'proxy startup failed', 'proxy container did not start',
+                       'clean URLs need', 'clean-URL helper', 'resolution', 'clean URL', 'localhost')
+            for line in (result.stdout + '\n' + result.stderr).splitlines():
+                if any(marker in line for marker in markers):
                     print('Startup route diagnostic: ' + redact_text(line)[:1200], flush=True)
         return entry
 

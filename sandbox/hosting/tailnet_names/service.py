@@ -49,6 +49,7 @@ from sandbox.hosting.tailnet_names.models import (
     TailnetNameError,
     TailnetNameRecord,
     Upstream,
+    wildcard_parent,
 )
 from sandbox.hosting.tailnet_names.state import StateStore
 from sandbox.hosting.tailnet_names.verify import ProbeResult, public_outcome, tailnet_outcome
@@ -508,6 +509,15 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                              f"{name.fqdn} belongs to stack {existing.stack}", "refused")
                 replace_upstream = existing is not None and existing.stack == stack
             run.call("preflight", _zone_check, ctx, name, existing)
+            if (existing is None and wildcard_parent(ctx.config, name.fqdn) is None and any(
+                    name.fqdn.endswith("." + covered)
+                    for covered in (ctx.config.wildcard_parents if ctx.config else ()))):
+                # A new deeper name would make its covered ancestor an empty
+                # non-terminal, and the wildcard would stop answering for it. A
+                # name recorded before the parent was configured keeps working.
+                run.stop("preflight", DNS_CONFLICT,
+                         "names more than one label below a tailnet_names.wildcard_parents "
+                         "entry are not supported", "refused")
             try:
                 facts = deps.preflight(entry, [name.fqdn], nginx.route_file(name.route_name))
             except FrontDoorError as exc:
@@ -546,26 +556,35 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                              "pass --replace-upstream to change it", "refused")
                 # DNS (FR-007, FR-008)
                 _hold(run, "dns", deps, ctx, name.fqdn, token)
-                res = run.call("dns", deps.dns, ctx.config,
-                               {"op": "ensure", "zone": name.zone, "name": name.fqdn,
-                                "ip": target.tailnet_ip}, on_fail=rec.failing("dns"))
+                parent = wildcard_parent(ctx.config, name.fqdn)
+                request = {"op": "ensure", "zone": name.zone, "name": name.fqdn,
+                           "ip": target.tailnet_ip}
+                if parent:
+                    request.update(op="ensure_wildcard", parent=parent)
+                res = run.call("dns", deps.dns, ctx.config, request, on_fail=rec.failing("dns"))
                 if res.result == "conflict":
                     rec.save("dns", "refused")
                     run.stop("dns", DNS_CONFLICT,
                              f"the name already has DNS records Sandbox will not change "
                              f"({res.code or 'other record'}: content {res.content}, "
                              f"proxied {res.proxied})", "refused")
-                if res.result not in ("created", "exists"):
+                if res.result not in ("created", "exists", "covered"):
                     rec.save("dns", "failed")
                     run.stop("dns", DNS_FAILED,
                              f"the DNS provider call failed ({res.code or res.result})")
-                adopted = rec.record.dns_adopted if rec.record.dns_record_id == res.record_id \
-                    else res.result == "exists"
-                rec.save("dns", "done", dns_record_id=res.record_id, dns_adopted=adopted)
-                if res.result == "created":
-                    run.done("dns", "created a DNS-only record")
-                else:
-                    run.skipped("dns", "an identical DNS-only record exists")
+                if res.result == "covered":
+                    # The name owns no record: remove leaves the shared wildcard alone.
+                    rec.save("dns", "done", dns_record_id=None, dns_adopted=False)
+                    run.skipped("dns", f"covered by the DNS-only *.{parent} record")
+                    res = None
+                if res is not None:
+                    adopted = rec.record.dns_adopted if rec.record.dns_record_id == res.record_id \
+                        else res.result == "exists"
+                    rec.save("dns", "done", dns_record_id=res.record_id, dns_adopted=adopted)
+                    if res.result == "created":
+                        run.done("dns", "created a DNS-only record")
+                    else:
+                        run.skipped("dns", "an identical DNS-only record exists")
 
                 # Certificate (FR-009, FR-010)
                 chain, cached = None, False

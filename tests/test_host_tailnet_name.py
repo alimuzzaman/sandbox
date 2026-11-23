@@ -338,6 +338,7 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(call["profile"]["argv"], [
             "/opt/lego", "run", "--accept-tos", "--email", "ops@example.test",
             "--server", m.ACME_SERVERS["letsencrypt"], "--dns", "cloudflare",
+            "--dns.propagation.disable-rns",
             "--csr", str(self.root / "csr" / "request.csr"), "--path", str(self.root)])
         self.assertEqual(call["csr"], csr)
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)

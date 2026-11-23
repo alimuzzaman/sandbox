@@ -175,7 +175,8 @@ def _container_key(name: str) -> str:
 
 
 def _hosted_target_usage(records: dict, container_rows: list,
-                         lifetimes: dict | None = None) -> tuple[list[dict], set[str]]:
+                         lifetimes: dict | None = None, *,
+                         containers_known: bool = True) -> tuple[list[dict], set[str]]:
     """Attribute ``sandbox-host-<project>-<environment>-*`` containers to hosted targets.
 
     ``records`` is ``panel_records.read_server_records``. A container goes to the
@@ -184,6 +185,9 @@ def _hosted_target_usage(records: dict, container_rows: list,
     ``panel_lifetime.read_server`` listing: each row carries its lifetime view,
     and a stack target with no summary takes its stack name from the record.
     Returns the rows and the names of the containers they claimed.
+    ``containers_known`` is False while the container listing is still being
+    read: a target with no matched container is then ``running: None``, not
+    "stopped".
     """
     from sandbox.hosting import panel_lifetime
 
@@ -222,7 +226,7 @@ def _hosted_target_usage(records: dict, container_rows: list,
             **target,
             "attribution_status": "compose_project" if matched else "unknown",
             "container_count": len(matched),
-            "running": bool(matched),
+            "running": True if matched else (False if containers_known else None),
             "memory_used_bytes": sum(int(row.get("memory_used_bytes") or 0) for row in matched),
             "cpu_percent": round(sum(float(row.get("cpu_percent") or 0) for row in matched), 2),
         })
@@ -283,7 +287,9 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
         partial.extend(records["partial_reasons"][:20])
         lifetimes = _lifetime_listing(Path(_paths.RUNTIME_DIR))
         partial.extend(lifetimes["partial_reasons"][:20])
-        hosted, attributed_names = _hosted_target_usage(records, container_rows, lifetimes)
+        hosted, attributed_names = _hosted_target_usage(
+            records, container_rows, lifetimes,
+            containers_known=bool(container_rows) or container_view.get("status") == "complete")
     except Exception:
         hosted, attributed_names = [], set()
         partial.append("hosted_target_inventory_unavailable")
@@ -312,13 +318,15 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     try:
         if deep:
             storage_probe = LocalProbeAdapter().observe_reclaim(
-                budget_seconds=30, directory_cache="refresh")
+                budget_seconds=30, directory_cache="refresh", deep=True)
             _record_slow_probe(LocalProbeAdapter, storage_probe)
             storage_state, storage_age = "ok", 0
         else:
             storage_state, storage_probe, storage_age = _cached_slow_probe(
                 LocalProbeAdapter, lambda: LocalProbeAdapter().observe_reclaim(
-                    budget_seconds=8, directory_cache="cache_only"))
+                    # Runs in the background, so a slow host only delays the
+                    # value; xspeed-dev with ~1,000 workspaces needs about 34 s.
+                    budget_seconds=45, directory_cache="cache_only", deep=True))
         if storage_state == "ok":
             storage = {
                 "status": "partial" if any(
@@ -328,8 +336,8 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
                 ) else "complete",
                 "capacity": storage_probe.get("capacity"),
                 "capacity_scope_id": storage_probe.get("capacity_scope_id"),
-                "attribution_status": (
-                    "available" if storage_probe.get("deep_attribution") else "unknown"
+                "attribution_status": str(
+                    (storage_probe.get("deep_attribution") or {}).get("status") or "unknown"
                 ),
                 "category_outcomes": list(storage_probe.get("category_outcomes") or ())[:50],
                 "observed_age_seconds": storage_age,
@@ -366,7 +374,9 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
         "host": host, "jobs": jobs,
         "process_view": diagnostics.get("process_view"), "containers": container_view,
         "per_instance_usage": per_instance,
-        "hosted_targets": {"total": len(hosted), "running": sum(1 for row in hosted if row["running"]),
+        "hosted_targets": {"total": len(hosted),
+                           "running": (None if any(row["running"] is None for row in hosted)
+                                       else sum(1 for row in hosted if row["running"])),
                            "rows": hosted},
         "unattributed_containers": unattributed,
         "storage": storage,

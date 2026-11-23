@@ -578,6 +578,11 @@ class ReclaimService:
                 "inventory_status": block.get("status"),
                 "truncated": bool(block.get("truncated")),
                 "unmeasured_count": int(block.get("unmeasured_count") or 0),
+                # What the scheduled routine needs to decide whether a partial
+                # inventory is still safe to act on: every entry listed and the
+                # container evidence whole. Unmeasured sizes only skip entries.
+                "deployment_inventory_complete": policy._deployment_inventory_complete(block),
+                "engine_complete": policy._engine_complete(block),
                 "requires_confirmation": True,
             },
         )

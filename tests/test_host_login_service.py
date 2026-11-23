@@ -467,6 +467,16 @@ class OverrideTests(unittest.TestCase):
                          "/run/sandbox-login", "expose", "healthcheck", IMAGE):
             self.assertIn(expected, self.override)
 
+    def test_the_gate_health_check_is_fast_at_start_then_once_a_minute(self):
+        # One gate runs in every stack: a 10 s probe was ~2.8 execs/s across 28 stacks.
+        lines = self.override.split("    healthcheck:\n", 1)[1].splitlines()
+        block = "\n".join(line for line in lines[:next(
+            (i for i, line in enumerate(lines) if not line.startswith("      ")), len(lines))])
+        for expected in ("interval: 60s", "start_period: 120s", "start_interval: 2s", "retries: 3",
+                         "timeout: 5s"):
+            self.assertIn(expected, block)
+        self.assertNotIn("interval: 10s", block)
+
     def test_credential_is_passed_by_reference_only(self):
         self.assertIn("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", self.override)
         self.assertIn("${CAPTURE_PASSWORD}", self.override)
@@ -554,6 +564,37 @@ class PreflightProbeTests(unittest.TestCase):
     @staticmethod
     def _port(**fields):
         return {"mode": "ingress", "target": 8025, "published": "18025", "protocol": "tcp", **fields}
+
+    def _probe_with_docker(self, compose_version, engine_version):
+        """The probe with a fake `docker` on PATH reporting these versions."""
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "config.json")
+            config.write_text(json.dumps({"services": {"capture": {}, login.SERVICE_NAME: {}}}))
+            fake = Path(directory, "compose.sh")
+            fake.write_text(f"#!/bin/sh\nexec /bin/cat {config}\n")
+            bin_dir = Path(directory, "bin")
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text("#!/bin/sh\n"
+                              f'if [ "$1" = compose ]; then echo {compose_version}; else echo {engine_version}; fi\n')
+            docker.chmod(0o755)
+            command = shlex.split(login.preflight_command(f"/bin/sh {fake}", "capture"))
+            done = run_test_process([sys.executable, *command[1:]], capture_output=True, text=True,
+                                    env={"PATH": f"{bin_dir}:/usr/bin:/bin"})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def test_a_host_too_old_for_the_gate_health_check_is_refused_by_name(self):
+        for compose_version, engine_version in (("2.20.0", "27.3.1"), ("v2.29.7", "24.0.7")):
+            with self.subTest(compose=compose_version, engine=engine_version):
+                output = self._probe_with_docker(compose_version, engine_version)
+                self.assertNotIn("capture_ports", output, "an old host stops before Compose config")
+                with self.assertRaises(login.LoginServiceError) as raised:
+                    login.check_preflight(output)
+                self.assertEqual(raised.exception.code, "login_service_docker_too_old")
+                self.assertIn(compose_version, str(raised.exception))
+        login.check_preflight(self._probe_with_docker("2.20.2", "25.0.0"))
+        login.check_preflight(self._probe_with_docker("v2.29.7", "27.3.1"))
 
     def assertCaptureRefused(self, capture):
         with self.assertRaises(login.LoginServiceError) as raised:

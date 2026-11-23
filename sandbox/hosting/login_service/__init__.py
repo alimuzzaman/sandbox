@@ -677,9 +677,13 @@ def render_service(declaration: dict, gate_port: int | None = None, *, target_di
         f"    command: {json.dumps(['python3', '-c', _LOADER, source])}",
         "    healthcheck:",
         f"      test: {json.dumps(['CMD', 'python3', '-c', probe])}",
-        "      interval: 10s",
+        # Every stack runs one gate: probe every 2 s while it starts, then once a
+        # minute (the setup templates' pattern), not one exec per gate every 10 s.
+        "      interval: 60s",
         "      timeout: 5s",
-        "      retries: 12",
+        "      start_period: 120s",
+        "      start_interval: 2s",
+        "      retries: 3",
     ]
     return "\n".join(lines) + "\n"
 
@@ -702,6 +706,22 @@ def preflight_upstreams(declaration: dict, primary: str) -> list[str]:
     return sorted(services)
 
 
+# The gate's health check uses ``start_interval`` (render_service), which Compose
+# validates from 2.20.2 and the Engine honours from 25. Older hosts get a named
+# refusal instead of a Compose validation error. Shared by the remote probe.
+_VERSION_SOURCE = """
+import re as _re
+MINIMUM={'compose_version':(2,20,2),'engine_version':(25,0,0)}
+def _parsed(text):
+    found=_re.match(r'v?([0-9]+)\\.([0-9]+)(?:\\.([0-9]+))?',text or '')
+    return tuple(int(part or 0) for part in found.groups()) if found else None
+def versions_supported(versions):
+    return all(_parsed(versions.get(key)) is None or _parsed(versions.get(key))>=floor for key,floor in MINIMUM.items())
+"""
+_version_rules: dict = {}
+exec(_VERSION_SOURCE, _version_rules)  # noqa: S102 -- fixed module text, also sent to the remote probe
+
+
 def preflight_command(prefix: str, capture_service: str | None, upstreams: list[str] = (),
                       gate_port: int | None = None) -> str:
     """A read-only remote probe; its output is counts, never Compose values.
@@ -713,6 +733,11 @@ def preflight_command(prefix: str, capture_service: str | None, upstreams: list[
         "import json,subprocess,sys",
         "command,capture,login,upstreams,gate=sys.argv[1:6]",
         "upstreams=json.loads(upstreams)",
+        "def version(argv):",
+        " try:return subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=20,text=True).stdout.strip()[:40]",
+        " except Exception:return ''",
+        "versions={'compose_version':version(['docker','compose','version','--short']),'engine_version':version(['docker','version','--format','{{.Server.Version}}'])}",
+        "if not versions_supported(versions):print(json.dumps(versions));sys.exit(0)",
         "done=subprocess.run(command,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=60,check=True)",
         "services=json.loads(done.stdout)['services']",
         "LOOPBACK={'127.0.0.1','::1'}",
@@ -724,8 +749,9 @@ def preflight_command(prefix: str, capture_service: str | None, upstreams: list[
         "login_ports=sum(1 for port in ports(login) if not managed(port))+host_network(login)",
         "upstream_missing=sum(1 for name in upstreams if name not in services)",
         "upstream_ports=sum(sum(1 for port in ports(name) if beyond_loopback(port))+host_network(name) for name in upstreams)",
-        "print(json.dumps({'capture_present':(capture in services) if capture else True,'capture_ports':capture_ports,'login_ports':login_ports,'upstream_missing':upstream_missing,'upstream_ports':upstream_ports}))",
+        "print(json.dumps({**versions,'capture_present':(capture in services) if capture else True,'capture_ports':capture_ports,'login_ports':login_ports,'upstream_missing':upstream_missing,'upstream_ports':upstream_ports}))",
     ))
+    program = _VERSION_SOURCE + "\n" + program
     config = f"{prefix} --profile '*' config --format json"
     return shlex.join(["python3", "-c", program, config, capture_service or "", SERVICE_NAME,
                        json.dumps(sorted(upstreams)), str(int(gate_port)) if gate_port else ""])
@@ -734,6 +760,15 @@ def preflight_command(prefix: str, capture_service: str | None, upstreams: list[
 def check_preflight(output: object) -> None:
     try:
         observed = json.loads(str(output))
+    except ValueError:
+        observed = None
+    if isinstance(observed, dict) and not _version_rules["versions_supported"](observed):
+        raise LoginServiceError(
+            "login_service_docker_too_old",
+            f"{SERVICE_NAME} needs Docker Compose 2.20.2 and Engine 25 or newer for its health check; "
+            f"this host has Compose {observed.get('compose_version') or 'unknown'}, "
+            f"Engine {observed.get('engine_version') or 'unknown'}")
+    try:
         present, capture_ports, login_ports = (
             observed["capture_present"], observed["capture_ports"], observed["login_ports"])
     except (ValueError, KeyError, TypeError):

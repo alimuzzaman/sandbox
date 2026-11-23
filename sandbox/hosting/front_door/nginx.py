@@ -628,6 +628,7 @@ for name in sorted(os.listdir(CONF_DIR)) if os.path.isdir(CONF_DIR) else []:
                 row["renewal_overdue"] = rc4 != 0
                 row["issuer"] = ("public" if cert.startswith("/etc/letsencrypt/") else
                                  "tailnet-acme" if cert.startswith("/etc/nginx/sandbox-tailnet/") else
+                                 "wildcard-acme" if cert.startswith("/etc/sandbox-edge/certs/wildcard-") else
                                  "origin-ca")
         cert_rows.append(row)
     other = [(p, n) for p, n in pairs if p != path]
@@ -1151,6 +1152,8 @@ def summarize(facts: dict) -> dict:
                     action = ("renewal has not succeeded" if cert.get("issuer") == "public"
                               else "run `sb host tailnet-name renew`"
                               if cert.get("issuer") == "tailnet-acme"
+                              else "re-apply any cloudflare.dns: wildcard target to renew it"
+                              if cert.get("issuer") == "wildcard-acme"
                               else "re-apply to reissue the Origin CA certificate")
                 problems.append(f"{row['file']}: certificate expires {cert.get('not_after')}; {action}")
     return {
@@ -1175,6 +1178,11 @@ def status(entry: dict) -> dict:
 
 def remove_route_and_certificates(entry: dict, name: str) -> dict:
     """Remove one Sandbox route file, then its Sandbox-owned certificates."""
+    if name.startswith("wildcard-"):
+        raise FrontDoorError(
+            "front_door_remove_shared_refused",
+            f"refusing to remove '{name}': it names the remote's shared wildcard "
+            "certificate, which every cloudflare.dns: wildcard route uses")
     if is_coverage_fallback_file(route_file(name)):
         raise FrontDoorError(
             "front_door_remove_fallback_refused",

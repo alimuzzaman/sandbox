@@ -84,7 +84,11 @@ class AnonymousInputTests(unittest.TestCase):
     def test_detached_launcher_passes_actual_stdin_without_fd_in_argv_or_environment(self):
         value = self.capture(b'fixture')
         service = JobService(repository=None, storage=None, components=None)
-        with mock.patch('sandbox.application.job_service.subprocess.Popen') as spawn:
+        # The scope wrapper depends on the host's systemd user manager; this test
+        # covers only how stdin reaches the supervisor.
+        with mock.patch('sandbox.application.job_service.subprocess.Popen') as spawn, \
+                mock.patch('sandbox.jobs.scope.scoped_launch',
+                           side_effect=lambda argv, job_id: (argv, None)):
             service._launch(Path('/synthetic/descriptor.json'), anonymous_input=value)
         self.assertEqual(spawn.call_args.kwargs['stdin'], value.fileno())
         self.assertNotIn('env', spawn.call_args.kwargs)

@@ -1099,6 +1099,49 @@ class TestThoroughProbeBudget(unittest.TestCase):
         self.assertIn("--remote remote-a", host["next_step"])
         self.assertIn("--refresh", host["next_step"])
 
+    def test_a_container_removed_during_inspect_keeps_the_engine_inventory_complete(self):
+        """xspeed-dev, 2026-11-22: CI containers come and go, so one inspect
+        batch missed an object and every workspace became UNKNOWN."""
+        import json as json_module
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "sandbox"
+            (home / "runtime").mkdir(parents=True)
+            namespace = self._scan_namespace(home, {
+                "action": "observe", "thorough": False, "budget_seconds": 20,
+            })
+            listing = {"ps": ["aaa111", "bbb222", "ccc333"]}
+            def run(argv, timeout):
+                if argv[:2] == ["docker", "ps"]:
+                    return 0, "\n".join(listing["ps"]), ""
+                if argv[:2] == ["docker", "inspect"]:
+                    ids = [item for item in argv[2:] if not item.startswith("-")]
+                    rows = [{"Id": item + "f" * 52, "Name": "/" + item} for item in ids
+                            if item not in listing.get("gone", ())]
+                    err = "Error: No such object: bbb222" if len(rows) < len(ids) else ""
+                    return (1 if err else 0), json_module.dumps(rows), err
+                if argv[:2] == ["docker", "buildx"]:
+                    return 0, "", ""
+                return 0, "", ""
+            namespace["run"] = run
+            listing["gone"] = {"bbb222"}
+            inventory, outcomes = namespace["docker_inventory"]()
+            status = {item["category"]: item["status"] for item in outcomes}
+            self.assertEqual(status["docker_containers"], "complete")
+            self.assertEqual(len(inventory["containers"]), 2)
+
+            # Any other inspect failure still marks the inventory incomplete.
+            def failing(argv, timeout):
+                if argv[:2] == ["docker", "inspect"]:
+                    return 1, "[]", "Error response from daemon: context deadline exceeded"
+                return run(argv, timeout)
+            namespace["run"] = failing
+            _inventory, outcomes = namespace["docker_inventory"]()
+            status = {item["category"]: item["status"] for item in outcomes}
+            self.assertNotEqual(status["docker_containers"], "complete")
+
     def _scan_namespace(self, home, request):
         import io
         import os

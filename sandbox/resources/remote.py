@@ -659,10 +659,34 @@ def docker_inventory():
             parsed = _json_rows(inspected)
             if parsed is not None:
                 rows.extend(parsed)
-            if code != 0 or parsed is None or len(parsed) < len(batch):
-                inspect_failed = True
             if code == 124:
                 inspect_timed_out = True
+                inspect_failed = True
+            elif code != 0 or parsed is None or len(parsed) < len(batch):
+                # Usually an object removed between the listing and this
+                # inspect (CI jobs create and remove containers all the time).
+                # One gone object must not mark the whole engine inventory
+                # incomplete, which leaves every workspace UNKNOWN; ask for
+                # each missing one alone and accept only "no such object".
+                found = set()
+                for row in parsed or ():
+                    for field in ("Id", "Name"):
+                        value = str(row.get(field) or "")
+                        found.add(value[7:] if value.startswith("sha256:") else value)
+                found.discard("")
+                for identifier in batch:
+                    if any(value == identifier or value.startswith(identifier) for value in found):
+                        continue
+                    one_code, one_out, one_err = run(inspect_argv + [identifier], 10)
+                    one = _json_rows(one_out)
+                    if one_code == 0 and one:
+                        rows.extend(one)
+                    elif one_code != 124 and "no such" in (one_err or "").lower():
+                        continue
+                    else:
+                        inspect_failed = True
+                        if one_code == 124:
+                            inspect_timed_out = True
         inventory[key] = rows
         if not inspect_failed and not list_failed:
             status = "complete"
@@ -1809,15 +1833,15 @@ def lifecycle_evidence():
     job_list_error = None
     index_complete = False
     try:
-        from sandbox.jobs.registry import read_resource_index
+        from sandbox.jobs import registry as job_registry
 
-        job_index = read_resource_index(
+        job_index = job_registry.read_resource_index(
             RUNTIME / "jobs" / "registry.sqlite3"
         )
         rows = job_index.get("jobs")
         if not isinstance(rows, list):
             raise ValueError("invalid job index")
-        index_complete = len(rows) < 10000
+        index_complete = len(rows) < getattr(job_registry, "RESOURCE_INDEX_LIMIT", 10000)
         if not index_complete:
             jobs_ok = False
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
@@ -2245,6 +2269,10 @@ def bounded_entry_size(path):
     indexed = indexed_size(path)
     if indexed is not None:
         return "measured", indexed
+    if str(path) in UNREACHED_PATHS:
+        # The shared walk ran out of time inside this subtree; a second du
+        # would spend the rest of the budget on it again.
+        return "timed_out", None
     if FAST or DEADLINE - time.monotonic() < 4:
         return "not_measured", None
     code, out, _err = run(["du", "-sx", "-sk", str(path)], 5)
@@ -2291,6 +2319,9 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
         },
         "index_available": bool(index_ok),
         "truncated": False,
+        # Every deploy-src entry was listed. An unmeasured size is not a
+        # missing entry: it only keeps that one entry out of a plan.
+        "deployment_inventory_complete": True,
         "unmeasured_count": 0,
         # Whether the *container* inventory is trustworthy is a different
         # question from whether every directory could be measured.  One
@@ -2314,10 +2345,30 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
     except OSError:
         block["status"] = "unavailable"
         block["reason"] = "deployment_root_unreadable"
+        block["deployment_inventory_complete"] = False
         return block
+    if not FAST:
+        # One streamed du for every unindexed entry instead of one du per
+        # entry with a 5 s cap: a ~1 GB workspace (node_modules) cannot finish
+        # in 5 s on a busy host, so it stayed unmeasured, and so outside every
+        # plan, on every run.
+        pending = []
+        for child in children:
+            try:
+                if child.is_dir() and not child.is_symlink() and indexed_size(child) is None:
+                    pending.append(child)
+            except OSError:
+                continue
+        try:
+            index_paths(pending, budget_share(0.8), count_links=True)
+        except Exception:
+            # A speed-up only: entries it could not index are measured one
+            # by one below, never left to fail the whole inventory.
+            pass
     for child in children:
         if time.monotonic() >= deadline:
             block["truncated"] = True
+            block["deployment_inventory_complete"] = False
             if block["status"] == "complete":
                 block["status"] = "partial"
             break
@@ -2378,11 +2429,24 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
         })
     # Retained terminal jobs also identify source checkouts already removed
     # by a previous partial cleanup. Keep their remaining stack reapable.
+    # Only when something of that stack is still in the engine: a checkout
+    # with nothing left was planned on every run and cost a full engine
+    # listing each (339 of them took the whole 30 min run on 2026-11-22).
     present = {entry["path"] for entry in block["entries"]}
+    engine_projects = set()
+    for item in list(inventory.get("containers") or ()) + list(inventory.get("volumes") or ()):
+        labels = (item.get("Config") or {}).get("Labels") if "Config" in item else item.get("Labels")
+        project = labels.get("com.docker.compose.project") if isinstance(labels, dict) else None
+        if isinstance(project, str) and project:
+            engine_projects.add(project)
     for canonical, references in protected_paths.items():
         path = Path(canonical)
         if (canonical in present or path.exists() or path.parent != DEPLOY
                 or "finished_job_idle" not in references or "retained_job" in references):
+            continue
+        leftover = any(owns_compose_project(path.name, project) for project in engine_projects) \
+            or any(source == canonical or source.startswith(canonical + "/") for source in binds)
+        if engine_complete and not leftover:
             continue
         block["entries"].append({
             "name": path.name, "path": canonical, "size_bytes": 0,
@@ -2673,10 +2737,11 @@ def reclaim_run():
                 # since the plan; re-read the registry and keep it if so, or
                 # if the registry cannot be read.
                 try:
-                    from sandbox.jobs.registry import read_resource_index
-                    current = read_resource_index(RUNTIME / "jobs" / "registry.sqlite3")
+                    from sandbox.jobs import registry as job_registry
+                    current = job_registry.read_resource_index(RUNTIME / "jobs" / "registry.sqlite3")
                     rows = current.get("jobs")
-                    if (not isinstance(rows, list) or len(rows) >= 10000 or
+                    limit = getattr(job_registry, "RESOURCE_INDEX_LIMIT", 10000)
+                    if (not isinstance(rows, list) or len(rows) >= limit or
                             any(not isinstance(job, dict) or
                                 not isinstance(job.get("project_root"), str) or
                                 not Path(job["project_root"]).is_absolute() or
@@ -4297,7 +4362,7 @@ class LocalProbeAdapter:
         )
 
     def observe_reclaim(self, *, budget_seconds: float = 30,
-                        directory_cache: str = "auto") -> dict:
+                        directory_cache: str = "auto", deep: bool = False) -> dict:
         response = self._run({
             "action": "observe",
             "thorough": False,
@@ -4307,8 +4372,9 @@ class LocalProbeAdapter:
             "focus": None,
             # Reclaim planning needs lifecycle, workspace, engine, and
             # deployment inventory. Capacity deep-attribution is unrelated
-            # and can consume the shared deadline before deploy-src is read.
-            "deep": False,
+            # and can consume the shared deadline before deploy-src is read,
+            # so only the host dashboard, which reports attribution, asks.
+            "deep": bool(deep),
             "directory_cache": directory_cache,
         }, budget_seconds + 5)
         payload = _salvage_payload(response.stdout) or {}

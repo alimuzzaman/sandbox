@@ -17,6 +17,7 @@ import contextlib
 import json
 import re
 import shlex
+import sys
 import time
 
 import sandbox.core._cloudflare as cloudflare
@@ -476,6 +477,44 @@ def _target_lease(entry: dict, project: str, environment: str):
                 target_lease.release(run, lease)
 
 
+_FIRST_TRY_SECONDS = 0.05
+STATE_LOCK_LABEL = "the host state lock (another stack's apply holds it while it runs)"
+
+
+@contextlib.contextmanager
+def _bounded_lock(factory, label: str, deadline: float, *, after_effects: bool = False):
+    """Enter ``factory(timeout)`` within the one wait budget a destroy has before teardown.
+
+    Destroy takes the target lock, then the host state lock that every apply
+    holds for its whole run. Waiting the full lock wait at each in turn outlived
+    the stack-down job's deadline with no output (feedback 66252fd8), so all
+    waits share ``deadline``, a busy lock is named on stderr, and running out
+    fails with ``host_lock_busy`` before anything is removed. After the
+    teardown (``after_effects``) a wait still names its lock, and running out
+    raises ``TimeoutError`` for the caller's own refusal.
+    """
+    started = time.monotonic()
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(factory(_FIRST_TRY_SECONDS))
+        except TimeoutError:
+            left = deadline - time.monotonic()
+            if left > 0:
+                print(f"host destroy: waiting up to {int(left) + 1}s for {label}", file=sys.stderr, flush=True)
+                try:
+                    stack.enter_context(factory(left))
+                    left = None
+                except TimeoutError:
+                    pass
+            if left is not None and after_effects:
+                # The caller names what the teardown already did and what is kept.
+                raise TimeoutError("operation_busy")
+            if left is not None:
+                raise DestroyError(f"waited {int(time.monotonic() - started)}s for {label}; "
+                                   "nothing was removed, retry when it is free", "host_lock_busy") from None
+        yield
+
+
 def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             clear_fenced: bool = False, client_factory=None,
             lock_wait: float = 600) -> dict:
@@ -488,14 +527,21 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
     from sandbox.hosting.recovery.repository import RecoveryRepository
     key = f"{remote_name}/{project}/{environment}"
     repository = RecoveryRepository()
+    # One wait budget for every lock taken before the teardown starts.
+    deadline = time.monotonic() + lock_wait
+    state_lock = lambda: _bounded_lock(  # noqa: E731
+        lambda timeout: repository.state_lock(timeout_seconds=timeout), STATE_LOCK_LABEL, deadline)
     with contextlib.ExitStack() as owned:
         for owned_key in namesakes(remote_name, project, environment):
-            owned.enter_context(repository.target_mutation_port(
-                "destroy", timeout_seconds=lock_wait).target_mutation_transaction(owned_key))
+            owned.enter_context(_bounded_lock(
+                lambda timeout, owned_key=owned_key: repository.target_mutation_port(
+                    "destroy", timeout_seconds=timeout).target_mutation_transaction(owned_key),
+                f"the target lock of {owned_key} (an apply, recovery or retire of this target holds it)",
+                deadline))
         # Spec 081 rollout: the same remote target lease every apply holds, so another
         # controller cannot destroy a target in the middle of its private apply.
         owned.enter_context(_target_lease(entry, project, environment))
-        with repository.state_lock(timeout_seconds=lock_wait):
+        with state_lock():
             state = hosting.load_host_state()
         found = plan(state, entry, remote_name, project, environment)
         record = state.get("hosts", {}).get(key)
@@ -544,7 +590,7 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
                 "; check no apply or recovery is still running, then pass --clear-fenced",
                 "target_fenced")
         name = found["compose_project"]
-        with repository.state_lock(timeout_seconds=lock_wait):
+        with state_lock():
             # A durable fence: if this run is interrupted while the remote shell
             # keeps going, apply, recovery and a second destroy still refuse.
             # Every key that maps to this Compose name is fenced, so a first apply
@@ -572,7 +618,8 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
                       "check it with a dry run, then re-run with --clear-fenced", "state_timeout")
         step = ("another operation held the state lock", kept, "state_lock_timeout")
         try:
-            with repository.state_lock(timeout_seconds=lock_wait):
+            with _bounded_lock(lambda timeout: repository.state_lock(timeout_seconds=timeout),
+                               STATE_LOCK_LABEL, time.monotonic() + lock_wait, after_effects=True):
                 step = local_step
                 # Read again: another target can apply onto one of these records during the
                 # teardown. Apply holds this lock across its provider writes and its save, so

@@ -81,11 +81,12 @@ class GuardedIO:
                    and argv[13].startswith("/CN="))
         # Only the exact fixture CA/leaf command shapes in one owned directory.
         cert = False
-        if argv[:2] == ("openssl", "req") and len(argv) == 13:
+        if argv[:2] == ("openssl", "req") and len(argv) == 17:
             cert = (argv[2:6] == ("-new", "-newkey", "rsa:2048", "-nodes")
                     and argv[6] == "-keyout" and local(argv[7]) and argv[8] == "-out"
                     and local(argv[9]) and argv[10] == "-subj" and argv[11] == "/CN=Sandbox Test CA"
-                    and argv[12] == "-x509")
+                    and argv[12:] == ("-x509", "-addext", "basicConstraints=critical,CA:TRUE",
+                                      "-addext", "keyUsage=critical,keyCertSign,cRLSign"))
         if argv[:2] == ("openssl", "req") and len(argv) == 12:
             cert = (argv[2:6] == ("-new", "-newkey", "rsa:2048", "-nodes")
                     and argv[6] == "-keyout" and local(argv[7]) and argv[8] == "-out"

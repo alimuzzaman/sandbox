@@ -89,8 +89,10 @@ class StackTemplate:
     dev_branch: str = DEFAULT_DEV_BRANCH  # spec 077: the repo's dev branch
     uses: tuple[str, ...] = ()  # direct same-remote stack names (spec 088)
     # The stack's tailnet-only inbox name, e.g. ``mail-{slug}.example.com``;
-    # Sandbox points it at the ``mailpit`` port after each apply.
-    mail_hostname: str | None = None
+    # Sandbox points it at the ``mailpit`` port after each apply. ``None``
+    # with a ``mailpit`` port means the default ``mail-{slug}.<zone>`` (the
+    # zone of the rendered ``host.primary``); ``False`` opts out.
+    mail_hostname: str | bool | None = None
 
     def environment_names(self) -> tuple[str, ...]:
         environments = self.raw.get("environments")
@@ -248,7 +250,9 @@ def parse_template(manifest: dict) -> StackTemplate:
     if len(set(uses)) != len(uses):
         raise StackTemplateError(USES_DUPLICATE, "stack.uses names must be unique")
     mail_hostname = block.get("mail_hostname")
-    if mail_hostname is not None:
+    if mail_hostname is False:
+        pass
+    elif mail_hostname is not None:
         if "mailpit" not in ports:
             raise StackTemplateError(TEMPLATE_INVALID, "stack.mail_hostname needs mailpit in stack.ports")
         if (not isinstance(mail_hostname, str) or mail_hostname.count("{slug}") != 1
@@ -387,12 +391,42 @@ def render(template: StackTemplate, *, slug: str, ref: StackRef, ports: dict[str
         "template": str(template_path),
         "ports": {name: int(port) for name, port in sorted(ports.items())},
     }
-    if template.mail_hostname:
+    if isinstance(template.mail_hostname, str):
         fqdn = mail_host(template.mail_hostname, slug)
         if fqdn is None:
             raise StackTemplateError(TEMPLATE_INVALID, f"stack.mail_hostname is not a hostname for slug {slug!r}")
         rendered[INSTANCE_KEY]["mail_hostname"] = fqdn
+    elif template.mail_hostname is None and "mailpit" in template.ports:
+        fqdn = _default_mail_host(rendered, slug)
+        if fqdn:
+            rendered[INSTANCE_KEY]["mail_hostname"] = fqdn
     return rendered
+
+
+def _default_mail_host(rendered: dict, slug: str) -> str | None:
+    """``mail-<slug>.<zone>``, the zone being the rendered ``host.primary`` without
+    its first label (the primary itself when it is a bare domain). ``None`` when
+    no environment names a primary, or the result would be one of the stack's
+    own hostnames, so a default never takes a public route offline."""
+    environments = rendered.get("environments")
+    if not isinstance(environments, dict):
+        return None
+    own = set()
+    primary = None
+    for name in sorted(environments, key=str):
+        host = (environments[name] or {}).get("host") if isinstance(environments[name], dict) else None
+        if not isinstance(host, dict):
+            continue
+        if isinstance(host.get("primary"), str):
+            own.add(host["primary"])
+            primary = primary or host["primary"]
+        own.update(str(item.get("hostname")) for item in (host.get("aliases") or ())
+                   if isinstance(item, dict))
+    if not primary:
+        return None
+    zone = primary.split(".", 1)[1] if primary.count(".") >= 2 else primary
+    fqdn = mail_host("mail-{slug}." + zone, slug)
+    return fqdn if fqdn and fqdn not in own else None
 
 
 def rendered_instance(manifest: dict, manifest_path: str | Path, stacks_root: str | Path) -> dict:

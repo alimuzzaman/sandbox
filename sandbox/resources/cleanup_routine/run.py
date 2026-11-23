@@ -25,9 +25,29 @@ from .store import RoutineStore, manifest_reference, utc_iso
 
 TRIGGER = "scheduled_routine"
 # Leave the probe room to report and the record room to be written before the
-# init-system backstop (bound + 60s) fires.
-_PLAN_BUDGET_CAP = 120.0
+# init-system backstop (bound + 60s) fires. Planning a host with ~1,000
+# workspaces needs a full du of deploy-src (138 s on xspeed-dev), so the plan
+# may use most of the run; the rest is for removal.
+_PLAN_BUDGET_CAP = 900.0
+_PLAN_SHARE = 0.6
 _MIN_REMOVAL_BUDGET = 5.0
+_RENEWAL_MIN_BUDGET = 1200.0
+
+
+def _inventory_actionable(data: Mapping) -> bool:
+    """Whether a safe plan may be applied although some evidence is partial.
+
+    Every entry must be listed and the container evidence whole: those decide
+    what is in use. A size that could not be measured only keeps its own entry
+    out of the plan (``size_unmeasured``), so it no longer stops the whole run.
+    A plan from an older probe without the two fields keeps the old rule.
+    """
+    if data.get("truncated"):
+        return False
+    listed, engine = data.get("deployment_inventory_complete"), data.get("engine_complete")
+    if isinstance(listed, bool) and isinstance(engine, bool):
+        return listed and engine
+    return data.get("inventory_status") == "complete"
 
 
 def _host_revision() -> str:
@@ -143,6 +163,12 @@ def run_routine(
     record["skipped_reasons"] = dict(hosted_skipped)
     record["skipped"] = sum(hosted_skipped.values())
     store.write_run(record)
+    # Shared wildcard certificates (cloudflare.dns: wildcard) renew here too, so they
+    # never depend on some target being applied in their last 30 days. Only due
+    # certificates do any work; one issuance can take most of lego's 900 s budget.
+    if bound - (monotonic() - started) > _RENEWAL_MIN_BUDGET:
+        record["wildcard_renewal"] = _wildcard_renewal_pass()
+        store.write_run(record)
     exclusions = effective_exclusions(
         routine, _host_config() if host_config is None else host_config,
     )
@@ -151,7 +177,7 @@ def run_routine(
     remaining = bound - (monotonic() - started)
     try:
         planned = service.plan(
-            "safe", budget_seconds=max(min(remaining, _PLAN_BUDGET_CAP), 1.0),
+            "safe", budget_seconds=max(min(remaining * _PLAN_SHARE, _PLAN_BUDGET_CAP), 1.0),
             exclude_kinds=("runtime",), exclude_names=tuple(exclusions),
         )
     except Exception:
@@ -163,7 +189,7 @@ def run_routine(
     plan_skipped = _merge_counts(hosted_skipped, _skipped_counts(data.get("skipped")))
     record["skipped_reasons"] = plan_skipped
     record["skipped"] = sum(plan_skipped.values())
-    if data.get("inventory_status") != "complete" or data.get("truncated"):
+    if not _inventory_actionable(data):
         return close("refused", "inventory_incomplete")
     if not data.get("candidates"):
         return close("reclaimed" if hosted_removed else "nothing_to_do")
@@ -213,6 +239,15 @@ def _hosted_pass(runtime: Path, run_id: str, remaining: float) -> dict[str, Any]
                                budget_seconds=max(min(remaining / 2, 1500.0), 1.0))
     except Exception as exc:  # the workspace pass must still run
         return {"ok": False, "status": "failed", "error": type(exc).__name__, "outcomes": []}
+
+
+def _wildcard_renewal_pass() -> dict[str, Any]:
+    """Renew due shared wildcard certificates on this host; never raises."""
+    try:
+        from sandbox.hosting.front_door import wildcard_cert
+        return wildcard_cert.renew_due()
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__, "zones": []}
 
 
 __all__ = ["TRIGGER", "effective_exclusions", "run_routine"]

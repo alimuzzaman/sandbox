@@ -1190,10 +1190,10 @@ cloudflare:
   proxied: true
   tls: origin-ca
   ssl_mode: strict
-  dns: auto # auto (default) | exact
+  dns: auto # auto (default) | exact | wildcard
 ```
 
-Omit `dns` for the default, or set it to `auto` or `exact`; an explicit `null` is invalid.
+Omit `dns` for the default, or set it to `auto`, `exact` or `wildcard`; an explicit `null` is invalid.
 
 - `auto` (default): Uses shared zone coverage whenever the remote has an nginx front door with an active covered zone matching the target hostname. If no zone covers the target or the remote uses Caddy, it falls back to creating an exact DNS record.
 - `exact`: Forces creation of an individual DNS record on Cloudflare. Required when:
@@ -1202,6 +1202,70 @@ Omit `dns` for the default, or set it to `auto` or `exact`; an explicit `null` i
   - The target declares multiple routes (`routes` has > 1 entry).
   - Using image activation (`host image ...`).
   - The operator explicitly wants a dedicated per-target DNS record.
+- `wildcard`: DNS-only ACME targets (`proxied: false`, `tls: acme`) on an nginx front
+  door share one record and one certificate per zone; see the next section.
+
+#### DNS-only wildcard hosting (`cloudflare.dns: wildcard`)
+
+For a busy zone of short-lived DNS-only stacks, where per-name records fill the zone's
+record quota and per-target certificates use up Let's Encrypt's weekly limit:
+
+```yaml
+cloudflare:
+  proxied: false
+  tls: acme
+  dns: wildcard
+```
+
+Every host name (primary and aliases, any number of routes) must be `<label>.<zone>` of
+one Cloudflare zone, and the zone must be listed in `tailnet_names.zones` in
+`sandbox.local.yml`: the certificate is issued with that block's DNS-01 token and pinned
+`lego`. Before any source or runtime change, apply refuses when:
+
+- the front door is not nginx (`front_door_capability_unavailable`), or the target uses
+  image activation or a private login service;
+- the zone is not a Cloudflare zone apex the hosting token can manage;
+- a host name has any record the target did not create, or names exist below it: by RFC
+  4592 the wildcard would not answer for it (`wildcard_name_ineligible`);
+- `*.<zone>` holds anything but exactly one DNS-only row per origin address family: a
+  proxied row, another address, a second row, a CNAME, or an AAAA when the remote has no
+  IPv6 (`wildcard_dns_conflict`). Sandbox never rewrites this record.
+
+Apply then:
+
+1. makes sure the remote has a current `*.<zone>` certificate in
+   `/etc/sandbox-edge/certs/wildcard-<zone>/`. The key is generated once on the remote
+   (root 0600, never copied off it). With fewer than 30 days left, or none, the
+   controller obtains a chain with a DNS-01 challenge (retrying while another issuance
+   holds the broker), and the remote installs it under the edge lock only if it matches
+   the key, with bounded `nginx -t` and reload. On failure the previous chain comes back,
+   or with none the new one is removed. The challenge's TXT record needs one free slot
+   in the zone's record quota;
+2. reads `*.<zone>` again and creates the missing row (only now, so a failed issuance
+   leaves no zone-wide record; a failure after this step keeps it, since it is shared
+   and never removed);
+3. serves the route with the shared certificate; it writes no per-name record and asks
+   certbot for nothing;
+4. after verification, deletes the per-name records this target created under an
+   earlier `exact` or `auto` apply. A record is deleted only when the target created
+   it, it still holds exactly what Sandbox wrote, and no other target on this controller
+   saved it, and a name is retired only when all its saved rows qualify (AAAA first),
+   so no name is left with an address of one family only; every other row stays in
+   state for `host destroy`. A recovered edge keeps the rows for the next apply.
+
+The shared record and certificate belong to the remote, not to a target: destroy and the
+reaper remove only the target's route and its own certificate directory, and
+`sb remote edge --remove-route wildcard-<zone>` is refused. The wildcard row is
+zone-wide production DNS: Sandbox creates it once and never removes it. The certificate
+renews when any wildcard target on the zone is applied within 30 days of expiry, and the
+remote's cleanup routine (`sb resources routine`) renews every due shared certificate on
+the host each run, before its reclaim pass, when at least 20 minutes of its bound remain.
+That pass never touches DNS, uses the host's own `tailnet_names` block and broker, leaves
+a busy broker for the next run, and records each zone as `current`, `renewed` or `failed`
+under `wildcard_renewal` in the run record. `sb remote edge` still reports an overdue
+certificate like any other. A target's old
+certbot certificate is left until the target is destroyed. Spec 070 zone coverage is not
+used for these targets.
 
 #### Hostnames with DNS managed elsewhere (`cloudflare.external_dns`)
 
@@ -1585,9 +1649,11 @@ shell may still be working) keeps apply, recovery and a second destroy out; re-r
 with `--clear-fenced` once the earlier run has ended. `host retire-delivery` refuses
 while a destroy owns the target. Certificate cleanup also
 reloads nginx, so a retry after an interrupted route removal cannot leave the old
-route loaded. Destroy waits up to
-`--lock-wait` seconds for the shared host state lock, like apply, and never holds
-that lock across an SSH call.
+route loaded. Before the teardown, destroy waits for the target lock and then the shared
+host state lock, which another stack's apply holds for its whole run. Both waits share one
+`--lock-wait` budget (default 600 s), a busy lock is named on stderr while it waits, and
+running out fails `host_lock_busy` with nothing removed. Destroy never holds the state lock
+across an SSH call.
 
 Destroy undoes the first adoption, but only for a record it can verify. For a record saved
 with a snapshot, it reads the record by ID first: one Sandbox created is deleted, and one it
@@ -1632,7 +1698,7 @@ project: xspeed-hub-{slug}
 stack:
   slug: '^[a-z0-9][a-z0-9-]{1,30}$'   # the stack name must fully match
   ports: [mailpit]                     # named ports, allocated per stack
-  mail_hostname: mail-{slug}.example.test   # optional tailnet-only inbox name
+  mail_hostname: mail-{slug}.example.test   # optional; mail-{slug}.<zone> is the default
 environments:
   sandbox:
     host:
@@ -1786,8 +1852,13 @@ port in Compose through the value, for example
 `"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
 private `environment.env` file apply passes with `--env-file`.
 
-**Inbox name (`stack.mail_hostname`).** A hostname with exactly one `{slug}`,
-allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
+**Inbox name (`stack.mail_hostname`).** On by default: a stack whose `stack.ports`
+declares `mailpit` gets `mail-{slug}.<zone>`, where the zone is its rendered
+`host.primary` without the first label (`hub-{slug}.example.test` gives
+`mail-{slug}.example.test`). No default is made when no environment names a
+primary or the default equals one of the stack's own hostnames, and
+`mail_hostname: false` opts out. An explicit value wins: a hostname with exactly
+one `{slug}`, allowed only when `stack.ports` declares `mailpit`; `stack up` refuses it when it
 equals one of the stack's routes or a hostname another target holds. After every
 completed apply of the stack, Sandbox publishes the rendered name as a
 [tailnet-only name](#tailnet-only-hostnames-sb-host-tailnet-name-spec-078) at
@@ -2172,7 +2243,10 @@ the last attempt with its job ids, and the last poll's reason.
 **Files.** Under `$SANDBOX_HOME/runtime/hosting/follow/`: `follows/<name>.json`,
 `audit.jsonl`, `keys/`, `known_hosts`, `work/<name>/repos/<repo>`, `locks/`. Timer:
 `~/.config/systemd/user/sandbox-stack-follow.{service,timer}` (needs user lingering;
-`follow_timer_unavailable` otherwise).
+`follow_timer_unavailable` otherwise). The service runs `$SANDBOX_HOME/sb-src/sb`, the
+link to the `current` release, so after `sb remote service migrate` the next poll runs the
+new runtime. A timer written by an older release names that release's own `sb`; the first
+`run-now` after the migrate rewrites it.
 
 **Where an attempt runs.** The poll is a `Type=oneshot` unit, and when it exits systemd
 stops everything in its cgroup. So the poll never starts the attempt job in its own
@@ -2360,6 +2434,30 @@ published name changes nothing.
    type). Exactly one identical record is adopted; anything else (another
    address, a proxied record, another type, several records) is refused
    (`tailnet_name_dns_conflict`) and never changed.
+   A name exactly one label below a `tailnet_names.wildcard_parents` entry
+   (`mail-x.tn.example.com` under `tn.example.com`) gets no record of its own:
+   the helper makes sure one DNS-only `*.<parent>` A record points at the
+   tailnet IPv4 (adopted when it is the only row and identical, created when
+   absent, never changed otherwise) and that nothing else answers for the name.
+   A record of any type at the name other than an identical A of its own, or
+   any name below it, is refused, since either stops the wildcard answering
+   (RFC 4592), except a leftover `_acme-challenge.<name>` TXT: every DNS-01
+   challenge for the name runs under its lease, which this step holds, so such a
+   TXT is stale and is deleted. A name more than one label below a parent is
+   refused, since it would hide its covered ancestor. The name keeps its own
+   certificate, so every activation and removal proof below is unchanged;
+   removal deletes no DNS record and never touches the shared one. During a
+   DNS-01 challenge the wildcard does not answer for the name, so on a renewal
+   the inbox can be unreachable for a few minutes (plus negative caching). A
+   name published before its parent was configured keeps its own record until
+   it is removed and added again, or renamed. When a stack's
+   `stack.mail_hostname` changes, the next apply removes the stack's earlier
+   names, and their records, once the new name is published.
+   One `*.<parent>` row points at one remote's tailnet address: a second remote
+   using the same parent is refused (`wildcard_other_record`), so give each
+   remote its own parent. The parent itself then exists in DNS, so a zone-level
+   `*.<zone>` record no longer answers for the parent name, and an NS
+   delegation at the parent is not detected.
 4. **Certificate**: the remote generates an EC P-256 key in
    `/etc/nginx/sandbox-tailnet/<fqdn>/privkey.pem` (root, 0600) and a signing
    request; `openssl` reads and writes only through stdin and stdout. `lego`

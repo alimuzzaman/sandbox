@@ -91,11 +91,27 @@ def installed() -> bool:
     return all(path.exists() for path in unit_paths().values())
 
 
+def stable_sb_path(sb_path: str, sandbox_home: str) -> str:
+    """``$SANDBOX_HOME/sb-src/sb`` when it is the same CLI as ``sb_path``, else ``sb_path``.
+
+    A server CLI runs from its own ``releases/<rev>/sb``. A unit naming that path
+    keeps running the old release after a migrate moves ``current`` on, so the
+    unit names the ``sb-src`` link instead, as the service and routine units do.
+    """
+    stable = Path(sandbox_home) / "sb-src" / "sb"
+    try:
+        if stable.resolve(strict=True) == Path(sb_path).resolve(strict=True):
+            return str(stable)
+    except (OSError, RuntimeError):
+        pass
+    return sb_path
+
+
 def install(*, sb_path: str, sandbox_home: str) -> dict:
     """Write both units and enable the timer; restore the prior files on failure."""
     from sandbox.resources import schedule
     check_host()
-    rendered = render(sb_path=sb_path, sandbox_home=sandbox_home)
+    rendered = render(sb_path=stable_sb_path(sb_path, sandbox_home), sandbox_home=sandbox_home)
     paths = unit_paths()
     current = {name: path.read_text() if path.exists() else None for name, path in paths.items()}
     if current == rendered and _run(["systemctl", "--user", "is-enabled", "--quiet", TIMER]) == 0:
@@ -119,6 +135,17 @@ def install(*, sb_path: str, sandbox_home: str) -> dict:
         _run(["systemctl", "--user", "daemon-reload"])
         raise FollowError("follow_timer_failed", f"the follower timer could not be installed: {exc}") from None
     return {"timer": TIMER, "changed": True}
+
+
+def refresh(*, sb_path: str, sandbox_home: str) -> dict:
+    """Rewrite an installed timer that names another CLI; never install a missing one.
+
+    Units written before ``stable_sb_path`` name the release that added the
+    follow. Run-now runs on the installed release, so it repoints them here.
+    """
+    if not installed():
+        return {"timer": TIMER, "changed": False}
+    return install(sb_path=sb_path, sandbox_home=sandbox_home)
 
 
 def remove() -> dict:

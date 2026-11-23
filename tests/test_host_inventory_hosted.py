@@ -79,6 +79,16 @@ class AttributionTest(unittest.TestCase):
         self.assertEqual((usage[0]["attribution_status"], usage[0]["running"], claimed),
                          ("unknown", False, set()))
 
+    def test_running_is_unknown_while_the_containers_are_still_being_read(self):
+        # The panel showed "22 hosted apps · 0 running" on its first load
+        # while 18 were up: the container listing had not arrived yet.
+        records = {"targets": [], "legacy": [{"project": "a", "environment": "b"}]}
+        usage, _claimed = host_inventory._hosted_target_usage(records, [], containers_known=False)
+        self.assertIsNone(usage[0]["running"])
+        usage, _claimed = host_inventory._hosted_target_usage(
+            records, [container("sandbox-host-a-b-web-1")], containers_known=False)
+        self.assertIs(usage[0]["running"], True)
+
 
 class LifetimeRowsTest(unittest.TestCase):
     """Spec 076 follow-up: rows carry the host's own lifetime view and stack fallback."""
@@ -265,7 +275,21 @@ class SnapshotTest(unittest.TestCase):
             host_inventory._hosted_inventory_snapshot(deep=True)
         self.assertEqual(diagnostics.call_count, 2)
         self.assertEqual(storage.return_value.observe_reclaim.call_args.kwargs,
-                         {"budget_seconds": 30, "directory_cache": "refresh"})
+                         {"budget_seconds": 30, "directory_cache": "refresh", "deep": True})
+
+    def test_storage_attribution_reports_the_deep_status(self):
+        storage = mock.MagicMock()
+        storage.return_value.observe_reclaim.return_value = {
+            "category_outcomes": [], "deep_attribution": {"status": "partial"}}
+        diagnostics = mock.Mock(return_value={"containers": {"status": "complete", "rows": []}, "process_view": {}})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("sandbox.core._paths.RUNTIME_DIR", Path(tmp)), \
+                mock.patch("sandbox.core._config.load_config", return_value={}), \
+                mock.patch("sandbox.core._dash.collect_instance_rows", return_value=[]), \
+                mock.patch("sandbox.resources.remote.LocalProbeAdapter", storage), \
+                mock.patch.object(host_inventory, "_diagnostic_process_snapshot", diagnostics):
+            snapshot = host_inventory._hosted_inventory_snapshot(deep=True)
+        self.assertEqual(snapshot["storage"]["attribution_status"], "partial")
 
     def test_no_hosted_targets_keeps_the_old_shape(self):
         with tempfile.TemporaryDirectory() as tmp:

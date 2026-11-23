@@ -49,10 +49,11 @@ export interface HostedTargetUsage {
   stack_slug: string | null; recorded: boolean; last_apply_status: string | null;
   // Follow-up 2026-11-10; absent from hosts whose runtime predates it.
   last_apply_reason?: string | null; lifetime?: LifetimeView;
-  attribution_status: string; container_count: number; running: boolean;
+  // null while the host is still reading its containers.
+  attribution_status: string; container_count: number; running: boolean | null;
   memory_used_bytes: number; cpu_percent: number;
 }
-export interface HostedTargets { total: number; running: number; rows: HostedTargetUsage[] }
+export interface HostedTargets { total: number; running: number | null; rows: HostedTargetUsage[] }
 
 // GET /api/hosting: stacks and hosted sites (spec 076). Read-only.
 export type HealthStatus = "checking" | "up" | "up_login" | "redirect" | "client_error" |

@@ -17,6 +17,28 @@ API_BASE = "https://api.cloudflare.com/client/v4"
 DNS_ONLY_TTL_SECONDS = 60
 
 
+MANAGED_RECORD_COMMENT = "managed by Sandbox hosting"
+
+
+def _address_ttl(proxied: bool) -> int:
+    return 1 if proxied else DNS_ONLY_TTL_SECONDS
+
+
+def address_record_current(record, address: str, *, proxied: bool) -> bool:
+    """True when ``record`` already holds exactly what ``upsert_address`` would write.
+
+    The apply then skips the write. Any difference, including an unexpected
+    field type or a differently spelled address, means a write.
+    """
+    if not isinstance(record, dict) or not isinstance(address, str):
+        return False
+    return (record.get("type") == ("AAAA" if ":" in address else "A")
+            and record.get("content") == address
+            and record.get("proxied") is bool(proxied)
+            and record.get("ttl") == _address_ttl(proxied)
+            and record.get("comment") == MANAGED_RECORD_COMMENT)
+
+
 class CloudflareError(RuntimeError):
     def __init__(self, message: str, code: str = "provider_failed"):
         self.code = code
@@ -124,6 +146,19 @@ class Client:
         path = f"/zones/{zone_id}/dns_records?name={urllib.parse.quote(hostname)}"
         return list(self._request("GET", path).get("result") or [])
 
+    def records_under(self, zone_id: str, hostname: str) -> list[dict]:
+        """Records strictly below ``hostname`` (one page is enough to know any exist)."""
+        path = (f"/zones/{zone_id}/dns_records?per_page=50&name.endswith="
+                + urllib.parse.quote("." + hostname))
+        rows = list(self._request("GET", path).get("result") or [])
+        suffix = "." + hostname.lower()
+        if not all(isinstance(row, dict) and str(row.get("name") or "").lower().endswith(suffix)
+                   for row in rows):
+            # A row outside the suffix proves the filter was not applied.
+            raise CloudflareError("Cloudflare did not apply the name.endswith filter",
+                                  "provider_response_invalid")
+        return rows
+
     def zone_records(self, zone_id: str, *, per_page: int = 100, max_pages: int = 50) -> list[dict]:
         """List all DNS records for a zone with pagination, bounded."""
         records: list[dict] = []
@@ -186,8 +221,8 @@ class Client:
         # Proxied records ignore TTL (1 = automatic). DNS-only records get the
         # 60s minimum so an origin move propagates quickly.
         body = {"type": record_type, "name": hostname, "content": address,
-                "proxied": bool(proxied), "ttl": 1 if proxied else DNS_ONLY_TTL_SECONDS,
-                "comment": "managed by Sandbox hosting"}
+                "proxied": bool(proxied), "ttl": _address_ttl(proxied),
+                "comment": MANAGED_RECORD_COMMENT}
         if existing:
             return self._request("PUT", f"/zones/{zone_id}/dns_records/{existing[0]['id']}", body)["result"]
         return self._request("POST", f"/zones/{zone_id}/dns_records", body)["result"]

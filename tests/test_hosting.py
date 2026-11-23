@@ -2598,7 +2598,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd.personal_secrets,
                           "read_hosting_binding_metadata", return_value={
                               "metadata_id": "sha256:" + "5" * 64,
-                              "revision": 1}), \
+                              "revision": 1}) as read_metadata, \
              patch.object(hosting_cmd.personal_secrets, "hosting_binding_key",
                           return_value=(b"k" * 32, "v1-test")):
             hosting_cmd._refresh_hosting_operation(
@@ -2612,6 +2612,8 @@ class TestHostingManifest(unittest.TestCase):
                         for index in range(4)]},
                 save_state=saved)
         saved.assert_called_once_with(state)
+        # The apply compares its own bound values when the shared file changed (bca4e8ac).
+        read_metadata.assert_called_once_with(key, compare_values=True)
         self.assertNotEqual(
             state["hosts"][key]["hosting_operation"]["evidence"]
             ["config_file_digests"][2]["digest"], "sha256:" + "6" * 64)
@@ -3988,7 +3990,8 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("    tls ", fixture.configure_edge.call_args.args[2])
         fixture.edge.assert_called_once_with(fixture.validated["routes"],
             healthcheck_path="/", basic_auth_enabled=False,
-            fresh_hostnames=frozenset(record["hostname"] for record in fixture.runtime["records"]))
+            fresh_hostnames=frozenset(record["hostname"] for record in fixture.runtime["records"]),
+            fresh_since=ANY)
         self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["edge"]["state"], "ready")
 
     @patch("sandbox.commands.hosting.cloudflare.cloudflare_token", return_value="configured")

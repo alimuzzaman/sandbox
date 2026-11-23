@@ -207,9 +207,16 @@ require_installed_helper() {
   [ "$self" = "$INSTALLED_HELPER" ] \
     || fail "privileged actions require $INSTALLED_HELPER (run: sudo tools/proxy-helper.sh install)"
   [ ! -L "$INSTALLED_HELPER" ] || fail "installed helper must not be a symlink"
-  owner=$(stat -f '%u %p' "$INSTALLED_HELPER" 2>/dev/null \
-    || stat -c '%u %a' "$INSTALLED_HELPER" 2>/dev/null) \
-    || fail "installed helper is unreadable"
+  # GNU stat reads -f as --file-system and the format as a second file, so a
+  # BSD-first call with a GNU fallback captured file-system lines before the
+  # owner and no Linux helper ever passed this check. Pick the form by OS.
+  if [ "$OS" = "Linux" ]; then
+    owner=$(stat -c '%u %a' -- "$INSTALLED_HELPER" 2>/dev/null) \
+      || fail "installed helper is unreadable"
+  else
+    owner=$(stat -f '%u %p' "$INSTALLED_HELPER" 2>/dev/null) \
+      || fail "installed helper is unreadable"
+  fi
   case "$owner" in
     "0 "*) : ;;
     *) fail "installed helper must be owned by root" ;;

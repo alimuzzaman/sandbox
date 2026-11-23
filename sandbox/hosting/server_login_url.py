@@ -355,7 +355,10 @@ def run_here(args) -> None:
             payload["error"] = ("the sign-in hash may be installed, but issuing did not finish ("
                                 + (getattr(exc, "code", None) if known and isinstance(getattr(exc, "code", None), str)
                                    else type(exc).__name__)
-                                + "); no link was shown and that entry expires unused; run the command again")
+                                + "); no link was shown and that entry expires unused; run the command again"
+                                # The failing command can echo the hash; keep only the reason.
+                                + (": " + re.sub(r"[0-9a-fA-F]{32,}", "<hash>", _refusal(exc)["error"])[:300]
+                                   if known and str(exc) else ""))
     print(json.dumps(payload, sort_keys=True))
     if not payload["ok"]:
         raise SystemExit(1)

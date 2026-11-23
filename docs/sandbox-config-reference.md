@@ -29,6 +29,7 @@ tailnet_names:
   acme_server: letsencrypt         # optional: letsencrypt | letsencrypt-staging | https URL
   lego: /opt/homebrew/bin/lego     # optional: default is `lego` on PATH
   lego_sha256: <64 lowercase hex>  # optional: trust a lego outside the known install paths
+  wildcard_parents: [tn.example.test]  # optional: names one label below these share one record
 ```
 
 A name's zone is the longest listed zone it falls under; its Cloudflare id is
@@ -36,7 +37,13 @@ looked up at run time. `--acme-server` overrides `acme_server` for one call.
 A `lego` outside `/usr/bin`, `/usr/local/bin` or a Homebrew `Cellar/lego/`
 is trusted only when its SHA-256 matches `lego_sha256`. A missing block is
 `tailnet_name_config_missing`; a malformed one (including a token value
-instead of a key name, or an unknown key) is `tailnet_name_config_invalid`. See
+instead of a key name, or an unknown key) is `tailnet_name_config_invalid`.
+Each `wildcard_parents` entry must sit below a listed zone; a name exactly one
+label below it (`mail-x.tn.example.test`) is served from one DNS-only
+`*.tn.example.test` record at the tailnet address instead of its own record.
+The key is new: a Sandbox checkout older than it refuses the whole block as
+`tailnet_name_config_invalid` (which also stops shared wildcard certificates),
+so update every checkout and controller that reads this file first. See
 [remote-hosting.md](remote-hosting.md#tailnet-only-hostnames-sb-host-tailnet-name-spec-078).
 
 A plugin repo becomes a **sandbox project** by carrying a `sandbox.config.json`

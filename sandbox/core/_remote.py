@@ -56,6 +56,7 @@ import selectors
 import tarfile
 import fcntl
 import stat
+import contextvars
 from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
@@ -1508,6 +1509,35 @@ def validate_remote_sandbox_home(value: object) -> str:
     return value
 
 
+# Inside remote_home_cache(): each SSH endpoint's resolved home, asked once.
+_HOME_CACHE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "sandbox_remote_home_cache", default=None)
+
+
+@contextmanager
+def remote_home_cache():
+    """Resolve each remote's $SANDBOX_HOME at most once inside this block.
+
+    One command (a server-cli dispatch) otherwise asks the same constant
+    question over a fresh Tailnet SSH session several times, about two seconds
+    each. The cache holds only the validated path, keyed by the exact SSH
+    endpoint, and ends with the block; every other command still runs on its
+    own session.
+    """
+    token = _HOME_CACHE.set({})
+    try:
+        yield
+    finally:
+        _HOME_CACHE.reset(token)
+
+
+def _home_cache_key(remote) -> tuple | None:
+    try:
+        return tuple(ssh_command_args(remote, ""))
+    except (TypeError, ValueError, KeyError, AttributeError, OSError):
+        return None
+
+
 def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
     """The REAL, expanded absolute path of $SANDBOX_HOME on the remote --
     resolved once via SSH rather than left as a literal shell variable,
@@ -1516,6 +1546,17 @@ def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
     owner = _owner_host_target(remote)
     if owner is not None:
         return validate_remote_sandbox_home(owner.sandbox_home())
+    cache = _HOME_CACHE.get()
+    key = _home_cache_key(remote) if cache is not None else None
+    if key is not None and key in cache:
+        return cache[key]
+    home = _resolve_sandbox_home_over_ssh(remote, timeout=timeout)
+    if key is not None:
+        cache[key] = home
+    return home
+
+
+def _resolve_sandbox_home_over_ssh(remote: dict, *, timeout: int) -> str:
     timeout = normalize_remote_push_timeout(timeout)
     try:
         res = ssh_run(

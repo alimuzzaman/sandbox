@@ -163,7 +163,10 @@ Compose, and environment writers before the observer can refuse.
 Secret equality comes from separate owner-only broker metadata produced during an
 eligible apply. Recovery reads no secret source or value. Its opaque metadata ID and
 secret-file epoch plus key identity must remain exact; environment-backed or stale metadata
-refuses. The selected secret source and binding key must each be a real, owner-only regular
+refuses. The apply that wrote the metadata checks it again once Compose finishes; there the
+shared secret file may have changed under another target, so a changed epoch passes only when
+the file, opened without following links, still holds this target's bound references with the
+same HMAC identities under the same key. The selected secret source and binding key must each be a real, owner-only regular
 file; missing files and symbolic links are never authorizing.
 The target lock precedes the broker revision lock, which covers metadata validation
 through durable recovery commit. `environment.env`'s raw SHA-256 never enters a receipt;

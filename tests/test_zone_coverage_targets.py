@@ -136,7 +136,10 @@ def make_tls_authority(test):
         _guard.allow_command(argv)
         run_test_process(argv, env={"HOME": td}, timeout=30, check=True, capture_output=True)
     run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", ca_key,
-         "-out", ca_cert, "-subj", "/CN=Sandbox Test CA", "-x509"])
+         "-out", ca_cert, "-subj", "/CN=Sandbox Test CA", "-x509",
+         # Python 3.13+ verifies strictly (VERIFY_X509_STRICT): a CA needs these.
+         "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign"])
     return td, ca_key, ca_cert, run
 
 
@@ -145,7 +148,9 @@ def make_loopback_tls_server(authority, san_hostname: str, status_code: int = 20
     td, ca_key, ca_cert, run = authority
     leaf_dir = tempfile.mkdtemp(dir=td, prefix="leaf-")
     key_path, cert_path, csr_path, ext_path = (os.path.join(leaf_dir, x) for x in ("key.pem", "cert.pem", "leaf.csr", "ext.cnf"))
-    Path(ext_path).write_text("subjectAltName=DNS:" + san_hostname + "\n")
+    Path(ext_path).write_text("subjectAltName=DNS:" + san_hostname + "\n"
+                              "authorityKeyIdentifier=keyid,issuer\n"
+                              "basicConstraints=CA:FALSE\n")
     run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", key_path,
          "-out", csr_path, "-subj", "/CN=fixture"])
     run(["openssl", "x509", "-req", "-in", csr_path, "-CA", ca_cert, "-CAkey", ca_key,
@@ -1138,7 +1143,7 @@ environments:
             hosting.validate_manifest(str(fixture.manifest_root))
         for setting in ("      dns: null\n", "      dns: invalid\n"):
             path.write_text(original + setting)
-            with self.assertRaisesRegex(hosting.HostingError, "cloudflare.dns must be auto or exact"):
+            with self.assertRaisesRegex(hosting.HostingError, "cloudflare.dns must be auto, exact or wildcard"):
                 hosting.validate_manifest(str(fixture.manifest_root))
 
     def test_image_preflight_covered_exact_and_adopted_controls(self):

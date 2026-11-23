@@ -235,6 +235,9 @@ class OwnerCommandTests(FollowCase):
         self.assertTrue(ran["retry"])
         self.assertTrue(ran["poll_started"])
         self.assertEqual(self.starts, [True])
+        # Run-now repoints the installed timer at the CLI it runs on (a migrated release).
+        self.assertEqual(self.installs[-1], {"sb_path": "/srv/sandbox/sb", "sandbox_home": str(self.home)})
+        self.assertEqual(len(self.installs), 2)
         self.assertEqual(self.audit_events(), ["add", "status", "pause", "resume", "run_now"])
 
     def test_key_reprints_public_keys_only(self):
@@ -1039,6 +1042,53 @@ class UnitTextTests(unittest.TestCase):
         for unsafe in ("relative/sb", "/srv/sb; rm -rf /", "/srv/s b"):
             with self.subTest(unsafe=unsafe), self.assertRaises(FollowError):
                 units.render(sb_path=unsafe, sandbox_home="/srv/home")
+
+
+class UnitPathTests(unittest.TestCase):
+    """The timer names the ``sb-src`` link, so a migrate carries the follower along."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.root.chmod(0o700)
+        self.home = self.root / "sandbox"
+        for rev in ("old", "new"):
+            (self.home / "releases" / rev).mkdir(parents=True)
+            (self.home / "releases" / rev / "sb").write_text("#!/bin/sh\n")
+        (self.home / "current").symlink_to("releases/new")
+        (self.home / "sb-src").symlink_to("current")
+        patcher = patch.dict(os.environ, {"HOME": str(self.root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.units = units.unit_dir()
+
+    def test_a_release_cli_is_named_through_sb_src(self):
+        release = str(self.home / "releases" / "new" / "sb")
+        self.assertEqual(units.stable_sb_path(release, str(self.home)), str(self.home / "sb-src" / "sb"))
+        other = self.home / "releases" / "old" / "sb"
+        self.assertEqual(units.stable_sb_path(str(other), str(self.home)), str(other))
+        self.assertEqual(units.stable_sb_path(release, str(self.root / "elsewhere")), release)
+
+    def test_install_and_refresh_rewrite_a_unit_naming_an_old_release(self):
+        calls = []
+        with patch.object(units, "check_host", lambda: None), \
+                patch.object(units, "_run", lambda argv, timeout=30: calls.append(argv) or 0):
+            self.assertEqual(units.refresh(sb_path=str(self.home / "releases" / "new" / "sb"),
+                                           sandbox_home=str(self.home)), {"timer": units.TIMER, "changed": False})
+            self.assertFalse(self.units.exists(), "refresh never installs a missing timer")
+            for directory in (self.root / ".config", self.root / ".config" / "systemd", self.units):
+                directory.mkdir(mode=0o700)
+                directory.chmod(0o700)
+            stale = units.render(sb_path=str(self.home / "releases" / "old" / "sb"), sandbox_home=str(self.home))
+            for name, text in stale.items():
+                (self.units / name).write_text(text)
+                (self.units / name).chmod(units.UNIT_MODE)
+            result = units.refresh(sb_path=str(self.home / "releases" / "new" / "sb"), sandbox_home=str(self.home))
+            self.assertTrue(result["changed"])
+            service = (self.units / units.SERVICE).read_text()
+            self.assertIn(f"ExecStart={self.home}/sb-src/sb host follow tick --here --json", service)
+            self.assertIn(["systemctl", "--user", "daemon-reload"], calls)
 
 
 class PrepareRunnerTests(unittest.TestCase):

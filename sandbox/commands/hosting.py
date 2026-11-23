@@ -5343,6 +5343,9 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
     return result
 
 
+REGISTER_MEMORY_LIMIT = "1024M"
+
+
 def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
                           state: dict, ttl_seconds: int | None,
                           save_state=None, *, run=None, home: str | None = None,
@@ -5401,7 +5404,11 @@ def _issue_host_autologin(validated: dict, entry: dict | None, remote_name: str,
     run(f"{prefix} exec -T {service} test -s {shlex.quote(target)}", 30)
     from sandbox.hosting.autologin import register_script
     registration = register_script(target, token_hash, config["user"], issued_at, expires_at)
-    run(f"{prefix} exec -T {service} php -r {shlex.quote(registration)}", 60)
+    # The image's CLI memory_limit (256M in the official WordPress image) is too
+    # small to boot a site with many heavy plugins; registration then dies in
+    # wp-load.php before it runs.
+    run(f"{prefix} exec -T {service} php -d memory_limit={REGISTER_MEMORY_LIMIT} "
+        f"-r {shlex.quote(registration)}", 60)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
     (save_state or hosting.save_host_state)(state)
     link = {"url": f"{login_base}#{token}"} if token is not None else {"login_base": login_base}

@@ -418,6 +418,7 @@ class ServerTests(unittest.TestCase):
             code, payload, raw = self._run_here(_args(here=True, token_sha256=HASH))
         self.assertEqual((code, payload["ok"], payload["code"]), (1, False, slu.AFTER_INSTALL))
         self.assertIn("may be installed", payload["error"])
+        self.assertIn("php failed near <hash>", payload["error"])
         self.assertNotIn(HASH, raw)
 
     def test_unexpected_error_is_one_json_line_naming_only_its_type(self):
@@ -462,6 +463,19 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0]), {"ok": True, "login_base": BASE, "token_sha256": HASH})
 
+    def test_failure_after_install_names_the_failing_step(self):
+        out = io.StringIO()
+
+        def issue(args, runner):
+            runner("true", 5)
+            raise RuntimeError("remote command failed (exit 255): Allowed memory size exhausted")
+        with patch.object(slu, "issue_here", side_effect=issue), \
+                redirect_stdout(out), self.assertRaises(SystemExit):
+            slu.run_here(_args(here=True))
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["code"], slu.AFTER_INSTALL)
+        self.assertIn("Allowed memory size exhausted", payload["error"])
+
     def test_here_refusal_is_one_json_line_without_a_link(self):
         out = io.StringIO()
         with patch.object(slu, "issue_here", side_effect=hosting.HostingRefusal("host_target_busy", "busy")), \
@@ -483,6 +497,14 @@ class IssuerTests(unittest.TestCase):
         self.assertIn(hashlib.sha256(token.encode()).hexdigest(), commands[2])
         for command in commands:
             self.assertNotIn(token, command)
+
+    def test_registration_lifts_the_php_memory_limit(self):
+        state = {"hosts": {"xspeed-dev/xspeed-hub-cfe-expiry-1111/sandbox": {}}}
+        commands = []
+        hosting_cmd._issue_host_autologin(
+            VALIDATED, None, "xspeed-dev", state, None, save_state=lambda value: None,
+            run=lambda command, timeout: commands.append(command) or "", home="/h", token_hash=HASH)
+        self.assertIn(f"php -d memory_limit={hosting_cmd.REGISTER_MEMORY_LIMIT} -r ", commands[2])
 
     def test_manifest_without_a_primary_route_installs_nothing(self):
         validated = {**VALIDATED, "routes": [{"hostname": "x.example", "primary": False}]}

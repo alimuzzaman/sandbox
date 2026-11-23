@@ -32,12 +32,16 @@ jobs:
           docker compose version
 
       # The smoke checks the default clean URL, which needs the one-time
-      # clean-URL setup an operator does interactively, and `proxy-helper.sh
+      # clean-URL setup an operator does interactively (`./sb domains setup`:
+      # the helper and a trusted mkcert CA), and `proxy-helper.sh
       # dns-up` serves only a plain /etc/resolv.conf (it declines one owned by
       # systemd-resolved, as on these runners). Give the runner both.
       - name: Prepare clean-URL host
         run: |
-          command -v dnsmasq >/dev/null || sudo apt-get install -y --no-install-recommends dnsmasq-base
+          # ensure gives a new instance its clean URL through mkcert (HTTPS);
+          # without it the instance stays on localhost.
+          sudo apt-get install -y --no-install-recommends dnsmasq-base mkcert libnss3-tools
+          mkcert -install
           sudo ./tools/proxy-helper.sh install
           if [ -L /etc/resolv.conf ]; then
             upstream=$(readlink -f /run/systemd/resolve/resolv.conf)

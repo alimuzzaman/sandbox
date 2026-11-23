@@ -259,6 +259,18 @@ class TestStatusReadsRunningContainers(unittest.TestCase):
         self.assertEqual(exposure["published"]["scope"], "loopback")
         self.assertIs(exposure["in_sync"], False)
 
+    def test_opt_in_mismatch_names_the_ports_still_on_local_addresses(self):
+        mixed = (("nginx", "0.0.0.0", 8300, 80), ("db", "127.0.0.1", 3500, 3306),
+                 ("mailpit", "127.0.0.1", 8301, 8025))
+        exposure = lifecycle._port_exposure(
+            {"server": "nginx", "expose_to_network": True, **PORTS},
+            self._containers(mixed), instance="fixture")
+        line = lifecycle._port_exposure_line(exposure)
+        self.assertIn("db 3500 (127.0.0.1)", line)
+        self.assertIn("mailpit 8301 (127.0.0.1)", line)
+        self.assertNotIn("nginx 8300", line)
+        self.assertIn("./sb up --instance fixture", line)
+
     def test_json_status_uses_the_container_rows(self):
         ps = types.SimpleNamespace(stdout=_ps_rows(*OLD_WILDCARD_ROWS), returncode=0)
         with mock.patch.object(lifecycle, "_core", return_value=types.SimpleNamespace(
@@ -430,6 +442,31 @@ class TestOptInIsProjectOwned(unittest.TestCase):
             result = sandbox_core.load_project_config(root)
         self.assertNotIn("exposeToNetwork", result)
         self.assertIn("deployed", err.getvalue())
+
+
+class TestRuntimeServiceKeepsTheCode(unittest.TestCase):
+    """M4: `sb ensure --json` and the MCP tool get `expose_to_network_invalid`
+    from the runtime service, not a generic `invalid_descriptor`."""
+
+    def test_ensure_through_the_runtime_service_returns_the_specific_code(self):
+        from sandbox.application.context import runtime_service
+        from sandbox.runtimes.base import OperationError, OperationRequest
+        base = Path(tempfile.mkdtemp(dir=Path.home(), prefix="sb-expose-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        root = base / "proj"
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(json.dumps({"exposeToNetwork": "yes"}))
+        user = base / "user-global.json"
+        user.write_text("{}")
+        runtime = base / "runtime"
+        runtime.mkdir()
+        env = {"SANDBOX_USER_CONFIG": str(user), "SANDBOX_RUNTIME": str(runtime)}
+        with mock.patch.dict(os.environ, env):
+            result = runtime_service({}).invoke(OperationRequest(
+                project_root=str(root), operation="ensure", label="default", arguments={}))
+            self.assertEqual(sandbox_core.registry_all(), {})
+        self.assertIsInstance(result, OperationError)
+        self.assertEqual(result.code, "expose_to_network_invalid")
 
 
 class TestLinuxGatewayLookup(_RenderCase):

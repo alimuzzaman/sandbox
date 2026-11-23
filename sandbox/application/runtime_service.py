@@ -642,7 +642,12 @@ class RuntimeService:
                 )
             kind = self._descriptor_kind(descriptor)
         except (KeyError, OSError, TypeError, ValueError) as exc:
-            return OperationError("invalid_descriptor", f"runtime descriptor is invalid: {exc}",
+            from sandbox.config.wordpress import ExposeToNetworkInvalid
+            # Keep the one specific config code callers act on; every other
+            # descriptor failure stays the generic invalid_descriptor.
+            code = (ExposeToNetworkInvalid.code if isinstance(exc, ExposeToNetworkInvalid)
+                    else "invalid_descriptor")
+            return OperationError(code, f"runtime descriptor is invalid: {exc}",
                                   requested_capability=request.operation)
         if request.arguments.get('expected_incarnation') is not None and request.arguments.get('creation_context') is None:
             return OperationError('creation_context_required', 'expected incarnation requires the original creation context', kind, request.operation)

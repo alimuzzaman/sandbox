@@ -1115,7 +1115,9 @@ def _port_exposure_line(exposure: Mapping) -> str:
                 if port["scope"] == "network"]
         found = f"still publish {', '.join(wide)} on every network interface"
     else:
-        found = "publish on local addresses only"
+        narrow = [f"{port['service']} {port['host_port']} ({port['host_ip']})"
+                  for port in published["ports"] if port["host_ip"] not in _WILDCARD_ADDRESSES]
+        found = f"still publish {', '.join(narrow)} on that address only"
     return (f"Ports: configured {wanted}, but the running containers {found}. "
             f"Run {exposure['next_command']} to recreate the web server, database and "
             "Mailpit with the configured binding (data is kept).")

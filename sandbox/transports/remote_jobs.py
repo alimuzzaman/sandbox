@@ -65,6 +65,25 @@ class RemoteJobTransportError(RuntimeError):
         }
 
 
+class TailnetSshDenied(RemoteJobTransportError):
+    """The joined remote's tailnet SSH policy refused the login; nothing ran there.
+
+    Raised only after a bare ``true`` session was refused the same way (see
+    sandbox/remote_runtime/tailnet_ssh.py). It says nothing about an earlier
+    attempt that used the same request id.
+    """
+
+    code = "tailnet_ssh_denied"
+    retryable = False
+
+
+class TailnetSshCheckRequired(RemoteJobTransportError):
+    """Tailscale check mode asked for re-authentication; whether a command ran is unknown."""
+
+    code = "tailnet_ssh_check_required"
+    retryable = False
+
+
 _NETWORK_CAPACITY_CODES = frozenset({
     "docker_network_capacity_unavailable",
     "docker_network_subnet_exhausted",
@@ -613,16 +632,28 @@ class RemoteJobTransport:
 
     def _run(self, remote: dict, command: str, *, timeout: int):
         """Sever arbitrary runner failures from the public transport error."""
+        from sandbox.remote_runtime import tailnet_ssh
         failed = False
+        refusal = None
         try:
             result = self.ssh_run(remote, command, timeout=timeout)
-        except Exception:
+        except Exception as exc:
             # Raise after leaving the handler so the raw exception is neither
             # the cause nor context of the bounded public error.
             failed = True
             result = None
+            if tailnet_ssh.joined(remote) and tailnet_ssh.symptom(exc) == tailnet_ssh.CHECK_REQUIRED:
+                refusal = tailnet_ssh.refusal_error(remote, tailnet_ssh.CHECK_REQUIRED)
+        if refusal is not None:
+            raise refusal
         if failed:
             raise RemoteJobTransportError("remote job transport runner failed") from None
+        if getattr(result, "returncode", 0) != 0:
+            refusal = tailnet_ssh.refusal_error(remote, tailnet_ssh.classify(
+                remote, result, lambda: self.ssh_run(
+                    remote, tailnet_ssh.PROBE_COMMAND, timeout=tailnet_ssh.PROBE_TIMEOUT)))
+            if refusal is not None:
+                raise refusal
         return result
 
     def _execution_remote(self, name: str) -> dict:

@@ -3,6 +3,9 @@ import re
 
 from sandbox.hosting.front_door import FrontDoorError
 
+# A join's explicit --front-door request, kept until SSH proves it on the same machine.
+REQUESTED_PROFILE = 'front_door_requested'
+
 MACHINE_PROGRAM = (
     "import hashlib,pathlib,re; m=pathlib.Path('/etc/machine-id').read_text().strip().lower(); "
     "assert re.fullmatch('[0-9a-f]{32}',m); "

@@ -19,6 +19,8 @@ from sandbox.registry import register
 import sandbox.core._remote as sr
 import sandbox.core._proplugins as pro
 from sandbox.services.redaction import redact_text
+from sandbox.remote_runtime import tailnet_ssh
+from sandbox.remote_runtime.tailnet_ssh import REFUSALS
 
 
 # See docs/remote-hosting.md and specs/014-remote-vps-hosting/ for the full design
@@ -922,9 +924,12 @@ def _cmd_service(args, as_json: bool) -> None:
                                                           sr._remote_mcp_service_status_via_ssh)
             else:
                 evidence = discover_join_identity(name, entry, sr.remote_host_memory_request)
+                cleared = ()
                 if requested_profile is not None:
                     evidence.update(_joined_profile_evidence(entry, evidence, requested_profile))
-                sr.put_remote(name, _expected=entry, **evidence)
+                    from sandbox.remote_runtime.join_profile import REQUESTED_PROFILE
+                    cleared = (REQUESTED_PROFILE,)
+                sr.put_remote(name, _expected=entry, **({'_remove': cleared} if cleared else {}), **evidence)
             payload = {"ok": True, "name": name, "status": "refreshed",
                        "data": evidence, "error": None}
         elif operation == "capability":
@@ -942,15 +947,28 @@ def _cmd_service(args, as_json: bool) -> None:
             available = service.get("probe_state", "complete") == "complete"
             if available:
                 service.update(_pin_listing(entry))
+            ssh_state = (service.get("ssh_access") or {}).get("state")
+            control_only = (not available and tailnet_ssh.joined(entry)
+                            and (service.get("control_admission") or {}).get("state") == "admitted"
+                            and ssh_state in {"denied", "check_required"})
             payload = {
-                "ok": available, "name": name,
-                "status": "observed" if available else "degraded",
+                "ok": available or control_only, "name": name,
+                "status": "observed" if available else ("control_only" if control_only else "degraded"),
                 "data": service,
-                "error": None if available else {
+                "error": None if available or control_only else {
                     "code": service.get("probe_error") or "remote_service_probe_unavailable",
                     "message": "bounded remote service evidence is incomplete; retry after SSH/systemd responds",
                 },
             }
+            if control_only:
+                # Control access is the read this command promises; the unit
+                # details it cannot read need the SSH the policy refuses.
+                service["ssh_access"]["check"] = tailnet_ssh.check_command(entry)
+                payload["next_step"] = (
+                    "Control access is admitted. "
+                    + (tailnet_ssh.denied_message(entry) if ssh_state == "denied"
+                       else tailnet_ssh.check_required_hint(entry))
+                    + " Service unit details need SSH too.")
         elif operation == "diagnostics":
             diagnostics = sr.remote_diagnostics(
                 entry, include_processes=_arg_true(args, "processes")
@@ -1177,6 +1195,8 @@ def _cmd_service(args, as_json: bool) -> None:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")
+        if payload.get("next_step"):
+            print(payload["next_step"])
         slots = (payload.get("data") or {}).get("job_slots") if operation == "diagnostics" else None
         if isinstance(slots, dict):
             from sandbox.jobs.scheduler import capacity_line
@@ -1478,7 +1498,7 @@ def _cmd_rebind_host(args, as_json: bool) -> None:
 
 
 _TAILNET_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
-_TAILSCALE_SSH_REFUSALS = ("permission denied", "tailnet policy", "requires an additional check")
+_TAILSCALE_SSH_REFUSALS = REFUSALS
 
 
 def _tailscale_ssh_enabled(entry: dict) -> bool:
@@ -1699,14 +1719,16 @@ def _first_ssh_login(target: str, port) -> str:
         argv[-2:-2] = ['-o', 'StrictHostKeyChecking=accept-new']
         login = subprocess.run(argv, capture_output=True, text=True,
                                timeout=30, check=False)
-    except subprocess.TimeoutExpired:
-        return "unknown"  # A timeout is not proof of a Tailnet policy denial.
+    except subprocess.TimeoutExpired as exc:
+        # A timeout is not proof of a Tailnet policy denial; check mode is named.
+        return "check_required" if tailnet_ssh.symptom(exc) == tailnet_ssh.CHECK_REQUIRED else "unknown"
     except (OSError, ValueError):
         return "unknown"
     if login.returncode == 0:
         return "ok"
-    refusal = (login.stderr or "").lower()
-    return "denied" if any(text in refusal for text in _TAILSCALE_SSH_REFUSALS) else "unknown"
+    # The session ran only `true`, so its own refusal is the login's.
+    return {tailnet_ssh.DENIED: "denied", tailnet_ssh.CHECK_REQUIRED: "check_required"}.get(
+        tailnet_ssh.symptom(login), "unknown")
 
 
 def _joined_profile_evidence(entry, evidence, requested):
@@ -1766,24 +1788,45 @@ def _cmd_join(args, as_json: bool) -> None:
         die(f"joined_metadata_unavailable: authenticated service identity is unavailable ({exc})")
     ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))
     requested_profile = _arg_str(args, 'front_door')
-    if requested_profile is not None:
-        if ssh_login != 'ok':
-            die(f'joined_profile_unavailable: HTTP control admitted; the separate Tailnet SSH path is {ssh_login}; no profile was recorded')
+    if requested_profile is not None and ssh_login != 'ok' and requested_profile != 'nginx':
+        die('joined_profile_unsupported: joined profile adoption supports explicit nginx only')
+    if requested_profile is not None and ssh_login == 'ok':
         try:
             entry.update(_joined_profile_evidence(entry, entry, requested_profile))
         except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
             die(f'joined_profile_unavailable: HTTP control admitted but front-door metadata is unproven ({exc})')
+    if requested_profile is not None and ssh_login != 'ok':
+        # Control admission is the permission. Without SSH the registration
+        # is still recorded, with the request kept apart from the proven
+        # `front_door`; the first lookup after SSH works proves it.
+        from sandbox.remote_runtime.join_profile import REQUESTED_PROFILE
+        entry[REQUESTED_PROFILE] = requested_profile
     sr.put_remote(name, _expected=None, **entry)
+    ssh_access = {"ok": "admitted", "denied": "denied",
+                  "check_required": "check_required"}.get(ssh_login, "unavailable")
     result = {"ok": True, "name": name, "status": "joined", "ssh": ssh,
-              "control_url": entry["control_url"], "ssh_login": ssh_login, "error": None}
+              "control_url": entry["control_url"], "ssh_login": ssh_login,
+              "ssh_access": {"state": ssh_access, "transport": "tailscale"},
+              "front_door": entry.get("front_door"),
+              "front_door_requested": entry.get("front_door_requested"), "error": None}
+    if ssh_login != "ok":
+        result["needs_ssh"] = tailnet_ssh.NEEDS_SSH
+        result["ssh_check"] = tailnet_ssh.check_command(entry)
+        result["next_step"] = (
+            f"Control access works now (`sb remote service status {name}`). Tailscale SSH as {user} is "
+            + {"denied": "refused by the server's tailnet SSH policy",
+               "check_required": "waiting for a Tailscale check (finish the browser check it opens)",
+               }.get(ssh_login, "unavailable")
+            + f"; {tailnet_ssh.NEEDS_SSH} need it"
+            + (" and the nginx front-door profile is recorded on first use after it works"
+               if requested_profile is not None else "")
+            + f". Check: `{result['ssh_check']}`; no rejoin is needed once it succeeds.")
     if as_json:
         print(json.dumps(result))
         return
     ok(f"joined '{name}' at {address}; authenticated control identity recorded")
     if ssh_login != "ok":
-        info('HTTP control admission succeeded. The separate Tailnet SSH path is '
-             + ('denied by its SSH policy.' if ssh_login == 'denied' else 'unavailable; this is not evidence of denied control access.')
-             + ' No role or credential approval was requested or changed.')
+        info(result["next_step"])
 
 
 def _cmd_remove(args, as_json: bool) -> None:

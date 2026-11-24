@@ -44,6 +44,41 @@ controller provider store or self-SSH. Lifecycle/bootstrap operations may still
 use admitted keyless Tailscale SSH internally. This release is not permission to
 remove an operator's recovery key or change SSH/Tailscale policy.
 
+## Join when Tailscale SSH is refused
+
+Control admission is the permission to join. When the server's tailnet SSH
+policy refuses the selected Linux account, `remote join` still records the
+registration and reports `ssh_access.state: denied` (or `check_required` for
+Tailscale check mode), `ssh_check` (the exact `tailscale ssh USER@ADDRESS true`
+to run) and `next_step`. A requested `--front-door nginx` is kept as
+`front_door_requested`, apart from the proven `front_door`. The first lookup
+after SSH works checks that SSH reaches the same machine and that nginx is the
+incumbent, then records `front_door: nginx` and drops the request; no rejoin is
+needed. An SSH machine-identity mismatch refuses and writes nothing, and an
+observed Caddy is never pinned over the request.
+
+Until SSH works:
+
+- `remote service status` exits 0 with `status: control_only`,
+  `data.ssh_access` (`state`, `check`) and a `next_step` naming the refusal.
+- `job-status --remote` exits 1 with `tailnet_ssh_denied` (or
+  `tailnet_ssh_check_required`) and the check, in JSON and human output.
+- `job-start`, `job-output --remote`, `host stack` and `host apply` refuse with
+  the same code and check.
+
+Those commands run the installed `sb` over keyless Tailscale SSH; the control
+service has no job or CLI route. The refusal is classified on the first SSH
+call, usually the `$SANDBOX_HOME` lookup. A failed session's exit 255 and
+"Permission denied" alone prove nothing, because OpenSSH passes on the remote
+command's own exit status, so Sandbox concludes `tailnet_ssh_denied` only when
+a bare `true` session is refused the same way. A server CLI request refused that
+way is `not_accepted` only when its request id was generated for this call; a
+request id you passed may belong to an earlier attempt whose receipt was lost,
+so it stays `unknown` until SSH works and the original can be inspected. Check
+mode never shows whether a command ran, so it is always `unknown`. A policy
+that admits SSH for everyone who may join belongs in the owner's Tailscale
+policy file, not in Sandbox.
+
 ## Follow the original remote job
 
 A `server-cli` acceptance receipt with `job_id` means accepted, not completed.

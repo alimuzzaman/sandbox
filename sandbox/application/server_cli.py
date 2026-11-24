@@ -726,7 +726,8 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
 def _dispatch_server_cli_selected(remote_name, entry, submission, *, clock, source_ref,
                                   required_capabilities, source_branch_bound, nested_apply):
     from sandbox.core import _remote
-    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
+    from sandbox.transports.remote_jobs import (
+        RemoteJobTransport, RemoteJobTransportError, TailnetSshCheckRequired, TailnetSshDenied)
     from sandbox.resources.context import authenticated_target_identity
     clock.lap('identity')
     identity = authenticated_target_identity(remote_name)
@@ -751,6 +752,8 @@ def _dispatch_server_cli_selected(remote_name, entry, submission, *, clock, sour
     clock.lap('capabilities')
     try:
         observed = transport.control(remote_name, ['job-capabilities'])
+    except (TailnetSshDenied, TailnetSshCheckRequired):
+        raise
     except RemoteJobTransportError:
         # This constant operation only observes the installed contract. The
         # source/job submission below has not been invoked, even if its reply

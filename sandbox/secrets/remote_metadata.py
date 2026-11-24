@@ -94,6 +94,9 @@ def dispatch_remote_metadata(args) -> bool:
         )
     except Exception as error:
         args._server_cli_request_id = request_id
+        from sandbox.hosting.server_cli_dispatch import _tailnet_ssh_failure
+        # The request id is always the caller's, so never provably fresh.
+        _tailnet_ssh_failure(args, error, fresh=False)
         unknown = getattr(error, "code", None) != "server_cli_capability_unavailable"
         _failure(args, "server_cli_acceptance_unknown" if unknown else
                  "server_cli_execution_unavailable", unknown=unknown)

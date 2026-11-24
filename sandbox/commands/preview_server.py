@@ -31,7 +31,8 @@ def dispatch_preview_if_selected(args):
     try:
         return _dispatch_preview_if_selected(args)
     except Exception as error:
-        from sandbox.hosting.server_cli_dispatch import _failure
+        from sandbox.hosting.server_cli_dispatch import _failure, _tailnet_ssh_failure
+        _tailnet_ssh_failure(args, error, fresh=not getattr(args, 'request_id', None))
         unknown = bool(getattr(error, 'completion_unknown', False)) or (
             bool(getattr(args, '_server_cli_submission_started', False))
             and getattr(error, 'code', None) != 'server_cli_capability_unavailable')

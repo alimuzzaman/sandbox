@@ -78,8 +78,10 @@ def front_door_mode(entry: dict | None) -> str:
     raw = (entry or {}).get("front_door")
     if raw is None:
         if (entry or {}).get('joined') is True and (entry or {}).get('control_access') == 'tailnet':
+            name = (entry or {}).get('_remote_name') or 'NAME'
             raise FrontDoorError('joined_profile_unavailable',
-                'admitted control access is available but the existing front-door profile is not proven; no routing changes were attempted')
+                'admitted control access is available but the existing front-door profile is not proven; no routing changes were attempted. '
+                f'It is recorded on first use once Tailscale SSH to this remote works; `sb remote service status {name} --json` shows ssh_access')
         return DEFAULT_FRONT_DOOR
     return validate_mode(raw)
 

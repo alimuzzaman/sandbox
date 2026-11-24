@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from typing import NotRequired
 
 from sandbox.hosting.names import TARGET_PART_RE
+from sandbox.hosting.stack_facts import Fact, parse_recorded
 
 SCHEMA = 1
 SUMMARY_NAME = "summary.json"
@@ -76,6 +77,7 @@ class StackFacts(TypedDict, total=False):
     ports: dict[str, int]
     created_at: int | None
     ttl_expires_at: int
+    facts: list[Fact]
 
 
 class TargetSummary(TypedDict):
@@ -277,6 +279,11 @@ def _stack_facts(value: object) -> StackFacts:
     }
     if value.get("ttl_expires_at") is not None:
         facts["ttl_expires_at"] = _epoch(value["ttl_expires_at"], "stack.ttl_expires_at")  # type: ignore[typeddict-item]
+    if value.get("facts"):
+        try:
+            facts["facts"] = parse_recorded(value["facts"])
+        except ValueError:
+            pass
     return facts
 
 
@@ -357,6 +364,8 @@ def build_stack_facts(stack: dict, stack_record: dict | None = None) -> StackFac
     }
     if record.get("ttl_expires_at") is not None:
         facts["ttl_expires_at"] = record["ttl_expires_at"]
+    if record.get("facts"):
+        facts["facts"] = record["facts"]
     return _stack_facts(facts)
 
 
@@ -456,11 +465,16 @@ class SummaryRecorder:
     def started_apply(self) -> bool:
         return self._last is not None
 
-    def _write(self) -> None:
+    def _write(self, *, delivered: bool = False) -> None:
         try:
+            from sandbox.hosting import stack_registry
+            record = self._stack_record
+            if (delivered and record is not None and self._last is not None
+                    and stack_registry.matches_apply(record, self._last["request_id"], self._commit)):
+                record = {**record, "facts": record["last_apply"].get("facts", record.get("facts"))}
             summary = build_target_summary(
                 self._validated, self._remote_name, self._runtime, commit=self._commit,
-                last_apply=self._last, stack_record=self._stack_record)  # type: ignore[arg-type]
+                last_apply=self._last, stack_record=record)  # type: ignore[arg-type]
             self._run_remote(remote_write_command(self._path, encode_record(summary)))  # type: ignore[arg-type]
         except Exception as exc:  # the apply must never fail on a panel record
             self.errors.append(type(exc).__name__)
@@ -486,7 +500,9 @@ class SummaryRecorder:
         if reason:
             last["reason"] = reason
         self._last = last
-        self._write()
+        delivered = status == "succeeded" or (status == "unverified" and isinstance(delivery, dict)
+                                              and delivery.get("delivery_state") == "incomplete")
+        self._write(delivered=delivered)
 
     def run(self, apply: Callable[[], object]):
         if self._running:  # nested: the outermost run owns the deferred finish

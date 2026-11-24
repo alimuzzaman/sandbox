@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from sandbox.core._hosting import HostingRefusal
+from sandbox.hosting.stack_facts import FactDeclaration, StackFactsError, parse_declarations
 
 TEMPLATE_REQUIRED = "stack_template_requires_stack_up"
 TEMPLATE_INVALID = "stack_template_invalid"
@@ -93,6 +94,7 @@ class StackTemplate:
     # with a ``mailpit`` port means the default ``mail-{slug}.<zone>`` (the
     # zone of the rendered ``host.primary``); ``False`` opts out.
     mail_hostname: str | bool | None = None
+    facts: tuple[FactDeclaration, ...] = ()
 
     def environment_names(self) -> tuple[str, ...]:
         environments = self.raw.get("environments")
@@ -217,7 +219,7 @@ def parse_template(manifest: dict) -> StackTemplate:
         raise StackTemplateError(TEMPLATE_INVALID, "a stack template needs a stack: mapping")
     if INSTANCE_KEY in manifest:
         raise StackTemplateError(TEMPLATE_INVALID, "a template cannot carry stack_instance")
-    unknown = set(block) - {"slug", "ports", "dev_branch", "uses", "mail_hostname"}
+    unknown = set(block) - {"slug", "ports", "dev_branch", "uses", "mail_hostname", "facts"}
     if unknown:
         raise StackTemplateError(
             TEMPLATE_INVALID, "unknown stack keys: " + ", ".join(sorted(map(str, unknown))))
@@ -249,6 +251,10 @@ def parse_template(manifest: dict) -> StackTemplate:
         raise StackTemplateError(USES_LIMIT, f"stack.uses accepts at most {MAX_STACK_USES} stacks")
     if len(set(uses)) != len(uses):
         raise StackTemplateError(USES_DUPLICATE, "stack.uses names must be unique")
+    try:
+        facts = parse_declarations(block.get("facts"))
+    except StackFactsError as exc:
+        raise StackTemplateError(exc.code, exc.detail) from None
     mail_hostname = block.get("mail_hostname")
     if mail_hostname is False:
         pass
@@ -267,7 +273,7 @@ def parse_template(manifest: dict) -> StackTemplate:
     if isinstance(project, str) and "{port:" in project:
         raise StackTemplateError(TEMPLATE_INVALID, "project cannot use {port:...}; ports belong to the project")
     return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw, dev_branch=dev_branch,
-                         uses=tuple(uses), mail_hostname=mail_hostname)
+                         uses=tuple(uses), mail_hostname=mail_hostname, facts=facts)
 
 
 def mail_host(pattern: str, slug: str) -> str | None:

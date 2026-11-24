@@ -1,4 +1,5 @@
 // Shapes returned by the Python /api endpoints + the client app store.
+import type { StackFactLike } from "./ui/stackfacts";
 
 export interface Instance {
   name: string;
@@ -105,6 +106,8 @@ export type MailAccess =
 export type RevisionEvidence = "verified" | "unverified" | "not_delivered";
 export interface StackPageAccess {
   uses: string[];
+  // Declared in the template's stack.facts; older panels omit it.
+  facts?: StackFactLike[];
   inbox: { url: string; hostname: string } | null;
   inbox_reason: string | null;
   revision_status: RevisionEvidence;

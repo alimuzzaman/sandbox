@@ -161,6 +161,25 @@ class RecorderTest(unittest.TestCase):
         for command in commands:
             self.assertNotIn(SECRET, decoded_payload(command))
 
+    def test_server_record_uses_facts_from_the_matching_delivered_job(self):
+        old = {"label": "API", "kind": "url", "value": "https://old.example.test"}
+        new = {**old, "value": "https://new.example.test"}
+        record = {**STACK_RECORD, "facts": [old], "last_apply": {
+            "request_id": "outer", "job_request_id": "nested", "commit": COMMIT, "facts": [new],
+        }}
+        for request_id, outcome, expected in (
+            ("nested", True, new), ("nested", False, old), ("other", True, old),
+        ):
+            with self.subTest(request_id=request_id, outcome=outcome):
+                commands = []
+                recorder = pr.SummaryRecorder(validated(), "r", RUNTIME, run_remote=commands.append,
+                                              stack_record=record)
+                recorder.started("/h", COMMIT, request_id)
+                recorder.finished(outcome)
+                start, finish = (json.loads(decoded_payload(command)) for command in commands)
+                self.assertEqual(start["stack"]["facts"], [old])
+                self.assertEqual(finish["stack"]["facts"], [expected])
+
     def test_run_marks_failed_and_reraises(self):
         recorder, commands = self.recorder()
 

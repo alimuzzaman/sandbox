@@ -187,6 +187,10 @@ def dispatch_host_if_selected(args) -> bool:
             bool(getattr(args, "_server_cli_submission_started", False))
             and code != "server_cli_capability_unavailable")
         busy = _source_busy(error)
+        from sandbox.transports.remote_jobs import TailnetSshDenied
+        if isinstance(error, TailnetSshDenied):
+            # The SSH client was refused before the remote command ran.
+            _failure(args, TailnetSshDenied.code, unknown=False, error=str(error))
         from sandbox.core._remote import RemoteBranchDiverged
         if isinstance(error, RemoteBranchDiverged) and generated_request_id:
             # Git refused the source push, so this fresh request was never

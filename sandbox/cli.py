@@ -214,7 +214,7 @@ def _transient_remote_error(exc: BaseException, args) -> RemoteJobTransportError
         # Only discovery can be transient; malformed or changed identities
         # need `remote service refresh`.
         message = str(exc)
-        code = ExecutionCapabilityUnavailable.code
+        code = exc.code
         retryable = message.startswith("installed job capability discovery is unavailable")
     elif (isinstance(exc, subprocess.TimeoutExpired) and getattr(args, "remote", None)
           and getattr(args, "cmd", None) in _READ_ONLY_JOB_COMMANDS):

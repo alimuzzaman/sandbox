@@ -19,6 +19,7 @@ from sandbox.registry import register
 import sandbox.core._remote as sr
 import sandbox.core._proplugins as pro
 from sandbox.services.redaction import redact_text
+from sandbox.remote_runtime.tailnet_ssh import REFUSALS
 
 
 # See docs/remote-hosting.md and specs/014-remote-vps-hosting/ for the full design
@@ -1478,7 +1479,7 @@ def _cmd_rebind_host(args, as_json: bool) -> None:
 
 
 _TAILNET_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
-_TAILSCALE_SSH_REFUSALS = ("permission denied", "tailnet policy", "requires an additional check")
+_TAILSCALE_SSH_REFUSALS = REFUSALS
 
 
 def _tailscale_ssh_enabled(entry: dict) -> bool:
@@ -1766,24 +1767,38 @@ def _cmd_join(args, as_json: bool) -> None:
         die(f"joined_metadata_unavailable: authenticated service identity is unavailable ({exc})")
     ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))
     requested_profile = _arg_str(args, 'front_door')
-    if requested_profile is not None:
-        if ssh_login != 'ok':
-            die(f'joined_profile_unavailable: HTTP control admitted; the separate Tailnet SSH path is {ssh_login}; no profile was recorded')
+    if requested_profile is not None and ssh_login != 'ok' and requested_profile != 'nginx':
+        die('joined_profile_unsupported: joined profile adoption supports explicit nginx only')
+    if requested_profile is not None and ssh_login == 'ok':
         try:
             entry.update(_joined_profile_evidence(entry, entry, requested_profile))
         except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
             die(f'joined_profile_unavailable: HTTP control admitted but front-door metadata is unproven ({exc})')
+    # Control admission is the permission. Without SSH the registration is
+    # still recorded; the front-door profile is proven later over SSH.
     sr.put_remote(name, _expected=None, **entry)
+    ssh_access = {"ok": "admitted", "denied": "denied"}.get(ssh_login, "unavailable")
     result = {"ok": True, "name": name, "status": "joined", "ssh": ssh,
-              "control_url": entry["control_url"], "ssh_login": ssh_login, "error": None}
+              "control_url": entry["control_url"], "ssh_login": ssh_login,
+              "ssh_access": {"state": ssh_access, "transport": "tailscale"},
+              "front_door": entry.get("front_door"), "error": None}
+    if ssh_login != "ok":
+        from sandbox.remote_runtime import tailnet_ssh
+        result["needs_ssh"] = tailnet_ssh.NEEDS_SSH
+        result["ssh_check"] = tailnet_ssh.check_command(entry)
+        result["next_step"] = (
+            f"Control access works now (`sb remote service status {name}`). Tailscale SSH as {user} is "
+            + ("refused by the server's tailnet SSH policy" if ssh_login == "denied" else "unavailable")
+            + f"; {tailnet_ssh.NEEDS_SSH} need it"
+            + (" and the nginx front-door profile is recorded on first use after it works"
+               if requested_profile is not None else "")
+            + f". Check: `{result['ssh_check']}`; no rejoin is needed once it succeeds.")
     if as_json:
         print(json.dumps(result))
         return
     ok(f"joined '{name}' at {address}; authenticated control identity recorded")
     if ssh_login != "ok":
-        info('HTTP control admission succeeded. The separate Tailnet SSH path is '
-             + ('denied by its SSH policy.' if ssh_login == 'denied' else 'unavailable; this is not evidence of denied control access.')
-             + ' No role or credential approval was requested or changed.')
+        info(result["next_step"])
 
 
 def _cmd_remove(args, as_json: bool) -> None:

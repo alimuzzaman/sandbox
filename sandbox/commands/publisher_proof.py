@@ -73,7 +73,7 @@ def dispatch(args):
                    "status": "unconfirmed" if started else "unavailable",
                    "request_id": args.request_id if re.fullmatch(
                        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.request_id) else None}
-        if getattr(error, "code", None) == "server_cli_capability_unavailable":
+        if getattr(error, "code", None) in {"server_cli_capability_unavailable", "tailnet_ssh_denied"}:
             payload["status"] = "unavailable"
     print(json.dumps(payload, sort_keys=True))
     if not isinstance(payload, dict) or payload.get("ok") is not True:

@@ -44,6 +44,21 @@ controller provider store or self-SSH. Lifecycle/bootstrap operations may still
 use admitted keyless Tailscale SSH internally. This release is not permission to
 remove an operator's recovery key or change SSH/Tailscale policy.
 
+## Join when Tailscale SSH is refused
+
+Control admission is the permission to join. When the server's tailnet SSH
+policy refuses the selected Linux account, `remote join` still records the
+registration and reports `ssh_access.state: denied`, `ssh_check` (the exact
+`tailscale ssh USER@ADDRESS true` to run) and `next_step`. A requested
+`--front-door nginx` is not recorded yet; it is proven over SSH on first use
+after SSH works, with no rejoin. Until then, control reads such as
+`remote service status` work, while jobs (`job-start`, `job-status`,
+`job-output --remote`), `host stack` and `host apply` refuse with
+`tailnet_ssh_denied` and the same check. Those commands run the installed `sb`
+over keyless Tailscale SSH; the control service has no job or CLI route. A
+policy that admits SSH for everyone who may join belongs in the owner's
+Tailscale policy file, not in Sandbox.
+
 ## Follow the original remote job
 
 A `server-cli` acceptance receipt with `job_id` means accepted, not completed.

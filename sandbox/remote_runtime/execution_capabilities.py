@@ -12,7 +12,11 @@ def adopt_execution_capabilities(name, record, request):
         return record
     try:
         observed = request(['job-capabilities'])
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'code', None) == 'tailnet_ssh_denied':
+            refusal = ExecutionCapabilityUnavailable(str(exc))
+            refusal.code = exc.code
+            raise refusal from None
         raise ExecutionCapabilityUnavailable(
             'installed job capability discovery is unavailable; this is not denied owner access') from None
     service = record.get('mcp_service') or {}

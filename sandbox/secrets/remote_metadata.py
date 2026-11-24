@@ -94,7 +94,7 @@ def dispatch_remote_metadata(args) -> bool:
         )
     except Exception as error:
         args._server_cli_request_id = request_id
-        unknown = getattr(error, "code", None) != "server_cli_capability_unavailable"
+        unknown = getattr(error, "code", None) not in {"server_cli_capability_unavailable", "tailnet_ssh_denied"}
         _failure(args, "server_cli_acceptance_unknown" if unknown else
                  "server_cli_execution_unavailable", unknown=unknown)
     if (not isinstance(receipt, dict) or receipt.get("ok") is False

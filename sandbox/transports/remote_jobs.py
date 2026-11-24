@@ -65,6 +65,13 @@ class RemoteJobTransportError(RuntimeError):
         }
 
 
+class TailnetSshDenied(RemoteJobTransportError):
+    """The joined remote's tailnet SSH policy refused the login; nothing ran there."""
+
+    code = "tailnet_ssh_denied"
+    retryable = False
+
+
 _NETWORK_CAPACITY_CODES = frozenset({
     "docker_network_capacity_unavailable",
     "docker_network_subnet_exhausted",
@@ -623,6 +630,9 @@ class RemoteJobTransport:
             result = None
         if failed:
             raise RemoteJobTransportError("remote job transport runner failed") from None
+        from sandbox.remote_runtime import tailnet_ssh
+        if tailnet_ssh.refused(remote, result):
+            raise TailnetSshDenied(tailnet_ssh.denied_message(remote))
         return result
 
     def _execution_remote(self, name: str) -> dict:

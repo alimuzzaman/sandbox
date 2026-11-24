@@ -6,6 +6,7 @@ import { hostingPath, stackPath } from "../router";
 import { stackCard } from "./hosting";
 import type { HostingStack } from "../types";
 import { resolveStack, stackSegment } from "../ui/stack-route";
+import { factRows } from "../ui/stackfacts";
 export { signInStack } from "../ui/stack-signin";
 
 // A shared stack is looked up by its exact segment only: the remote-name alias
@@ -39,7 +40,17 @@ export function stackView(remote: string, slug: string): string {
         `<a data-link href="${esc(stackPath(stackSegment(used), name))}" class="text-[13px] text-blue-700 hover:underline dark:text-blue-300">Open shared stack</a>${stackCard(used)}` :
         `<p class="text-[13px] ${theme.quiet}">Shared stack ${esc(name)} is missing from this controller's records.</p>`}</section>`;
     }).join("");
-    content = `${stackCard(stack)}${shared}`;
+    const facts = factRows(stack.page_access?.facts).map(row => {
+      const value = row.href
+        ? `<a href="${esc(row.href)}" target="_blank" rel="noopener noreferrer" class="break-words text-blue-700 hover:underline dark:text-blue-300">${esc(row.text)}</a>`
+        : `<span class="break-words">${esc(row.text)}</span>`;
+      const open = row.stackPath
+        ? ` <a data-link href="${esc(row.stackPath)}" class="ml-2 text-blue-700 hover:underline dark:text-blue-300">Open stack</a>` : "";
+      return `<div class="min-w-0"><dt class="${theme.label}">${esc(row.label)}</dt><dd class="mt-1 text-[13px]">${value}${open}</dd></div>`;
+    }).join("");
+    const connected = facts
+      ? `<section class="space-y-3"><h2 class="text-[16px] font-semibold">Connected to</h2><dl class="${theme.panel} grid gap-4 px-5 py-4 sm:grid-cols-2">${facts}</dl></section>` : "";
+    content = `${stackCard(stack)}${connected}${shared}`;
   }
   return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">${head}${warning}${partial}${content}</div></div>`;
 }

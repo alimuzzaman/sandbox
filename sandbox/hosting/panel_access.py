@@ -5,6 +5,7 @@ import re
 from urllib.parse import urlsplit
 
 from sandbox.hosting import panel_view
+from sandbox.hosting.stack_facts import Fact, url_hostname
 from sandbox.hosting.tailnet_names.models import TailnetNameError
 from sandbox.hosting.tailnet_names.state import StateStore, default_root
 
@@ -84,11 +85,29 @@ def inbox_names(remote: str) -> dict[int, str]:
     return names
 
 
+def fact_views(facts: list[Fact], stack_key: str,
+               served: dict[str, list[tuple[str, str]]]) -> list[panel_view.StackFactView]:
+    out: list[panel_view.StackFactView] = []
+    for fact in facts:
+        page = None
+        if fact["kind"] == "url":
+            owners = {path for key, path in served.get(url_hostname(fact["value"]) or "", [])
+                      if key != stack_key}
+            page = owners.pop() if len(owners) == 1 else None
+        out.append({**fact, "page_path": page})
+    return out
+
+
 def enrich(view: panel_view.HostingView, stack_data: dict, host_state: dict, *, server_records=None) -> None:
     """Add bounded direct relationships and safe access metadata to the polling view."""
     records = stack_data.get("stacks") or {}
     hosts = host_state.get("hosts") or {}
     names_by_remote: dict[str, dict[int, str]] = {}
+    served: dict[str, list[tuple[str, str]]] = {}
+    for stack in view["stacks"]:
+        for row in stack["servers"]:
+            hostname = row["hostname"].lower().removesuffix(".")
+            served.setdefault(hostname, []).append((stack["key"], stack["page_path"]))
     for stack in view["stacks"]:
         remote, slug = stack["remote"], stack["slug"]
         record = (records.get(f"{remote}/{slug}") or {}) if stack["source"] == "controller" else {}
@@ -131,6 +150,8 @@ def enrich(view: panel_view.HostingView, stack_data: dict, host_state: dict, *, 
             evidence = "verified" if entry.get("observed_runtime_revision") == stack["commit"] else "unverified"
         if not stack["commit"]:
             evidence = "not_delivered"
-        stack["page_access"] = {"uses": uses, "inbox": inbox, "inbox_reason": reason, "revision_status": evidence,
+        facts = fact_views(stack.pop("facts", []), stack["key"], served)
+        stack["page_access"] = {"uses": uses, "facts": facts, "inbox": inbox,
+                                "inbox_reason": reason, "revision_status": evidence,
                                 "sign_in": sign_in_availability(stack, stack_data, host_state,
                                                                 server_records=server_records)}

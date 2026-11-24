@@ -44,6 +44,26 @@ class StackPageMetadataTests(unittest.TestCase):
         self.assertIn("inventory_unavailable", access["inbox_reason"])
         controller_names.assert_not_called()
 
+    def test_facts_link_only_to_a_unique_other_stack(self):
+        source = summary("web", slug="web", remote="r")
+        source["stack"]["facts"] = [
+            {"label": "Service", "kind": "url", "value": "https://API.example.test:443/health"},
+            {"label": "Self", "kind": "url", "value": "https://hub-web.example.test"},
+            {"label": "Region", "kind": "text", "value": "west"},
+        ]
+        route = [{"hostname": "api.example.test", "mode": "serve", "primary": True}]
+        target = summary("api", slug="api", remote="r", routes=route)
+        duplicate = summary("another", slug="another", remote="r", routes=route)
+        for targets, expected in (([target], "/hosting/this-server/api"), ([], None), ([target, duplicate], None)):
+            with self.subTest(targets=targets):
+                view = pv.build_view([server([source, *targets])])
+                panel_access.enrich(view, {}, {})
+                web = next(stack for stack in view["stacks"] if stack["slug"] == "web")
+                self.assertEqual(web["page_access"]["facts"], [
+                    {**fact, "page_path": path} for fact, path in zip(source["stack"]["facts"], [expected, None, None])
+                ])
+                self.assertNotIn("facts", web)
+
     def test_controller_revision_needs_runtime_evidence(self):
         for observed, expected in ((None, "unverified"), (COMMIT, "verified")):
             view = self.view()
@@ -79,6 +99,18 @@ class StackPageMetadataTests(unittest.TestCase):
         stack = pv.build_view([source])["stacks"][0]
         self.assertEqual(stack["commit"], requested)
         self.assertEqual(stack["servers"][0]["ref"]["commit"], requested)
+
+    def test_controller_facts_follow_the_recorded_delivery(self):
+        old = {"label": "API", "kind": "url", "value": "https://old.example.test"}
+        new = {**old, "value": "https://new.example.test"}
+        record = {"remote": "r", "slug": "demo", "project": "app", "environment": "test",
+                  "commit": COMMIT, "facts": [old], "hostnames": ["app.example.test"],
+                  "last_apply": {"commit": "b" * 40, "facts": [new], "submitted_at": 1}}
+        for status in ("running", "failed", "succeeded"):
+            with self.subTest(status=status):
+                source = pv.controller_records({"stacks": {"r/demo": record}}, {},
+                                               lambda row: {**row["last_apply"], "status": status})
+                self.assertEqual(pv.build_view([source])["stacks"][0]["facts"], [old])
 
 
 class RecordedSignInTests(unittest.TestCase):

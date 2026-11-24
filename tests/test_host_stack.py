@@ -248,6 +248,33 @@ class StackUsesSchemaTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, code)
 
 
+class StackFactsSchemaTests(unittest.TestCase):
+    def test_template_validates_declarations(self):
+        declaration = {"label": "API", "kind": "url", "key": "SERVICE_URL", "env_file": "config/site.env"}
+        data = _yaml(TEMPLATE)
+        self.assertEqual(stack_template.parse_template(data).facts, ())
+        data["stack"]["facts"] = [declaration]
+        self.assertEqual(stack_template.parse_template(data).facts[0].key, "SERVICE_URL")
+        for key in ("AUTH_SERVICE_URL", "OAUTH_ISSUER_URL"):
+            data["stack"]["facts"] = [{**declaration, "key": key}]
+            self.assertEqual(stack_template.parse_template(data).facts[0].key, key)
+        cases = [
+            ([{**declaration, "env_file": "../site.env"}], "stack_facts_invalid"),
+            ([{**declaration, "kind": "shell"}], "stack_facts_invalid"),
+            ([declaration, declaration], "stack_facts_invalid"),
+            ([declaration] * 9, "stack_facts_limit"),
+            *[([{**declaration, "key": key}], "stack_fact_secret_key")
+              for key in ("db_password", "SERVICE_TOKEN", "CLIENT_SECRET", "API_KEY",
+                          "DB_PASS", "ADMIN_PWD", "TLS_PASSPHRASE", "NONCE_SALT", "DB_DSN",
+                          "AUTH_COOKIE", "SESSION_ID")],
+        ]
+        for value, code in cases:
+            with self.subTest(value=value), self.assertRaises(StackTemplateError) as raised:
+                data["stack"]["facts"] = value
+                stack_template.parse_template(data)
+            self.assertEqual(raised.exception.code, code)
+
+
 class BranchPolicyTests(unittest.TestCase):
     def test_globs_exact_names_and_star(self):
         allowed = stack_template.branch_allowed
@@ -310,9 +337,11 @@ class RecordDeliveryTests(unittest.TestCase):
     def test_only_the_awaited_apply_moves_the_commit(self):
         path = Path(tempfile.mkdtemp()) / "registry.json"
         self.addCleanup(shutil.rmtree, path.parent, True)
+        old = {"label": "API", "kind": "url", "value": "https://old.example.test"}
+        new = {**old, "value": "https://new.example.test"}
         with stack_registry.locked(path) as registry:
-            registry.put({"remote": "r", "slug": "demo", "commit": "a" * 40,
-                          "last_apply": {"request_id": "req-2", "commit": "b" * 40}})
+            registry.put({"remote": "r", "slug": "demo", "commit": "a" * 40, "facts": [old],
+                          "last_apply": {"request_id": "req-2", "commit": "b" * 40, "facts": [new]}})
 
         def deliver(**values):
             return stack_registry.record_delivery("r", "demo", path=path, now=7, **values)
@@ -322,12 +351,15 @@ class RecordDeliveryTests(unittest.TestCase):
                        {"request_id": None, "commit": "b" * 40}):     # no durable request
             with self.subTest(values=values):
                 self.assertFalse(deliver(**values))
-                self.assertEqual(stack_registry.read(path)["stacks"]["r/demo"]["commit"], "a" * 40)
+                record = stack_registry.read(path)["stacks"]["r/demo"]
+                self.assertEqual(record["commit"], "a" * 40)
+                self.assertEqual(record["facts"], [old])
         self.assertFalse(stack_registry.record_delivery("r", "other", request_id="req-2",
                                                         commit="b" * 40, path=path))
         self.assertTrue(deliver(request_id="req-2", commit="b" * 40))
         record = stack_registry.read(path)["stacks"]["r/demo"]
         self.assertEqual((record["commit"], record["updated_at"]), ("b" * 40, 7))
+        self.assertEqual(record["facts"], [new])
         self.assertFalse(deliver(request_id="req-2", commit="b" * 40))
 
 
@@ -719,6 +751,70 @@ class StackCommandTests(unittest.TestCase):
                     lifetime=None, ttl=None, owner=None, copy=None, force_owner=False)
         base.update(values)
         return SimpleNamespace(**base)
+
+    def commit_fact(self, env: str) -> str:
+        import yaml
+
+        data = _yaml(TEMPLATE)
+        data["stack"]["facts"] = [{"label": "API", "kind": "url", "key": "SERVICE_URL", "env_file": "site.env"}]
+        (self.hub / "sandbox.hosting.yml").write_text(yaml.safe_dump(data))
+        (self.hub / "site.env").write_text(env)
+        _git(self.hub, "add", "sandbox.hosting.yml", "site.env")
+        _git(self.hub, "commit", "-m", "declare public service URL")
+        _git(self.hub, "branch", "-f", "stack/demo")
+        return _git(self.hub, "rev-parse", "HEAD")
+
+    def test_only_the_committed_declared_fact_reaches_the_record(self):
+        expected = [{"label": "API", "kind": "url", "value": "https://service.example.test"}]
+        commit = self.commit_fact(
+            "SERVICE_URL = 'https://service.example.test' # public endpoint\n"
+            "UNRELATED_PASSWORD='private\nSERVICE_URL=https://hidden.example.test\n'\n"
+        )
+        (self.hub / "site.env").write_text("SERVICE_URL=https://uncommitted.example.test\n")
+        with patch.object(host_stack, "_submit", return_value="job-facts"):
+            result = host_stack._up(self.args("up", confirm=True, request_id="req-facts"))
+        record = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(result["facts"], expected)
+        self.assertEqual(record["last_apply"]["facts"], expected)
+        self.assertNotIn("facts", record)
+        for excluded in ("UNRELATED_PASSWORD", "SERVICE_URL", "site.env", "hidden.example", "uncommitted.example"):
+            self.assertNotIn(excluded, json.dumps(record))
+        self.assertTrue(stack_registry.record_delivery("r", "demo", request_id="req-facts", commit=commit))
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["facts"], expected)
+
+    def test_invalid_fact_refuses_before_apply_submission(self):
+        for value in ("http://service.example.test", "https://user:private@service.example.test",
+                      "https://service.example.test/$PATH", "https://a/" + "a" * 512):
+            self.commit_fact(f"SERVICE_URL={value}\n")
+            with self.subTest(value=value), patch.object(host_stack, "_submit") as submit:
+                with self.assertRaises(StackTemplateError) as raised:
+                    host_stack._up(self.args("up", confirm=True))
+                self.assertEqual(raised.exception.code, "stack_fact_value_invalid")
+                self.assertNotIn(value, str(raised.exception))
+                self.assertEqual(stack_registry.read()["stacks"], {})
+                submit.assert_not_called()
+
+    def test_refused_apply_and_retry_keep_the_last_delivered_fact(self):
+        old = {"label": "API", "kind": "url", "value": "https://old.example.test"}
+        new = {**old, "value": "https://new.example.test"}
+        commit = self.commit_fact(f"SERVICE_URL={old['value']}\n")
+        with patch.object(host_stack, "_submit", return_value="job-old"):
+            host_stack._up(self.args("up", confirm=True, request_id="req-old"))
+        self.assertTrue(stack_registry.record_delivery("r", "demo", request_id="req-old", commit=commit))
+        self.commit_fact(f"SERVICE_URL={new['value']}\n")
+        refusal = host_stack.StackCommandError(host_stack.SUBMISSION_FAILED, "test refusal")
+        with patch.object(host_stack, "job_view", return_value={"lifecycle": "succeeded"}), \
+                patch.object(host_stack, "_submit", side_effect=refusal), self.assertRaises(host_stack.StackCommandError):
+            host_stack._up(self.args("up", confirm=True))
+        refused = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(refused["facts"], [old])
+        self.assertEqual(refused["last_apply"]["facts"], [new])
+        self.assertEqual(refused["last_apply"]["status"], "refused")
+        with patch.object(host_stack, "_submit", return_value="job-retry"):
+            host_stack._up(self.args("up", confirm=True))
+        retried = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(retried["facts"], [old])
+        self.assertEqual(retried["last_apply"]["facts"], [new])
 
     def test_wordpress_stack_up_names_the_site_and_the_login_command_never_a_link(self):
         """Feedback 3234ad2b: the operator learns how to get the autologin link."""

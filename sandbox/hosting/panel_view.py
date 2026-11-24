@@ -23,6 +23,7 @@ from sandbox.hosting import panel_records as pr
 from sandbox.hosting.tailnet_names import panel as mail_panel
 from sandbox.hosting import stack_registry
 from sandbox.hosting.panel_health import NOT_CHECKED, HealthResult
+from sandbox.hosting.stack_facts import Fact
 
 if TYPE_CHECKING:
     from typing import NotRequired
@@ -83,8 +84,13 @@ class ApplyView(TypedDict):
     reason: NotRequired[str]
 
 
+class StackFactView(Fact):
+    page_path: str | None
+
+
 class StackPageAccess(TypedDict):
     uses: list[str]
+    facts: list[StackFactView]
     inbox: dict[str, str] | None
     inbox_reason: str | None
     revision_status: Literal["verified", "unverified", "not_delivered"]
@@ -122,6 +128,7 @@ class StackView(TypedDict):
     compose_project: str
     lifetime: pl.LifetimeView
     servers: list[ServerRow]
+    facts: NotRequired[list[Fact]]
     page_access: NotRequired[StackPageAccess]
 
 
@@ -551,6 +558,7 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             "lifetime": lifetime_for(source, target["remote"], target["project"], target["environment"],
                                      stack["slug"], compose_project),
             "servers": servers,
+            "facts": list(stack.get("facts") or []),
         })
 
     for source, target in sorted(chosen.values(), key=lambda item: (item[1]["remote"], item[1]["project"],

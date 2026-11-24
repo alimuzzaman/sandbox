@@ -1741,6 +1741,37 @@ recorded inbox names shows the supported setup command. One-link teammate access
 and per-click sign-in are separate spec 088 work; this declaration alone does not
 grant access.
 
+A stack can show the service it connects to under **Connected to**:
+
+```yaml
+stack:
+  slug: '^[a-z0-9][a-z0-9-]{0,30}$'
+  facts:
+    - label: API
+      env_file: service.env
+      key: SERVICE_URL
+      kind: url
+```
+
+Set `SERVICE_URL=https://api.example.com` in `service.env`. The file must be a
+regular file committed in the selected stack revision, relative to the stack's
+`source_root`. Sandbox reads up to eight declared facts, with unique labels of
+up to 32 characters and files of up to 64 KiB. Use literal, single-line
+assignments. Values can be unquoted or quoted, and the last assignment wins.
+
+Use `kind: url` for an HTTPS URL up to 512 characters with a DNS hostname and
+without user information. `kind: text` is the default and accepts up to 128
+characters, starting with a letter or digit. Text can include letters, digits,
+spaces and `._:/+@-`. Missing values, invalid values and credential-like key
+names such as `SERVICE_TOKEN` refuse the plan and apply. Declare only values
+that anyone with panel access may see, including any URL path and query.
+
+The stack record retains the declared labels, kinds and values. The panel
+exposes the delivered values in `/api/hosting` under `page_access.facts`.
+When a URL's hostname matches a server row for exactly one other stack on the
+panel, the fact includes that stack's `page_path`. Reapply to update or remove
+facts.
+
 `stack up` reports the stack's site (`site_url`, and `site:` in text). When the
 template's environment declares WordPress `autologin`, it also reports
 `login_url_command`, the one command that prints the one-time admin link once the

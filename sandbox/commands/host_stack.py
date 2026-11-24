@@ -21,7 +21,7 @@ import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 from sandbox.core import die, info
 from sandbox.core._config import ensure_pyyaml
-from sandbox.hosting import hostname_ownership, stack_registry, stack_template
+from sandbox.hosting import hostname_ownership, stack_facts, stack_registry, stack_template
 from sandbox.hosting.lifetime import client as lifetime_client, hoststore, naming
 from sandbox.hosting.stack_template import StackRef, StackTemplateError
 from sandbox.hosting.server_cli_target import host_target, is_owner_target
@@ -479,6 +479,42 @@ def _export_compose_files(checkout: Path, commit: str, source_rel: PurePosixPath
         target.write_bytes(result.stdout)
 
 
+def _read_stack_facts(checkout: Path, commit: str, source_rel: PurePosixPath,
+                      template: stack_template.StackTemplate) -> list[stack_facts.Fact]:
+    if not template.facts:
+        return []
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(checkout), *args], env=remote.git_environment(),
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=30)
+
+    def read(name: str) -> bytes | None:
+        spec = (source_rel / name).as_posix()
+        result = git("ls-tree", "-l", "-z", "--full-tree", commit, "--", f":(top,literal){spec}")
+        if result.returncode:
+            raise stack_facts.StackFactsError(stack_facts.FACTS_INVALID, f"could not locate stack fact file {name} in Git")
+        if not result.stdout:
+            return None
+        metadata, _, _ = result.stdout.partition(b"\t")
+        blob = re.fullmatch(rb"100(?:644|755) blob ([0-9a-f]{40}|[0-9a-f]{64}) +([0-9]{1,20})", metadata)
+        if blob is None:
+            raise stack_facts.StackFactsError(stack_facts.FACTS_INVALID, "stack fact file must be a regular Git blob")
+        object_id, size = blob[1].decode("ascii"), int(blob[2])
+        if size > stack_facts.MAX_ENV_FILE_BYTES:
+            raise stack_facts.StackFactsError(stack_facts.FACTS_INVALID, "stack fact file is too large")
+        result = git("cat-file", "blob", object_id)
+        if result.returncode or len(result.stdout) != size:
+            raise stack_facts.StackFactsError(stack_facts.FACTS_INVALID, f"could not read stack fact file {name} from Git")
+        return result.stdout
+
+    try:
+        return stack_facts.read_facts(template.facts, read)
+    except stack_facts.StackFactsError as exc:
+        raise StackTemplateError(exc.code, exc.detail) from None
+    except (OSError, subprocess.TimeoutExpired):
+        raise StackTemplateError(stack_facts.FACTS_INVALID, "could not read stack fact files from Git") from None
+
+
 def _select_environment(template, requested: str | None) -> str:
     names = template.environment_names()
     if requested:
@@ -733,6 +769,7 @@ def _up_timed(args, plan: bool, confirm: bool, clock) -> dict:
     project = stack_template.render_project(template, slug, ref)
     compose_project = hosting.compose_project_name({"project": project, "environment": environment})
     source_rel = stack_template.template_source_root(template, relpath)
+    facts = _read_stack_facts(checkout, ref.commit, source_rel, template)
     from sandbox.hosting.front_door import front_door_mode
     front_door = front_door_mode(entry)
 
@@ -790,7 +827,8 @@ def _up_timed(args, plan: bool, confirm: bool, clock) -> dict:
     def result(mode: str, validated: dict, ports: dict, hostnames: list[str], *, source_root,
                submission, stored: dict, job_id=None, request_id=None, missing=()) -> dict:
         return {"ok": True, "action": "stack-up", "mode": mode, "slug": slug, "remote": remote_name,
-                "project": project, "environment": environment, "uses": list(template.uses), "ref": ref.ref,
+                "project": project, "environment": environment, "uses": list(template.uses),
+                "facts": facts, "ref": ref.ref,
                 "ref_branch": ref.ref_branch, "commit": ref.commit, "hostnames": hostnames,
                 "ports": ports, "manifest": validated["manifest_path"], "source_root": source_root,
                 "template": str(template_path), "submission": submission, "job_id": job_id,
@@ -877,6 +915,8 @@ def _up_timed(args, plan: bool, confirm: bool, clock) -> dict:
             raise
         now = int(time.time())
         earlier = [path for path in (previous or {}).get("worktrees") or [] if path != str(worktree)]
+        previous_status = _last_apply_view(previous).get("status") if previous else None
+        delivered_facts = (previous or {}).get("facts")
         record: stack_registry.StackRecord = {
             "remote": remote_name, "slug": slug, "project": project, "environment": environment,
             # Caller context for owner labels and merge sweeps, not the new
@@ -886,15 +926,16 @@ def _up_timed(args, plan: bool, confirm: bool, clock) -> dict:
             "ref_branch": ref.ref_branch, "hostnames": sorted(hostnames),
             # `commit` stays what an apply last delivered; `sb host apply` moves
             # it to last_apply.commit once this one completes (record_delivery).
-            "commit": (stack_registry.delivered_commit(previous, _last_apply_view(previous).get("status"))
+            "commit": (stack_registry.delivered_commit(previous, previous_status)
                        if previous else None),
             "ports": ports, "uses": list(template.uses), "manifest": str(manifest_path),
+            **({"facts": delivered_facts} if delivered_facts else {}),
             "worktrees": [*earlier, str(worktree)],
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
             # Spec 076: sites `sb deploy --stack` linked to this stack outlive a re-apply.
             **({"sites": list(previous["sites"])} if (previous or {}).get("sites") else {}),
             "last_apply": {"request_id": request_id, "job_id": None, "submitted_at": now,
-                           "status": "submitting", "commit": ref.commit},
+                           "status": "submitting", "commit": ref.commit, "facts": facts},
             "copy_id": claim_request["record"]["copy_id"], "owner": stored.get("owner"),
             "lifetime": stored.get("lifetime"), "lifetime_source": stored.get("lifetime_source"),
             "ttl_seconds": stored.get("ttl_seconds"), "expires_at": stored.get("expires_at"),

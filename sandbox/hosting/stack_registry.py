@@ -18,6 +18,7 @@ from typing import Iterator, Mapping, TypedDict
 
 from sandbox.core import _paths
 from sandbox.core._hosting import STACK_PORT_END, STACK_PORT_START, HostingRefusal
+from sandbox.hosting.stack_facts import Fact
 
 PORT_INVALID = "stack_port_invalid"
 PORT_UNAVAILABLE = "stack_port_unavailable"
@@ -32,6 +33,7 @@ class StackRegistryError(HostingRefusal):
 
 class LastApply(TypedDict, total=False):
     request_id: str
+    job_request_id: str
     job_id: str | None
     submitted_at: int
     status: str
@@ -40,6 +42,7 @@ class LastApply(TypedDict, total=False):
     # the record's ``commit`` once the apply completes (record_delivery); readers
     # also treat it as delivered once the apply's job succeeded (delivered_commit).
     commit: str
+    facts: list[Fact]
 
 
 class SiteLinkRef(TypedDict, total=False):
@@ -65,6 +68,7 @@ class StackRecord(TypedDict, total=False):
     commit: str | None
     hostnames: list[str]
     uses: list[str]  # absent on older controller records
+    facts: list[Fact]
     ports: dict[str, int]
     manifest: str
     worktrees: list[str]
@@ -228,24 +232,34 @@ def delivered_commit(record: Mapping, last_apply_status: str | None) -> str | No
     return record.get("commit")
 
 
+def matches_apply(record: Mapping, request_id: str | None, commit: str | None) -> bool:
+    last = record.get("last_apply") or {}
+    return bool(request_id and commit and last.get("commit") == commit
+                and (last.get("job_request_id") or last.get("request_id")) == request_id)
+
+
 def record_delivery(remote_name: str, slug: str, *, request_id: str | None, commit: str,
                     now: int | None = None, path: Path | None = None) -> bool:
     """Move a stack's ``commit`` to the commit its apply just delivered.
 
     `sb host apply` calls this when the apply completes. Only the apply the
-    record waits for counts: ``last_apply.request_id`` and ``last_apply.commit``
-    must both match, so a manual or older apply of the same manifest never
-    moves the record. Returns whether the record changed.
+    record waits for counts. Its job request ID and commit must both match.
+    Returns whether the record changed.
     """
     if not request_id:
         return False
     with locked(path) as registry:
         record = registry.data["stacks"].get(record_key(remote_name, slug))
-        last = (record or {}).get("last_apply") or {}
-        if (not isinstance(record, dict) or last.get("request_id") != request_id
-                or last.get("commit") != commit or record.get("commit") == commit):
+        if not isinstance(record, dict) or not matches_apply(record, request_id, commit):
+            return False
+        facts = record["last_apply"].get("facts", record.get("facts") or [])
+        if record.get("commit") == commit and (record.get("facts") or []) == facts:
             return False
         record["commit"] = commit
+        if facts:
+            record["facts"] = facts
+        else:
+            record.pop("facts", None)
         record["updated_at"] = int(time.time()) if now is None else now
         registry.put(record)
         return True

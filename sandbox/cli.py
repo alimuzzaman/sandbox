@@ -2124,7 +2124,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # Spec 082: a remote-only controller may have no local instance at all;
     # its doctor reports the mode and the remote targets instead.
     remote_only_doctor = (args.cmd == "doctor"
-                          and _core().local_runtime_remote_only())
+                          and local_runtime_remote_only())
     if chosen is None:
         if inner_local_observation:
             project_root = Path(getattr(args, "project_dir", "")).expanduser().resolve()

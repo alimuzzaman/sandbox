@@ -13,7 +13,7 @@ def adopt_execution_capabilities(name, record, request):
     try:
         observed = request(['job-capabilities'])
     except Exception as exc:
-        if getattr(exc, 'code', None) == 'tailnet_ssh_denied':
+        if getattr(exc, 'code', None) in {'tailnet_ssh_denied', 'tailnet_ssh_check_required'}:
             refusal = ExecutionCapabilityUnavailable(str(exc))
             refusal.code = exc.code
             raise refusal from None

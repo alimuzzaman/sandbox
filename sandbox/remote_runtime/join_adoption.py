@@ -6,7 +6,7 @@ import subprocess
 import time
 
 from .join_identity import discover_join_identity
-from .join_profile import MACHINE_PROGRAM, adopt_join_profile
+from .join_profile import MACHINE_PROGRAM, REQUESTED_PROFILE, adopt_join_profile
 from sandbox.hosting.front_door import FrontDoorError
 from sandbox.resources.host_memory.remote import RemoteProtocolError
 
@@ -66,8 +66,11 @@ def adopt_missing(name, record, *, budget_seconds=15):
             if result.returncode:
                 raise FrontDoorError('joined_profile_unavailable', 'same-host SSH metadata is unavailable')
             return (result.stdout or '').strip()
+        # A join that could not reach SSH keeps the operator's explicit
+        # profile request; without one, only an observed owner is adopted.
+        requested = 'nginx' if record.get(REQUESTED_PROFILE) == 'nginx' else None
         try:
-            evidence.update(adopt_join_profile(record, evidence, None,
+            evidence.update(adopt_join_profile(record, evidence, requested,
                 machine_probe=machine_probe,
                 nginx_probe=lambda selected: nginx.probe(selected, profile_only=True, timeout=profile_remaining())))
         except FrontDoorError as exc:
@@ -77,8 +80,10 @@ def adopt_missing(name, record, *, budget_seconds=15):
             pass  # Missing SSH/profile evidence is not denied Tailnet admission.
     # The persisted writer compares the original registration under its locks.
     # It never overwrites changed pins or unrelated controller state.
-    changed = any(record.get(key) != value for key, value in evidence.items())
+    remove = (REQUESTED_PROFILE,) if evidence.get('front_door') and REQUESTED_PROFILE in record else ()
+    changed = bool(remove) or any(record.get(key) != value for key, value in evidence.items())
     if not changed:
         return record
-    updated = _remote.put_remote(name, _lock_timeout=remaining(), _expected=record, **evidence)
+    updated = _remote.put_remote(name, _lock_timeout=remaining(), _expected=record,
+                                 **({'_remove': remove} if remove else {}), **evidence)
     return {**updated, '_remote_name': name}

@@ -187,10 +187,7 @@ def dispatch_host_if_selected(args) -> bool:
             bool(getattr(args, "_server_cli_submission_started", False))
             and code != "server_cli_capability_unavailable")
         busy = _source_busy(error)
-        from sandbox.transports.remote_jobs import TailnetSshDenied
-        if isinstance(error, TailnetSshDenied):
-            # The SSH client was refused before the remote command ran.
-            _failure(args, TailnetSshDenied.code, unknown=False, error=str(error))
+        _tailnet_ssh_failure(args, error, fresh=generated_request_id)
         from sandbox.core._remote import RemoteBranchDiverged
         if isinstance(error, RemoteBranchDiverged) and generated_request_id:
             # Git refused the source push, so this fresh request was never
@@ -216,6 +213,25 @@ def dispatch_host_if_selected(args) -> bool:
                            + type(error).__name__ + ").")
         _failure(args, "server_cli_acceptance_unknown" if unknown else
                  "server_cli_execution_unavailable", unknown=unknown, busy=busy)
+
+
+def _tailnet_ssh_failure(args, error, *, fresh):
+    """Report a joined remote's Tailscale SSH refusal; return if ``error`` is not one.
+
+    A proven login refusal means this attempt ran nothing, so only a fresh
+    request id is not accepted. A reused id may belong to an earlier attempt
+    whose receipt was lost, and its ledger cannot be read without SSH. Check
+    mode never shows whether the command ran.
+    """
+    from sandbox.transports.remote_jobs import TailnetSshCheckRequired, TailnetSshDenied
+    if isinstance(error, TailnetSshDenied) and fresh:
+        _failure(args, TailnetSshDenied.code, unknown=False, error="Not submitted: " + str(error))
+    if isinstance(error, TailnetSshDenied):
+        _failure(args, TailnetSshDenied.code, unknown=True, error=str(error)
+                 + " This request id was given, so an earlier attempt may already be accepted;"
+                   " once SSH works, inspect the original request/job before any retry.")
+    if isinstance(error, TailnetSshCheckRequired):
+        _failure(args, TailnetSshCheckRequired.code, unknown=True, error=str(error))
 
 
 def _source_busy(error):

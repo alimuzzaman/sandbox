@@ -724,10 +724,12 @@ def register_workspace_deployment_receipt(
 _ANY_REMOTE = object()
 
 
-def put_remote(name: str, _lock_timeout: float = 30, *, _expected=_ANY_REMOTE, **fields) -> dict:
+def put_remote(name: str, _lock_timeout: float = 30, *, _expected=_ANY_REMOTE,
+               _remove=(), **fields) -> dict:
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's
-    idempotency expectation, applied to registration too)."""
+    idempotency expectation, applied to registration too). A ``None`` field
+    is ignored; ``_remove`` names the fields to delete."""
     deadline = time.monotonic() + _lock_timeout
     with registered_remote_lock(registration_lock_name(name),
                                 timeout_seconds=_lock_timeout), \
@@ -740,6 +742,8 @@ def put_remote(name: str, _lock_timeout: float = 30, *, _expected=_ANY_REMOTE, *
                 raise RuntimeError("remote_registration_changed")
         entry = dict(block.get(name) or {})
         entry.update({k: v for k, v in fields.items() if v is not None})
+        for key in _remove:
+            entry.pop(key, None)
         block[name] = entry
         _write_remote_block(block)
         return entry
@@ -1557,13 +1561,28 @@ def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
 
 
 def _resolve_sandbox_home_over_ssh(remote: dict, *, timeout: int) -> str:
+    from sandbox.remote_runtime import tailnet_ssh
     timeout = normalize_remote_push_timeout(timeout)
+    refusal = None
     try:
         res = ssh_run(
             remote, "echo ${SANDBOX_HOME:-$HOME/sandbox}", timeout=timeout
         )
     except subprocess.TimeoutExpired as exc:
-        raise RemoteHomeResolutionTimeout(timeout) from exc
+        if tailnet_ssh.joined(remote) and tailnet_ssh.symptom(exc) == tailnet_ssh.CHECK_REQUIRED:
+            refusal = tailnet_ssh.refusal_error(remote, tailnet_ssh.CHECK_REQUIRED)
+        else:
+            raise RemoteHomeResolutionTimeout(timeout) from exc
+    if refusal is not None:
+        raise refusal
+    if res.returncode != 0:
+        # Every SSH-only command resolves this home first, so a joined
+        # remote's tailnet SSH refusal is classified here, once.
+        refusal = tailnet_ssh.refusal_error(remote, tailnet_ssh.classify(
+            remote, res, lambda: ssh_run(remote, tailnet_ssh.PROBE_COMMAND,
+                                         timeout=tailnet_ssh.PROBE_TIMEOUT)))
+        if refusal is not None:
+            raise refusal
     if res.returncode != 0 or type(res.stdout) is not str or not res.stdout:
         raise RuntimeError(
             f"could not resolve $SANDBOX_HOME on remote: "
@@ -5208,6 +5227,7 @@ def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18,
 def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float = 18,
                                     metadata_only: bool = False) -> dict:
     """Read only the selected Sandbox unit state; never inspect generic argv."""
+    from sandbox.remote_runtime import tailnet_ssh
     record = dict(remote.get("mcp_service") or {})
     expected = record.get("service_name") == REMOTE_MCP_SERVICE
     marker = record.get("ownership_marker") if isinstance(record.get("ownership_marker"), str) else ""
@@ -5384,14 +5404,17 @@ def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float =
         if timeout_seconds <= 0:
             return unavailable('remote_service_probe_timeout')
         res = ssh_run(remote, command, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        if remote.get('control_transport') == 'tailscale' and tailnet_ssh.symptom(exc) == tailnet_ssh.CHECK_REQUIRED:
+            ssh_admission = 'check_required'
         return unavailable("remote_service_probe_timeout")
     except (OSError, subprocess.SubprocessError):
         return unavailable("remote_service_probe_transport_failed")
     if getattr(res, "returncode", 1) != 0:
-        diagnostic = (getattr(res, 'stderr', '') or '').lower()
-        if remote.get('control_transport') == 'tailscale' and ('tailnet policy does not permit' in diagnostic or 'permission denied' in diagnostic):
-            ssh_admission = 'denied'
+        if remote.get('control_transport') == 'tailscale':
+            # A read, so the symptom is enough here; no acceptance follows from it.
+            ssh_admission = {tailnet_ssh.DENIED: 'denied', tailnet_ssh.CHECK_REQUIRED: 'check_required'}.get(
+                tailnet_ssh.symptom(res), ssh_admission)
         return unavailable("remote_service_probe_transport_failed")
     ssh_admission = 'admitted'
     if not (getattr(res, "stdout", "") or "").strip():

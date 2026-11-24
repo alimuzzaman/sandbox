@@ -645,6 +645,12 @@ def cmd_job_status(_cfg, args) -> None:
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).status(args.remote, args.job_id)
+        if result.get("code") in {"tailnet_ssh_denied", "tailnet_ssh_check_required"}:
+            # The job's state is unobservable, not unknown-but-fine: say why and fail.
+            if args.json:
+                print(json.dumps(result, sort_keys=True))
+                raise SystemExit(1)
+            _die(f"{result['code']}: {result['error']} Job {args.job_id} was not observed.")
     else:
         try:
             result = durable_job_dependencies()["job_service"].get(args.job_id)

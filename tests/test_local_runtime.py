@@ -245,5 +245,30 @@ class TestRemoteOnlyDoctor(unittest.TestCase):
         self.assertIn("controller.local_runtime", payload["checks"][0]["label"])
 
 
+class TestRemoteOnlyDoctorEntryPoint(unittest.TestCase):
+    """Through ./sb, not cmd_doctor: the dispatch in cli.main once called a
+    helper that the top-level sandbox_core module does not define."""
+
+    def test_sb_doctor_runs_on_a_remote_only_controller(self):
+        import tempfile
+        from pathlib import Path
+        from tests.subprocess_support import run_test_process
+        sb = Path(__file__).resolve().parent.parent / "sb"
+        with tempfile.TemporaryDirectory() as home:
+            Path(home, "sandbox.local.yml").write_text(
+                "controller:\n  local_runtime: none\n")
+            proc = run_test_process(
+                [str(sb), "doctor", "--json", "--report-only"],
+                env={"SANDBOX_HOME": home, "SANDBOX_INSTANCE": "",
+                     "SANDBOX_AUTO_UPDATE": "0"},
+                cwd=home, capture_output=True, text=True)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(payload["local_runtime"]["mode"], "none")
+        self.assertEqual(payload["local_runtime"]["source"], "machine_override")
+        self.assertEqual(payload["checks"][0]["section"], "Local runtime")
+
+
 if __name__ == "__main__":
     unittest.main()

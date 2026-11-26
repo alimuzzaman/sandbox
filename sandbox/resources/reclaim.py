@@ -37,6 +37,7 @@ WORKSPACE_VOLUME_PATTERN = re.compile(
 )
 SCRATCH_PATTERNS = (
     re.compile(r"^\.drive-volume-fallbacks-"),
+    re.compile(r"^\.sandbox-materialize-[0-9a-f]+\.lock$"),
 )
 
 DEFAULT_WORKSPACE_TTL_SECONDS = 7 * 86400

@@ -52,7 +52,7 @@ def _resource_contract(payload: dict) -> dict:
         from sandbox.resources.cleanup_routine import host as cleanup_routine
 
         return cleanup_routine.handle(payload, live_revision=_live_runtime_revision())
-    from sandbox.resources.remote import LocalProbeAdapter
+    from sandbox.resources.remote import LocalProbeAdapter, _salvage_payload
 
     action = payload.get("action")
     if action not in {"observe", "reclaim", "lease", "remove"}:
@@ -67,16 +67,20 @@ def _resource_contract(payload: dict) -> dict:
     if not math.isfinite(budget) or budget <= 0:
         raise ValueError("resource budget_seconds must be finite and positive")
     adapter = LocalProbeAdapter()
-    response = adapter._run(payload, min(max(budget + 10, 1), 910))
-    result = None
-    for line in reversed((response.stdout or "").splitlines()):
-        try:
-            candidate = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(candidate, dict):
-            result = candidate
-            break
+    # Finish slightly ahead of the remote HTTP client timeout (budget + 5s) so
+    # a timed-out observe probe still delivers its salvaged capacity envelope
+    # instead of dropping the connection.
+    response = adapter._run(payload, min(max(budget + 2, 1), 905))
+    result = _salvage_payload(response.stdout) if action == "observe" else None
+    if result is None:
+        for line in reversed((response.stdout or "").splitlines()):
+            try:
+                candidate = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(candidate, dict):
+                result = candidate
+                break
     if result is None:
         result = {"ok": False, "reason": "resource_response_invalid"}
     return {"resource_schema": 1, "transport": "control", "result": result}

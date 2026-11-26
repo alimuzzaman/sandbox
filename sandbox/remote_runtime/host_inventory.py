@@ -131,6 +131,16 @@ def _record_slow_probe(key, value) -> None:
         entry["value"], entry["at"], entry["failed"] = value, time.monotonic(), False
 
 
+def invalidate_storage_cache() -> None:
+    """Drop the cached storage probe so the next refresh observes live disk state."""
+    from sandbox.resources.remote import LocalProbeAdapter
+
+    with _slow_probe_lock:
+        entry = _slow_probes.get(LocalProbeAdapter)
+        if entry is not None:
+            entry["value"], entry["at"], entry["failed"] = None, None, False
+
+
 def _cached_slow_probe(key, compute) -> tuple[str, object, int | None]:
     """(state, value, age_seconds) for one slow probe; state is ok, pending or failed.
 
@@ -318,16 +328,22 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     try:
         if deep:
             storage_probe = LocalProbeAdapter().observe_reclaim(
-                budget_seconds=30, directory_cache="refresh", deep=True)
+                budget_seconds=180, directory_cache="refresh", deep=True)
             _record_slow_probe(LocalProbeAdapter, storage_probe)
             storage_state, storage_age = "ok", 0
         else:
             storage_state, storage_probe, storage_age = _cached_slow_probe(
                 LocalProbeAdapter, lambda: LocalProbeAdapter().observe_reclaim(
                     # Runs in the background, so a slow host only delays the
-                    # value; xspeed-dev with ~1,000 workspaces needs about 34 s.
+                    # value; cache_only reads the saved index without walking.
                     budget_seconds=45, directory_cache="cache_only", deep=True))
         if storage_state == "ok":
+            deep_block = storage_probe.get("deep_attribution") if isinstance(storage_probe, dict) else None
+            deep_block = deep_block if isinstance(deep_block, dict) else {}
+            reclaim_summary = _reclaim_summary(
+                storage_probe.get("reclaim") if isinstance(storage_probe, dict) else None,
+                storage_probe.get("capacity") if isinstance(storage_probe, dict) else None,
+            )
             storage = {
                 "status": "partial" if any(
                     str(item.get("status")) not in {"complete", "measured"}
@@ -336,20 +352,25 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
                 ) else "complete",
                 "capacity": storage_probe.get("capacity"),
                 "capacity_scope_id": storage_probe.get("capacity_scope_id"),
-                "attribution_status": str(
-                    (storage_probe.get("deep_attribution") or {}).get("status") or "unknown"
-                ),
+                "attribution_status": str(deep_block.get("status") or "unknown"),
+                "reconciliation": _reconciliation_summary(deep_block.get("reconciliation")),
+                "directory_index": _directory_index_summary(deep_block.get("directory_index")),
+                "top_findings": _top_findings(deep_block.get("findings")),
+                "reclaim": reclaim_summary,
+                "routine": _routine_summary(),
                 "category_outcomes": list(storage_probe.get("category_outcomes") or ())[:50],
                 "observed_age_seconds": storage_age,
             }
         else:
             status = "pending" if storage_state == "pending" else "unavailable"
             storage = {"status": status, "capacity": None,
-                       "attribution_status": "unknown", "category_outcomes": []}
+                       "attribution_status": "unknown", "category_outcomes": [],
+                       "routine": _routine_summary()}
             partial.append(f"storage_inventory_{status}")
     except Exception:
         storage = {"status": "unavailable", "capacity": None,
-                   "attribution_status": "unknown", "category_outcomes": []}
+                   "attribution_status": "unknown", "category_outcomes": [],
+                   "routine": _routine_summary()}
         partial.append("storage_inventory_unavailable")
 
     running = sum(1 for row in instances if row["running"])
@@ -391,6 +412,106 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
                           "remote_docker_pool", "deploy_transport"],
         },
     }
+
+
+def _reconciliation_summary(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    keys = (
+        "used_bytes", "accounted_bytes", "residual_unexplained_bytes",
+        "directory_allocated_bytes", "deleted_open_bytes", "overlapping_logical_bytes",
+    )
+    return {key: raw.get(key) for key in keys if key in raw}
+
+
+def _directory_index_summary(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    keys = ("source", "complete", "stale", "age_seconds", "mode")
+    return {key: raw.get(key) for key in keys if key in raw}
+
+
+def _top_findings(raw) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        display = str(item.get("display_name") or "").strip()
+        observed = item.get("observed_bytes")
+        if not display or not isinstance(observed, int) or isinstance(observed, bool):
+            continue
+        rows.append({
+            "display_name": display[:160],
+            "kind": str(item.get("kind") or "directory")[:32],
+            "observed_bytes": observed,
+            "overlap": str(item.get("overlap") or "unknown")[:32],
+            "guidance": str(item.get("guidance") or "monitoring_only")[:32],
+        })
+        if len(rows) >= 15:
+            break
+    return rows
+
+
+def _reclaim_summary(block, capacity) -> dict | None:
+    if not isinstance(block, dict):
+        return None
+    try:
+        from sandbox.resources import reclaim
+        report = reclaim.build_report(block, capacity, now=time.time())
+    except Exception:
+        return None
+    if not isinstance(report, dict):
+        return None
+    volumes = report.get("volumes") if isinstance(report.get("volumes"), dict) else {}
+    return {
+        "status": report.get("status"),
+        "reason": report.get("reason"),
+        "truncated": bool(report.get("truncated")),
+        "unmeasured_count": int(report.get("unmeasured_count") or 0),
+        "classes": list(report.get("classes") or ()),
+        "tiers": dict(report.get("tiers") or {}),
+        "volumes": {
+            "eligible": int(volumes.get("eligible") or 0),
+            "eligible_bytes": int(volumes.get("eligible_bytes") or 0),
+            "protected": int(volumes.get("protected") or 0),
+        },
+        "capacity_pressure": report.get("capacity_pressure"),
+    }
+
+
+def _routine_summary() -> dict | None:
+    try:
+        from sandbox.resources.cleanup_routine import units as routine_units
+        from sandbox.resources.cleanup_routine.store import RoutineStore
+        store = RoutineStore()
+        config = store.read_config()
+        runs = store.runs(limit=1)
+        last = runs[0] if runs else None
+        enabled = bool(config and config.get("enabled") is True)
+        health = routine_units.service_health()
+        return {
+            "enabled": enabled,
+            "cadence": (config or {}).get("cadence") if enabled else None,
+            "next_run": routine_units.next_run() if enabled else None,
+            "exclusions_count": len((config or {}).get("exclusions") or ()),
+            "unit_healthy": health.get("healthy"),
+            "exec_exists": health.get("exec_exists"),
+            "active_state": health.get("active_state"),
+            "result": health.get("result"),
+            "last_run": {
+                "outcome": last.get("outcome"),
+                "reason": last.get("reason"),
+                "started_at": last.get("started_at"),
+                "ended_at": last.get("ended_at"),
+                "removed": last.get("removed"),
+                "bytes_reclaimed": last.get("bytes_reclaimed"),
+                "skipped": last.get("skipped"),
+            } if isinstance(last, dict) else None,
+        }
+    except Exception:
+        return None
 
 
 def _memory_snapshot(meminfo_path: Path = Path("/proc/meminfo")) -> dict:

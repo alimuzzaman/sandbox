@@ -21,6 +21,7 @@ import {
 import { doCreate, submitCreate } from "./pages/create";
 import { hostingStillChecking } from "./pages/hosting";
 import { shareLinks, shareStack } from "./pages/share";
+import { openCleanup } from "./pages/cleanup";
 import { signInStack } from "./pages/stack";
 import type { SbApi } from "./types";
 
@@ -218,7 +219,9 @@ function showHelp(): void {
 
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
-  navigate, goHome, selectInstance, selectRemote, refreshRemote, refreshHosts, refreshHosting, showUsage, showHelp, openTerminal,
+  navigate, goHome, selectInstance, selectRemote, refreshRemote,
+  openCleanup: (name: string) => { openCleanup(name, (remote) => { void refreshRemote(remote); }); },
+  refreshHosts, refreshHosting, showUsage, showHelp, openTerminal,
   submitCreate,
   doCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),

@@ -228,6 +228,7 @@ def _instance_route_file_names() -> list[str]:
 # send neither; a cross-site fetch that tries triggers a preflight nothing answers.
 _SHARE_PATH = "/api/hosting/share"
 _SIGN_IN_PATH = "/api/hosting/sign-in"
+_CLEANUP_PATH = "/api/remote/cleanup"
 _SHARE_HEADER = "X-Sandbox-Panel"
 _SHARE_BODY_MAX = 4096
 _SHARE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -237,9 +238,16 @@ _SHARE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SHARE_KEYS = {"create": frozenset({"action", "remote", "stack"}),
                "list": frozenset({"action", "remote", "stack"}),
                "revoke": frozenset({"action", "remote", "stack", "id"})}
+_CLEANUP_TIERS = frozenset({"safe", "tmp", "all"})
+_CLEANUP_PLAN_ID_RE = re.compile(r"[0-9a-f]{16,64}")
+_CLEANUP_KEYS = {
+    "plan": frozenset({"action", "remote", "tier"}),
+    "apply": frozenset({"action", "remote", "tier", "plan_id", "confirm"}),
+}
 
 
-def _share_request_allowed(peer, bound_host, headers, allowed_names: frozenset[str] = frozenset()) -> bool:
+def _share_request_allowed(peer, bound_host, headers, allowed_names: frozenset[str] = frozenset(),
+                           *, expected_header: str = "share") -> bool:
     """True only for a same-origin JSON request from the panel's page (R10)."""
     host, origin = headers.get("Host"), headers.get("Origin")
     if not host or not origin:
@@ -254,7 +262,7 @@ def _share_request_allowed(peer, bound_host, headers, allowed_names: frozenset[s
         return False
     if (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower() != "application/json":
         return False
-    if headers.get(_SHARE_HEADER) != "share":
+    if headers.get(_SHARE_HEADER) != expected_header:
         return False
     site = headers.get("Sec-Fetch-Site")
     if site is not None and site != "same-origin":
@@ -264,6 +272,190 @@ def _share_request_allowed(peer, bound_host, headers, allowed_names: frozenset[s
     except ValueError:
         return False
     return 0 < length <= _SHARE_BODY_MAX
+
+
+def _cleanup_request_allowed(peer, bound_host, headers,
+                             allowed_names: frozenset[str] = frozenset()) -> bool:
+    """Same-origin JSON + panel header gate for storage cleanup requests."""
+    return _share_request_allowed(
+        peer, bound_host, headers, allowed_names, expected_header="cleanup",
+    )
+
+
+def _cleanup_request(payload) -> tuple[str, str, str, str | None, bool]:
+    """Validate POST /api/remote/cleanup payload; ValueError names what is wrong."""
+    import sandbox.core._remote as remote_core
+
+    if not isinstance(payload, dict):
+        raise ValueError("the body must be a JSON object")
+    action = payload.get("action")
+    keys = _CLEANUP_KEYS.get(action) if isinstance(action, str) else None
+    if keys is None:
+        raise ValueError("action must be plan or apply")
+    if set(payload) != keys:
+        raise ValueError(f"{action} takes exactly: " + ", ".join(sorted(keys)))
+    remote_name = payload.get("remote")
+    tier = payload.get("tier")
+    if not isinstance(remote_name, str) or not isinstance(tier, str):
+        raise ValueError("remote and tier must be strings")
+    try:
+        if remote_core.validate_remote_name(remote_name) != remote_name:
+            raise ValueError
+    except ValueError:
+        raise ValueError("remote is not a valid remote name") from None
+    if tier not in _CLEANUP_TIERS:
+        raise ValueError("tier must be safe, tmp or all")
+    if action == "plan":
+        return action, remote_name, tier, None, False
+    plan_id = payload.get("plan_id")
+    confirm = payload.get("confirm")
+    if not isinstance(plan_id, str) or not _CLEANUP_PLAN_ID_RE.fullmatch(plan_id):
+        raise ValueError("plan_id must be a valid hex plan id")
+    if type(confirm) is not bool:
+        raise ValueError("confirm must be a boolean")
+    return action, remote_name, tier, plan_id, confirm
+
+
+def _web_remote_cleanup(payload) -> tuple[int, dict]:
+    """Plan or apply tiered storage cleanup for this server or a registered remote."""
+    from collections import Counter
+    import sandbox.core._remote as remote_core
+    from sandbox.resources.context import reclaim_service
+
+    try:
+        action, remote_name, tier, plan_id, confirm = _cleanup_request(payload)
+    except ValueError as exc:
+        return 400, {"ok": False, "code": "panel_request_invalid", "message": str(exc)}
+    if action == "apply" and not confirm:
+        return 400, {
+            "ok": False,
+            "code": "confirmation_required",
+            "message": "Storage cleanup requires explicit confirmation.",
+        }
+
+    entry = remote_core.get_remote(remote_name)
+    local = entry is None and remote_name == THIS_SERVER and _hosts_control_service()
+    if entry is None and not local:
+        return 404, {"ok": False, "code": "remote_not_found", "message": "No such remote."}
+
+    try:
+        svc = reclaim_service(None if local else remote_name)
+        if action == "plan":
+            planned = svc.plan(tier, budget_seconds=120, directory_cache="auto")
+            if not isinstance(planned, dict) or not planned.get("ok"):
+                err = (planned.get("error") if isinstance(planned, dict) else None) or {}
+                return 409, remote_core.redact_structure({
+                    "ok": False,
+                    "action": "plan",
+                    "remote": remote_name,
+                    "code": str(err.get("code") or "cleanup_plan_failed")[:64],
+                    "message": str(err.get("message") or "Storage cleanup plan failed.")[:240],
+                })
+            data = planned.get("data") or {}
+            candidates_raw = data.get("candidates") or []
+            preview = []
+            for item in candidates_raw[:50]:
+                if not isinstance(item, dict):
+                    continue
+                preview.append({
+                    "display_name": str(item.get("display_name") or item.get("locator") or "unknown")[:160],
+                    "kind": str(item.get("kind") or "unknown")[:32],
+                    "class": str(item.get("class") or "unknown")[:32],
+                    "tier": str(item.get("tier") or tier)[:16],
+                    "reason": str(item.get("reason") or "eligible")[:64],
+                    "bytes": int(item.get("bytes") or 0),
+                })
+            skipped_raw = data.get("skipped") or []
+            skipped_reasons = Counter(
+                str(item.get("reason") or "skipped")[:64]
+                for item in skipped_raw if isinstance(item, dict)
+            )
+            return 200, remote_core.redact_structure({
+                "ok": True,
+                "action": "plan",
+                "remote": remote_name,
+                "plan_id": str(data.get("plan_id") or ""),
+                "tier": str(data.get("tier") or tier),
+                "expires_at": data.get("expires_at"),
+                "estimated_reclaimable_bytes": int(data.get("estimated_reclaimable_bytes") or 0),
+                "candidate_count": len(candidates_raw),
+                "candidates": preview,
+                "candidates_truncated": len(candidates_raw) > 50,
+                "skipped_count": len(skipped_raw),
+                "skipped_reasons": dict(skipped_reasons.most_common(12)),
+                "inventory_status": str(data.get("inventory_status") or "unknown"),
+                "deployment_inventory_complete": bool(data.get("deployment_inventory_complete")),
+                "engine_complete": bool(data.get("engine_complete")),
+                "unmeasured_count": int(data.get("unmeasured_count") or 0),
+                "truncated": bool(data.get("truncated")),
+            })
+
+        applied = svc.cleanup(
+            plan_id=plan_id,
+            tier=tier,
+            confirm=True,
+            trigger="web_panel",
+            budget_seconds=300,
+        )
+        if local:
+            from sandbox.remote_runtime import host_inventory
+            host_inventory.invalidate_storage_cache()
+        if not isinstance(applied, dict):
+            return 500, {
+                "ok": False, "action": "apply", "remote": remote_name,
+                "code": "cleanup_failed", "message": "Storage cleanup returned an invalid response.",
+            }
+        data = applied.get("data") if isinstance(applied.get("data"), dict) else {}
+        outcomes = data.get("outcomes") if isinstance(data.get("outcomes"), list) else []
+        counts = Counter(
+            str(item.get("status") or "failed")
+            for item in outcomes if isinstance(item, dict)
+        )
+        if not applied.get("ok"):
+            err = applied.get("error") if isinstance(applied.get("error"), dict) else {}
+            status = str(applied.get("status") or "failed")
+            code = 409 if status in ("refused", "skipped") else 500
+            return code, remote_core.redact_structure({
+                "ok": False,
+                "action": "apply",
+                "remote": remote_name,
+                "status": status,
+                "plan_id": str(data.get("plan_id") or plan_id),
+                "run_id": data.get("run_id"),
+                "tier": str(data.get("tier") or tier),
+                "observed_reclaimed_bytes": int(data.get("observed_reclaimed_bytes") or 0),
+                "removed_count": int(counts.get("removed", 0)),
+                "skipped_count": int(counts.get("skipped", 0)),
+                "failed_count": int(counts.get("failed", 0) + counts.get("timed_out", 0)),
+                "already_absent_count": int(counts.get("already_absent", 0)),
+                "budget_exhausted": bool(data.get("budget_exhausted")),
+                "code": str(err.get("code") or "cleanup_failed")[:64],
+                "message": str(err.get("message") or "Storage cleanup failed.")[:240],
+            })
+        return 200, remote_core.redact_structure({
+            "ok": True,
+            "action": "apply",
+            "remote": remote_name,
+            "status": str(applied.get("status") or "completed"),
+            "run_id": str(data.get("run_id") or ""),
+            "plan_id": str(data.get("plan_id") or plan_id),
+            "tier": str(data.get("tier") or tier),
+            "observed_reclaimed_bytes": int(data.get("observed_reclaimed_bytes") or 0),
+            "planned_bytes": int(data.get("planned_bytes") or 0),
+            "removed_count": int(counts.get("removed", 0)),
+            "skipped_count": int(counts.get("skipped", 0)),
+            "failed_count": int(counts.get("failed", 0) + counts.get("timed_out", 0)),
+            "already_absent_count": int(counts.get("already_absent", 0)),
+            "budget_exhausted": bool(data.get("budget_exhausted")),
+        })
+    except (Exception, SystemExit):
+        return 500, {
+            "ok": False,
+            "action": action,
+            "remote": remote_name,
+            "code": "cleanup_failed",
+            "message": "Storage cleanup failed; inspect the host logs or run `sb resources plan`.",
+        }
 
 
 def _share_request(payload) -> tuple[str, str, str, str | None]:
@@ -743,7 +935,7 @@ def cmd_web(cfg, args) -> None:
 
         def end_headers(self):
             # Also cover BaseHTTPRequestHandler's unsupported-method errors.
-            if self.path.split("?", 1)[0] == _SHARE_PATH:
+            if self.path.split("?", 1)[0] in {_SHARE_PATH, _CLEANUP_PATH}:
                 self.send_header("Cache-Control", "no-store")
             super().end_headers()
 
@@ -755,7 +947,7 @@ def cmd_web(cfg, args) -> None:
             # its mutating actions, such as "Share this stack".
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
-            if no_store and self.path.split("?", 1)[0] != _SHARE_PATH:
+            if no_store and self.path.split("?", 1)[0] not in {_SHARE_PATH, _CLEANUP_PATH}:
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -813,6 +1005,19 @@ def cmd_web(cfg, args) -> None:
                         "code": "panel_request_invalid", "message": "Invalid stack sharing request."}), no_store=True)
             code, result = (_web_sign_in(payload, owner_request=owner_request) if self.path == _SIGN_IN_PATH
                             else _web_share(payload, owner_request=owner_request))
+            return self._send(code, json.dumps(result), no_store=True)
+
+        def _cleanup(self):
+            if not _cleanup_request_allowed(self.client_address[0], self.server.server_address[0],
+                                            self.headers, allowed_names):
+                return self._send(403, json.dumps({
+                    "ok": False, "code": "panel_request_refused",
+                    "message": "cleanup requests must come from the panel page"}), no_store=True)
+            try:
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            except (ValueError, RecursionError):
+                payload = None
+            code, result = _web_remote_cleanup(payload)
             return self._send(code, json.dumps(result), no_store=True)
 
         def do_DELETE(self):
@@ -910,6 +1115,8 @@ def cmd_web(cfg, args) -> None:
                 # _share_request_allowed applies the _local() gate first, then its own checks,
                 # so every share response (refusals included) is answered no-store.
                 return self._share()
+            if self.path == _CLEANUP_PATH:
+                return self._cleanup()
             if not self._local():
                 return self._send(403, json.dumps({"error": "forbidden"}))
             if self.path != "/api/action":

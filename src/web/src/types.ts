@@ -28,6 +28,131 @@ export interface AppData {
 
 export interface RemoteSummary { name: string; provisioned: boolean; control_ready: boolean; local?: boolean }
 export interface ResourceRow { name?: string; pid?: number; cpu_percent?: number; rss_bytes?: number; memory_used_bytes?: number; memory_percent?: number; pids?: number; process_count?: number; container_count?: number; attribution_status?: string }
+export interface StorageFinding {
+  display_name: string;
+  kind: string;
+  observed_bytes: number;
+  overlap: string;
+  guidance: string;
+}
+export interface StorageReclaimClass {
+  class: string;
+  count: number;
+  bytes: number;
+  tier?: string | null;
+  unmeasured?: number;
+}
+export interface StorageRoutineSummary {
+  enabled: boolean;
+  cadence?: string | null;
+  next_run?: string | null;
+  exclusions_count?: number;
+  unit_healthy?: boolean | null;
+  exec_exists?: boolean | null;
+  active_state?: string | null;
+  result?: string | null;
+  last_run?: {
+    outcome?: string | null;
+    reason?: string | null;
+    started_at?: string | null;
+    ended_at?: string | null;
+    removed?: number | null;
+    bytes_reclaimed?: number | null;
+    skipped?: number | null;
+  } | null;
+}
+export interface RemoteStorage {
+  status: string;
+  attribution_status: string;
+  capacity?: { total_bytes?: number; used_bytes?: number; available_bytes?: number } | null;
+  reconciliation?: {
+    used_bytes?: number;
+    accounted_bytes?: number;
+    residual_unexplained_bytes?: number;
+    directory_allocated_bytes?: number;
+    deleted_open_bytes?: number;
+    overlapping_logical_bytes?: number;
+  } | null;
+  directory_index?: {
+    source?: string;
+    complete?: boolean;
+    stale?: boolean;
+    age_seconds?: number | null;
+    mode?: string;
+  } | null;
+  top_findings?: StorageFinding[];
+  reclaim?: {
+    status?: string;
+    reason?: string | null;
+    truncated?: boolean;
+    unmeasured_count?: number;
+    classes?: StorageReclaimClass[];
+    tiers?: Record<string, { count?: number; bytes?: number }>;
+    volumes?: { eligible: number; eligible_bytes: number; protected: number };
+    capacity_pressure?: { level?: string; free_ratio?: number | null; guidance?: string } | null;
+  } | null;
+  routine?: StorageRoutineSummary | null;
+  category_outcomes?: Array<Record<string, unknown>>;
+  observed_age_seconds?: number | null;
+}
+export type CleanupTier = "safe" | "tmp" | "all";
+export interface CleanupCandidatePreview {
+  display_name: string;
+  kind: string;
+  class: string;
+  tier: string;
+  reason: string;
+  bytes: number;
+}
+export interface CleanupPlanResult {
+  ok: true;
+  action: "plan";
+  remote: string;
+  plan_id: string;
+  tier: CleanupTier;
+  expires_at?: string | null;
+  estimated_reclaimable_bytes: number;
+  candidate_count: number;
+  candidates: CleanupCandidatePreview[];
+  candidates_truncated: boolean;
+  skipped_count: number;
+  skipped_reasons: Record<string, number>;
+  inventory_status: string;
+  deployment_inventory_complete: boolean;
+  engine_complete: boolean;
+  unmeasured_count: number;
+  truncated: boolean;
+}
+export interface CleanupApplyResult {
+  ok: true;
+  action: "apply";
+  remote: string;
+  status: string;
+  run_id: string;
+  plan_id: string;
+  tier: CleanupTier;
+  observed_reclaimed_bytes: number;
+  planned_bytes: number;
+  removed_count: number;
+  skipped_count: number;
+  failed_count: number;
+  already_absent_count: number;
+  budget_exhausted: boolean;
+}
+export interface CleanupRefused {
+  ok: false;
+  action?: "plan" | "apply";
+  remote?: string;
+  status?: string;
+  code: string;
+  message: string;
+  observed_reclaimed_bytes?: number;
+  removed_count?: number;
+  skipped_count?: number;
+  failed_count?: number;
+  already_absent_count?: number;
+  budget_exhausted?: boolean;
+}
 export interface RemoteInventory {
   ok: boolean; name?: string; inventory_schema: number; transport: "control";
   evidence_status: "complete" | "partial" | "unavailable";
@@ -41,7 +166,7 @@ export interface RemoteInventory {
   per_instance_usage?: Array<{ name: string; attribution_status: string; container_count: number; memory_used_bytes: number; cpu_percent: number }>;
   unattributed_containers?: ResourceRow[];
   hosted_targets?: HostedTargets;
-  storage?: { status: string; attribution_status: string; capacity?: { total_bytes?: number; used_bytes?: number; available_bytes?: number } | null; category_outcomes?: Array<Record<string, unknown>> };
+  storage?: RemoteStorage;
 }
 
 // `sb host apply` targets on a host, with their containers (spec 076).
@@ -217,6 +342,7 @@ export interface SbApi {
   selectInstance(name: string): void;
   selectRemote(name: string): void;
   refreshRemote(name: string, deep?: boolean): void;
+  openCleanup(name: string): void;
   refreshHosts(): void;
   refreshHosting(): void;
   submitCreate(): void;

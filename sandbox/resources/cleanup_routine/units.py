@@ -64,8 +64,28 @@ def _systemd_utc(text: str) -> str | None:
     return moment.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def stable_sb_path(sb_path: str, sandbox_home: str) -> str:
+    """Return ``$SANDBOX_HOME/sb-src/sb`` when it resolves to ``sb_path``.
+
+    A remote runtime runs from ``$SANDBOX_HOME/releases/<rev>/sb``; baking that
+    versioned path into ``sandbox-cleanup-routine.service`` breaks the timer
+    with 203/EXEC once release GC prunes that revision. Using the ``sb-src``
+    compatibility symlink keeps the timer tracking ``current``.
+    """
+    if not isinstance(sb_path, str) or not isinstance(sandbox_home, str):
+        return sb_path
+    stable = Path(sandbox_home) / "sb-src" / "sb"
+    try:
+        if stable.resolve(strict=True) == Path(sb_path).resolve(strict=True):
+            return str(stable)
+    except (OSError, RuntimeError):
+        pass
+    return sb_path
+
+
 def render(config: Mapping[str, Any], *, sb_path: str, sandbox_home: str) -> dict[str, str]:
     """Return the service and timer text for one validated routine config."""
+    sb_path = stable_sb_path(sb_path, sandbox_home)
     for value in (sb_path, sandbox_home):
         if not isinstance(value, str) or _SAFE_PATH.fullmatch(value) is None:
             raise RoutineError(
@@ -212,7 +232,65 @@ def next_run() -> str | None:
     return _systemd_utc(output)
 
 
+def service_health() -> dict[str, Any]:
+    """Inspect the installed routine service unit without mutating anything.
+
+    Detects a unit whose ``ExecStart`` points at a pruned release binary
+    (``203/EXEC``) or a failed systemd service state so status and the panel
+    never silently report a broken nightly timer as healthy.
+    """
+    service_path = unit_paths()[SERVICE]
+    if not service_path.is_file():
+        return {"installed": False, "exec_path": None, "exec_exists": None,
+                "active_state": None, "result": None, "healthy": None}
+    exec_path: str | None = None
+    try:
+        for line in service_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("ExecStart="):
+                rest = line[len("ExecStart="):].strip()
+                exec_path = rest.split()[0] if rest else None
+                break
+    except OSError:
+        exec_path = None
+    exec_exists = Path(exec_path).is_file() if exec_path else None
+    code, output = _run([
+        "systemctl", "--user", "show", SERVICE,
+        "--property=ActiveState,Result",
+    ])
+    props: dict[str, str] = {}
+    if code == 0:
+        for line in output.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                props[key.strip()] = value.strip()
+    active_state = props.get("ActiveState") or None
+    result = props.get("Result") or None
+    healthy = bool(exec_exists is not False and active_state != "failed")
+    return {
+        "installed": True,
+        "exec_path": exec_path,
+        "exec_exists": exec_exists,
+        "active_state": active_state,
+        "result": result,
+        "healthy": healthy,
+    }
+
+
+def refresh(config: Mapping[str, Any], *, sb_path: str, sandbox_home: str) -> bool:
+    """Re-render the installed unit when its ExecStart differs (e.g. pruned release)."""
+    paths = unit_paths()
+    if not all(path.is_file() for path in paths.values()):
+        return False
+    rendered = render(config, sb_path=sb_path, sandbox_home=sandbox_home)
+    current = {name: path.read_text(encoding="utf-8", errors="replace") for name, path in paths.items()}
+    if current == rendered:
+        return False
+    install(config, sb_path=sb_path, sandbox_home=sandbox_home, preflight=False)
+    return True
+
+
 __all__ = [
-    "SERVICE", "TIMER", "UNIT", "check_host", "install", "next_run", "remove", "render",
-    "unit_dir", "unit_paths", "validate_cadence",
+    "SERVICE", "TIMER", "UNIT", "check_host", "install", "next_run", "refresh",
+    "remove", "render", "service_health", "stable_sb_path", "unit_dir",
+    "unit_paths", "validate_cadence",
 ]

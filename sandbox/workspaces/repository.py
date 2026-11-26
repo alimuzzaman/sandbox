@@ -1574,8 +1574,9 @@ class WorkspaceRepository:
         # startup/diagnosis and must not create an index, parent directory, or
         # migration plan.  Both SQLite and legacy reads are read-only.
         indexed = self._indexed(read_only=True)
-        evidence = self._read_evidence()
-        projection_jobs = self._read_projection_jobs()
+        raw_jobs = self._read_raw_job_index()
+        evidence = self._read_evidence(raw_jobs)
+        projection_jobs = self._extract_projection_jobs(raw_jobs)
         scan = scan_legacy(self.legacy_root)
         correlated = self._settle(correlate(self._records_with_findings(scan), evidence),
                                   self._settled(read_only=True))
@@ -1605,23 +1606,34 @@ class WorkspaceRepository:
                 generation = int(row[0]) if row else 0
             finally:
                 connection.close()
+        active_jobs_by_ws: dict[str, int] = {}
+        active_jobs_by_key: dict[tuple[Any, Any], int] = {}
+        active_leases_by_ws: dict[str, int] = {}
+        active_leases_by_key: dict[tuple[Any, Any], int] = {}
+        for row in projection_jobs:
+            lifecycle = row.get("lifecycle")
+            if lifecycle not in {"accepted", "queued", "running", "cancelling"}:
+                continue
+            ws_id = row.get("workspace_id")
+            if ws_id is not None:
+                active_jobs_by_ws[ws_id] = active_jobs_by_ws.get(ws_id, 0) + 1
+                if lifecycle in {"running", "cancelling"}:
+                    active_leases_by_ws[ws_id] = active_leases_by_ws.get(ws_id, 0) + 1
+            else:
+                key = (row.get("project_identity"), row.get("workspace_label"))
+                active_jobs_by_key[key] = active_jobs_by_key.get(key, 0) + 1
+                if lifecycle in {"running", "cancelling"}:
+                    active_leases_by_key[key] = active_leases_by_key.get(key, 0) + 1
+
         def project(item: WorkspaceRecord) -> dict[str, Any]:
-            active_jobs = sum(
-                (row.get("workspace_id") == item.workspace_id
-                 if row.get("workspace_id") is not None
-                 else (row.get("project_identity") == item.project_identity
-                       and row.get("workspace_label") == item.label))
-                and row.get("lifecycle") in {
-                    "accepted", "queued", "running", "cancelling"}
-                for row in projection_jobs
+            pair = (item.project_identity, item.label)
+            active_jobs = (
+                active_jobs_by_ws.get(item.workspace_id, 0)
+                + active_jobs_by_key.get(pair, 0)
             )
-            active_leases = sum(
-                (row.get("workspace_id") == item.workspace_id
-                 if row.get("workspace_id") is not None
-                 else (row.get("project_identity") == item.project_identity
-                       and row.get("workspace_label") == item.label))
-                and row.get("lifecycle") in {"running", "cancelling"}
-                for row in projection_jobs
+            active_leases = (
+                active_leases_by_ws.get(item.workspace_id, 0)
+                + active_leases_by_key.get(pair, 0)
             )
             binding_rows = [dict(binding) for binding in item.bindings]
             alias_evidence = []
@@ -1727,32 +1739,44 @@ class WorkspaceRepository:
             raise WorkspaceIndexError("evidence_unavailable", "typed job/project evidence could not be read") from exc
         return normalize_evidence(value)
 
-    def _read_projection_jobs(self) -> tuple[dict[str, Any], ...]:
-        """Read bounded job rows without discarding lifecycle evidence."""
+    def _read_raw_job_index(self) -> Any:
         reader = self.job_index_reader
         if reader is None:
             return ()
         try:
             if callable(reader):
                 try:
-                    value = reader()
+                    return reader()
                 except TypeError:
-                    value = reader(self.legacy_root)
-            elif hasattr(reader, "list"):
-                value = {"jobs": reader.list(limit=10000)}
-            elif hasattr(reader, "read"):
-                value = reader.read()
-            else:
-                value = reader
+                    return reader(self.legacy_root)
+            if hasattr(reader, "list"):
+                try:
+                    return {"jobs": reader.list(limit=10000)}
+                except TypeError:
+                    return reader.list()
+            if hasattr(reader, "read"):
+                return reader.read()
+            return reader
         except Exception as exc:
-            raise WorkspaceIndexError(
-                "evidence_unavailable",
-                "typed job evidence could not be read for ownership projection",
-            ) from exc
+            raise WorkspaceIndexError("evidence_unavailable", "typed job/project evidence could not be read") from exc
+
+    @staticmethod
+    def _extract_projection_jobs(value: Any) -> tuple[dict[str, Any], ...]:
         rows = value.get("jobs", ()) if isinstance(value, Mapping) else value
         if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Iterable):
             return ()
         return tuple(dict(row) for row in rows if isinstance(row, Mapping))
+
+    def _read_projection_jobs(self) -> tuple[dict[str, Any], ...]:
+        """Read bounded job rows without discarding lifecycle evidence."""
+        try:
+            value = self._read_raw_job_index()
+        except WorkspaceIndexError as exc:
+            raise WorkspaceIndexError(
+                "evidence_unavailable",
+                "typed job evidence could not be read for ownership projection",
+            ) from exc
+        return self._extract_projection_jobs(value)
 
     def _migration_inputs(self, *, evidence: Iterable[Any] | Mapping[str, Any] | None = None,
                           job_inputs: Iterable[Any] | Mapping[str, Any] | None = None,

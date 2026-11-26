@@ -199,10 +199,19 @@ def walk_rows(argv, timeout, multiplier, keep_prefixes=()):
             except ValueError:
                 continue
             path = parts[1].strip()
-            if measured < DIRECTORY_MIN_BYTES and not any(
-                path == prefix or path.startswith(prefix.rstrip("/") + "/")
-                for prefix in keep_prefixes
-            ):
+            normalized_path = path.rstrip("/") or "/"
+            keep_managed = False
+            for prefix in keep_prefixes:
+                p = prefix.rstrip("/")
+                if normalized_path == p:
+                    keep_managed = True
+                    break
+                if normalized_path.startswith(p + "/"):
+                    rel = normalized_path[len(p) + 1:]
+                    if rel.count("/") <= 1:
+                        keep_managed = True
+                        break
+            if measured < DIRECTORY_MIN_BYTES and not keep_managed:
                 continue
             rows.append((measured, path))
             if len(rows) >= 20000:
@@ -1775,7 +1784,7 @@ except ValueError:
     FINISHED_JOB_IDLE_SECONDS = 6 * 3600
 
 
-def lifecycle_evidence():
+def lifecycle_evidence(workspace_projection=None):
     protected_paths = {}
     protected_projects = set()
     outcomes = []
@@ -1785,7 +1794,8 @@ def lifecycle_evidence():
     # the resource probe; these names remain only as compatibility markers for
     # source-level boundary tests.  ``registry.sqlite3`` and read_resource_index
     # below belong to the feature-owned job service decoder, not this boundary.
-    workspace_projection = load_workspace_projection()
+    if workspace_projection is None:
+        workspace_projection = load_workspace_projection()
     registry_records = (
         workspace_projection.get("records")
         if isinstance(workspace_projection, dict) else None
@@ -2267,6 +2277,8 @@ def entry_mtime(path):
 
 def bounded_entry_size(path):
     indexed = indexed_size(path)
+    if indexed is None:
+        indexed = cached_directory_size(path)
     if indexed is not None:
         return "measured", indexed
     if str(path) in UNREACHED_PATHS:
@@ -2334,12 +2346,9 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
         block["reason"] = "lifecycle_evidence_unavailable"
     elif not engine_complete:
         block["reason"] = "container_inventory_unavailable"
-    # A fast status skips the engine inventory, so the entry walk is the only
-    # work left; give it a small floor rather than returning an empty listing
-    # when the shared deadline has already been consumed by lifecycle reads.
-    deadline = DEADLINE
-    if FAST:
-        deadline = max(DEADLINE, time.monotonic() + min(3.0, BUDGET_SECONDS * 0.3))
+    # Give the lightweight entry listing loop a small floor after size indexing
+    # finishes so an exhausted du budget leaves entries ``size_unmeasured``
+    # instead of truncating the directory list and failing the entire plan.
     try:
         children = sorted(DEPLOY.iterdir(), key=lambda item: item.name)
     except OSError:
@@ -2347,25 +2356,42 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
         block["reason"] = "deployment_root_unreadable"
         block["deployment_inventory_complete"] = False
         return block
+    lock_pattern = re.compile(r"^\.sandbox-materialize-[0-9a-f]+\.lock$")
+    stale_locks = []
+    deploy_children = []
+    now_ts = time.time()
+    for child in children:
+        if lock_pattern.fullmatch(child.name):
+            try:
+                st = child.lstat()
+                if not stat.S_ISLNK(st.st_mode) and (now_ts - st.st_mtime) >= 86400:
+                    stale_locks.append((child, st))
+            except OSError:
+                pass
+            continue
+        deploy_children.append(child)
     if not FAST:
         # One streamed du for every unindexed entry instead of one du per
         # entry with a 5 s cap: a ~1 GB workspace (node_modules) cannot finish
         # in 5 s on a busy host, so it stayed unmeasured, and so outside every
         # plan, on every run.
         pending = []
-        for child in children:
+        for child in deploy_children:
             try:
-                if child.is_dir() and not child.is_symlink() and indexed_size(child) is None:
+                if (child.is_dir() and not child.is_symlink()
+                        and indexed_size(child) is None
+                        and cached_directory_size(child) is None):
                     pending.append(child)
             except OSError:
                 continue
         try:
-            index_paths(pending, budget_share(0.8), count_links=True)
+            index_paths(pending, budget_share(0.65), count_links=True)
         except Exception:
             # A speed-up only: entries it could not index are measured one
             # by one below, never left to fail the whole inventory.
             pass
-    for child in children:
+    deadline = max(DEADLINE, time.monotonic() + (min(3.0, BUDGET_SECONDS * 0.3) if FAST else 5.0))
+    for child in deploy_children:
         if time.monotonic() >= deadline:
             block["truncated"] = True
             block["deployment_inventory_complete"] = False
@@ -2466,6 +2492,13 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
             "project": owner(volume.get("Labels")),
             "size_bytes": indexed_size(Path(mountpoint)) if mountpoint else None,
             "mounted_running": name in running_volumes,
+        })
+    for lock_path, lock_stat in stale_locks:
+        block["scratch"].append({
+            "name": lock_path.name,
+            "path": str(lock_path),
+            "size_bytes": int(lock_stat.st_size) if stat.S_ISREG(lock_stat.st_mode) else 0,
+            "mtime": lock_stat.st_mtime,
         })
     try:
         for child in sorted(RUNTIME.iterdir(), key=lambda item: item.name):
@@ -3023,6 +3056,8 @@ def scan():
         "deep_attribution": None,
     }
     emit(ENVELOPE)
+    PHASE = "workspace_ownership"
+    workspace_projection = load_workspace_projection()
     PHASE = "lifecycle_evidence"
     (
         protected_paths,
@@ -3033,9 +3068,7 @@ def scan():
         artifacts_complete,
         lifecycle_complete,
         lifecycle_outcomes,
-    ) = lifecycle_evidence()
-    PHASE = "workspace_ownership"
-    workspace_projection = load_workspace_projection()
+    ) = lifecycle_evidence(workspace_projection)
     PHASE = "docker_inventory"
     if FAST:
         inventory = {
@@ -3443,19 +3476,27 @@ def scan():
             ),
         ))
     PHASE = "managed_path_classification"
+    skip_worktrees_for_cache = focus == "cache" and not targeted
     if resource_thorough and not FAST:
         managed_paths = []
-        for root in (DEPLOY, RUNTIME):
+        for root in ((RUNTIME,) if skip_worktrees_for_cache else (DEPLOY, RUNTIME)):
             try:
                 managed_paths.extend(
                     path for path in sorted(root.iterdir(), key=lambda item: item.name)
                     if not (targeted and target_locator != str(path))
                     and indexed_size(path) is None
+                    and cached_directory_size(path) is None
                 )
             except OSError:
                 continue
         index_paths(managed_paths, budget_share(0.6), count_links=True)
     for root, category in ((DEPLOY, "deploy_worktrees"), (RUNTIME, "sandbox_runtime")):
+        if skip_worktrees_for_cache and root == DEPLOY:
+            outcomes.append({
+                "category": category, "status": "complete",
+                "reason": "cache_focus_skipped",
+            })
+            continue
         if targeted and target_kind not in {
             "worktree", "download_cache", "runtime", "job_artifact",
         }:
@@ -3652,7 +3693,7 @@ def scan():
     if host_breakdown_pending:
         host_breakdown()
     reclaim = None
-    if not targeted and REQUEST.get("reclaim") is not False:
+    if not targeted and focus != "cache" and REQUEST.get("reclaim") is not False:
         PHASE = "reclaim_inventory"
         engine_complete = not FAST and all(
             item.get("status") == "complete"
@@ -4350,10 +4391,18 @@ class LocalProbeAdapter:
                 env=environment, check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            out = (
+                exc.stdout.decode("utf-8", "replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout if isinstance(exc.stdout, str) else "")
+            )
+            err = (
+                exc.stderr.decode("utf-8", "replace")
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr if isinstance(exc.stderr, str) else "")
+            )
             return ProcessResult(
-                (self.python, "-"), 124,
-                exc.stdout if isinstance(exc.stdout, str) else "",
-                exc.stderr if isinstance(exc.stderr, str) else "",
+                (self.python, "-"), 124, out, err,
             )
         del sys
         return ProcessResult(

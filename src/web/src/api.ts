@@ -3,6 +3,7 @@
 import type {
   AppData, ActionResult, JobSnapshot, Usage, RemoteInventory, RemoteSummary, HostingView,
   ShareCreated, ShareList, ShareRevoked, ShareRefused, SharePartial,
+  CleanupTier, CleanupPlanResult, CleanupApplyResult, CleanupRefused,
 } from "./types";
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -142,5 +143,34 @@ export async function postShare(body: ShareTarget & { action: string; id?: strin
     return await r.json();
   } catch {
     return { ok: false, code: "share_failed", message: `Request failed (${r.status})` };
+  }
+}
+
+export function postRemoteCleanup(
+  body: { action: "plan"; remote: string; tier: CleanupTier },
+): Promise<CleanupPlanResult | CleanupRefused>;
+export function postRemoteCleanup(
+  body: { action: "apply"; remote: string; tier: CleanupTier; plan_id: string; confirm: true },
+): Promise<CleanupApplyResult | CleanupRefused>;
+export async function postRemoteCleanup(
+  body: { action: "plan" | "apply"; remote: string; tier: CleanupTier; plan_id?: string; confirm?: boolean },
+): Promise<unknown> {
+  let r: Response;
+  try {
+    r = await fetch("/api/remote/cleanup", {
+      method: "POST",
+      cache: "no-store",
+      credentials: "same-origin",
+      redirect: "error",
+      headers: { "content-type": "application/json", "x-sandbox-panel": "cleanup" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, code: "panel_unreachable", message: "The panel could not be reached." };
+  }
+  try {
+    return await r.json();
+  } catch {
+    return { ok: false, code: "cleanup_failed", message: `Request failed (${r.status})` };
   }
 }

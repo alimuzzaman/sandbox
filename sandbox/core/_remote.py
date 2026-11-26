@@ -3391,8 +3391,8 @@ def _remote_control_request(remote: dict, path: str, *, timeout: float = 10,
         with _control_urlopen(remote, request, timeout=max(float(timeout), 0.001)) as response:
             if response.status != 200:
                 raise RuntimeError(f"remote control returned HTTP {response.status}")
-            raw = response.read(4 * 1024 * 1024 + 1)
-            if len(raw) > 4 * 1024 * 1024:
+            raw = response.read(16 * 1024 * 1024 + 1)
+            if len(raw) > 16 * 1024 * 1024:
                 raise RuntimeError("remote control response is too large")
             result = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:

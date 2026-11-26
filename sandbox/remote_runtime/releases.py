@@ -173,6 +173,40 @@ def unit_revision(unit_path):
 def run(args, cwd):
     subprocess.run(args, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True)
 
+
+def _heal_routine_unit():
+    """Repoint an older routine unit from ``releases/<rev>/sb`` to ``sb-src/sb``.
+
+    Units written before ``stable_sb_path`` broke with 203/EXEC once release GC
+    deleted their pinned revision. Updating the ExecStart line on activation
+    keeps the nightly cleanup timer healthy across upgrades.
+    """
+    unit = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user",
+                        "sandbox-cleanup-routine.service")
+    try:
+        info = os.lstat(unit)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            return
+        text = open(unit, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return
+    pattern = re.compile(
+        r"^(ExecStart=)" + re.escape(REL) + r"/[0-9a-f]{24}/sb(\s+.*)$",
+        re.MULTILINE,
+    )
+    updated, count = pattern.subn(r"\1" + os.path.join(LEGACY, "sb") + r"\2", text)
+    if not count or updated == text:
+        return
+    try:
+        put(unit, updated, 0o644)
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
 def prepare(stage_name, receipt, rev, source):
     if not re.fullmatch(r"\.sb-src-stage-[0-9a-f]{12}-[0-9a-f]{32}", stage_name) \
             or not re.fullmatch(r"[0-9a-f]{24}", rev) or not re.fullmatch(r"[0-9a-f]{40}", source):
@@ -278,6 +312,7 @@ def activate(rev, unit_path, origin_path):
                 os.symlink("current", LEGACY); steps.append("legacy_link")
         os.utime(os.path.join(REL, rev, MARKER))
         fsync_dir(home)
+        _heal_routine_unit()
     except Exception as exc:
         try:
             revert(state)

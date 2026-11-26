@@ -1146,3 +1146,25 @@ class StorageInspectionRoundThreeTests(unittest.TestCase):
                     hosting_cmd.cmd_host({}, self.args(False))
                 self.assertIn('Storage admission: blocked; reason: ' + reason, out.getvalue())
                 self.assertNotIn('None bytes', out.getvalue())
+
+
+class OwnerTargetLocalImageTests(unittest.TestCase):
+    def test_entry_uses_selected_owner_target_without_remote_registry(self):
+        owner = object()
+        with unittest.mock.patch("sandbox.hosting.server_cli_target.selected_owner_target", return_value=owner), \
+                unittest.mock.patch.object(remote_local_images._remote, "get_remote", side_effect=AssertionError("must not read remote registry")):
+            self.assertIs(remote_local_images._entry("xcloud-london"), owner)
+
+    def test_transfer_lease_runs_engine_lock_locally_for_owner_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = unittest.mock.MagicMock()
+            owner.require_current.return_value = unittest.mock.MagicMock()
+            with unittest.mock.patch("sandbox.hosting.server_cli_target.is_owner_target", return_value=True), \
+                    unittest.mock.patch.object(remote_local_images, "_local_image_root", return_value=f"{tmp}/host-local-images"), \
+                    unittest.mock.patch.object(remote_local_images._remote, "ssh_command_args", side_effect=AssertionError("must not shell to ssh")):
+                with remote_local_images.target_image_lease(
+                        "xcloud-london", "lenzora", "development",
+                        "sha256:" + "a" * 64, entry=owner) as lease:
+                    self.assertFalse(lease.lost())
+                owner.require_current.assert_called_once()
+

@@ -31,6 +31,10 @@ class RemoteLocalImageError(RuntimeError):
 def _entry(remote_name: str) -> dict:
     if not isinstance(remote_name, str) or _REMOTE.fullmatch(remote_name) is None:
         raise RemoteLocalImageError("local_images_remote_invalid")
+    from sandbox.hosting.server_cli_target import selected_owner_target
+    owner = selected_owner_target(remote_name)
+    if owner is not None:
+        return owner
     entry = _remote.get_remote(remote_name)
     if not isinstance(entry, dict) or entry.get("provisioned") is not True:
         raise RemoteLocalImageError("local_images_remote_unavailable")
@@ -357,11 +361,17 @@ class _TransferLease:
 
     def __enter__(self):
         try:
+            from sandbox.hosting.server_cli_target import is_owner_target
             argv = ["python3", "-c", _ENGINE_LOCK_PROGRAM,
                     _local_image_root(self.entry)]
+            if is_owner_target(self.entry):
+                self.entry.require_current()
+                command_args = argv
+            else:
+                command_args = _remote.ssh_command_args(
+                    self.entry, shlex.join(argv), multiplex=False)
             self.process = subprocess.Popen(
-                _remote.ssh_command_args(
-                    self.entry, shlex.join(argv), multiplex=False),
+                command_args,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, start_new_session=True,
             )

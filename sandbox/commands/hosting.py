@@ -6368,9 +6368,10 @@ def _verify_receipt_bound_local_images(validated: dict, entry: dict,
             "local image receipt Compose model changed: "
             + local_images.mismatch_summary(model_mismatches))
     home = remote.resolve_sandbox_home(entry)
-    if document.get("machine_identity") != machine_identity \
-            or document.get("registered_host_digest") != registered_host_digest(
-                entry, remote_name, home):
+    if document.get("machine_identity") != machine_identity:
+        raise hosting.HostingError("local image receipt target identity does not match apply")
+    if not is_owner_target(entry) and document.get("registered_host_digest") != registered_host_digest(
+            entry, remote_name, home):
         raise hosting.HostingError("local image receipt target identity does not match apply")
     observation = remote_local_images.observe(
         remote_name, receipt, remote_receipt_digest=receipt_digest, timeout=120, entry=entry)
@@ -6393,7 +6394,8 @@ def _verify_receipt_bound_local_images(validated: dict, entry: dict,
 
 @contextmanager
 def _local_image_apply_lease(validated: dict, remote_name: str,
-                             receipt_digest: str | None):
+                             receipt_digest: str | None, *,
+                             entry: dict | None = None):
     """Serialize receipt verification/runtime convergence with image transfer."""
     if receipt_digest is None:
         yield None
@@ -6401,7 +6403,7 @@ def _local_image_apply_lease(validated: dict, remote_name: str,
     from sandbox.transports.remote_local_images import target_image_lease
     with target_image_lease(
             remote_name, validated["project"], validated["environment"],
-            receipt_digest) as lease:
+            receipt_digest, entry=entry) as lease:
         yield lease
 
 
@@ -10019,7 +10021,8 @@ def cmd_host(cfg, args) -> None:
 
                 with _hold_controller_awake(), _local_image_apply_lease(
                         validated, args.remote,
-                        getattr(args, "local_images", None)) as active_image_lease:
+                        getattr(args, "local_images", None),
+                        entry=current_entry) as active_image_lease:
                     from sandbox.hosting.panel_records import SummaryRecorder, stack_record_for
                     summary_recorder = SummaryRecorder(
                         validated, args.remote, runtime,

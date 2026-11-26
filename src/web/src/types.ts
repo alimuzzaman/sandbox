@@ -87,7 +87,7 @@ export interface RemoteStorage {
     truncated?: boolean;
     unmeasured_count?: number;
     classes?: StorageReclaimClass[];
-    tiers?: Record<string, { count?: number; bytes?: number }>;
+    tiers?: Record<string, { candidates?: number; count?: number; bytes?: number }>;
     volumes?: { eligible: number; eligible_bytes: number; protected: number };
     capacity_pressure?: { level?: string; free_ratio?: number | null; guidance?: string } | null;
   } | null;

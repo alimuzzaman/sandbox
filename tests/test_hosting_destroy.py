@@ -46,7 +46,7 @@ def guarded_destroy_case(method):
     return wrapped
 
 
-def destroy_dispatch(project, environment, probe, store=None, events=None, *, fail_teardown=False, on_edge=None):
+def destroy_dispatch(project, environment, probe, store=None, events=None, *, fail_teardown=False, on_edge=None, remove_source=True):
     """Match commands generated for exactly one fixture target; never execute them."""
     name = destroy.compose_name(project, environment)
     # Execution class patches resolve_sandbox_home to this fixed synthetic path.
@@ -55,7 +55,7 @@ def destroy_dispatch(project, environment, probe, store=None, events=None, *, fa
     route = destroy._route_file(name, "nginx")
     certs = destroy._cert_dirs(name, "nginx")
     expected_probe = destroy._probe_command(name, paths, route, certs)
-    expected_teardown = destroy._remote_teardown_command(name, paths)
+    expected_teardown = destroy._remote_teardown_command(name, paths, remove_source=remove_source)
     capture = []
     def capture_command(entry, command, timeout=30):
         capture.append(command)
@@ -357,8 +357,9 @@ class Execution(unittest.TestCase):
             _record(), [self.PROBE, "", "removed\n"], client)
         self.assertEqual(result["state"], "destroyed")
         self.assertNotIn("docker compose", commands[2])
-        self.assertNotIn("deploy-src", commands[2])
         self.assertIn("/home/u/sandbox/runtime/hosts/site/sandbox", commands[2])
+        self.assertIn("[ ! -e /home/u/sandbox/runtime/hosts/site ]", commands[2])
+        self.assertIn("/home/u/sandbox/deploy-src/hosts/site", commands[2])
         self.assertEqual(client.calls, [("dns", "z1", "rec1"), ("cert", "cert1")])
         self.assertNotIn(KEY, state["hosts"])
         self.assertIn("r1/keep/sandbox", state["hosts"])

@@ -204,6 +204,11 @@ def _heal_routine_unit():
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=15, check=False,
         )
+        subprocess.run(
+            ["systemctl", "--user", "reset-failed", "sandbox-cleanup-routine.service"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=15, check=False,
+        )
     except (OSError, subprocess.SubprocessError):
         pass
 

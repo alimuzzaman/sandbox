@@ -13,11 +13,13 @@ from unittest import mock
 
 import sandbox.core._remote as remote_core
 from sandbox.commands import ui_dash
+from sandbox.hosting import destroy
 from sandbox.remote_runtime import host_inventory, releases
 from sandbox.resources import reclaim
 from sandbox.resources.cleanup_routine import units as routine_units
 from sandbox.resources.remote import LocalProbeAdapter, _program
 from sandbox.workspaces.repository import WorkspaceRepository
+from tests.subprocess_support import run_test_process
 
 
 class OwnershipProjectionIndexingTests(unittest.TestCase):
@@ -306,6 +308,102 @@ class WebCleanupEndpointAndInventoryTests(unittest.TestCase):
         self.assertIsNotNone(host_inventory._slow_probes[LocalProbeAdapter]["value"])
         host_inventory.invalidate_storage_cache()
         self.assertIsNone(host_inventory._slow_probes[LocalProbeAdapter]["value"])
+
+
+class HostingDestroySourceCleanupTests(unittest.TestCase):
+    def _run_teardown(self, *, remove_source: bool, sibling_env: bool = False,
+                      working_dir_label: str = ""):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / "bin" / "docker"
+            fake.parent.mkdir()
+            label_line = working_dir_label.replace("'", "'\"'\"'")
+            fake.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  ps)\n"
+                "    case \"$*\" in\n"
+                f"      *working_dir*) printf '%s\\n' '{label_line}' ;;\n"
+                "    esac\n"
+                "    ;;\n"
+                "esac\n"
+                "exit 0\n"
+            )
+            fake.chmod(0o755)
+            paths = destroy._paths(tmp, "site", "sandbox")
+            Path(paths["runtime"]).mkdir(parents=True)
+            if sibling_env:
+                (Path(paths["project_runtime"]) / "production").mkdir(parents=True)
+            Path(paths["source"]).mkdir(parents=True)
+            (Path(paths["source"]) / "index.php").write_text("<?php\n")
+
+            cmd = destroy._remote_teardown_command(
+                "sandbox-host-site-sandbox", paths, remove_source=remove_source,
+            )
+            result = run_test_process(
+                ["bash", "-c", cmd],
+                env={"PATH": f"{fake.parent}:/usr/bin:/bin"},
+                capture_output=True, text=True,
+            )
+            return (
+                result,
+                Path(paths["runtime"]).exists(),
+                Path(paths["source"]).exists(),
+                paths["source"],
+            )
+
+    def test_removes_deploy_src_when_last_environment_and_no_container_uses_it(self):
+        result, runtime_exists, source_exists, _ = self._run_teardown(remove_source=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("removed", result.stdout)
+        self.assertFalse(runtime_exists)
+        self.assertFalse(source_exists)
+
+    def test_preserves_deploy_src_when_sibling_runtime_environment_exists_on_host(self):
+        result, runtime_exists, source_exists, _ = self._run_teardown(
+            remove_source=True, sibling_env=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(runtime_exists)
+        self.assertTrue(source_exists)
+
+    def test_preserves_deploy_src_when_another_container_uses_its_working_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = destroy._paths(tmp, "site", "sandbox")
+            fake = root / "bin" / "docker"
+            fake.parent.mkdir()
+            fake.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  ps)\n"
+                "    case \"$*\" in\n"
+                f"      *working_dir*) printf '%s/sub\\n' '{paths['source']}' ;;\n"
+                "    esac\n"
+                "    ;;\n"
+                "esac\n"
+                "exit 0\n"
+            )
+            fake.chmod(0o755)
+            Path(paths["runtime"]).mkdir(parents=True)
+            Path(paths["source"]).mkdir(parents=True)
+            cmd = destroy._remote_teardown_command(
+                "sandbox-host-site-sandbox", paths, remove_source=True,
+            )
+            result = run_test_process(
+                ["bash", "-c", cmd],
+                env={"PATH": f"{fake.parent}:/usr/bin:/bin"},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(Path(paths["runtime"]).exists())
+            self.assertTrue(Path(paths["source"]).exists())
+
+    def test_preserves_deploy_src_when_remove_source_is_false(self):
+        result, runtime_exists, source_exists, _ = self._run_teardown(remove_source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(runtime_exists)
+        self.assertTrue(source_exists)
 
 
 if __name__ == "__main__":

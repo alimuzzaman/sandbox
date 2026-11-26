@@ -317,7 +317,7 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
     return res
 
 
-def _remote_teardown_command(name: str, paths: dict) -> str:
+def _remote_teardown_command(name: str, paths: dict, *, remove_source: bool = False) -> str:
     """Remove the stack and directories; exit non-zero unless all of it is gone.
 
     Images are removed by this project's own tags (``<project>-<service>``) and
@@ -326,6 +326,11 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
     selected by the project label, never through ``docker compose down``, which
     would read whatever Compose file sits in the login directory and could
     remove an explicitly named volume belonging to something else.
+
+    When ``remove_source`` is true (no other environment of the project is
+    recorded), ``deploy-src/hosts/<project>`` is also removed only after
+    verifying on the remote host that ``runtime/hosts/<project>`` is empty/gone
+    and no remaining container has a Compose working dir inside that source dir.
     """
     label = shlex.quote(f"label=com.docker.compose.project={name}")
     tags, own = _image_tag_filter(name)
@@ -336,6 +341,18 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
     side = shlex.quote("label=com.docker.compose.project=sandbox-hostside-"
                        + name.removeprefix("sandbox-host-"))
     side_net = shlex.quote(f"label=sandbox.hostside={name}")
+    source_cleanup = ""
+    if remove_source and paths.get("source"):
+        src = shlex.quote(paths["source"])
+        proj_rt = shlex.quote(paths["project_runtime"])
+        source_cleanup = (
+            f"if [ ! -e {proj_rt} ] && [ ! -L {src} ] && [ -d {src} ]; then "
+            "w=$(docker ps -a --format '{{.Label \"com.docker.compose.project.working_dir\"}}') || exit 3; "
+            f"in_use=$(printf '%s\\n' \"$w\" | awk -v s={src} '$0 == s || index($0, s \"/\") == 1' || true); "
+            "if [ -z \"$in_use\" ]; then "
+            f"(rm -rf {src} 2>/dev/null || sudo -n rm -rf {src}) || exit 6; "
+            f"[ ! -e {src} ] || exit 6; fi; fi; "
+        )
     return (
         "set -u; docker info >/dev/null 2>&1 || exit 3; "
         f"docker ps -aq --filter {side} | xargs -r docker rm -f -v >/dev/null || exit 4; "
@@ -348,6 +365,7 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
         f"rm -rf {quoted} || exit 6; "
         f"rmdir {shlex.quote(paths['project_runtime'])} 2>/dev/null || true; "
         f"for path in {quoted}; do [ ! -e \"$path\" ] || exit 6; done; "
+        f"{source_cleanup}"
         f"c=$(docker ps -aq --filter {label}; docker ps -aq --filter {side}) || exit 3; "
         f"v=$(docker volume ls -q --filter {label}) || exit 3; "
         f"n=$(docker network ls -q --filter {label}) || exit 3; "
@@ -605,7 +623,11 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             repository._write(state)
         paths = _paths(remote.resolve_sandbox_home(entry), project, environment)
         _remove_edge(entry, name, found["front_door"], bool(found["remote"]["route"]))
-        result = remote.ssh_run(entry, _remote_teardown_command(name, paths), timeout=600)
+        result = remote.ssh_run(
+            entry,
+            _remote_teardown_command(name, paths, remove_source=not found["other_environments"]),
+            timeout=600,
+        )
         if result.returncode != 0 or "removed" not in result.stdout.split():
             raise DestroyError(f"remote teardown incomplete (exit {result.returncode}); state kept",
                                "remote_teardown_incomplete")
@@ -701,8 +723,11 @@ def render(result: dict, *, confirmed: bool) -> str:
                  f"certificates {'present' if r['certs'] else 'absent'}")
     lines.append(f"  runtime dir {r['runtime_kb']} KB (generated secrets live here)")
     if r.get("source_kb"):
-        lines.append(f"  deploy source {r['source_kb']} KB kept (shared by the project's "
-                     "environments; remove it by hand once none is left)")
+        if result["other_environments"]:
+            lines.append(f"  deploy source {r['source_kb']} KB kept (shared with "
+                         + ", ".join(result["other_environments"]) + ")")
+        else:
+            lines.append(f"  deploy source {r['source_kb']} KB (removed if no other stack uses it)")
     retained_rows = result.get("shared_coverage_retained")
     if not isinstance(retained_rows, list):
         retained_rows = result.get("shared_coverage_rows") or []

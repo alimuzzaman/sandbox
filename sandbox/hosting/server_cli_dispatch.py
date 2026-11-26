@@ -372,6 +372,21 @@ def _dispatch_host_if_selected(args) -> bool:
             source_branch_bound = True
     # Paths in the fixed command refer to its staged source, not the Mac.
     # No host path, runtime path or target identity is supplied as authority.
+    # When project_dir is a subdirectory of a Git repository (such as
+    # config/local-image-hosting with source_root: ../..), source upload stages
+    # the Git repository root, so --project-dir must keep its relative subpath.
+    stage_root = root
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if top.returncode == 0 and top.stdout.strip():
+            candidate = Path(top.stdout.strip()).resolve(strict=True)
+            root.relative_to(candidate)
+            stage_root = candidate
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
     head = argv.index("--") if "--" in argv else len(argv)
     index = 0
     while index < head:
@@ -384,9 +399,13 @@ def _dispatch_host_if_selected(args) -> bool:
                 value = argv[index + 1]
             path = Path(value).expanduser().resolve(strict=True)
             try:
-                relocated = "." if option == "--project-dir" else path.relative_to(root).as_posix()
-                if option == "--project-dir" and path != root:
-                    raise ValueError
+                if option == "--project-dir":
+                    if path != root:
+                        raise ValueError
+                    rel = path.relative_to(stage_root).as_posix()
+                    relocated = "." if rel == "." else rel
+                else:
+                    relocated = path.relative_to(stage_root).as_posix()
             except ValueError:
                 raise ValueError("server_cli_path_outside_source") from None
             if equals:

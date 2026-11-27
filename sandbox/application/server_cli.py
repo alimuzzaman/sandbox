@@ -606,9 +606,10 @@ def owner_command_args(owner: ServerCliOwner, command: str) -> list[str]:
 
 
 def owner_process(owner: ServerCliOwner, command: str, *, timeout: float = 30,
-                  input_data=None) -> subprocess.CompletedProcess:
+                  input_data=None, json_output: bool = False) -> subprocess.CompletedProcess:
     """Same-server local process channel, retaining native command/target guards."""
-    result = owner_process_bounded(owner, command, timeout=timeout, input_data=input_data)
+    result = owner_process_bounded(owner, command, timeout=timeout, input_data=input_data,
+                                   json_output=json_output)
     if result.stdout_truncated or result.stderr_truncated:
         raise ServerCLIEffectUnknown('bounded owner output is incomplete; effect completion is unknown')
     stdout, stderr = result.stdout, result.stderr
@@ -619,8 +620,10 @@ def owner_process(owner: ServerCliOwner, command: str, *, timeout: float = 30,
 
 def owner_process_bounded(owner: ServerCliOwner, command: str, *, timeout: float = 30,
                           input_data=None, max_output: int = 1_048_576,
-                          terminate_on_output_limit: bool = True):
+                          terminate_on_output_limit: bool = True, json_output: bool = False):
     from sandbox.services.process import BoundedProcessRunner
+    if type(json_output) is not bool:
+        raise ValueError('json_output must be boolean')
     context = validate_owner_current(owner)
     if not isinstance(command, str) or not command or '\0' in command:
         raise ValueError('local owner command is invalid')
@@ -639,7 +642,8 @@ def owner_process_bounded(owner: ServerCliOwner, command: str, *, timeout: float
         result = BoundedProcessRunner(max_output=max_output,
             terminate_on_output_limit=terminate_on_output_limit).run(
                 ['/bin/sh', '-c', command], cwd=owner.home, env=owner_environment(owner),
-                timeout=min(timeout, remaining), stdin=None if source is None else source.fileno(), start_new_session=False)
+                timeout=min(timeout, remaining), json_output=json_output,
+                stdin=None if source is None else source.fileno(), start_new_session=False)
     # Remain in the original durable process group: its supervisor can still
     # terminate grandchildren after this caller exits. A local timeout does not
     # prove that every effect or escaped descendant stopped, so never retry it.

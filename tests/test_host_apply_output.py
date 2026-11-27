@@ -41,14 +41,16 @@ class ApplyOutputTests(unittest.TestCase):
             'DBUS_SESSION_BUS_ADDRESS': 'unix:path=' + str(self.root / 'bus')}
         self.enterContext(patch.object(sdk, 'owner_environment', return_value=self.environment))
         self.calls = []
-        def local(owner, command, *, timeout, input_data=None):
+        def local(owner, command, *, timeout, input_data=None, json_output=False):
             self.calls.append((command, timeout))
+            self.assertTrue(json_output)
             self.assertIsInstance(input_data, str)
             self.assertIn(self.canary, json.loads(input_data)['exact_values'])
             self.assertNotIn(self.canary, command)
             self.assertNotIn(base64.b64encode(self.canary.encode()).decode(), command)
             return run_test_process(['/bin/sh', '-c', command], input=input_data,
                 env=self.environment, capture_output=True, text=True, timeout=min(10, timeout))
+        self._real_owner_process = sdk.owner_process
         self.process = self.enterContext(patch.object(sdk, 'owner_process', side_effect=local))
 
     def initializer(self, code, *, split=False):
@@ -210,14 +212,16 @@ class ApplyOutputTests(unittest.TestCase):
 
     def test_invalid_completion_receipts_retain_each_original_apply_fence(self):
         receipts = (
-            (0, '', ''), (0, '{}', ''),
-            (0, json.dumps({'schema_version': 2, 'status': 'exited', 'exit_code': 0, 'output': ''}), ''),
-            (0, json.dumps({'schema_version': 1, 'status': 'unknown'}), ''),
-            (0, json.dumps({'schema_version': 1, 'status': 'exited', 'exit_code': True, 'output': ''}), ''),
-            (0, json.dumps({'schema_version': 1, 'status': 'exited', 'exit_code': 0, 'output': []}), ''),
-            (7, '', ''), (0, '', self.canary),
+            (0, '', '', 'invalid_receipt_json'),
+            (0, '{}', '', 'invalid_receipt_schema'),
+            (0, json.dumps({'schema_version': 2, 'status': 'exited', 'exit_code': 0, 'output': ''}), '', 'invalid_receipt_schema'),
+            (0, json.dumps({'schema_version': 1, 'status': 'unknown'}), '', 'invalid_receipt_schema'),
+            (0, json.dumps({'schema_version': 1, 'status': 'exited', 'exit_code': True, 'output': ''}), '', 'invalid_receipt_schema'),
+            (0, json.dumps({'schema_version': 1, 'status': 'exited', 'exit_code': 0, 'output': []}), '', 'invalid_receipt_schema'),
+            (7, '', '', 'helper_exit'),
+            (0, '', self.canary, 'unexpected_stderr'),
         )
-        for index, (code, output, error) in enumerate(receipts):
+        for index, (code, output, error, expected_reason) in enumerate(receipts):
             with self.subTest(receipt=index):
                 context = replace(self.context, job_id=hashlib.sha256(str(index).encode()).hexdigest()[:32],
                                   request_id='invalid-output-' + str(index))
@@ -235,10 +239,43 @@ class ApplyOutputTests(unittest.TestCase):
                         patch.object(hosting, '_release_host_apply_lease') as release, \
                         self.assertRaises(sdk.ServerCLIEffectUnknown) as failure:
                     hosting._apply_host({}, entry, 'box', {})
+                self.assertIn(f'({expected_reason})', str(failure.exception))
                 self.assertNotIn(self.canary, str(failure.exception))
                 self.assertTrue(targets.owner_effect_unknown(entry))
                 self.process.assert_called_once()
                 release.assert_not_called()
+
+    def test_quoted_secret_assignment_in_output_survives_real_owner_process_redaction(self):
+        """Real BoundedProcessRunner redaction must not corrupt JSON receipts.
+
+        BuildKit compose_build output includes quoted secret-named assignments
+        such as ``FOO_SECRET_FINGERPRINT=\"...\"``. Plain-text redaction on the
+        JSON receipt strips the escaping backslash and leaves an unescaped quote,
+        breaking json.loads() in run_owner_logged().
+        """
+        script = self.root / 'buildkit-output.py'
+        script.write_text(
+            'import sys\n'
+            'sys.stdout.write(\'#2 WARN: SecretsUsedInArgOrEnv: Do not use ARG or ENV (ARG "APP_BUILD_SECRET_FINGERPRINT")\\n\')\n'
+            'sys.stdout.write(\'RUN APP_BUILD_SECRET_FINGERPRINT="${APP_BUILD_SECRET_FINGERPRINT}" npm run build\\n\')\n'
+            'sys.stdout.write("secret_canary=" + ' + repr(self.canary) + ' + "\\n")\n'
+        )
+        log = self.root / 'compose-build.log'
+        progress = []
+        with patch.object(sdk, 'owner_process', self._real_owner_process), \
+                apply_output.owner_apply_output_scope(self.entry):
+            apply_output.bind_owner_apply_output(self.entry, [self.canary])
+            returned = hosting._remote_checked(
+                self.entry, shlex.join([sys.executable, str(script)]), timeout=15,
+                progress=progress.append, log_path=str(log), log_phase='compose_build',
+            )
+        retained = log.read_text()
+        self.assertFalse(targets.owner_effect_unknown(self.entry))
+        for text in (retained, returned, '\n'.join(progress)):
+            self.assertNotIn(self.canary, text)
+            self.assertIn('APP_BUILD_SECRET_FINGERPRINT="[REDACTED]"', text)
+            self.assertIn('event=finished', text)
+            self.assertIn('exit=0', text)
 
     def test_hardlinked_wrong_mode_and_nonregular_logs_refuse_before_initializer(self):
         marker = self.root / 'initializer-started'

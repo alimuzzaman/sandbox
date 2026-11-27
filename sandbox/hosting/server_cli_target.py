@@ -72,11 +72,13 @@ class OwnerHostTarget(Mapping):
         self.require_current()
         return len(self._metadata)
 
-    def process(self, command, *, timeout=30, input_data=None):
+    def process(self, command, *, timeout=30, input_data=None, json_output=False):
         from sandbox.application.server_cli import owner_process
         current = self.require_current()
-        return self._complete_process(lambda: owner_process(current.owner, command,
-            timeout=timeout, input_data=input_data))
+        kwargs = {"timeout": timeout, "input_data": input_data}
+        if json_output:
+            kwargs["json_output"] = True
+        return self._complete_process(lambda: owner_process(current.owner, command, **kwargs))
 
     def _complete_process(self, run):
         try:
@@ -94,12 +96,14 @@ class OwnerHostTarget(Mapping):
         return result
 
     def process_bounded(self, command, *, timeout=30, input_data=None,
-                        max_output=65536, terminate_on_output_limit=True):
+                        max_output=65536, terminate_on_output_limit=True, json_output=False):
         from sandbox.application.server_cli import owner_process_bounded
         current = self.require_current()
-        return self._complete_process(lambda: owner_process_bounded(current.owner, command,
-            timeout=timeout, input_data=input_data, max_output=max_output,
-            terminate_on_output_limit=terminate_on_output_limit))
+        kwargs = {"timeout": timeout, "input_data": input_data,
+                  "max_output": max_output, "terminate_on_output_limit": terminate_on_output_limit}
+        if json_output:
+            kwargs["json_output"] = True
+        return self._complete_process(lambda: owner_process_bounded(current.owner, command, **kwargs))
 
     def stream(self, command, *, timeout=30, on_line=None):
         """One captured local invocation; never an SSH retry or second launch.

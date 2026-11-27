@@ -97,11 +97,22 @@ def run_owner_logged(entry, command, log_path, phase, *, timeout, progress=None)
                           'environment': owner_environment(context.owner)}, separators=(',', ':'))
     if len(payload.encode()) > MAX_INPUT:
         raise OutputUnavailable('resolved output filter exceeds its private input bound')
-    result = entry.process(shlex.join(argv), timeout=timeout, input_data=payload)
+    # Structural JSON redaction is required on the receiver stdout receipt:
+    # plain-text redaction rewrites secret-shaped assignments inside JSON
+    # strings (for example `FOO_SECRET=\"...\"`), stripping the escaping
+    # backslash and leaving an unescaped quote that breaks json.loads().
+    result = entry.process(shlex.join(argv), timeout=timeout, input_data=payload, json_output=True)
+    reason = 'unexpected_error'
     try:
-        if result.returncode != 0 or result.stderr:
+        if result.returncode != 0:
+            reason = 'helper_exit'
             raise ValueError()
+        if result.stderr:
+            reason = 'unexpected_stderr'
+            raise ValueError()
+        reason = 'invalid_receipt_json'
         receipt = json.loads(result.stdout)
+        reason = 'invalid_receipt_schema'
         if (not isinstance(receipt, dict) or type(receipt.get('schema_version')) is not int
                 or receipt['schema_version'] != 1):
             raise ValueError()
@@ -112,6 +123,7 @@ def run_owner_logged(entry, command, log_path, phase, *, timeout, progress=None)
                 or not 0 <= receipt['exit_code'] <= 255 or not isinstance(receipt['output'], str)
                 or len(receipt['output'].encode()) > TAIL_BYTES + 4):
             raise ValueError()
+        reason = 'owner_context_changed'
         entry.require_current()
         if progress is not None:
             for line in receipt['output'].splitlines():
@@ -126,7 +138,9 @@ def run_owner_logged(entry, command, log_path, phase, *, timeout, progress=None)
         raise
     except Exception:
         withhold_owner_completion(entry)
-        raise ServerCLIEffectUnknown('public output completion is unknown; retain the original apply fence') from None
+        raise ServerCLIEffectUnknown(
+            f'public output completion is unknown ({reason}); retain the original apply fence'
+        ) from None
 
 
 def _open_log(path):
